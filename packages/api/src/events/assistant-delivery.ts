@@ -18,6 +18,10 @@ import type { EngineHost } from "../engine/host.js";
 import { and, eq, sql } from "drizzle-orm";
 import { agentSessions } from "../schema/index.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import type { EventSubscriptionThreadWire } from "../wire/types.js";
+import { SUBSCRIPTION_THREAD_UNAVAILABLE, subscriptionThreadAvailable, subscriptionWorkspaceAuthorized } from "./subscription-thread.js";
+import type { Providers } from "../providers/types.js";
+import { sharedWithWholeTeamSql, threadVisibility } from "../services/thread-access.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
@@ -37,6 +41,8 @@ const deliveryChains = new Map<string, Promise<void>>();
 export interface AssistantDeliveryDeps {
   db: AppDb;
   engineHost: EngineHost;
+  engineCredentials?: Providers["engineCredentials"];
+  onePassword?: Providers["onePassword"];
   /**
    * Seed a channel thread's earlier messages on the assistant's FIRST turn in
    * it. Wired only on the mention path (`orchestrator-target`); the follow
@@ -51,6 +57,9 @@ export interface AssistantDeliveryArgs {
   actorUserId: string;
   threadKey: string;
   target?: { sessionId: string; threadId: string };
+  subscriptionThread?: EventSubscriptionThreadWire;
+  destinationUserId?: string;
+  subscriptionSourceKey?: string;
   signal: SignalContent;
   presence?: Presence;
   dispatchId: string;
@@ -69,6 +78,7 @@ export async function deliverToAssistantThread(
   // A delivery can outlive a routing upgrade. The admitted dispatch belongs
   // to its original runtime, even if today's route selects another one.
   if (args.dispatchId.startsWith("event:") && await recoverAdmittedEvent(deps, args)) return;
+  await assertSubscriptionAccess(deps, args);
   // Serialize by runtime session and thread so delivery paths share one queue.
   let session: Session;
   if (args.target) {
@@ -86,7 +96,7 @@ export async function deliverToAssistantThread(
       actorUserId: args.actorUserId, orgId: args.orgId,
     }, args.threadKey));
   }
-  const key = `${session.id}:${args.threadKey}`;
+  const key = `${session.id}:${args.target?.threadId ?? args.threadKey}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
   // The stored tail swallows the failure (the caller gets it from `run`) and
@@ -99,6 +109,30 @@ export async function deliverToAssistantThread(
     });
   deliveryChains.set(key, tail);
   return run;
+}
+
+/** Check current access only for admissions that have not already landed. */
+async function assertSubscriptionAccess(
+  deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs, target?: { sessionId: string; threadId: string },
+): Promise<void> {
+  if (!args.subscriptionThread) return;
+  const scope = { orgId: args.orgId, owner: args.owner, userId: args.destinationUserId ?? args.actorUserId };
+  const existing = target ?? (args.subscriptionThread.mode === "existing" ? args.subscriptionThread : undefined);
+  const allowed = existing ? await subscriptionThreadAvailable(deps.db, scope, existing)
+    : await subscriptionWorkspaceAuthorized(deps.db, scope);
+  if (!allowed) throw new Error(SUBSCRIPTION_THREAD_UNAVAILABLE);
+  if (args.owner.type !== "team" || !args.subscriptionSourceKey) return;
+  // The live predicate refreshes public classifications. Without credential
+  // access, only a fresh persisted classification can authorize the source.
+  let sourceVisible: boolean;
+  if (deps.engineCredentials) {
+    sourceVisible = await threadVisibility({ db: deps.db, engineCredentials: deps.engineCredentials, onePassword: deps.onePassword },
+      { ownerType: "team" }, { orgId: args.orgId, userId: undefined })(args.subscriptionSourceKey);
+  } else {
+    const source = await deps.db.execute(sql`SELECT 1 WHERE ${sharedWithWholeTeamSql(args.orgId, sql`${args.subscriptionSourceKey}::text`)}`) as { rows: unknown[] };
+    sourceVisible = source.rows.length > 0;
+  }
+  if (!sourceVisible) throw new Error("This Slack event is not shared with the whole team. Use channel routing or a public Slack channel.");
 }
 
 /** Recover an existing admission without resubmitting or replaying its tools. */
@@ -200,6 +234,7 @@ async function deliverToAssistantThreadInner(
       LIMIT 1`) as { rows: Array<{ id: string }> };
     if (!result.rows.length) throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
   }
+  await assertSubscriptionAccess(deps, args, { sessionId: session.id, threadId: thread.id });
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
     ...(args.presence ? { metadata: { presence: args.presence } } : {}),

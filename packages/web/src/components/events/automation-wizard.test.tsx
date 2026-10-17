@@ -45,6 +45,7 @@ const catalogData = {
   ],
 };
 
+vi.mock("~/components/events/subscription-thread-destination", () => ({ SubscriptionThreadDestination: ({ onChange }: { onChange: (value: { mode: "existing"; sessionId: string; threadId: string }) => void }) => <button type="button" onClick={() => onChange({ mode: "existing", sessionId: "", threadId: "" })}>Pick existing destination</button> }));
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useCreateEventSubscription: () => ({ mutate: createSubscription, isPending: false }),
@@ -83,6 +84,7 @@ let teamsData: { teams: { id: string; name: string; memberCount: number }[] } = 
   teams: [{ id: "t_platform", name: "Platform", memberCount: 3 }],
 };
 vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u1" } }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
 }));
@@ -393,7 +395,7 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR ping" } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true });
+    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
   });
 
   it("workflow outcome posts a subscription with a workflow target", () => {
@@ -447,6 +449,7 @@ describe("AutomationWizard", () => {
       kind: "orchestrator",
       orchestrator: "team",
       teamId: "t_platform",
+      thread: { mode: "new" },
     });
   });
 
@@ -559,6 +562,7 @@ describe("AutomationWizard", () => {
       deliveryPolicy: "always",
       pauseOnOverlap: true,
       follow: false,
+      thread: { mode: "new" },
       systemPrompt: "Triage it. Answer in one sentence.",
       userPromptTemplate: "{{event.summary}} on {{refs.repo}}",
     });
@@ -728,4 +732,21 @@ describe("AutomationWizard", () => {
     createReplyRule("Clean rule");
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+});
+
+it("does not carry an incomplete event destination into a schedule", () => {
+  render(<AutomationWizard open onOpenChange={() => {}} />);
+  fireEvent.click(screen.getByLabelText(/Send a notification/));
+  clickNext();
+  fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+  clickNext();
+  fireEvent.click(screen.getByRole("button", { name: "Pick existing destination" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  fireEvent.click(screen.getByLabelText(/On a schedule/));
+  clickNext();
+  fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * *" } });
+  clickNext();
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Summarize changes" } });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Next" }).disabled).toBe(false);
 });

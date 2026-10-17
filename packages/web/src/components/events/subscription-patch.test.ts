@@ -225,3 +225,22 @@ describe("presence overrides", () => {
       .toEqual({ name: "Renamed" });
   });
 });
+
+
+describe("subscription thread destination", () => {
+  it("changes the destination without rewriting event filters or prompts", () => {
+    const s = sub();
+    expect(buildSubscriptionPatch(s, { ...unchangedForm(s), thread: { mode: "new" } }))
+      .toEqual({ thread: { mode: "new" } });
+  });
+  it("clears an explicit destination and preserves an unchanged one", () => {
+    const s = sub({ target: { kind: "orchestrator", thread: { mode: "existing", sessionId: "s1", threadId: "t1" } } });
+    expect(buildSubscriptionPatch(s, { ...unchangedForm(s), thread: null })).toEqual({ thread: null });
+    expect(buildSubscriptionPatch(s, { ...unchangedForm(s), thread: { mode: "existing", sessionId: "s1", threadId: "t1" } })).toBeNull();
+  });
+});
+
+it("does not rewrite an unchanged destination when stored JSON keys are reordered", () => {
+  const s = sub({ target: { kind: "orchestrator", thread: { threadId: "t1", sessionId: "s1", mode: "existing" } } });
+  expect(buildSubscriptionPatch(s, { ...unchangedForm(s), thread: { mode: "existing", sessionId: "s1", threadId: "t1" } })).toBeNull();
+});

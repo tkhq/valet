@@ -29,6 +29,7 @@ import { slackEventChannel, slackEventsThreadKey } from "../services/thread-acce
 import type { ChannelOrigin, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import type { EventSubscriptionThreadWire } from "../wire/types.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -75,6 +76,9 @@ export interface OrchestratorDeliverFn {
     /** The thread to deliver to, when the event names one other than its origin's. */
     threadKey?: string;
     target?: { sessionId: string; threadId: string };
+    subscriptionThread?: EventSubscriptionThreadWire;
+    destinationUserId?: string;
+    subscriptionSourceKey?: string;
     /** The channel message this delivery carries, for the channel record. */
     inbound?: InboundChannelMessage;
     /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
@@ -144,6 +148,7 @@ interface SubscriptionTarget {
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
+  thread?: EventSubscriptionThreadWire;
   pauseOnOverlap?: boolean;
   overlapPausedAt?: number;
   /** Standing instruction rendered above the event. Absent → no instruction. */
@@ -303,6 +308,7 @@ export class EventDispatcher {
         // A Slack event from a channel with no thread to reply into stays
         // with that channel's audience, not the shared events thread.
         const slackChannel = slackEventChannel(event);
+        if (target.thread && target.follow) throw new Error("Conversation destinations cannot follow channel replies. Clear follow or use channel routing.");
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
         let channelBody = "";
@@ -398,8 +404,16 @@ export class EventDispatcher {
           },
           ...(target.presence ? { presence: target.presence } : {}),
           dispatchId: eventDeliveryDispatchId(delivery.id),
-          ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
-          ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
+          ...(target.thread ? {
+            subscriptionThread: target.thread,
+            destinationUserId: sub.createdBy,
+            ...(slackChannel ? { subscriptionSourceKey: slackEventsThreadKey(slackChannel) } : {}),
+            threadKey: target.thread.mode === "new" ? `web:event:${delivery.id}` : `subscription:${target.thread.sessionId}:${target.thread.threadId}`,
+            ...(target.thread.mode === "existing" ? { target: { sessionId: target.thread.sessionId, threadId: target.thread.threadId } } : {}),
+          } : {
+            ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
+            ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
+          }),
           ...(inbound ? { inbound } : {}),
           ...(author ? { author } : {}),
         });

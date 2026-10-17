@@ -15,6 +15,7 @@ import { allCatalogEntries } from "./ingest.js";
 import { eventKeyMatches, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
+import { SUBSCRIPTION_THREAD_UNAVAILABLE, subscriptionThreadAvailable, subscriptionWorkspaceAuthorized } from "./subscription-thread.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
@@ -110,6 +111,24 @@ export function validateSubscription(
   if (typeof target.kind !== "string" || !(TARGET_KINDS as readonly string[]).includes(target.kind)) {
     return `unknown target kind: ${String(target.kind)}`;
   }
+  if (target.thread !== undefined) {
+    if (target.kind !== "orchestrator") return "Conversation destinations apply only to assistant subscriptions. Choose an assistant target.";
+    if (target.orchestrator === "org") return "Conversation destinations require a personal or team workspace. Choose that workspace.";
+    const thread = target.thread;
+    if (typeof thread !== "object" || thread === null || Array.isArray(thread) || !("mode" in thread)) {
+      return "Invalid conversation destination. Choose a new or existing conversation.";
+    }
+    if (thread.mode === "new") {
+      if (Object.keys(thread).some(key => key !== "mode")) return "A new conversation destination cannot name an existing thread. Choose the destination again.";
+    } else if (thread.mode === "existing") {
+      if (!("sessionId" in thread) || typeof thread.sessionId !== "string" || !thread.sessionId.trim()
+        || !("threadId" in thread) || typeof thread.threadId !== "string" || !thread.threadId.trim()
+        || Object.keys(thread).some(key => !["mode", "sessionId", "threadId"].includes(key))) {
+        return "An existing conversation requires sessionId and threadId. Choose the conversation again.";
+      }
+    } else return "Unknown conversation destination. Choose a new or existing conversation.";
+    if (target.follow === true) return "Conversation destinations cannot follow channel replies. Clear follow or use channel routing.";
+  }
   if (target.presence !== undefined) {
     const error = validatePresence(target.presence);
     if (error) return error;
@@ -170,6 +189,12 @@ export interface SubscriptionWriteScope {
   /** The subscription's creator (`created_by`) — the caller on create, the
    * row's own creator on patch. */
   creatorUserId: string;
+  /** Required when a write selects a conversation destination. */
+  orgId?: string;
+  ownerId?: string;
+  actorUserId?: string;
+  /** A disable-only patch must remain possible after its destination loses access. */
+  disablingOnly?: boolean;
   /** The request's explicit any-channel opt-out. */
   anyChannel: boolean;
   ownerType?: "user" | "team" | "org";
@@ -207,6 +232,18 @@ export async function validateSubscriptionWrite(
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
       ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to personal assistant subscriptions." };
+  const target = body.target as Record<string, unknown>;
+  if (target.kind === "orchestrator" && target.thread !== undefined && !scope.disablingOnly) {
+    const ownerType = scope.ownerType ?? (target.orchestrator === "team" ? "team" : target.orchestrator === "org" ? "org" : "user");
+    const ownerId = scope.ownerId ?? (ownerType === "team" ? String(target.teamId) : scope.creatorUserId);
+    if (!scope.orgId) return { ok: false, error: SUBSCRIPTION_THREAD_UNAVAILABLE };
+    const destinationScope = { orgId: scope.orgId, owner: { type: ownerType, id: ownerId }, userId: scope.actorUserId ?? scope.creatorUserId };
+    if (!await subscriptionWorkspaceAuthorized(db, destinationScope)) return { ok: false, error: SUBSCRIPTION_THREAD_UNAVAILABLE };
+    const thread = target.thread as { mode: "new" } | { mode: "existing"; sessionId: string; threadId: string };
+    if (thread.mode === "existing" && !await subscriptionThreadAvailable(db, destinationScope, thread)) {
+      return { ok: false, error: SUBSCRIPTION_THREAD_UNAVAILABLE };
+    }
+  }
   const filters = body.filters as SubscriptionFilter[];
   // The audience is read on every write, including one that changes nothing
   // about the match: a patch may set it alone.

@@ -11,3 +11,21 @@ describe("subscription presence", () => {
     expect(validateSubscription([githubPlugin], body)).toBeNull();
   });
 });
+
+
+describe("subscription conversation destination", () => {
+  const body = { name: "Review", eventKeys: ["github.pull_request.opened"], filters: [] };
+  it.each([null, [], {}, { mode: "other" }, { mode: "existing" },
+    { mode: "existing", sessionId: "", threadId: "t" },
+    { mode: "existing", sessionId: "s", threadId: 1 },
+    { mode: "new", threadId: "ignored" }])("refuses malformed destinations %j", thread => {
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread } })).not.toBeNull();
+  });
+  it.each([{ mode: "new" }, { mode: "existing", sessionId: "s", threadId: "t" }])("accepts destinations %j", thread => {
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread } })).toBeNull();
+  });
+  it("refuses destinations on workflows and alongside follow", () => {
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "workflow", workflowId: "w", thread: { mode: "new" } } })).not.toBeNull();
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", follow: true, thread: { mode: "new" } } })).not.toBeNull();
+  });
+});

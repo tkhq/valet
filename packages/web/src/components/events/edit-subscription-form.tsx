@@ -2,32 +2,14 @@ import { type Presence, validatePresence } from "@valet/shared";
 import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "./automation-review";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
-/**
- * EditSubscriptionDialog — edit an existing event subscription: name, event
- * keys, filters, and, for an assistant target, its prompt templates. The
- * target itself is shown read-only: the server pins the target's kind and
- * owner on PATCH (only a same-owner `assistantId` re-point is accepted, which
- * this dialog does not offer yet), so pointing a rule at a different target is
- * a delete-and-recreate, not an edit.
- *
- * A save sends only the changed fields (`buildSubscriptionPatch`), with the
- * wizard's collision handling: a 409 shows the colliding rules and offers
- * "Save anyway"; a committed write that still overlaps shows the warning,
- * then Done.
- *
- * Mount only while open: the form seeds from `sub` at mount, so mount time
- * must be open time (the same rule the wizard's header comment states).
- */
 import { useState } from "react";
 import type {
   EventSubscriptionCollisionsWire,
   EventSubscriptionWire,
+  EventSubscriptionThreadWire,
 } from "@valet/api/wire";
 import {
   Button,
-  Dialog,
-  DialogContent,
-  DialogFooter,
   Input,
   Label,
 } from "~/components/primitives";
@@ -48,26 +30,31 @@ import {
   promptFieldsFrom,
   type PromptFieldsValue,
 } from "./prompt-fields";
+import { describeThreadDestination } from "./subscription-labels";
+import { SubscriptionThreadDestination } from "./subscription-thread-destination";
 import { buildSubscriptionPatch } from "./subscription-patch";
 
-export function EditSubscriptionDialog({
-  open,
+export function EditSubscriptionForm({
   onOpenChange,
   sub,
   targetLabel,
   review = false,
   replacesNote,
+  readOnly = false,
 }: {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
   sub: EventSubscriptionWire;
   /** The stored target as a display sentence (the row already resolves
-   * workflow and team names); the dialog only shows it. */
+   * workflow and team names); the form shows this label. */
   targetLabel: string;
   review?: boolean;
+  readOnly?: boolean;
   /** The name of the subscription this proposal replaces, when it has one. */
   replacesNote?: string;
 }) {
+  // Compare against the opened revision. A refetch must not turn untouched
+  // draft fields into changes that overwrite another editor. The page keys by ID.
+  const [baseline] = useState(sub);
   const catalogQ = useEventCatalog();
   const patch = usePatchEventSubscription();
   const services = catalogQ.data?.services ?? [];
@@ -76,14 +63,14 @@ export function EditSubscriptionDialog({
     deliveryPolicy: sub.target.kind === "orchestrator" ? sub.target.deliveryPolicy ?? "always" : "always",
     pauseOnOverlap: sub.target.kind === "orchestrator" ? sub.target.pauseOnOverlap ?? true : true,
   });
+  const [thread, setThread] = useState<EventSubscriptionThreadWire | null>(sub.target.kind === "orchestrator" ? sub.target.thread ?? null : null);
   const [presence, setPresence] = useState<Presence>(sub.target.presence ?? {});
   const [name, setName] = useState(sub.name);
   const { keys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
     services, sub.eventKeys, () => fromWireFilters(sub.filters),
   );
   const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub.eventKeys, sub.filters));
-  // Seeded from the stored target at mount, which is open time (see the
-  // header comment). Only an assistant target renders a template.
+  // Seeded when this subscription opens. Only an assistant target has templates.
   const [prompts, setPrompts] = useState<PromptFieldsValue>(() =>
     promptFieldsFrom(sub.target.kind === "orchestrator" ? sub.target : {}),
   );
@@ -96,7 +83,9 @@ export function EditSubscriptionDialog({
   } | null>(null);
 
   function save(allowCollision = false) {
+    if (readOnly) return;
     setError(null);
+    if (thread?.mode === "existing" && (!thread.sessionId || !thread.threadId)) { setError("Select a destination thread."); return; }
     const presenceError = validatePresence(presence);
     if (presenceError) { setError(presenceError); return; }
     if (name.trim().length === 0) {
@@ -116,13 +105,14 @@ export function EditSubscriptionDialog({
     }
     const { filters } = match;
 
-    let body = buildSubscriptionPatch(sub, {
+    let body = buildSubscriptionPatch(baseline, {
       name,
       eventKeys: [...keys],
       filters,
       anyChannel,
       prompts,
       presence,
+      thread,
       ...(sub.ownerType === "user" && sub.target.kind === "orchestrator" ? { deliveryPreferences } : {}),
     });
     if (review && !sub.enabled) body = { ...body, enabled: true };
@@ -156,12 +146,7 @@ export function EditSubscriptionDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        title={`${review ? "Review" : "Edit"} ${sub.name}`}
-        description={review ? (sub.enabled ? "This subscription is already enabled. Review its current configuration." : "Review the saved proposal. It stays paused until you enable it.") : "Change what this automation matches. A save keeps its target."}
-        className="max-w-lg"
-      >
+    <fieldset disabled={readOnly || patch.isPending} className="min-w-0 space-y-6">
         <div className="space-y-4">
           <div className="grid gap-1">
             <Label htmlFor="edit-subscription-name">Name</Label>
@@ -191,9 +176,14 @@ export function EditSubscriptionDialog({
             <p className="text-xs font-medium text-muted">Then</p>
             <p className="mt-1 text-sm text-ink">{targetLabel}</p>
             <p className="mt-1 text-xs text-muted">
-              This dialog cannot change the target. To use a different target, create a new
-              automation and delete this one.
+              To change the workspace or workflow, create a new automation.
             </p>
+            {sub.target.kind === "orchestrator" && sub.target.orchestrator !== "org" && !sub.target.follow && !readOnly && (
+              <SubscriptionThreadDestination owner={{ ownerType: sub.ownerType, ownerId: sub.ownerId }} value={thread} onChange={setThread} disabled={patch.isPending} />
+            )}
+            {readOnly && sub.target.kind === "orchestrator" && <p className="mt-3 text-sm text-ink">
+              Run in: {describeThreadDestination(sub.target.thread)}
+            </p>}
             {/* The target stays fixed, but what the assistant reads is a field
                 of this rule, so it is editable here. */}
             {sub.target.kind === "orchestrator" && (
@@ -212,7 +202,7 @@ export function EditSubscriptionDialog({
 
           <AutomationReview follow={sub.target.kind === "orchestrator" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
             result={sub.target.kind === "orchestrator" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}
-            destination={targetLabel} replaces={review && !sub.enabled ? replacesNote : undefined} />
+            destination={sub.target.kind === "orchestrator" ? `${targetLabel} · ${describeThreadDestination(thread)}` : targetLabel} replaces={review && !sub.enabled ? replacesNote : undefined} />
           {collisions !== null && (
             <CollisionNotice
               report={collisions.report}
@@ -223,7 +213,7 @@ export function EditSubscriptionDialog({
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>
 
-        <DialogFooter>
+        {!readOnly && <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-line bg-paper py-4">
           {collisions?.committed === true ? (
             // The write landed; the notice above is the last word. No further
             // Save — resubmitting the same form would write again.
@@ -255,8 +245,7 @@ export function EditSubscriptionDialog({
               )}
             </>
           )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>}
+    </fieldset>
   );
 }

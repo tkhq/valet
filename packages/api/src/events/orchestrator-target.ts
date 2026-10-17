@@ -20,7 +20,7 @@
 import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { deliverToAssistantThread } from "./assistant-delivery.js";
+import { deliverToAssistantThread, type AssistantDeliveryDeps } from "./assistant-delivery.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
 /**
@@ -44,10 +44,12 @@ export function threadKeyForSignal(signal: SignalContent): string {
 export function buildOrchestratorTarget(deps: {
   db: AppDb;
   engineHost: EngineHost;
+  engineCredentials?: AssistantDeliveryDeps["engineCredentials"];
+  onePassword?: AssistantDeliveryDeps["onePassword"];
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence }) => {
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence, subscriptionThread, destinationUserId, subscriptionSourceKey }) => {
     // Every subscription resolves the singleton runtime of its owner.
     await deliverToAssistantThread(deps, {
       orgId,
@@ -57,6 +59,9 @@ export function buildOrchestratorTarget(deps: {
       signal,
       ...(presence ? { presence } : {}),      dispatchId,
       target,
+      subscriptionThread,
+      destinationUserId,
+      subscriptionSourceKey,
       mismatchReason: "event_target_mismatch",
       ...(inbound ? { inbound } : {}),
       ...(author ? { author } : {}),

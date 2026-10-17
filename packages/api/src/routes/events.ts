@@ -23,6 +23,7 @@ import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatche
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
+import { listSubscriptionThreads, subscriptionWorkspaceAuthorized, type SubscriptionThreadScope } from "../events/subscription-thread.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -613,7 +614,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     db,
     plugins,
     { ...body, filters: body.filters ?? [] },
-    { creatorUserId: user.id, anyChannel: body.anyChannel === true, matchChanged: true },
+    { creatorUserId: user.id, orgId: user.orgId, anyChannel: body.anyChannel === true, matchChanged: true },
   );
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
@@ -802,6 +803,41 @@ eventsRouter.get("/event-subscriptions", async (c) => {
   return c.json(resp);
 });
 
+eventsRouter.get("/event-subscriptions/:id", async c => {
+  const [row] = await c.var.providers.db.select().from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.id, c.req.param("id")), eq(eventSubscriptions.orgId, c.var.user.orgId))).limit(1);
+  if (!row) return c.json({ error: "Subscription not found. Refresh the subscription list." }, 404);
+  return c.json({ subscription: rowToSubscription(row) });
+});
+
+/** Only eligible destinations are offered, including in a team member's picker. */
+eventsRouter.get("/event-subscription-threads", async c => {
+  const ownerType = c.req.query("ownerType");
+  const ownerId = c.req.query("ownerId");
+  if ((ownerType !== "user" && ownerType !== "team") || !ownerId) {
+    return c.json({ error: "Choose a personal or team workspace with ownerType and ownerId." }, 400);
+  }
+  const scope: SubscriptionThreadScope = { orgId: c.var.user.orgId, owner: { type: ownerType, id: ownerId }, userId: c.var.user.id };
+  if (!await subscriptionWorkspaceAuthorized(c.var.providers.db, scope)) return c.json({ error: "Workspace not found. Select an accessible workspace." }, 404);
+  const limit = readLimit(c.req.query("limit"), 50, 100);
+  if (limit === undefined) return c.json({ error: "Use a conversation page limit from 1 to 100." }, 400);
+  const query = c.req.query("q")?.trim().toLowerCase() ?? "";
+  if (query.length > 500 || query.includes("\0")) return c.json({ error: "Use a conversation search of at most 500 characters without NUL characters." }, 400);
+  let after: { createdAt: number; id: string } | undefined;
+  const rawCursor = c.req.query("cursor");
+  if (rawCursor !== undefined) {
+    const cursor = decodePageCursor(rawCursor);
+    if (!cursor || typeof cursor.createdAt !== "number" || !Number.isFinite(cursor.createdAt) || typeof cursor.id !== "string") {
+      return c.json({ error: "Invalid conversation cursor. Refresh the conversation list." }, 400);
+    }
+    after = { createdAt: cursor.createdAt, id: cursor.id };
+  }
+  const rows = await listSubscriptionThreads(c.var.providers.db, scope, { limit: limit + 1, query, after });
+  const threads = rows.slice(0, limit);
+  const last = threads.at(-1);
+  return c.json({ threads, ...(rows.length > limit && last ? { nextCursor: encodePageCursor({ createdAt: last.createdAt, id: last.id }) } : {}) });
+});
+
 eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const { db, plugins } = c.var.providers;
   const user = c.var.user;
@@ -840,6 +876,13 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
   const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
   let patchedTarget: EventSubscriptionTargetWire = storedTarget;
+  if (body.thread !== undefined) {
+    if (patchedTarget.kind !== "orchestrator") return c.json({ error: "Conversation destinations apply only to assistant subscriptions. Choose an assistant target." }, 400);
+    if (body.thread === null) {
+      const { thread: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else patchedTarget = { ...patchedTarget, thread: body.thread };
+  }
   if (body.presence === null) {
     const { presence: _cleared, ...rest } = patchedTarget;
     patchedTarget = rest;
@@ -896,6 +939,10 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // validated jsonb, same as `rowToSubscription`.
   const write = await validateSubscriptionWrite(db, plugins, merged, {
     creatorUserId: row.createdBy,
+    disablingOnly: body.enabled === false && Object.keys(body).every(key => key === "enabled"),
+    orgId: user.orgId,
+    actorUserId: user.id,
+    ownerId: row.ownerId,
     ownerType: row.ownerType,
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,
