@@ -162,6 +162,12 @@ must approve their own account. Human review nodes remain explicit decisions.
 
 Saved workflow consent applies only to direct tool invocation contexts. Workflow agents and sandbox scripts keep their existing separate account approval paths.
 
+A run's account gate also offers the lender "Always allow for this workflow".
+It needs the lender's signed-in browser answer. It saves the same
+`workflow_account_grants` row for that one service, only while the run's steps
+match the saved definition. Otherwise it returns `stale_workflow` and grants
+nothing. "Always allow for this team" stays the wider choice.
+
 Borrowing checks the live run owner, actor, team membership, source account,
 share generation, and saved definition. A run with different steps cannot use
 this consent. Step edits retire all saved account consent. A human edit can
