@@ -238,6 +238,18 @@ describe("resolveClaims: rules", () => {
     expect([...d.waiters.values()]).toEqual(["append", "append"]);
   });
 
+  it("breaks a createdAt tie on the waiter id, in any input order", async () => {
+    const { message, mention } = twins();
+    const a = (e: NormalizedEvent) => candidate("w-a", e, { owner: SRE, sessionId: "s-a", threadId: "t-a", subjects: [CHANNEL], createdAt: 500 });
+    const b = (e: NormalizedEvent) => candidate("w-b", e, { owner: SRE, sessionId: "s-b", threadId: "t-b", subjects: [CHANNEL], createdAt: 500 });
+    for (const order of [[a, b], [b, a]]) {
+      const redirect = await resolve(fakes(), { event: mention, twin: message, matched: [M], candidates: withTwinCandidates([], order.map((c) => c(message))) });
+      expect(redirect.deliveries.get("M")).toMatchObject({ kind: "target", threadId: "t-b", reason: "claim_redirect", matchedWaiterId: "w-b" });
+      const skip = await resolve(fakes(), { event: message, matched: [P], candidates: order.map((c) => c(message)) });
+      expect(skip.deliveries.get("P")).toEqual({ kind: "skip", reason: "claimed by thread t-b" });
+    }
+  });
+
   it("ignores a candidate whose thread cannot receive a delivery", async () => {
     const f = fakes();
     f.undeliverable.add("t-inc");

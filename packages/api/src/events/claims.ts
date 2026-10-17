@@ -87,9 +87,18 @@ function specificity(candidate: WaiterCandidate, event: NormalizedEvent): number
   return best;
 }
 
+/**
+ * True when `b` is newer than `a`. A `createdAt` tie breaks on the waiter id,
+ * so both Slack halves choose the same candidate in any input order.
+ */
+function isNewer(b: WaiterCandidate, a: WaiterCandidate): boolean {
+  if (b.waiter.createdAt !== a.waiter.createdAt) return b.waiter.createdAt > a.waiter.createdAt;
+  return b.waiter.id > a.waiter.id;
+}
+
 /** The newest candidate. */
 function newest(candidates: ReadonlyArray<WaiterCandidate>): WaiterCandidate {
-  return candidates.reduce((a, b) => (b.waiter.createdAt > a.waiter.createdAt ? b : a));
+  return candidates.reduce((a, b) => (isNewer(b, a) ? b : a));
 }
 
 /** The redirect target: the most specific matching subject, newest on a tie (Part C step 3). */
@@ -98,7 +107,7 @@ function redirectTarget(candidates: ReadonlyArray<WaiterCandidate>, event: Norma
     const sa = specificity(a, event);
     const sb = specificity(b, event);
     if (sb !== sa) return sb > sa ? b : a;
-    return b.waiter.createdAt > a.waiter.createdAt ? b : a;
+    return isNewer(b, a) ? b : a;
   });
 }
 
