@@ -76,6 +76,8 @@ interface Fakes {
   deps: ClaimDeps;
   bindings: Map<string, ConversationBinding>;
   undeliverable: Set<string>;
+  /** Subscription ids that a team rule covers. */
+  covered: Set<string>;
   bindingLookups: Principal[];
 }
 
@@ -83,11 +85,13 @@ function fakes(opts: { covered?: (owner: Principal) => boolean } = {}): Fakes {
   const bindings = new Map<string, ConversationBinding>();
   const undeliverable = new Set<string>();
   const bindingLookups: Principal[] = [];
+  const covered = new Set<string>();
   const deps: ClaimDeps = {
     isDeliverable: async (_owner, target) => !undeliverable.has(target.threadId),
     mentionCovered: async (owner) => opts.covered?.(owner) ?? false,
+    teamCovered: async (id) => covered.has(id),
   };
-  return { deps, bindings, undeliverable, bindingLookups };
+  return { deps, bindings, undeliverable, covered, bindingLookups };
 }
 
 function resolve(f: Fakes, args: Pick<ResolveClaimsArgs, "event" | "matched" | "candidates"> & { twin?: NormalizedEvent | null }) {
@@ -114,7 +118,6 @@ describe("resolveClaims: Scenario C", () => {
     const d = await resolve(f, { event: message, matched: [P], candidates: [tInc(message)] });
     expect(d.deliveries.get("P")).toEqual({ kind: "skip", reason: "claimed by thread t-inc" });
     expect(d.waiters.get("w-inc")).toBe("append");
-    expect(d.endAsMatched.size).toBe(0);
   });
 
   it("C2: the mention redirects to t-inc, and neither half appends a digest", async () => {
@@ -300,15 +303,14 @@ describe("resolveClaims: Review Focus", () => {
     expect(atMessage.waiters.get("w-inc")).toBe("append");
   });
 
-  it("3: a once-mode redirect target ends as matched; an ambient once waiter does not", async () => {
+  it("3: a once-mode redirect target is named on the stamp; an ambient skip names no waiter to end", async () => {
     const { message, mention } = twins();
     const once = tInc(message, { once: true });
     const d = await resolve(fakes(), { event: mention, twin: message, matched: [M], candidates: withTwinCandidates([], [once]) });
-    expect([...d.endAsMatched]).toEqual(["w-inc"]);
     // The stamp names the waiter, so the dispatcher can end it after the delivery.
     expect(d.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect", matchedWaiterId: "w-inc" });
     const ambient = await resolve(fakes(), { event: message, matched: [P], candidates: [once] });
-    expect(ambient.endAsMatched.size).toBe(0);
+    expect(ambient.deliveries.get("P")).toEqual({ kind: "skip", reason: "claimed by thread t-inc" });
   });
 
   it("4: a throw for one owner leaves that owner unstamped and appending, and others resolve", async () => {
@@ -331,6 +333,67 @@ describe("resolveClaims: Review Focus", () => {
     expect(d.deliveries.get("P-u")).toEqual({ kind: "skip", reason: "claimed by thread t-u" });
     expect(errors).toHaveBeenCalledOnce();
     errors.mockRestore();
+  });
+});
+
+describe("resolveClaims: fix round 1", () => {
+  it("both halves choose one target when a mention-only waiter competes with a message waiter", async () => {
+    const { message, mention } = twins();
+    // W1 waits for channel messages; W2 is newer and waits only for mentions.
+    const w1 = (e: NormalizedEvent) => tInc(e, { createdAt: 100 });
+    const w2 = (e: NormalizedEvent) => candidate("w-mention", e, { owner: SRE, sessionId: "s-m", threadId: "t-m", subjects: [CHANNEL], createdAt: 200 });
+    const rejected = (c: WaiterCandidate): WaiterCandidate => ({ ...c, digests: [], accepted: false });
+    const covered = { covered: () => true };
+    // Mention ingest: W2 accepts the mention itself; W1 accepts the message twin.
+    const atMention = () => resolve(fakes(covered), {
+      event: mention, twin: message, matched: [M], candidates: withTwinCandidates([rejected(w1(mention)), w2(mention)], [w1(message), rejected(w2(message))]),
+    });
+    // Message ingest: W1 accepts the message; W2 accepts the mention twin.
+    const atMessage = () => resolve(fakes(covered), {
+      event: message, twin: mention, matched: [P], candidates: withTwinCandidates([w1(message), rejected(w2(message))], [rejected(w1(mention)), w2(mention)]),
+    });
+    for (const order of ["mention first", "message first"]) {
+      let m;
+      let msg;
+      if (order === "mention first") {
+        m = await atMention();
+        msg = await atMessage();
+      } else {
+        msg = await atMessage();
+        m = await atMention();
+      }
+      expect(m?.deliveries.get("M")).toMatchObject({ kind: "target", threadId: "t-m", reason: "claim_redirect" });
+      expect(m?.waiters.get("w-mention")).toBe("suppress");
+      // W1 is not the target, so it appends its message digest at the message ingest.
+      expect(msg?.waiters.get("w-inc")).toBe("append");
+      expect(msg?.waiters.get("w-mention")).toBe("suppress");
+    }
+  });
+
+  it("a team-covered personal rule claims nothing, and its owner's waiter appends", async () => {
+    const { message, mention } = twins();
+    const f = fakes();
+    f.covered.add("M-personal");
+    const uWaiter = candidate("w-u", message, { owner: U001, sessionId: "s-u", threadId: "t-u", subjects: [CHANNEL] });
+    const d = await resolve(f, { event: mention, twin: message, matched: [M, sub("M-personal", U001)], candidates: withTwinCandidates([], [tInc(message), uWaiter]) });
+    expect(d.deliveries.has("M-personal")).toBe(false);
+    expect(d.waiters.has("w-u")).toBe(false);
+    expect(d.deliveries.get("M")).toMatchObject({ kind: "target", threadId: "t-inc" });
+  });
+
+  it("leaves a signal target unstamped (INV-D7)", async () => {
+    const message = slackEvent("slack.message");
+    const signal: ClaimSubscription = { id: "S", ownerType: "org", ownerId: ORG, target: { kind: "signal", signal: "incident" } };
+    const d = await resolve(fakes(), { event: message, matched: [signal], candidates: [tInc(message)] });
+    expect(d.deliveries.size).toBe(0);
+    expect(d.waiters.size).toBe(0);
+  });
+
+  it("gives one turn when two rules of one owner redirect to one thread", async () => {
+    const { message, mention } = twins();
+    const d = await resolve(fakes(), { event: mention, twin: message, matched: [sub("M-b", SRE), sub("M-a", SRE)], candidates: withTwinCandidates([], [tInc(message)]) });
+    expect(d.deliveries.get("M-a")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect" });
+    expect(d.deliveries.get("M-b")).toEqual({ kind: "skip", reason: "claimed by thread t-inc" });
   });
 });
 
@@ -359,6 +422,7 @@ describe("mentionCoveredBy", () => {
   });
 
   const catalog = catalogForService([slackPlugin], "slack");
+  const notCovered = async () => false;
   function rule(owner: Principal, over: Record<string, unknown> = {}) {
     return {
       enabled: true, orgId: ORG, ownerType: owner.type, ownerId: owner.id, createdBy: "u-001",
@@ -370,22 +434,27 @@ describe("mentionCoveredBy", () => {
   });
 
   it("covers a team mention from a linked member", async () => {
-    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], SRE, mentionFrom("U001"), catalog)).toBe(true);
+    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], SRE, mentionFrom("U001"), catalog, notCovered)).toBe(true);
   });
 
   it("does not cover a team mention from an unlinked sender (C4)", async () => {
-    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], SRE, mentionFrom("U002"), catalog)).toBe(false);
+    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], SRE, mentionFrom("U002"), catalog, notCovered)).toBe(false);
   });
 
   it("covers an unlinked sender's mention under a personal rule, which has no sender gate", async () => {
     // A personal mention rule must name its user filter (mention-scope rule).
     const personal = rule(U001, { filters: [{ field: "user", op: "eq", value: "U002" }] });
-    expect(await mentionCoveredBy(tdb.appDb, [personal], U001, mentionFrom("U002"), catalog)).toBe(true);
+    expect(await mentionCoveredBy(tdb.appDb, [personal], U001, mentionFrom("U002"), catalog, notCovered)).toBe(true);
+  });
+
+  it("does not cover a mention under a personal rule that a team rule covers", async () => {
+    const personal = rule(U001, { filters: [{ field: "user", op: "eq", value: "U002" }] });
+    expect(await mentionCoveredBy(tdb.appDb, [personal], U001, mentionFrom("U002"), catalog, async () => true)).toBe(false);
   });
 
   it("does not cover a mention under a disabled rule, another owner's rule, or a workflow rule", async () => {
-    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { enabled: false })], SRE, mentionFrom("U001"), catalog)).toBe(false);
-    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], PLATFORM, mentionFrom("U001"), catalog)).toBe(false);
-    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { target: { kind: "workflow", workflowId: "wf" } })], SRE, mentionFrom("U001"), catalog)).toBe(false);
+    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { enabled: false })], SRE, mentionFrom("U001"), catalog, notCovered)).toBe(false);
+    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], PLATFORM, mentionFrom("U001"), catalog, notCovered)).toBe(false);
+    expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { target: { kind: "workflow", workflowId: "wf" } })], SRE, mentionFrom("U001"), catalog, notCovered)).toBe(false);
   });
 });

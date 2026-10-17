@@ -29,8 +29,6 @@ export interface ClaimDecision {
   deliveries: Map<string, Destination>;
   /** The decision per waiter id. A waiter with no entry appends. */
   waiters: Map<string, WaiterDecision>;
-  /** Once-mode waiters that are a redirect target. They end as matched after the delivery (Part C step 5). */
-  endAsMatched: Set<string>;
   /** The number of owners whose resolution threw. Their deliveries are unstamped and their waiters append (INV-D6). */
   failedOwners: number;
 }
@@ -44,6 +42,12 @@ export interface ClaimDeps {
    * (`mentionSenderActor`, without a drop log). Part C step 8.
    */
   mentionCovered(owner: Principal, twin: NormalizedEvent): Promise<boolean>;
+  /**
+   * True when the dispatcher skips this personal subscription for `event`
+   * because a team rule covers it (`hasTeamCoverage`). A covered rule
+   * delivers nothing, so it claims nothing.
+   */
+  teamCovered(subscriptionId: string, event: NormalizedEvent): Promise<boolean>;
 }
 
 export interface ResolveClaimsArgs {
@@ -105,15 +109,14 @@ function sameThread(candidate: WaiterCandidate, thread: { sessionId: string; thr
 interface OwnerResult {
   destination: Destination | null;
   waiters: Map<string, WaiterDecision>;
-  endAsMatched: string | null;
 }
 
 /**
- * Merges the candidates that accept the `slack.message` twin of a
- * `slack.app_mention` into the mention's own candidates (Part C step 8). A
- * twin candidate can be the redirect target, but it carries no digests:
- * the twin is a prediction, and the waiter's digest comes from the real
- * `slack.message` ingest.
+ * Merges the candidates that accept an event's Slack twin into the event's
+ * own candidates (Part C step 8). Both halves of a mention then choose a
+ * redirect target over the same set. A twin candidate can be the redirect
+ * target, but it carries no digests: the twin is a prediction, and the
+ * waiter's digest comes from the ingest of the real event.
  */
 export function withTwinCandidates(
   own: ReadonlyArray<WaiterCandidate>,
@@ -153,12 +156,11 @@ async function resolveOwner(
   const binding = await args.binding(owner);
   const waiters = new Map<string, WaiterDecision>(claims.map((c) => [c.waiter.id, "append"]));
   let destination: Destination | null = null;
-  let endAsMatched: string | null = null;
 
   if (binding?.via === "legacy_follow") {
     // A legacy follow names no thread, so no candidate can be matched to it.
     // The dispatcher resolves the delivery from the binding (Part C step 7).
-    return { destination: null, waiters, endAsMatched: null };
+    return { destination: null, waiters };
   }
   if (binding) {
     // The binding wins (Part B step 1). A candidate in its thread appends no
@@ -176,7 +178,6 @@ async function resolveOwner(
       kind: "target", sessionId: target.waiter.sessionId, threadId: target.waiter.threadId, reason: "claim_redirect",
       ...(once ? { matchedWaiterId: target.waiter.id } : {}),
     };
-    if (once) endAsMatched = target.waiter.id;
   } else {
     if (mentionComing) {
       // The mention reaches the redirect target through the subscription.
@@ -185,7 +186,7 @@ async function resolveOwner(
     }
     destination = { kind: "skip", reason: `claimed by thread ${newest(claims).waiter.threadId}` };
   }
-  return { destination: hasAssistantDelivery ? destination : null, waiters, endAsMatched: hasAssistantDelivery ? endAsMatched : null };
+  return { destination: hasAssistantDelivery ? destination : null, waiters };
 }
 
 /**
@@ -204,7 +205,7 @@ async function resolveOwner(
  * appending (INV-D6), and the other owners still resolve.
  */
 export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): Promise<ClaimDecision> {
-  const decision: ClaimDecision = { deliveries: new Map(), waiters: new Map(), endAsMatched: new Set(), failedOwners: 0 };
+  const decision: ClaimDecision = { deliveries: new Map(), waiters: new Map(), failedOwners: 0 };
   const owners = new Map<string, { owner: Principal; subscriptions: ClaimSubscription[] }>();
   for (const sub of args.matched) {
     if (!isAssistantTarget(sub.target)) continue;
@@ -225,8 +226,12 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
 
   for (const { owner, subscriptions } of owners.values()) {
     let result: OwnerResult | null;
+    const delivering: ClaimSubscription[] = [];
     try {
-      result = await resolveOwner(deps, args, owner, subscriptions.length > 0);
+      // A team-covered personal rule delivers nothing (the dispatcher skips
+      // it), so it neither claims nor takes a stamp.
+      for (const sub of subscriptions) if (!(await deps.teamCovered(sub.id, args.event))) delivering.push(sub);
+      result = await resolveOwner(deps, args, owner, delivering.length > 0);
     } catch (error) {
       decision.failedOwners += 1;
       console.error(`[event-claims] claim resolution failed for a ${owner.type} owner in org ${args.orgId}`, error);
@@ -234,8 +239,18 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
     }
     if (!result) continue;
     for (const [waiterId, choice] of result.waiters) decision.waiters.set(waiterId, choice);
-    if (result.destination) for (const sub of subscriptions) decision.deliveries.set(sub.id, result.destination);
-    if (result.endAsMatched) decision.endAsMatched.add(result.endAsMatched);
+    const destination = result.destination;
+    if (!destination) continue;
+    if (destination.kind === "target" && destination.reason === "claim_redirect") {
+      // Two rules of one owner that redirect to one thread would give it two
+      // turns. One delivery, the lowest subscription id, carries the
+      // redirect. The others skip and name the thread.
+      const [first, ...rest] = [...delivering].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (first) decision.deliveries.set(first.id, destination);
+      for (const sub of rest) decision.deliveries.set(sub.id, { kind: "skip", reason: `claimed by thread ${destination.threadId}` });
+    } else {
+      for (const sub of delivering) decision.deliveries.set(sub.id, destination);
+    }
   }
   return decision;
 }
@@ -259,19 +274,24 @@ export interface MentionRuleSubscription {
  * tests the twin's payload, then the dispatcher's own sender gate
  * (`mentionSenderActor`) runs without a drop log. A mention that the gate
  * refuses reaches no subscription, so the waiter receives the message as
- * an ordinary channel message.
+ * an ordinary channel message. A personal rule that a team rule covers
+ * (`teamCovered`, the dispatcher's `hasTeamCoverage`) does not count.
  */
-export async function mentionCoveredBy(
+export async function mentionCoveredBy<S extends MentionRuleSubscription>(
   db: AppDb,
-  subs: ReadonlyArray<MentionRuleSubscription>,
+  subs: ReadonlyArray<S>,
   owner: Principal,
   twin: NormalizedEvent,
   catalog: EventCatalogEntry[],
+  teamCovered: (sub: S, twin: NormalizedEvent) => Promise<boolean>,
 ): Promise<boolean> {
   for (const sub of subs) {
     if (!sub.enabled || sub.ownerType !== owner.type || sub.ownerId !== owner.id || !isAssistantTarget(sub.target)) continue;
     if (!subscriptionMatchesEvent(sub, twin.key, twin.payload, catalog, isTeamAssistantMention(sub, twin.key), twin.subjects)) continue;
-    if (await mentionSenderActor(db, sub, twin.key, twin.payload, false) !== null) return true;
+    if (await mentionSenderActor(db, sub, twin.key, twin.payload, false) === null) continue;
+    // A personal rule that a team rule covers delivers nothing.
+    if (await teamCovered(sub, twin)) continue;
+    return true;
   }
   return false;
 }
