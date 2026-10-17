@@ -12,7 +12,7 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - Filter discovery and visible tools. Check execution again, including pinned actions and sandbox calls.
 - A thread focus belongs to one thread. Cached team sessions never store focus in their shared catalog.
 - Workflow runs carry the starting scope through agent steps, tool steps, and nested runs.
-- An unattended workflow task never receives `ask_question` or `ask_approval`. This covers a workflow step's own session and a workflow task sent to an assistant thread, including repairs (`metadata.unattendedWorkflow`). Nobody watches these turns, so the author settles decisions when the workflow is saved. A step that cannot finish fails truthfully. Gate replay still finds a question asked before this rule.
+- An unattended workflow task never receives `ask_question` or `ask_approval`. This covers a workflow step's own session, a workflow task sent to an assistant thread, including repairs (`metadata.unattendedWorkflow`), and every turn on a run's own thread that a person did not type, such as `child.settled` (the `unattendedThread` session hook). Nobody watches these turns, so the author settles decisions when the workflow is saved. A step that cannot finish fails truthfully. A person's reply on the run page keeps both tools. Gate replay still finds a question asked before this rule.
 - A `foreach` body is one node. Its declared scope applies to each iteration, including calls before a session exists.
 - Child steering, collected messages, and completion signals retain their originating ceilings.
 - Child gate notifications retain the gate submission's scope. Missing source records permit no tools or actions.

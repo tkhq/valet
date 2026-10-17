@@ -2629,6 +2629,9 @@ export interface CreateSessionOptions {
   systemContext?: Array<{ name: string; content: string; order?: number }>;
   /** Host context for one thread, assembled with the session system context. */
   threadSystemContext?: (thread: { id: string; key: string }) => string | undefined;
+  /** True for a thread nobody watches, such as a workflow run's own thread.
+   * Its turns that a person did not type get no tools that wait for a person. */
+  unattendedThread?: (thread: { id: string; key: string }) => boolean;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).

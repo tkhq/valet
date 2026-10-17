@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "@valet/engine";
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
-import { workflowConversationKey, workflowEditorThreadContext, workflowRunThreadContext, workflowThreadContext } from "./editor-thread-context.js";
+import { isWorkflowRunThread, workflowConversationKey, workflowEditorThreadContext, workflowRunThreadContext, workflowThreadContext } from "./editor-thread-context.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
 describe("workflow editor context", () => {
   it("binds the editor thread to its workflow without granting access", () => {
@@ -45,15 +45,16 @@ describe("workflow run thread context", () => {
   const runKeys = [workflowRunThreadKey("wfrun_abc"), workflowRunThreadKey("wfrun_evt_1-2", "C0123")];
   const sentences = (text: string) => text.split(/(?<=\.)\s+/);
 
-  it("asks before an action whose content is in doubt, not only its place, and holds the action without an answer", () => {
+  it("holds an action whose content or place is in doubt and reports the gap instead of asking", () => {
     for (const key of runKeys) {
+      expect(isWorkflowRunThread({ key })).toBe(true);
       const lines = sentences(workflowThreadContext({ key }) ?? "");
-      // A known recipient with two conflicting prices still needs a question.
-      expect(lines.filter(line => line.includes("ask_question"))).toEqual([
-        "Call ask_question before you send, change, or delete something if a fact the action needs is missing or in conflict.",
-      ]);
+      expect(lines.filter(line => line.includes("ask_question"))).toEqual([]);
+      expect(lines).toContain("Nobody answers questions during this run, and no tool here can ask one.");
+      // A known recipient with two conflicting prices still holds the action.
+      expect(lines).toContain("If a fact that a send, change, or delete needs is missing or in conflict, do not do that action.");
       expect(lines).toContain("This covers what the action says, such as a price or a time, and where it goes.");
-      expect(lines).toContain("If no one answers, or the question expires, do not do that action, and say in the result what was missing.");
+      expect(lines).toContain("Say in the result what was missing, so the workflow's author can fix the workflow.");
       expect(lines).toContain("For other gaps, state your assumptions in the result.");
       expect(lines.join(" ")).not.toContain("visual editor");
     }
@@ -61,7 +62,8 @@ describe("workflow run thread context", () => {
   it("leaves interactive threads and the editor without the run line", () => {
     for (const key of ["web:123", "slack:C0123:1700000000.000100", "slack-events:C0123", workflowConversationKey("wf_demo", "user-1")]) {
       expect(workflowRunThreadContext({ key })).toBeUndefined();
-      expect(workflowThreadContext({ key }) ?? "").not.toContain("may not be watching this run");
+      expect(isWorkflowRunThread({ key })).toBe(false);
+      expect(workflowThreadContext({ key }) ?? "").not.toContain("during this run");
     }
     expect(workflowThreadContext({ key: "workflow:wf_demo" })).toContain("visual editor for workflow wf_demo");
   });
@@ -90,6 +92,36 @@ describe("workflow run thread context", () => {
       expect(asked).toHaveLength(2);
       expect(asked[0]).toMatch(/^<signal signalType="workflow\.request" runId="wfrun_abc">/);
       expect(asked[1]).toBe("Ask me which projects before you inspect them.");
+    } finally { session.suspendTimers(); faux.unregister(); }
+  });
+  it("offers no tool that waits for a person to a run thread's child.settled turn, but keeps them for a person's reply", async () => {
+    const faux = registerFauxProvider({ provider: "workflow-run-thread-tools" });
+    const offered: string[][] = [];
+    // The transcript declares tools on system messages as they are added or removed.
+    const record = (context: { messages: Message[] }) => {
+      const names = new Set<string>();
+      for (const message of context.messages) {
+        if (message.role !== "system") continue;
+        for (const tool of message.toolsAdded ?? []) names.add(tool.name);
+        for (const tool of message.toolsRemoved ?? []) names.delete(tool.name);
+      }
+      offered.push([...names]);
+      return fauxAssistantMessage("done");
+    };
+    faux.setResponses([record, record]);
+    const session = await new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } }).createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), threadSystemContext: workflowThreadContext, unattendedThread: isWorkflowRunThread,
+    });
+    try {
+      const thread = await session.createThread(workflowRunThreadKey("wfrun_abc"));
+      const settled = await thread.submitPrompt({ kind: "signal", signalType: "child.settled", body: "The delegated task finished.", attributes: {} }, { queueMode: "followup" });
+      await thread.awaitResult(settled.queueItemId);
+      const reply = await thread.submitPrompt("Which projects should I check?", { author: { id: "u", interactive: true } });
+      await thread.awaitResult(reply.queueItemId);
+      expect(offered[0]).toContain("read");
+      expect(offered[0]).not.toContain("ask_question");
+      expect(offered[0]).not.toContain("ask_approval");
+      expect(offered[1]).toContain("ask_question");
     } finally { session.suspendTimers(); faux.unregister(); }
   });
 });

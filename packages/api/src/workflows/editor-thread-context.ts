@@ -31,25 +31,26 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
 }
 
 /** A run with no conversation origin reports on its own thread
- * (`workflowRunThreadKey`). A person may watch it from the run page, or
- * nobody may, so a question is allowed but a guess is stated instead when
- * it is safe. A guess about what an action says is as unsafe as a guess
- * about where it goes. A run started from a conversation reports there, so
- * its key never matches.
- *
- * Thread context applies to every turn of the thread, and a person can
- * reply on the run page. The rule therefore covers every signal message:
- * the run's own `workflow.request` (`engine-deps.ts#promptOrchestrator`)
- * and anything that continues it, such as a delegated task's
- * `child.settled`. A person's reply arrives as plain text and keeps the
- * normal rules for questions. */
+ * (`workflowRunThreadKey`). A run started from a conversation reports there,
+ * so its key never matches. */
+export function isWorkflowRunThread(thread: { key: string }): boolean {
+  return /^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key);
+}
+
+/** Nobody answers questions during a run. The engine offers no tool that waits
+ * for a person on a run thread's signal turns (`unattendedThread` in
+ * `engine/host.ts`), so the rule covers every signal message: the run's own
+ * `workflow.request` (`engine-deps.ts#promptOrchestrator`) and anything that
+ * continues it, such as a delegated task's `child.settled`. A guess about what
+ * an action says is as unsafe as a guess about where it goes. A person's reply
+ * on the run page arrives as plain text and keeps the normal rules. */
 export function workflowRunThreadContext(thread: { key: string }): string | undefined {
-  if (!/^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key)) return undefined;
+  if (!isWorkflowRunThread(thread)) return undefined;
   return [
-    "A person may not be watching this run.",
-    "Call ask_question before you send, change, or delete something if a fact the action needs is missing or in conflict.",
+    "Nobody answers questions during this run, and no tool here can ask one.",
+    "If a fact that a send, change, or delete needs is missing or in conflict, do not do that action.",
     "This covers what the action says, such as a price or a time, and where it goes.",
-    "If no one answers, or the question expires, do not do that action, and say in the result what was missing.",
+    "Say in the result what was missing, so the workflow's author can fix the workflow.",
     "For other gaps, state your assumptions in the result.",
     "These rules apply to every signal message in this conversation, such as signalType `workflow.request` or `child.settled`.",
     "When a person writes in this conversation, use your normal rules for questions.",

@@ -85,6 +85,7 @@ delegate pushes, branches, and PRs to a child session.
 ## Questions
 
 When a decision or a missing fact blocks the work, call ask_question instead of ending your turn with a question in text.
+A workflow task (signalType \`workflow.request\`) has no ask_question. If a decision or a missing fact blocks a send, change, or delete there, do not do it, and say in the result what was missing.
 When you go ahead on a guess about what the person meant, say what you assumed in one line.
 Give options when the answer is one of a few choices; each becomes a button in the app and in Slack.
 If the user asks you to wait or pause, acknowledge briefly and end your turn.

@@ -5326,9 +5326,11 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
-  /** A workflow step's own session, or a workflow task handed to an assistant thread. */
+  /** A workflow step's own session, a workflow task handed to an assistant thread,
+   * or any turn on a run's own thread that a person did not type. */
   private isUnattendedWorkflowTask(): boolean {
-    return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true;
+    return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
   }
 
   /** `includeRestricted` finds a suspended call's tool on replay, so it keeps every tool. */
