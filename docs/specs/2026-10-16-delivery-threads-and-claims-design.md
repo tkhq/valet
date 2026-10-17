@@ -155,7 +155,9 @@ start.
    JSON. The schedule stores it in a new nullable `thread_policy` jsonb
    column on `workflow_schedules`, edited in place in `0000_app.sql`, with
    a matching `SCHEMA_REPAIRS` entry.
-3. An absent policy MUST read as `{ mode: "own" }`. No backfill runs.
+3. An absent policy MUST read as `new` when the target sets `follow: true`,
+   else `own`. No backfill runs. `readThreadPolicy` stays shape-only; the
+   dispatcher applies this default.
 4. `subject` MUST be refused for a schedule, and for an event subscription
    whose keys name no natural subject (Part D). The refusal MUST say
    `This rule's events have no subject to group by. Pick another thread
@@ -386,6 +388,15 @@ event wakeups spec Part A.
 - **Receipt lookup.** The `destination` stage is appended to the receipt
   whose `event_id` matches the delivery's event. `event_receipts` gains the
   index `event_receipts_event` on `(org_id, event_id)`.
+- **Channel privacy follows content.** Every Slack-sourced assistant
+  delivery records its channel on the thread it lands in, in engine thread
+  `metadata.slackChannels`, and on a team execution's governing thread. The
+  read gate (`services/thread-access.ts`) collects channels from the key
+  (`slack:`, `slack-events:`, and `subject:slack:<team>/<channel>`) and from
+  `metadata.slackChannels` of the thread and the threads above it. A reader
+  needs access to every private channel among them. Thread lists, thread
+  routes, `thread_read`, attention routing, and the shared team views
+  (briefings, outcomes) apply the same rule.
 - **Counter name.** The OpenTelemetry instrument is
   `valet_event_delivery_destination`. The Prometheus exporter adds the
   `_total` suffix.

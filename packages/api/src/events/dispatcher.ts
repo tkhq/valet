@@ -27,7 +27,7 @@ import type { Presence } from "@valet/shared";
  */
 import { slackEventChannel } from "../services/thread-access.js";
 import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SessionStore, SignalContent, ValetPlugin } from "@valet/engine";
-import { readThreadPolicy } from "@valet/shared";
+import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -151,6 +151,17 @@ export function eventDeliveryDispatchId(deliveryId: string): string {
  * minted, so a retried delivery resolves to the same run (`startWorkflow`). */
 export function eventDeliveryRunId(deliveryId: string): string {
   return `wfrun_evt_${deliveryId}`;
+}
+
+/**
+ * A subscription's effective thread policy (spec 2026-10-16: delivery
+ * threads, Part A step 3). An absent policy reads as `new` when the target
+ * follows its conversations, so each Slack thread keeps its own assistant
+ * thread, and as `own` otherwise. `readThreadPolicy` stays shape-only.
+ */
+export function subscriptionThreadPolicy(target: { thread?: unknown; follow?: boolean }): AssistantThreadPolicy {
+  if (target.thread === undefined || target.thread === null) return target.follow === true ? { mode: "new" } : { mode: "own" };
+  return readThreadPolicy(target.thread);
 }
 
 /** A Slack direct message: a conversational event (spec Terminology). */
@@ -462,7 +473,7 @@ export class EventDispatcher {
           // Slack thread key it has always used.
           ? { kind: "key", key: follow.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
           : resolveDestination({
-            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: readThreadPolicy(target.thread) },
+            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: subscriptionThreadPolicy(target) },
             event: {
               deliveryId: delivery.id,
               summary: event.summary,
