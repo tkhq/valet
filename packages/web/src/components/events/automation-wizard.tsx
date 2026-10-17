@@ -847,7 +847,7 @@ function WhenDoStep({ outcome, service, fixedService, fixedWorkflow, onWhenChang
         <summary className="cursor-pointer text-sm text-muted">Advanced: pick events and filters</summary>
         <div className="mt-2 space-y-1">
           <p className="text-xs text-muted">Pick raw event keys and filters, then what Valet does.</p>
-          <Button type="button" variant="secondary" size="sm" aria-pressed={outcome === "advanced"} onClick={onAdvanced}>
+          <Button type="button" variant="secondary" size="sm" aria-pressed={outcome === "advanced"} disabled={fixedWorkflow} onClick={onAdvanced}>
             Pick raw events
           </Button>
         </div>

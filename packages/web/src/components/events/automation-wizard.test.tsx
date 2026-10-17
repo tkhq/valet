@@ -10,8 +10,11 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type {
   CreateEventSubscriptionRequest,
-  CreateWorkflowScheduleRequest
+  CreateWorkflowScheduleRequest,
+  EventSubscriptionWire,
+  GetWorkflowTriggerCatalogResponse,
 } from "@valet/api/wire";
+import { presenceSentence } from "~/components/presence/sentences";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -49,6 +52,33 @@ const catalogData = {
     },
   ],
 };
+
+/** The mocked catalog in the shape the sentences read. */
+const sentenceCatalog: GetWorkflowTriggerCatalogResponse["catalog"] = catalogData.services.map((s) => ({
+  service: s.service,
+  entries: s.entries.map((e) => ({
+    key: e.key,
+    description: e.description,
+    filters: e.filters.map((f) => ({ field: f.field, description: f.description ?? "" })),
+  })),
+}));
+
+/** A create body as the stored line it becomes, with placeholder ids. */
+function storedLine(body: CreateEventSubscriptionRequest): EventSubscriptionWire {
+  return {
+    id: "stored",
+    name: body.name,
+    ownerType: "user",
+    ownerId: "u1",
+    eventKeys: body.eventKeys,
+    filters: body.filters ?? [],
+    target: body.target,
+    enabled: true,
+    createdBy: "u1",
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
 
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
@@ -1148,5 +1178,55 @@ describe("AutomationWizard", () => {
       fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Incident bot" } });
       expect(preview()).toBe("When someone mentions Valet in #incidents, reply in a new thread, as Incident bot.");
     });
+  });
+
+  describe("the preview equals the stored line's sentence", () => {
+    const INCIDENTS = { subject: "slack:T1/C900", service: "slack" as const, label: "#incidents" };
+
+    function expectStoredSentence() {
+      const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+      expect(presenceSentence(storedLine(body), sentenceCatalog, workflowsData.workflows, {})).toBe(preview());
+    }
+
+    it("for a reply", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      clickNext();
+      addReplyChannel("C123");
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Replies" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      expectStoredSentence();
+    });
+
+    it("for Work on it", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      pickWhenDo(GITHUB, "Work on it");
+      clickNext();
+      fireEvent.click(screen.getByRole("checkbox", { name: /github\.check_run\.completed/ }));
+      clickNext();
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Checks" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      expectStoredSentence();
+    });
+
+    it("for Run a workflow", () => {
+      workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      pickWhenDo(GITHUB, "Run a workflow");
+      clickNext();
+      fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+      clickNext();
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Deploy PRs" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      expectStoredSentence();
+    });
+  });
+
+  it("a preselected workflow disables Pick raw events", () => {
+    workflowsData = { workflows: [{ id: "wf_2", name: "Triage" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} preselectedWorkflowId="wf_2" />);
+    expect((screen.getByRole("button", { name: "Pick raw events" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

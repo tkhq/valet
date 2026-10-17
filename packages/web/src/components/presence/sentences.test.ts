@@ -240,6 +240,23 @@ describe("presenceSentence parts", () => {
     );
   });
 
+  it("skips the creator scope the server adds to a mention rule, and keeps a labeled sender", () => {
+    const scoped = sub({
+      filters: [incidents, { field: "user", op: "eq", value: "U0ABC" }],
+      target: { kind: "assistant", thread: { mode: "new" } },
+    });
+    expect(presenceSentence(scoped, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, reply in a new thread.",
+    );
+    const labeled = sub({
+      filters: [incidents, { field: "user", op: "eq", value: "U0ABC", label: "Alice" }],
+      target: { kind: "assistant", thread: { mode: "new" } },
+    });
+    expect(presenceSentence(labeled, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet from Alice in #incidents, reply in a new thread.",
+    );
+  });
+
   it("adds the appearance when one is set", () => {
     const s = sub({
       filters: [incidents],

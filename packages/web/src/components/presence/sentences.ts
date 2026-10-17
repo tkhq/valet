@@ -223,8 +223,14 @@ function presencePlace(service: Service | null, filters: readonly EventSubscript
   return ANY_PLACE[service];
 }
 
-function senderFilter(filters: readonly EventSubscriptionFilterWire[]): string | null {
-  const filter = filters.find((f) => SENDER_FIELDS.includes(f.field) && f.op === "eq");
+function senderFilter(keys: readonly string[], filters: readonly EventSubscriptionFilterWire[]): string | null {
+  // The server adds an unlabeled `user` filter with the creator's Slack id
+  // to a personal or org mention rule (api events/mention-scope.ts). That
+  // filter is the rule's scope, not a sender the reader chose, so skip it.
+  const mention = keys.some((k) => k === "slack.app_mention" || k === "slack.*");
+  const filter = filters.find(
+    (f) => SENDER_FIELDS.includes(f.field) && f.op === "eq" && !(mention && f.field === "user" && !hasText(f.label)),
+  );
   if (!filter) return null;
   const values = filterValues(filter);
   return values.length === 1 ? (values[0] ?? null) : null;
@@ -294,7 +300,7 @@ export function presenceSentence(
   const service = serviceOf(sub.eventKeys);
   const place = presencePlace(service, sub.filters);
   const where = place === null ? "" : ` ${service === "github" ? "on" : "in"} ${place}`;
-  const sender = senderFilter(sub.filters);
+  const sender = senderFilter(sub.eventKeys, sub.filters);
   const from = sender === null ? "" : ` from ${sender}`;
   const events = eventsInWords(sub.eventKeys, catalog);
   return `When ${events}${from}${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
