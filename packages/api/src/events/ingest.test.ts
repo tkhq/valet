@@ -241,7 +241,7 @@ describe("ingestEvent event waiter matching", () => {
     await linkSender();
     const result = await ingest(mention("Ev-m1:mention"), waiterDeps(), deliverable);
     expect(result).toMatchObject({ deliveries: 1 });
-    expect(await deliveryStamps()).toEqual([{ kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect" }]);
+    expect(await deliveryStamps()).toEqual([{ kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect", matchedWaiterId: "wk_1" }]);
     expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
   });
 
@@ -307,7 +307,7 @@ describe("ingestEvent event waiter matching", () => {
     await ingest(mention("Ev-p1:mention"), sessions, deliverable);
     const rows = await db.appDb.select().from(eventDeliveries);
     expect(Object.fromEntries(rows.map((r) => [r.subscriptionId, r.destination]))).toEqual({
-      "mention-sub": { kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect" },
+      "mention-sub": { kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect", matchedWaiterId: "wk_1" },
       "personal-sub": null,
     });
     await ingest(message("Ev-p1", "<@U-BOT> status?"), sessions, deliverable);

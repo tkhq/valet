@@ -60,6 +60,14 @@ describe("appendClaimedWaiterDigest", () => {
     expect(h.nudge).toHaveBeenCalledWith(["w-inc"]);
   });
 
+  it("appends to a stream-mode waiter the same way", async () => {
+    const h = harness();
+    await h.store.createWakeup(waiter({ eventMatch: { clauses: [{ key: "slack.message", bots: false }], once: false, self: [] } }));
+    expect(await appendClaimedWaiterDigest(h.deps, args)).toBe(true);
+    expect((await h.store.getWakeup("w-inc"))?.eventBuffer?.map((d) => d.key)).toEqual(["slack.message"]);
+    expect(h.nudge).toHaveBeenCalledWith(["w-inc"]);
+  });
+
   it("gives nothing to a waiter that ended, moved org, or lost the channel", async () => {
     const ended = harness();
     await ended.store.createWakeup(waiter({ status: "done" }));
