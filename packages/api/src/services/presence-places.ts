@@ -173,6 +173,22 @@ export function placeLabel(place: string, names: ReadonlyMap<string, string>): s
 }
 
 /**
+ * The place an event happened in, as its concrete name (`#incidents`,
+ * `acme/api#12`, `ENG-42`), or null when its plugin names no place. It reads
+ * the stored event's subjects through the plugin's `naturalSubject`. A Slack
+ * thread names its channel.
+ */
+export function eventPlaceName(plugins: PresenceDeps["plugins"], row: EventRow): string | null {
+  const natural = eventNaturalSubject(plugins, row);
+  const place = natural ? placeOfSubject(natural.subject) : null;
+  if (!natural || !place) return null;
+  const channelId = slackChannelOf(place);
+  const names = new Map<string, string>();
+  if (channelId && natural.label.startsWith("#")) names.set(channelId, natural.label.slice(1));
+  return placeLabel(place, names);
+}
+
+/**
  * The reach of a parent row, the place a listener lists when its filters
  * name no single place (spec Part B step 2), or undefined for a row that is
  * no parent: a channel, a pull request or issue, a Linear issue.

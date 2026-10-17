@@ -20,6 +20,7 @@ import {
   events,
   eventSubscriptions,
   orgMembers,
+  sessionThreads,
   slackChannelPrivacy,
   teamMembers,
   teams,
@@ -955,6 +956,31 @@ describe("GET /api/events/:id", () => {
     const hidden = other.deliveries.find((d) => d.id === "del_claimed");
     expect(hidden?.claimedBy).toBeUndefined();
     expect(hidden?.lastError).toBe("Skipped, claimed by another thread.");
+  });
+
+  it("names a claiming thread's title and keeps the claim after the thread is archived (presence hub Review Focus 4)", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_claimed", eventId: "ev_dest", subscriptionId: "sub_assist", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+    const patch = (body: object) => fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect((await patch({ title: "t-inc" })).status).toBe(200);
+    const read = async () => ((await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse).deliveries;
+
+    const live = await read();
+    expect(live.find((d) => d.id === "del_claimed")?.claimedBy).toEqual({ ...thread, title: "t-inc" });
+    expect(live.find((d) => d.id === "del_assist")?.thread).toEqual({ ...thread, title: "t-inc" });
+
+    // The thread holds a queued delivery, so the archive route refuses it;
+    // stamp the archive time the way the route does.
+    await a.providers.db.update(sessionThreads).set({ archivedAt: Date.now() })
+      .where(and(eq(sessionThreads.sessionId, thread.sessionId), eq(sessionThreads.id, thread.threadId)));
+    const archived = await read();
+    expect(archived.find((d) => d.id === "del_claimed")?.claimedBy).toEqual({ ...thread, title: "t-inc", archived: true });
   });
 
   it("omits the thread and the run for a viewer who may not open them", async () => {

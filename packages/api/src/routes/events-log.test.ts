@@ -1,7 +1,9 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
+import githubPlugin from "@valet/plugin-github/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions, slackChannelPrivacy } from "../schema/index.js";
 import type { EventLogResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -162,4 +164,54 @@ it("keeps disabled subscription history while hiding new webhook diagnostics by 
   expect(second.nextCursor).toBeNull();
   expect((await log(api)).items.some(item => item.id === "incoming_after_disable")).toBe(true);
   expect((await fetch(`${api.baseUrl}/api/events/log?${MINE}&diagnostics=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
+});
+
+it("names each stored event's place from its natural subject (presence hub Part E)", async () => {
+  api = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(events).values([
+    {
+      id: "ev_mention", orgId: "local-org", service: "slack", eventKey: "slack.app_mention", dedupeKey: "ev_mention",
+      refs: { channel: "C900", channel_name: "incidents" }, subjects: ["slack:T1", "slack:T1/C900", "slack:T1/C900/1700.1"],
+      summary: "mention", payload: {}, occurredAt: now - 200, receivedAt: now - 200,
+    },
+    {
+      id: "ev_pr", orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: "ev_pr",
+      refs: {}, subjects: ["github:acme/api", "github:acme/api#12"], summary: "pr", payload: {}, occurredAt: now - 300, receivedAt: now - 300,
+    },
+  ]);
+  await api.providers.db.insert(eventDeliveries).values([
+    { id: "d_mention", eventId: "ev_mention", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now },
+    { id: "d_pr", eventId: "ev_pr", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now },
+  ]);
+  // A Slack event shows only when its channel is known to be public.
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C900", isPrivate: false, checkedAt: Date.now() });
+  const items = new Map((await log(api)).items.map((item) => [item.id, item]));
+  expect(items.get("ev_mention")?.place).toBe("#incidents");
+  expect(items.get("ev_pr")?.place).toBe("acme/api#12");
+  // An event whose subjects name no place carries none.
+  expect(items.get("ev_ok")).not.toHaveProperty("place");
+  // A problem row is not an event and carries neither.
+  expect(items.get("drop_filter")).not.toHaveProperty("place");
+  expect(items.get("drop_filter")).not.toHaveProperty("deliveries");
+});
+
+it("lists each stored event's deliveries to this workspace's rules, newest first", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_theirs", orgId: "local-org", ownerType: "team", ownerId: "team-b", name: "Theirs",
+    eventKeys: ["github.push"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  await api.providers.db.insert(eventDeliveries).values([
+    { id: "d_theirs", eventId: "ev_ok", subscriptionId: "sub_theirs", status: "dead", attempts: 5, nextAttemptAt: 0, createdAt: now + 1 },
+    { id: "d_skip", eventId: "ev_ok", subscriptionId: "sub_mine", status: "skipped", lastError: "Skipped by delivery preferences", attempts: 0, nextAttemptAt: 0, createdAt: now + 2 },
+  ]);
+  const ok = (await log(api)).items.find((item) => item.id === "ev_ok");
+  expect(ok?.deliveries?.map((d) => [d.id, d.status, d.subscriptionName])).toEqual([
+    ["d_skip", "skipped", "Mine"], ["d1", "delivered", "Mine"],
+  ]);
+  expect(ok?.deliveries?.[0]?.lastError).toBe("Skipped by delivery preferences");
 });

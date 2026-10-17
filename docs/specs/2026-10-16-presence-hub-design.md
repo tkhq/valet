@@ -283,3 +283,11 @@ Pass criterion: all steps, in one run, from a clean start.
   sets when a dead pin disables the schedule. Enabling the schedule or
   changing its pin clears it. The index `event_deliveries_subscription`
   serves the problem query.
+- **Activity rows carry their place and deliveries (Part E step 1).** Each
+  stored event on `GET /api/events/log` carries `place`, the concrete name
+  of its natural subject's place, and `deliveries`, the same delivery rows
+  the event page lists for this workspace's rules and the org's. A thread
+  reference on a delivery (`thread`, `claimedBy`) carries the thread's
+  `title` and `archived`, so a row reads `claimed by t-inc` after `t-inc`
+  is archived. A claim whose thread the viewer may not open reads `claimed
+  by another thread`.

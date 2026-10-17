@@ -5225,6 +5225,16 @@ export interface EventSummaryWire {
   receivedAt: number;
 }
 
+/** A thread a delivery reached or that claimed it. `title` is present when
+ * the thread has one; `archived` is present, and true, when the thread is
+ * archived and no longer takes deliveries. */
+export interface EventDeliveryThreadRef {
+  sessionId: string;
+  threadId: string;
+  title?: string;
+  archived?: true;
+}
+
 export interface EventDeliveryWire {
   id: string;
   subscriptionId: string;
@@ -5242,11 +5252,11 @@ export interface EventDeliveryWire {
   subscriptionName?: string;
   /** The assistant thread that received this delivery. Absent when the
    * delivery reached no thread, or when the viewer may not open it. */
-  thread?: { sessionId: string; threadId: string };
+  thread?: EventDeliveryThreadRef;
   /** The assistant thread whose event waiter claimed this skipped delivery
    * (spec 2026-10-16: delivery threads and claims, Part E step 2). Absent
    * when no waiter claimed it, or when the viewer may not open the thread. */
-  claimedBy?: { sessionId: string; threadId: string };
+  claimedBy?: EventDeliveryThreadRef;
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;
@@ -5290,6 +5300,12 @@ export interface EventLogItem {
   reason: string | null;
   detail: string | null;
   deliveryCount: number;
+  /** A stored event's place, by its concrete name (`#incidents`,
+   * `acme/api#12`). Absent when the event's plugin names no place. */
+  place?: string;
+  /** A stored event's deliveries to this workspace's rules (and the org's),
+   * newest first, as the event page lists them. Absent on a problem. */
+  deliveries?: EventDeliveryWire[];
 }
 
 /** `GET /api/events/log`. */

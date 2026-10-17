@@ -13,7 +13,7 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  * written — the ingest matcher (`events/ingest.ts`) trusts the
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
-import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
+import type { FilterOption, FilterOptionResolver, Principal, StoredCredential, ValetPlugin } from "@valet/engine";
 import { and, desc, eq, gte, inArray, ne, or, sql, type SQL } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
@@ -35,7 +35,9 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
+  EventDeliveryThreadRef,
   EventDeliveryWire,
+  EventLogItem,
   EventLogResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -62,6 +64,7 @@ import { slackEventChannel, storedThreadRef } from "../services/thread-access.js
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
+import { eventPlaceName } from "../services/presence-places.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -423,13 +426,67 @@ eventsRouter.get("/events/log", async (c) => {
   });
   const last = items.at(-1);
   const resp: EventLogResponse = {
-    items,
+    items: await withPlacesAndDeliveries(c, items, owner),
     nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
     lastEventAt: await lastEventLogActivity(db, user.orgId, admin, diagnostics),
     windowDays: EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000),
   };
   return c.json(resp);
 });
+
+/**
+ * Each stored event on a Log page with its place and its deliveries, so the
+ * Activity tab reads the row as one sentence
+ * (docs/specs/2026-10-16-presence-hub-design.md Part E step 1). The
+ * deliveries are the ones the Log counts: this workspace's rules and the
+ * org's. A problem row stays as it is.
+ */
+async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[], owner: Principal): Promise<EventLogItem[]> {
+  const ids = items.filter((item) => item.kind === "event").map((item) => item.id);
+  if (ids.length === 0) return items;
+  const { db, plugins } = c.var.providers;
+  const orgId = c.var.user.orgId;
+  const eventRows = await db.select().from(events).where(and(eq(events.orgId, orgId), inArray(events.id, ids)));
+  const places = new Map<string, string>();
+  for (const row of eventRows) {
+    const place = eventPlaceName(plugins, row);
+    if (place !== null) places.set(row.id, place);
+  }
+  const deliveryRows = await db
+    .select({
+      eventId: eventDeliveries.eventId,
+      id: eventDeliveries.id,
+      subscriptionId: eventDeliveries.subscriptionId,
+      subscriptionName: eventSubscriptions.name,
+      status: eventDeliveries.status,
+      attempts: eventDeliveries.attempts,
+      lastError: eventDeliveries.lastError,
+      deliveredAt: eventDeliveries.deliveredAt,
+      nextAttemptAt: eventDeliveries.nextAttemptAt,
+      destination: eventDeliveries.destination,
+      target: eventSubscriptions.target,
+    })
+    .from(eventDeliveries)
+    .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+    .where(and(
+      inArray(eventDeliveries.eventId, ids),
+      eq(eventSubscriptions.orgId, orgId),
+      or(and(eq(eventSubscriptions.ownerType, owner.type), eq(eventSubscriptions.ownerId, owner.id)), eq(eventSubscriptions.ownerType, "org")),
+    ))
+    .orderBy(desc(eventDeliveries.createdAt), desc(eventDeliveries.id));
+  const wire = await deliveriesToWire(c, deliveryRows);
+  const byEvent = new Map<string, EventDeliveryWire[]>();
+  deliveryRows.forEach((row, index) => {
+    const list = byEvent.get(row.eventId) ?? [];
+    list.push(wire[index]!);
+    byEvent.set(row.eventId, list);
+  });
+  return items.map((item) => {
+    if (item.kind !== "event") return item;
+    const place = places.get(item.id);
+    return { ...item, ...(place !== undefined ? { place } : {}), deliveries: byEvent.get(item.id) ?? [] };
+  });
+}
 
 /** Whether this request may see an event. A Slack event from a private
  * channel shows only to the channel's members (`services/thread-access.ts`),
@@ -452,33 +509,70 @@ async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: 
 async function deliveryThreads(
   c: Context<AppEnv>,
   deliveryIds: string[],
-): Promise<Map<string, { sessionId: string; threadId: string }>> {
-  const found = new Map<string, { sessionId: string; threadId: string }>();
+): Promise<Map<string, EventDeliveryThreadRef>> {
+  const found = new Map<string, EventDeliveryThreadRef>();
   if (deliveryIds.length === 0) return found;
   const { db } = c.var.providers;
   const byDispatchId = new Map(deliveryIds.map((id) => [eventDeliveryDispatchId(id), id]));
   const result = await db.execute(sql`
-    SELECT q.dispatch_id, q.session_id, q.thread_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
+    SELECT q.dispatch_id, q.session_id, q.thread_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id,
+      st.title, (st.archived_at IS NOT NULL) AS archived
     FROM engine_queue_items q
     JOIN agent_sessions s ON s.id = q.session_id
     JOIN engine_threads t ON t.session_id = q.session_id AND t.id = q.thread_id
+    LEFT JOIN session_threads st ON st.session_id = t.session_id AND st.id = t.id
     WHERE q.dispatch_id IN (${sql.join([...byDispatchId.keys()].map((id) => sql`${id}`), sql`, `)})
       AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'
     ORDER BY q.created_at`) as {
-    rows: Array<{
-      dispatch_id: string; session_id: string; thread_id: string; key: string;
-      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
-    }>;
+    rows: Array<ThreadAccessRow & { dispatch_id: string }>;
   };
-  // An event has few deliveries, so each thread is checked on its own.
+  // A Log page repeats threads, so each thread is checked once per request.
+  const readable = readableThreads(c);
   for (const row of result.rows) {
     const deliveryId = byDispatchId.get(row.dispatch_id);
     if (deliveryId === undefined || found.has(deliveryId)) continue;
-    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
-    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) continue;
-    found.set(deliveryId, { sessionId: row.session_id, threadId: row.thread_id });
+    const ref = await readable(row);
+    if (ref) found.set(deliveryId, ref);
   }
   return found;
+}
+
+/** A thread row with the session columns the thread access checks read,
+ * and the thread's title and archived state. Raw SQL rows are untyped; the
+ * SELECTs above name these columns. */
+interface ThreadAccessRow {
+  session_id: string; thread_id: string; key: string;
+  org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+  title: string | null; archived: boolean | null;
+}
+
+/**
+ * A checker that returns a thread's reference when this request may open it
+ * at `/threads/:threadId` (`routes/threads.ts`), by the same two checks:
+ * `threadEntry` (a viewer of the session, or a member the thread's share
+ * admits), then `threadsVisibleTo` on the thread's key. It remembers each
+ * thread's answer for the life of the checker.
+ */
+function readableThreads(c: Context<AppEnv>): (row: ThreadAccessRow) => Promise<EventDeliveryThreadRef | null> {
+  const seen = new Map<string, Promise<EventDeliveryThreadRef | null>>();
+  return (row) => {
+    const key = `${row.session_id}:${row.thread_id}`;
+    let answer = seen.get(key);
+    if (!answer) {
+      answer = (async () => {
+        const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+        if (!await threadEntry(c, session, row.thread_id)) return null;
+        if (!await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) return null;
+        return {
+          sessionId: row.session_id, threadId: row.thread_id,
+          ...(row.title ? { title: row.title } : {}),
+          ...(row.archived === true ? { archived: true as const } : {}),
+        };
+      })();
+      seen.set(key, answer);
+    }
+    return answer;
+  };
 }
 
 /** The skip text for a viewer who may not open the thread that claimed the delivery. */
@@ -493,26 +587,25 @@ const CLAIMED_ELSEWHERE = "Skipped, claimed by another thread.";
 async function claimThreads(
   c: Context<AppEnv>,
   claims: Array<{ deliveryId: string; threadId: string }>,
-): Promise<Map<string, { sessionId: string; threadId: string }>> {
-  const found = new Map<string, { sessionId: string; threadId: string }>();
+): Promise<Map<string, EventDeliveryThreadRef>> {
+  const found = new Map<string, EventDeliveryThreadRef>();
   if (claims.length === 0) return found;
   const threadIds = [...new Set(claims.map((claim) => claim.threadId))];
   const result = await c.var.providers.db.execute(sql`
-    SELECT t.id AS thread_id, t.session_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
+    SELECT t.id AS thread_id, t.session_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id,
+      st.title, (st.archived_at IS NOT NULL) AS archived
     FROM engine_threads t
     JOIN agent_sessions s ON s.id = t.session_id
+    LEFT JOIN session_threads st ON st.session_id = t.session_id AND st.id = t.id
     WHERE t.id IN (${sql.join(threadIds.map((id) => sql`${id}`), sql`, `)})
       AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'`) as {
-    rows: Array<{
-      thread_id: string; session_id: string; key: string;
-      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
-    }>;
+    rows: ThreadAccessRow[];
   };
-  const readable = new Map<string, { sessionId: string; threadId: string }>();
+  const check = readableThreads(c);
+  const readable = new Map<string, EventDeliveryThreadRef>();
   for (const row of result.rows) {
-    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
-    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) continue;
-    readable.set(row.thread_id, { sessionId: row.session_id, threadId: row.thread_id });
+    const ref = await check(row);
+    if (ref) readable.set(row.thread_id, ref);
   }
   for (const claim of claims) {
     const thread = readable.get(claim.threadId);
