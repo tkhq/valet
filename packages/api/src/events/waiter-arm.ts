@@ -22,6 +22,7 @@ import { identityForUser } from "../channels/identity-links.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
 import { loadAppConfig } from "../services/github-app.js";
+import { slackBotUserIdOf } from "../services/slack-bot-identity.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { installationResolvesFor } from "../services/github-tokens.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
@@ -386,7 +387,8 @@ export function armDeps(
       return res.ok ? idOf((await jsonOf(res))?.id) : undefined;
     }
     if (service === "slack") {
-      return idOf((await slackOrg())?.metadata?.botUserId);
+      // The same bot id the follow router and the event matchers read.
+      return slackBotUserIdOf(store, session.orgId, await slackOrg());
     }
     if (service === "linear") {
       const app = await store.get({ type: "org", id: session.orgId }, LINEAR_CREDENTIAL_SERVICE);

@@ -7,7 +7,7 @@ import { createEventReceipt, appendReceiptStage } from "./receipts.js";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
+import type { EventCatalogEntry, NormalizedEvent, Principal, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
@@ -21,7 +21,7 @@ import {
   type WaiterCandidate,
   type WaiterMatchDeps,
 } from "./waiters.js";
-import { followRouteFor } from "../channels/follow-router.js";
+import { followRouteFor, followRouterPassed } from "../channels/follow-router.js";
 import { isPrincipalType, mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
@@ -44,6 +44,23 @@ export const CLAIM_FAILURE_STAGE = {
   outcome: "failed",
   detail: "Claim resolution failed. The deliveries land by their conversation binding or thread policy, and every matching waiter appends its digest.",
 } as const;
+
+/**
+ * The owner of the follow binding that the follow router delivered this
+ * Slack message event to, or null (spec 2026-10-16: delivery threads and
+ * claims, Part C step 4). The Slack inbox runs the router before ingest, so
+ * the router's cursor (`followRouterPassed`) tells a delivered reply from
+ * one the router dropped before its binding existed or its sender was
+ * admitted. A dropped reply is not routed: its waiters append (INV-D6).
+ */
+export async function followRoutedOwner(
+  db: AppDb,
+  args: { orgId: string; botUserId?: string | undefined; payload: unknown },
+): Promise<Principal | null> {
+  const follow = await followRouteFor(db, { orgId: args.orgId, ...(args.botUserId ? { botUserId: args.botUserId } : {}), payload: args.payload });
+  if (!follow || !followRouterPassed(follow, args.payload) || !isPrincipalType(follow.ownerType)) return null;
+  return { type: follow.ownerType, id: follow.ownerId };
+}
 
 /**
  * The other half of a Slack mention, from the plugin that owns `service`
@@ -495,8 +512,7 @@ async function resolveEventClaims(
     },
     followRoute: async (e) => {
       if (service !== "slack" || e.key !== "slack.message") return null;
-      const follow = await followRouteFor(db, { orgId, botUserId: await deps.waiters?.slackBotUserId(orgId), payload: e.payload });
-      return follow && isPrincipalType(follow.ownerType) ? { type: follow.ownerType, id: follow.ownerId } : null;
+      return followRoutedOwner(db, { orgId, botUserId: await deps.waiters?.slackBotUserId(orgId), payload: e.payload });
     },
     ...deps.claims,
   };
