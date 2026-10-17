@@ -164,10 +164,16 @@ start.
    option.`
 5. `existing` MUST be validated at write time: the thread MUST exist, MUST
    belong to a live assistant or execution session of the rule's owner, and
-   MUST NOT be archived. The refusal for another owner's thread is `This
-   thread belongs to another owner. Pick a thread in your workspace.` The
-   refusal for an archived thread is `This thread is archived. Pick an open
-   thread.`
+   MUST NOT be archived. The person who writes the policy MUST be able to
+   read the thread, by the gate the thread read paths use
+   (`threadVisibility`): a team thread with content from a private Slack
+   channel needs membership in that channel. A team or org rule MUST NOT
+   pin one person's thread (a helper or workflow editor key). The refusal
+   for another owner's thread, a missing thread, and a thread the writer
+   cannot read is the same text, `This thread belongs to another owner.
+   Pick a thread in your workspace.`, so the answer never shows that the
+   thread exists. The refusal for an archived thread is `This thread is
+   archived. Pick an open thread.`
 6. `validateValetPlugin` is unaffected. The policy is rule configuration.
 
 ## Part B: Destination resolution

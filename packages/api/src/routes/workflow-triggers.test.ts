@@ -5,12 +5,12 @@
  * seed rows under a second org id (stub auth pins the caller to `local-org`).
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { seedAssistantThread } from "../test-helpers/assistant-thread.js";
-import { eventSubscriptions, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { eventSubscriptions, slackChannelPrivacy, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
@@ -1015,6 +1015,39 @@ describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
     const scheduleId = ((await accepted.json()) as WorkflowScheduleResponse).schedule.scheduleId;
     const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
     expect(row).toMatchObject({ ownerType: "team", ownerId: "team_a", threadPolicy: { mode: "existing", ...teamThread } });
+  });
+
+  it("refuses a team schedule's pin on a private-channel thread the caller cannot read", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    // The caller has no linked Slack account, so no private channel shows to them.
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CSCHEDPRIV", isPrivate: true, checkedAt: Date.now() });
+    const hidden = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_a" }, sessionId: "sess-team", threadId: "thr-hidden",
+      key: "sub:incident", slackChannels: ["CSCHEDPRIV"],
+    });
+    const helper = { sessionId: "sess-team", threadId: "thr-helper" };
+    await a.providers.db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES (${helper.threadId}, ${helper.sessionId}, 'app-assistant:local-user', 'idle', 'steer', 1, 1)`);
+    const create = (thread: unknown) => fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "orchestrator", prompt: "Summarize" }, teamId: "team_a", thread }),
+    });
+
+    for (const pinned of [hidden, helper]) {
+      const refused = await create({ mode: "existing", ...pinned });
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: "This thread belongs to another owner. Pick a thread in your workspace." });
+    }
+    expect(await a.providers.db.select().from(workflowSchedules)).toEqual([]);
+
+    const created = await create({ mode: "new" });
+    expect(created.status).toBe(201);
+    const scheduleId = ((await created.json()) as WorkflowScheduleResponse).schedule.scheduleId;
+    const patched = await patchSchedule(a, scheduleId, { thread: { mode: "existing", ...hidden } });
+    expect(patched.status).toBe(400);
+    expect(await patched.json()).toEqual({ error: "This thread belongs to another owner. Pick a thread in your workspace." });
   });
 
   it("refuses a patch to another owner's thread and keeps the stored policy", async () => {

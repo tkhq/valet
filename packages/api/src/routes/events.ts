@@ -54,7 +54,7 @@ import type {
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
-import { channelsVisibleTo, threadEntry, threadsVisibleTo } from "./_thread-access.js";
+import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import { slackEventChannel, storedThreadRef } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
@@ -660,8 +660,10 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = teamId;
     }
-    // `existing` names a thread, which must belong to the owner just resolved.
-    const threadError = await existingThreadError(db, user.orgId, { type: ownerType, id: ownerId }, body.target.thread);
+    // `existing` names a thread, which must belong to the owner just resolved
+    // and be one the caller can read.
+    const threadError = await existingThreadError(c.var.providers, viewerOf(c),
+      { type: ownerType, id: ownerId }, body.target.thread);
     if (threadError) return c.json({ error: threadError }, 400);
   }
 
@@ -930,7 +932,8 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Only a patch that sets the policy re-checks its thread. A rename of a rule
   // whose pinned thread was archived later must still work.
   if (body.thread != null && patchedTarget.kind === "orchestrator") {
-    const threadError = await existingThreadError(db, user.orgId, { type: row.ownerType, id: row.ownerId }, patchedTarget.thread);
+    const threadError = await existingThreadError(c.var.providers, viewerOf(c),
+      { type: row.ownerType, id: row.ownerId }, patchedTarget.thread);
     if (threadError) return c.json({ error: threadError }, 400);
   }
 

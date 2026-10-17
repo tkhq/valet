@@ -7,7 +7,8 @@
 import { sql } from "drizzle-orm";
 import type { Principal, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, validateThreadPolicy } from "@valet/shared";
-import type { AppDb } from "../lib/drizzle.js";
+import type { Providers } from "../providers/types.js";
+import { isPersonalThreadKey, storedThreadRef, threadVisibility, type ThreadViewer } from "../services/thread-access.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { eventKeyMatches } from "./match.js";
 
@@ -32,31 +33,45 @@ export function subjectModeAllowed(eventKeys: readonly string[], plugins: readon
   );
 }
 
+/** What the `existing` checks read: the database, and the Slack credential
+ * the thread read gate uses (`threadVisibility`). */
+export type ThreadPolicyWriteDeps = Pick<Providers, "db" | "engineCredentials"> & { onePassword?: Providers["onePassword"] };
+
 /**
- * Validate an `existing` policy's thread for a rule of `owner` in `orgId`.
- * Returns null when a delivery could land there, else the refusal text. The
- * deliverability gate is the dispatcher's own (`isDeliverableTarget`), so a
- * thread accepted here is one the dispatcher would accept today.
+ * Validate an `existing` policy's thread for a rule of `owner`, written by
+ * `writer` (the person who sends the create or the edit). Returns null when a
+ * delivery could land there, else the refusal text. The deliverability gate
+ * is the dispatcher's own (`isDeliverableTarget`), so a thread accepted here
+ * is one the dispatcher would accept today.
  *
- * A missing thread and another owner's thread get the same text, so the
- * answer never shows that another owner's thread exists.
+ * The writer controls the rule's prompt and its reply route, so the writer
+ * must be able to read the thread, by the same gate the read paths use
+ * (`threadVisibility`). A team or org rule never pins one person's thread
+ * (`isPersonalThreadKey`). A missing thread, another owner's thread, and a
+ * thread the writer cannot read get the same text, so the answer never shows
+ * that such a thread exists.
  */
 export async function validateExistingThread(
-  db: AppDb,
-  orgId: string,
+  deps: ThreadPolicyWriteDeps,
+  writer: ThreadViewer,
   owner: Principal,
   target: { sessionId: string; threadId: string },
 ): Promise<string | null> {
-  if (await isDeliverableTarget({ db }, orgId, owner, target)) return null;
-  const result = await db.execute(sql`
-      SELECT (m.archived_at IS NOT NULL) AS archived FROM agent_sessions s
+  const result = await deps.db.execute(sql`
+      SELECT t.key AS key, (m.archived_at IS NOT NULL) AS archived FROM agent_sessions s
       JOIN engine_threads t ON t.session_id = s.id AND t.id = ${target.threadId}
       LEFT JOIN session_threads m ON m.session_id = s.id AND m.id = t.id
-      WHERE s.id = ${target.sessionId} AND s.org_id = ${orgId} AND s.status <> 'deleted'
+      WHERE s.id = ${target.sessionId} AND s.org_id = ${writer.orgId} AND s.status <> 'deleted'
         AND s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}
-      LIMIT 1`) as { rows: Array<{ archived: boolean }> }; // Raw SQL rows are untyped; the SELECT names one boolean.
+      LIMIT 1`) as { rows: Array<{ key: string | null; archived: boolean }> }; // Raw SQL rows are untyped; the SELECT names a key and a boolean.
   const row = result.rows[0];
   if (!row) return CROSS_OWNER_THREAD_ERROR;
+  if (owner.type !== "user" && isPersonalThreadKey(row.key)) return CROSS_OWNER_THREAD_ERROR;
+  const visible = threadVisibility(deps, { ownerType: owner.type, id: target.sessionId }, writer);
+  if (!(await visible(await storedThreadRef(deps.db, target.sessionId, target.threadId, row.key)))) {
+    return CROSS_OWNER_THREAD_ERROR;
+  }
+  if (await isDeliverableTarget({ db: deps.db }, writer.orgId, owner, target)) return null;
   // The owner's thread exists. It is archived, or its session is not a live
   // assistant conversation (a plain session, or a retired assistant).
   return row.archived ? ARCHIVED_THREAD_ERROR : NOT_ASSISTANT_THREAD_ERROR;
@@ -69,8 +84,8 @@ export async function validateExistingThread(
  * skipped the shape check fails closed. Call it once the rule's owner is known.
  */
 export async function existingThreadError(
-  db: AppDb,
-  orgId: string,
+  deps: ThreadPolicyWriteDeps,
+  writer: ThreadViewer,
   owner: Principal,
   policy: unknown,
 ): Promise<string | null> {
@@ -78,5 +93,5 @@ export async function existingThreadError(
   const shapeError = validateThreadPolicy(policy);
   if (shapeError) return shapeError;
   const read = readThreadPolicy(policy);
-  return read.mode === "existing" ? validateExistingThread(db, orgId, owner, read) : null;
+  return read.mode === "existing" ? validateExistingThread(deps, writer, owner, read) : null;
 }

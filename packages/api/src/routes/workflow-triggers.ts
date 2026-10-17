@@ -214,7 +214,7 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const owner = ownerFrom(c);
-  const result = await updateWorkflowSchedule(db, owner, c.req.param("id"), body);
+  const result = await updateWorkflowSchedule(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
