@@ -165,6 +165,20 @@ export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null
   return owner ? { ...owner, agentEditor: true } : null;
 }
 
+/** The turn is this person's own signed-in prompt: never an event, a signal,
+ * a workflow step or delegated work (`ToolContext.interactiveActor`). */
+function isDirectActor(ctx: PluginActionContext, owner: WorkflowOwner): boolean {
+  return ctx.interactiveActor?.id === owner.userId && !ctx.externalSender
+    && ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+}
+
+/** The owner for an assistant edit of a definition. On the person's own prompt
+ * the save grants as their browser save would (`authorizeHumanWorkflowSave`). */
+function saverFromContext(ctx: PluginActionContext): WorkflowOwner | null {
+  const owner = ownerFromContext(ctx);
+  return owner && isDirectActor(ctx, owner) ? { ...owner, interactiveSaver: owner.userId } : owner;
+}
+
 function ownerFromContextUnmarked(ctx: PluginActionContext): WorkflowOwner | null {
   // A channel sender with no Valet account runs as the rule's creator, but is
   // not that person: they may not manage the workspace's workflows.
@@ -445,12 +459,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach|workflow. " +
       "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
-      "Saving through an agent does not approve actions or shared accounts. " +
-      "Ask the owner or team admin to open the workflow and review its permissions once before unattended runs. " +
+      "A save on the person's own prompt allows this workflow's tool steps and that person's shared accounts for later runs, within existing policies. " +
+      "A save from an event, a schedule, a workflow step or delegated work allows nothing: ask the owner or a team admin to review permissions once. " +
       "Returns { workflowId } — always surface it to the user.",
     riskLevel: "medium",
     execute: async ({ workflow_id, name, definition }, ctx) => {
-      const owner = ownerFromContext(ctx);
+      const owner = saverFromContext(ctx);
       if (!owner) return NO_OWNER;
 
       // The validate env is best-effort: if deps aren't wired (early boot,
@@ -552,8 +566,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const directActor = ctx.interactiveActor?.id === owner.userId &&
-        ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+      const directActor = isDirectActor(ctx, owner);
       let result;
       try {
         result = await deleteWorkflowDefinition(getDeps(), { ...owner, deletionAuthority: directActor ? { type: "interactive", userId: owner.userId } : { type: "automated" } }, workflow_id);
@@ -594,7 +607,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id, reason }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      if (ctx.interactiveActor?.id !== owner.userId || ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child") {
+      if (!isDirectActor(ctx, owner)) {
         return { success: false, error: "Open a deletion request from signed-in web chat or team settings. Automated turns cannot submit requests for a person." };
       }
       const deps = getDeps();
@@ -871,7 +884,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "patch; the reply names those errors as pre-existing.",
     riskLevel: "medium",
     execute: async ({ workflow_id, name, presence, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
-      const owner = ownerFromContext(ctx);
+      const owner = saverFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const wf = await getWorkflowDefinition(deps, owner, workflow_id);
@@ -963,7 +976,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "or an org model tier.",
     riskLevel: "medium",
     execute: async ({ workflow_id, model, node_ids }, ctx) => {
-      const owner = ownerFromContext(ctx);
+      const owner = saverFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const catalog = await buildOrgCatalog(deps.db, deps.credentials, owner.orgId);
@@ -1015,7 +1028,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "outgoing edge. The node is an ordinary node afterwards — editable and removable like any other.",
     riskLevel: "medium",
     execute: async ({ workflow_id, mode, model, node_id, sources, instructions }, ctx) => {
-      const owner = ownerFromContext(ctx);
+      const owner = saverFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await addAggregateNode(
