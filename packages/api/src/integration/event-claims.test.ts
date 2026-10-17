@@ -318,11 +318,23 @@ describe("api integration: claims acceptance scenario", () => {
     expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
     expect(await queuedWith(u, c3Text)).toEqual([expect.objectContaining(tInc)]);
 
+    // C3b: U001, a linked member, replies in X. The follow router admits the
+    // sender and delivers the reply to t-inc. The router owns a followed
+    // reply, so P skips it and the waiter appends no digest: one turn.
+    const c3bText = "failover finished";
+    await postSlack(u, slackMessage("C900", "U001", c3bText, x));
+    expect(await settled(u, "P", 4)).toMatchObject({ status: "skipped", lastError: "Skipped, the followed thread delivers this reply." });
+    await poll(() => queuedWith(u, c3bText), (rows) => rows.length > 0, "the routed reply");
+    await tick(u);
+    await expectNoNewSignal(u, "event.matched", 1, tInc.sessionId, tInc.threadId);
+    expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
+    expect(await queuedWith(u, c3bText)).toEqual([expect.objectContaining(tInc)]);
+
     // C4: U002 links to no Valet user. The team gate refuses the mention, so
     // M delivers nothing and t-inc receives the post as one digest.
     const c4Text = `<@${BOT_USER}> is the replica healthy?`;
     await mention(u, "U002", c4Text);
-    expect(await settled(u, "P", 4)).toMatchObject(skippedFor(tInc));
+    expect(await settled(u, "P", 5)).toMatchObject(skippedFor(tInc));
     expect((await deliveriesOf(u, "M")).filter((d) => d.status !== "dead")).toHaveLength(2);
     await tick(u);
     const c4 = await awaitSignals(u, "event.matched", 2, tInc.sessionId, tInc.threadId);
@@ -340,7 +352,7 @@ describe("api integration: claims acceptance scenario", () => {
     // P's message half also follows the X2 binding into t-s, so t-s gets a
     // second turn for the post. Spec Deviations, "Both halves of a mention in
     // a bound Slack thread", records this gap.
-    expect(await settled(u, "P", 5)).toMatchObject({ status: "delivered", destination: { kind: "target", ...tS, reason: "conversation_follow" } });
+    expect(await settled(u, "P", 6)).toMatchObject({ status: "delivered", destination: { kind: "target", ...tS, reason: "conversation_follow" } });
     await tick(u);
     const c5Digests = await awaitSignals(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
     expect(c5Digests[2]?.content).toContain("rollback ready?");
@@ -367,7 +379,7 @@ describe("api integration: claims acceptance scenario", () => {
     const c6Turns = await queuedWith(u, "who owns db-2?");
     expect(c6Turns).toHaveLength(2);
     expect(c6Turns).toEqual(expect.arrayContaining([expect.objectContaining(tInc), expect.objectContaining(platformThread)]));
-    expect(await settled(u, "P", 6)).toMatchObject(skippedFor(tInc));
+    expect(await settled(u, "P", 7)).toMatchObject(skippedFor(tInc));
     await tick(u);
     await expectNoNewSignal(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
 
@@ -375,12 +387,12 @@ describe("api integration: claims acceptance scenario", () => {
     // message to a new subject thread for the channel.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U001", "incident closed, stop watching"));
-    expect(await settled(u, "P", 7)).toMatchObject(skippedFor(tInc));
+    expect(await settled(u, "P", 8)).toMatchObject(skippedFor(tInc));
     await tick(u);
     await poll(() => p.engineStore.getWakeup(waiterId), (w) => w?.status !== "running", "the agent to cancel the waiter");
     expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "cancelled" });
     await postSlack(u, slackMessage("C900", "U001", "postmortem at 15:00"));
-    const c7 = await settled(u, "P", 8);
+    const c7 = await settled(u, "P", 9);
     expect(c7.status).toBe("delivered");
     const [channelThread] = await landings(u, c7.id);
     if (!channelThread) throw new Error("P's delivery landed nowhere");

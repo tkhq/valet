@@ -37,6 +37,7 @@ import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js"
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
+import { followRouteFor } from "../channels/follow-router.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
@@ -146,6 +147,12 @@ export interface EventDispatcherDeps {
    * Absent → the waiter does not see the event.
    */
   recoverClaimedDigest?: (args: { waiterId: string; orgId: string; service: string; event: NormalizedEvent }) => Promise<boolean>;
+  /**
+   * The org's Slack bot user id, for the follow router's predicate and the
+   * `conversationalTwin` hook. Absent: no message text counts as
+   * addressed to the bot.
+   */
+  slackBotUserId?: (orgId: string) => Promise<string | undefined>;
   /**
    * Counts where a delivery landed (spec Part E step 3). Absent → the
    * `valet_event_delivery_destination` counter. Tests pass a recorder.
@@ -499,6 +506,11 @@ export class EventDispatcher {
             (reason) => this.recordDestination(reason));
           return;
         }
+        const owned = await this.ownedElsewhere(sub, event, destination);
+        if (owned) {
+          await this.skipDelivery({ ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id }, owned);
+          return;
+        }
         const author = teamMention
           ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender)
           : sub.ownerType === "team" && event.service === "slack"
@@ -661,6 +673,42 @@ export class EventDispatcher {
       binding: found,
       claim: null,
     });
+  }
+
+  /**
+   * Why another path owns a `slack.message` delivery that follows a follow
+   * binding, or null (spec Part C step 4). One post gives one turn: the
+   * follow router delivers the reply to the bound thread, so the rule skips
+   * it (`follow_routed`).
+   */
+  private async ownedElsewhere(
+    sub: typeof eventSubscriptions.$inferSelect,
+    event: typeof events.$inferSelect,
+    destination: Destination,
+  ): Promise<{ text: string; reason: "follow_routed" } | null> {
+    if (event.eventKey !== "slack.message" || destination.kind === "skip" || destination.reason !== "conversation_follow") return null;
+    const { db } = this.deps;
+    const botUserId = await this.deps.slackBotUserId?.(event.orgId);
+    const route = await followRouteFor(db, { orgId: event.orgId, ...(botUserId ? { botUserId } : {}), payload: event.payload });
+    const sameThread = destination.kind === "key" || (route?.sessionId === destination.sessionId && route?.threadId === destination.threadId);
+    if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread) {
+      return { text: "the followed thread delivers this reply", reason: "follow_routed" };
+    }
+    return null;
+  }
+
+  /** Settles a delivery that another path owns: skipped, with its receipt stage and counter. */
+  private async skipDelivery(
+    args: { deliveryId: string; subscriptionId: string; attempts: number; orgId: string; eventId: string },
+    owned: { text: string; reason: "follow_routed" },
+  ): Promise<void> {
+    const { db } = this.deps;
+    await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${owned.text}.`, attempts: args.attempts + 1 })
+      .where(eq(eventDeliveries.id, args.deliveryId));
+    const recorded = await appendReceiptStageForEvent(db, args.orgId, args.eventId,
+      destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, { kind: "skip", reason: owned.text, outcome: owned.reason }),
+      destinationStageMarker(args.deliveryId));
+    if (recorded !== "exists") this.recordDestination(owned.reason);
   }
 
   /**
