@@ -276,4 +276,14 @@ describe("PolicyGateCard", () => {
     expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "team_account" } });
   });
 
+  it("lets the lender keep their account for this workflow after confirming", async () => {
+    const user = userEvent.setup();
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ serviceDisplayName: "Google Workspace", approver: { userId: "me" } })} />);
+    await user.click(screen.getByRole("button", { name: "Always allow for this workflow" }));
+    expect(screen.getByText(/use your Google Workspace account in later runs of this workflow until someone changes its steps/)).toBeTruthy();
+    expect(mutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Allow action" }));
+    expect(mutate).toHaveBeenCalledWith({ nodeId: "node_1", body: { approved: true, scope: "workflow", note: undefined, iteration: undefined } });
+  });
+
 });

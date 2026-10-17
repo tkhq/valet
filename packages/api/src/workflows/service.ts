@@ -2053,7 +2053,10 @@ export async function resolveWorkflowApproval(
     if (!owner.humanAccountConsent || input.via !== "web" || owner.agentEditor) return "human_only";
     if (!input.approved) input = { ...input, scope: undefined };
   }
-  if (approver && input.scope !== undefined && input.scope !== "once" && input.scope !== "team_account") input = { ...input, scope: undefined };
+  // The lender can keep their account for this workflow's current steps only.
+  const accountForWorkflow = approver !== undefined && input.approved && input.scope === "workflow";
+  if (accountForWorkflow && (!owner.humanAccountConsent || input.via !== "web" || owner.agentEditor)) return "human_only";
+  if (approver && !accountForWorkflow && input.scope !== undefined && input.scope !== "once" && input.scope !== "team_account") input = { ...input, scope: undefined };
 
   const orgId = await definitionOrgId(deps.db, run.params.workflowId);
   if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
@@ -2075,9 +2078,11 @@ export async function resolveWorkflowApproval(
     const [current] = await deps.db.select({ definition: workflowDefinitions.definition }).from(workflowDefinitions)
       .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
     if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
-    const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
-    workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
-    if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
+    if (!accountForWorkflow) {
+      const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+      workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
+      if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
+    }
   }
 
   // The signal's unique key selects one resolution winner. Only that caller
@@ -2113,7 +2118,7 @@ export async function resolveWorkflowApproval(
       // landed after the check above must not keep a grant for steps nobody
       // reviewed. An edit that comes after waits on this lock, and its
       // revoke-after-write then removes the grant.
-      if (prepared?.ok) {
+      if (prepared?.ok || accountForWorkflow) {
         const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
           WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
         if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
@@ -2133,6 +2138,7 @@ export async function resolveWorkflowApproval(
         if (!approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
         if (run.owner?.ownerType !== "team") throw new Error("The team is unavailable. Request account approval again.");
         await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, consentScope: input.scope === "team_account" ? "team" : undefined, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
+        if (accountForWorkflow) await saveWorkflowAccountConsent(tx, { orgId, workflowId: run.params.workflowId, teamId: run.owner.ownerId, userId: approver.userId, services: [service] });
       }
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";
