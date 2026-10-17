@@ -512,6 +512,11 @@ Revision 2 deviations:
   `/presence/routines?routine=<id>`. `/workflows?tab=runs` redirects to
   `/workflows/runs`. Each `/workflows` row has a match condition, so a URL
   that no row takes serves the list.
+- **View all searches a Slack place by its channel id (Part C step 7).**
+  The server matches `q` against an event's summary and key, and a Slack
+  summary carries the channel id (`app mentioned in C900 by U1`). So `View
+  all` on a Slack channel sends the channel id from its key
+  (`slack:<team>/<channel>`). Every other place sends its label.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the

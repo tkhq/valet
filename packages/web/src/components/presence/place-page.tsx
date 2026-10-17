@@ -19,7 +19,7 @@ import { PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
 import { usePresenceSentence } from "./presence-rows";
 import { PlaceThreads } from "./place-threads";
-import { SERVICE_NAMES } from "./places";
+import { placeSearchTerm, SERVICE_NAMES } from "./places";
 import { eventInWords, eventPlace, type ThreadTitles } from "./sentences";
 
 export function PlacePage({ subject }: { subject: string }) {
@@ -93,7 +93,7 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
         title="Recent activity"
         count={recent.length}
         actions={activity.length > 0 && (
-          <Link to="/presence/activity" search={{ q: place.label }} className={textLinkClass}>View all</Link>
+          <Link to="/presence/activity" search={{ q: placeSearchTerm(place) }} className={textLinkClass}>View all</Link>
         )}
       >
         {activity.length === 0 && <EmptyRow className="px-4 py-3">Nothing happened here in the last 30 days.</EmptyRow>}

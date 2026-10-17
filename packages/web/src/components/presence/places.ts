@@ -29,6 +29,24 @@ export function isMidGrain(place: Pick<PresencePlaceWire, "subject">): boolean {
   return SLACK_CHANNEL.test(place.subject) || GITHUB_REPO.test(place.subject) || LINEAR_TEAM.test(place.subject);
 }
 
+/** A Slack key's channel: `slack:<team>/<channel>`, or a thread under it. */
+const SLACK_CHANNEL_PREFIX = /^slack:[^/]+\/([^/]+)/;
+
+/**
+ * The `q` that `View all` sends to Activity for a place (spec Part C step
+ * 7). The server matches `q` against an event's summary and key, and a
+ * Slack summary carries the channel id (`app mentioned in C900 by U1`), not
+ * the channel name. So a Slack place searches by its channel id, and every
+ * other place by its label (`acme/api`, `ENG`).
+ */
+export function placeSearchTerm(place: Pick<PresencePlaceWire, "subject" | "label" | "service">): string {
+  if (place.service === "slack") {
+    const channel = SLACK_CHANNEL_PREFIX.exec(place.subject)?.[1];
+    if (channel !== undefined) return channel;
+  }
+  return place.label;
+}
+
 /** An exact filter's values: `eq` gives one, `in` gives a list. Other ops
  * name no single place. It mirrors the server's `exactValues`
  * (packages/api/src/services/presence-places.ts). */

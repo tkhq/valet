@@ -4,7 +4,7 @@
  */
 import type { EventSubscriptionFilterWire, PresencePlaceWire } from "@valet/api/wire";
 import { describe, expect, it } from "vitest";
-import { isMidGrain, isServiceRoot, placeSubjectsForRule } from "./places";
+import { isMidGrain, isServiceRoot, placeSearchTerm, placeSubjectsForRule } from "./places";
 
 function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null = null): PresencePlaceWire {
   return { subject, label, service, parent, listenerCount: 1, activeThreadCount: 0, lastActivityAt: null };
@@ -63,5 +63,21 @@ describe("placeSubjectsForRule", () => {
     expect(placeSubjectsForRule(rule([{ field: "channel", op: "prefix", value: "C9" }]), places)).toEqual([]);
     expect(placeSubjectsForRule(rule([]), places)).toEqual([]);
     expect(placeSubjectsForRule(rule([{ field: "repo", op: "eq", value: "acme/web" }]), places)).toEqual([]);
+  });
+});
+
+describe("placeSearchTerm", () => {
+  it("searches a Slack channel by its channel id, which the event summary carries", () => {
+    expect(placeSearchTerm(place("slack:T1/C900", "#incidents", "slack"))).toBe("C900");
+  });
+
+  it("searches a Slack thread by its channel id", () => {
+    expect(placeSearchTerm(place("slack:T1/C900/1700000000.1", "Thread", "slack"))).toBe("C900");
+  });
+
+  it("searches the Slack workspace, a repository, and a Linear team by label", () => {
+    expect(placeSearchTerm(place("slack:T1", "Slack", "slack"))).toBe("Slack");
+    expect(placeSearchTerm(place("github:acme/api", "acme/api", "github"))).toBe("acme/api");
+    expect(placeSearchTerm(place("linear:team/ENG", "ENG", "linear"))).toBe("ENG");
   });
 });
