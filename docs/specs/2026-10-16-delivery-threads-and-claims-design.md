@@ -299,10 +299,12 @@ incident routing spec's Parts A and B.
      waiter already suppressed its digest, so a dead-letter would lose the
      event. Only an `existing` pin dead-letters (`pin_unavailable`). A
      fallback does not end the claimed waiter.
-   - A stamped delivery that the dispatcher skips after ingest (a team
-     rule now covers it, or the rule was disabled) gives each waiter in
-     `matchedWaiterId` and `suppressedWaiterIds` its digest back, with
-     reason `claim_recovered`. The recovery runs before the skipped write.
+   - A stamped delivery that ends without reaching its thread gives each
+     waiter in `matchedWaiterId` and `suppressedWaiterIds` its digest back,
+     with reason `claim_recovered`. The terminal paths are: a skip decided
+     after ingest (a team rule now covers it, or the rule was disabled), a
+     deleted rule, a sender gate denial at dispatch, and the last failed
+     attempt. The recovery runs before the row's final write.
    - Both are named repairs for the window between ingest and dispatch.
 8. Slack sends a mention as two events, `slack.message` and
    `slack.app_mention`, in either order. Each ingest predicts the other
@@ -548,6 +550,10 @@ event wakeups spec Part A.
 - **A fallback after an admitted attempt misrecords.** A retry that flips to
   fallback after an earlier attempt was admitted records `claim_fallback`,
   though the event landed in the admitted thread. Only the record is wrong.
+- **Valet's own pull request comment recovers nothing.** The dispatcher
+  skips a comment that Valet wrote itself (`isOwnPullRequestWrite`) and does
+  not give the `t-pr` waiter its suppressed digest. This is on purpose: the
+  waiter's `self` filter drops the thread's own write anyway.
 - **The C7 title.** A `slack.message` event does not name its channel, so
   the Slack `naturalSubject` label falls back to the channel id (Part D).
   In the Scenario E universe, C7's thread title is `C900`.

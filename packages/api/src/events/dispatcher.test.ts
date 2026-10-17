@@ -1022,6 +1022,62 @@ describe("EventDispatcher", () => {
       expect(endMatchedWaiter).not.toHaveBeenCalled();
     });
 
+    describe("terminal paths recover suppressed digests (INV-D6)", () => {
+      const stamp = { ...redirect, matchedWaiterId: "w-inc" };
+
+      function dispatcherWith(recover: EventDispatcherDeps["recoverClaimedDigest"], deliver: AssistantDeliverFn = async () => LANDED) {
+        return new EventDispatcher({
+          db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: vi.fn(deliver),
+          recordDestination, recoverClaimedDigest: recover,
+          resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }),
+        });
+      }
+
+      function mentionDelivery() {
+        return seedDelivery({
+          target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+          eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
+          payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
+          destination: stamp,
+        });
+      }
+
+      it("a deleted rule", async () => {
+        const { deliveryId, subscriptionId } = await mentionDelivery();
+        await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
+        const recover = vi.fn(async () => true);
+        await dispatcherWith(recover).pollOnce();
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "event or subscription vanished" });
+        expect(recover).toHaveBeenCalledOnce();
+        expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-inc" })]);
+      });
+
+      it("a sender gate denial at dispatch", async () => {
+        // No identity link for U9: the team mention gate refuses the sender.
+        await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });
+        const { deliveryId } = await mentionDelivery();
+        const recover = vi.fn(async () => true);
+        await dispatcherWith(recover).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("dead");
+        expect(recover).toHaveBeenCalledOnce();
+      });
+
+      it("the last failed attempt, and not an earlier one", async () => {
+        await seedMentionMember("team-x");
+        await seedSession("sess-inc", "team", "team-x", "thr-inc");
+        const { deliveryId } = await mentionDelivery();
+        const recover = vi.fn(async () => true);
+        const failing = async (): Promise<never> => { throw new Error("transient"); };
+        await dispatcherWith(recover, failing).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("failed");
+        expect(recover).not.toHaveBeenCalled();
+        await tdb.appDb.update(eventDeliveries).set({ attempts: 4, nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+        await dispatcherWith(recover, failing).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("dead");
+        expect(recover).toHaveBeenCalledOnce();
+      });
+    });
+
     it("a skip for a reason decided after ingest recovers nothing without a matched waiter", async () => {
       const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, destination: redirect });
       await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
