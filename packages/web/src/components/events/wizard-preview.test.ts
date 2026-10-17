@@ -56,6 +56,18 @@ describe("wizardDraft", () => {
     expect(draft.sub.target).toEqual({ kind: "workflow", workflowId: "" });
   });
 
+  it("a Slack thread follow posts slack.message on the link's channel and thread, like the create", () => {
+    const link = "https://acme.slack.com/archives/C123ABC/p1750000000123456";
+    const draft = wizardDraft(state({ outcome: "thread", threadLink: link, thread: { mode: "own" } }));
+    if (draft.kind !== "presence") throw new Error("expected a line of presence");
+    expect(draft.sub.eventKeys).toEqual(["slack.message"]);
+    expect(draft.sub.filters).toEqual([
+      { field: "channel", op: "eq", value: "C123ABC" },
+      { field: "thread_ts", op: "eq", value: "1750000000.123456" },
+    ]);
+    expect(draft.sub.target).toEqual({ kind: "assistant", assistant: "user", follow: false, thread: { mode: "own" } });
+  });
+
   it("a routine takes the typed name, else this routine", () => {
     const named = wizardDraft(state({ outcome: "schedule", name: " Digest ", cron: "0 9 * * 1-5", thread: { mode: "own" } }));
     expect(named).toEqual({
@@ -111,10 +123,14 @@ describe("wizardSentence", () => {
     ).toBe("When a check completes on acme/api, work in one thread per pull request, as CI bot.");
   });
 
-  it("follows a Slack thread with a fixed sentence", () => {
-    expect(sentence({ outcome: "thread" })).toBe("When someone replies in the Slack thread, reply in that thread.");
+  it("follows a Slack thread with the stored line's sentence", () => {
+    expect(sentence({ outcome: "thread", thread: { mode: "own" } })).toBe(
+      "When someone replies in the Slack thread, work in its own thread.",
+    );
     const link = "https://acme.slack.com/archives/C123ABC/p1750000000123456";
-    expect(sentence({ outcome: "thread", threadLink: link })).toBe(`When someone replies in ${link}, reply in that thread.`);
+    expect(sentence({ outcome: "thread", threadLink: link, thread: { mode: "own" } })).toBe(
+      "When someone replies in the Slack thread in C123ABC, work in its own thread.",
+    );
   });
 
   it("reads a routine, and an empty schedule as On a schedule", () => {

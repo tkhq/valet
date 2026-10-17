@@ -286,10 +286,25 @@ function appearancePart(appearance: Appearance | undefined): string {
 }
 
 /**
+ * True when a line follows one Slack thread: every key is a Slack message
+ * and a `thread_ts` filter names the thread (the wizard's `Follow a Slack
+ * thread` outcome).
+ */
+export function followsSlackThread(sub: Pick<EventSubscriptionWire, "eventKeys" | "filters">): boolean {
+  return (
+    sub.eventKeys.length > 0 &&
+    sub.eventKeys.every((k) => k === "slack.message" || k.startsWith("slack.message.")) &&
+    sub.filters.some((f) => f.field === "thread_ts")
+  );
+}
+
+/**
  * A line of presence as one sentence:
  * `When <events>[ from <sender>] <in|on> <place>, <do>[, as <appearance>].`
  * `in` for Slack and Linear, `on` for GitHub. Without a place:
  * `When <events>[ from <sender>], <do>[, as <appearance>].`
+ * A line that follows one Slack thread reads
+ * `When someone replies in the Slack thread[ in <channel>], <do>[, as <appearance>].`
  */
 export function presenceSentence(
   sub: EventSubscriptionWire,
@@ -297,6 +312,12 @@ export function presenceSentence(
   workflows: WorkflowNames,
   threads: ThreadTitles,
 ): string {
+  if (followsSlackThread(sub)) {
+    const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
+    const values = channel === undefined ? [] : filterValues(channel);
+    const where = values.length > 0 ? ` in ${joinOr(values)}` : "";
+    return `When someone replies in the Slack thread${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
+  }
   const service = serviceOf(sub.eventKeys);
   const place = presencePlace(service, sub.filters);
   const where = place === null ? "" : ` ${service === "github" ? "on" : "in"} ${place}`;

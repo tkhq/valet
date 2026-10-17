@@ -1210,6 +1210,21 @@ describe("AutomationWizard", () => {
       expectStoredSentence();
     });
 
+    it("for Follow a Slack thread", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      pickOutcome(/Follow a Slack thread/);
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Slack thread link"), {
+        target: { value: "https://acme.slack.com/archives/C123ABC/p1750000000123456" },
+      });
+      clickNext();
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Follow rollout thread" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      expect(preview()).toBe("When someone replies in the Slack thread in C123ABC, work in its own thread.");
+      expectStoredSentence();
+    });
+
     it("for Run a workflow", () => {
       workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
       render(<AutomationWizard open onOpenChange={() => {}} />);

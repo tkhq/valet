@@ -6,13 +6,14 @@ import { placeFilter, type PreselectedPlace } from "~/components/presence/place-
 import { runsInLabel } from "~/components/presence/sentences";
 import { AutomationReview } from "./automation-review";
 import { wizardDraft, wizardSentence, type WhenService } from "./wizard-preview";
-import { parseSlackThreadLink } from "./slack-thread-preset";
+import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-preset";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * AutomationWizard — one flow for the creation surfaces that used to be
  * separate: an event subscription, a workflow event trigger, and a schedule.
  * UI copy names the result by its flow (spec 2026-10-16, Terminology): an
- * event rule is a **listener**, a schedule is a **routine**.
+ * event rule is a line of presence, read as its sentence, and a schedule
+ * is a **routine**.
  *
  * Step 1 asks **When** (a Slack mention, a GitHub or Linear event, or a
  * schedule) and **Do** (reply, follow a Slack thread, work on it, or run a
@@ -447,10 +448,7 @@ export function AutomationWizard({
     setCollisions(null);
     if (step === 2 && outcome === "thread" && threadPreset) {
       setKeys(new Set(["slack.message"]));
-      setFilterRows([
-        { id: "thread-channel", field: "channel", op: "eq", value: threadPreset.channel },
-        { id: "thread-timestamp", field: "thread_ts", op: "eq", value: threadPreset.threadTs },
-      ]);
+      setFilterRows(slackThreadFilterRows(threadPreset));
     }
     setStep((s) => (Math.min(s + 1, plan.count) as Step));
   }
@@ -521,7 +519,7 @@ export function AutomationWizard({
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
-          // The reply step collects the same optional templates the Then step
+          // The reply step collects the same optional templates the Do step
           // collects for the other assistant outcomes. Empty fields are left
           // off, so the rule posts the target it always did.
           target: { ...mentionTarget, ...appearanceFields, follow, ...threadField, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.assistant === "user" ? deliveryPreferences : {}) },
@@ -571,7 +569,7 @@ export function AutomationWizard({
     }
 
     // Schedule branch. The schedule store takes a workflow OR an assistant
-    // prompt target — the same two kinds the Then step offers.
+    // prompt target, the same two kinds the Do step offers.
     const base = { name: name.trim(), cron: cron.trim(), timezone: timezone.trim() };
     if (target.kind === "workflow") {
       createSchedule.mutate(

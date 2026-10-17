@@ -116,6 +116,31 @@ describe("presenceSentence <do>", () => {
     );
   });
 
+  it("a Slack thread follow: replies in the Slack thread in <channel>", () => {
+    const thread = { field: "thread_ts", op: "eq" as const, value: "1750000000.123456" };
+    const raw = sub({
+      eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "eq", value: "C0123" }, thread],
+      target: { kind: "assistant", follow: false, thread: { mode: "own" } },
+    });
+    expect(presenceSentence(raw, catalog, workflows, threads)).toBe(
+      "When someone replies in the Slack thread in C0123, work in its own thread.",
+    );
+    const labeled = sub({
+      eventKeys: ["slack.message"],
+      filters: [incidents, thread],
+      target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t-ci" }, appearance: { displayName: "Ops" } },
+    });
+    expect(presenceSentence(labeled, catalog, workflows, threads)).toBe(
+      "When someone replies in the Slack thread in #incidents, work in the Platform CI thread, as Ops.",
+    );
+    // Without a thread_ts filter, a message rule keeps the event grammar.
+    const plain = sub({ eventKeys: ["slack.message"], filters: [incidents], target: { kind: "assistant", thread: { mode: "own" } } });
+    expect(presenceSentence(plain, catalog, workflows, threads)).toBe(
+      "When someone posts a message in #incidents, work in its own thread.",
+    );
+  });
+
   it("assistant, existing: work in the <title> thread", () => {
     const s = sub({
       eventKeys: ["github.check_run.completed"],

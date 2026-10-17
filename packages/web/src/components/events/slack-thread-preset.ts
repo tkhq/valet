@@ -10,3 +10,19 @@ export function parseSlackThreadLink(value: string): { channel: string; threadTs
     return { channel: match[1], threadTs: parent ?? `${match[2].slice(0, -6)}.${match[2].slice(-6)}` };
   } catch { return null; }
 }
+
+/**
+ * The filter rows that follow one Slack thread: its channel and its parent
+ * timestamp. The wizard's create and its preview both read these rows.
+ */
+export function slackThreadFilterRows(preset: { channel: string; threadTs: string }): Array<{
+  id: string;
+  field: string;
+  op: "eq";
+  value: string;
+}> {
+  return [
+    { id: "thread-channel", field: "channel", op: "eq", value: preset.channel },
+    { id: "thread-timestamp", field: "thread_ts", op: "eq", value: preset.threadTs },
+  ];
+}

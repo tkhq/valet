@@ -497,6 +497,13 @@ Revision 2 deviations:
   section of the thread context card names an event wakeup `Event waiter`.
   The card is outside Presence, so the copy lint does not read it. A
   later copy pass replaces the word with `active`.
+- **A thread follow has its own sentence (Part C step 2).** The `Follow a
+  Slack thread` outcome stores a `slack.message` line with `channel` and
+  `thread_ts` filters. A line whose keys are all Slack messages and that
+  has a `thread_ts` filter reads `When someone replies in the Slack thread
+  in <channel>, <do>.` The channel is its label, or its id when the line
+  has no label. The wizard preview reads the draft through the same
+  renderer, so the preview equals the stored sentence.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, the routine
