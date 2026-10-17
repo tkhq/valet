@@ -5,7 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, credentials, credentialShares, teamMembers, teams, workflowAccountGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { applyAppMigrations, missingSchemaRepairs } from "../lib/drizzle.js";
-import { canBorrowCredential } from "./credential-borrow.js";
+import { canBorrowCredential, shareGeneration, writeBorrowGrant } from "./credential-borrow.js";
 import { revokeShare, shareCredential } from "./credential-shares.js";
 import { revokeWorkflowAccountConsent, saveWorkflowAccountConsent } from "./workflow-account-consent.js";
 
@@ -34,7 +34,7 @@ async function fixture() {
       { ownerType: "team", ownerId: "account-team", actorUserId: id === "account-human-run" ? "test-member" : "team:account-team" });
   }
   const consent = { orgId: "local-org", workflowId: "account-workflow", teamId: "account-team", userId: "local-user", services: ["demo"] };
-  const scope = { orgId: "local-org", teamId: "account-team", service: "demo", memberId: "local-user", actorId: "team:account-team", sessionId: "wf:account-run-one:step" };
+  const scope = { orgId: "local-org", teamId: "account-team", service: "demo", memberId: "local-user", actorId: "team:account-team", sessionId: "wf:account-run-one" };
   return { db, workflowStore, consent, scope };
 }
 
@@ -43,10 +43,10 @@ it("reuses the saving person's account consent for later scheduled and human wor
   expect(await canBorrowCredential(db, scope)).toBe(false);
   await saveWorkflowAccountConsent(db, consent);
   await saveWorkflowAccountConsent(db, consent);
-  for (const sessionId of ["wf:account-run-one:step", "wf:account-run-one", "wf:account-run-two:step:1"]) {
+  for (const sessionId of ["wf:account-run-one", "wf:account-run-two"]) {
     expect(await canBorrowCredential(db, { ...scope, sessionId })).toBe(true);
   }
-  expect(await canBorrowCredential(db, { ...scope, actorId: "test-member", sessionId: "wf:account-human-run:step" })).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, actorId: "test-member", sessionId: "wf:account-human-run" })).toBe(true);
   expect(await db.select().from(workflowAccountGrants)).toHaveLength(1);
   expect((await db.select().from(credentialShares)).every(share => share.borrowConsentAt === null)).toBe(true);
 });
@@ -58,7 +58,7 @@ it("does not authorize other accounts, services, organizations, teams, workflows
   await workflowStore.createRun("other-run", { workflowId: "different-workflow", definitionVersionId: "v1" }, definition, "v1", { ownerType: "team", ownerId: "account-team", actorUserId: scope.actorId });
   for (const change of [
     { memberId: "test-member" }, { service: "slack" }, { orgId: "different-org" },
-    { teamId: "other-team", actorId: "team:other-team" }, { sessionId: "wf:other-run:step" },
+    { teamId: "other-team", actorId: "team:other-team" }, { sessionId: "wf:other-run" },
     { sessionId: "ordinary-chat", threadId: "thread" }, { sessionId: "wf:missing:step" }, { actorId: "outsider" },
     { actorId: "test-member" },
   ]) expect(await canBorrowCredential(db, { ...scope, ...change })).toBe(false);
@@ -88,7 +88,7 @@ it("requires a new workflow save after a share is revoked and shared again", asy
 it.each(["lender", "actor", "credential"])("rejects workflow account consent after removing the %s", async removed => {
   const { db, consent, scope } = await fixture();
   await saveWorkflowAccountConsent(db, consent);
-  const human = { ...scope, actorId: "test-member", sessionId: "wf:account-human-run:step" };
+  const human = { ...scope, actorId: "test-member", sessionId: "wf:account-human-run" };
   expect(await canBorrowCredential(db, human)).toBe(true);
   if (removed === "credential") await db.delete(credentials).where(and(eq(credentials.ownerType, "user"), eq(credentials.ownerId, scope.memberId), eq(credentials.service, scope.service)));
   else await db.delete(teamMembers).where(and(eq(teamMembers.teamId, scope.teamId), eq(teamMembers.userId, removed === "lender" ? scope.memberId : "test-member")));
@@ -108,7 +108,7 @@ it("allows layout edits but rejects old run snapshots after a new save authorize
   expect(await canBorrowCredential(db, scope)).toBe(false);
   await workflowStore.createRun("new-definition-run", { workflowId: consent.workflowId, definitionVersionId: "v2" }, changed, "v2",
     { ownerType: "team", ownerId: scope.teamId, actorUserId: scope.actorId });
-  expect(await canBorrowCredential(db, { ...scope, sessionId: "wf:new-definition-run:step" })).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, sessionId: "wf:new-definition-run" })).toBe(true);
 });
 
 it("rejects workflow account consent after scoped grant revocation", async () => {
@@ -165,4 +165,54 @@ it("repairs already migrated account-consent storage without deleting saved data
   } finally {
     await database.close();
   }
+});
+
+it("excludes GitHub accounts from saved workflow consent", async () => {
+  const { db, consent } = await fixture();
+  await shareCredential(db, { teamId: consent.teamId, service: "github", userId: consent.userId, createdAt: 1 });
+  await db.insert(credentials).values({ ownerType: "user", ownerId: consent.userId, service: "github", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  await saveWorkflowAccountConsent(db, { ...consent, services: ["github", "demo"] });
+  expect((await db.select().from(workflowAccountGrants)).map(grant => grant.service)).toEqual(["demo"]);
+});
+
+it("refuses GitHub borrowing even when a workflow account grant was already persisted", async () => {
+  const { db, consent, scope } = await fixture();
+  await shareCredential(db, { teamId: scope.teamId, service: "github", userId: scope.memberId, createdAt: 1 });
+  await db.insert(credentials).values({ ownerType: "user", ownerId: scope.memberId, service: "github", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  const generation = await shareGeneration(db, scope.teamId, "github", scope.memberId);
+  if (!generation) throw new Error("Expected a current GitHub share.");
+  await db.insert(workflowAccountGrants).values({ orgId: consent.orgId, workflowId: consent.workflowId,
+    teamId: consent.teamId, service: "github", memberId: scope.memberId, shareGeneration: generation, createdAt: 1 });
+  expect(await canBorrowCredential(db, { ...scope, service: "github" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, service: "github", sessionId: "wf:account-run-one:agentStep" })).toBe(false);
+});
+
+it.each(["run", "team"])("requires explicit %s account consent in workflow agent and script sessions", async consentScope => {
+  const { db, consent, scope } = await fixture();
+  const mixed = { ...definition, nodes: [...definition.nodes,
+    { id: "agentStep", type: "session", prompt: "Use demo" },
+    { id: "scriptStep", type: "session", prompt: "Run a script in the sandbox" },
+  ] };
+  await db.update(workflowDefinitions).set({ definition: mixed }).where(eq(workflowDefinitions.id, consent.workflowId));
+  await db.update(workflowRuns).set({ definition: mixed }).where(eq(workflowRuns.workflowId, consent.workflowId));
+  await saveWorkflowAccountConsent(db, consent);
+  expect(await canBorrowCredential(db, scope)).toBe(true);
+  const sessions = ["wf:account-run-one:agentStep", "wf:account-run-one:agentStep:1", "wf:account-run-one:scriptStep"];
+  for (const sessionId of sessions) expect(await canBorrowCredential(db, { ...scope, sessionId })).toBe(false);
+  const generation = await shareGeneration(db, scope.teamId, scope.service, scope.memberId);
+  if (!generation) throw new Error("Expected a current demo share.");
+  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: generation, consentScope: consentScope === "team" ? "team" : undefined });
+  for (const sessionId of sessions) expect(await canBorrowCredential(db, { ...scope, sessionId })).toBe(true);
+});
+
+it("revokes only the selected member's saved workflow account consent", async () => {
+  const { db, consent, scope } = await fixture();
+  await saveWorkflowAccountConsent(db, consent);
+  await saveWorkflowAccountConsent(db, { ...consent, userId: "test-member" });
+  expect(await canBorrowCredential(db, scope)).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, memberId: "test-member" })).toBe(true);
+  await revokeWorkflowAccountConsent(db, consent.orgId, consent.workflowId, consent.userId);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, memberId: "test-member" })).toBe(true);
+  expect((await db.select().from(workflowAccountGrants)).map(grant => grant.memberId)).toEqual(["test-member"]);
 });

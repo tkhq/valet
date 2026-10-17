@@ -102,7 +102,7 @@ export async function canBorrowCredential(
   db: AppQueryable,
   scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
 ): Promise<boolean> {
-  if (!scope.actorId) return false;
+  if (!scope.actorId || scope.service === "github") return false;
   const runId = workflowRunOf(scope.sessionId);
   if (scope.sessionId.startsWith("wf:") && !runId) return false;
   const unattended = scope.actorId === `team:${scope.teamId}`;
@@ -110,7 +110,8 @@ export async function canBorrowCredential(
   const memberAuthorization = sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
     WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`;
   const runtimeAuthorization = unattended ? (runId ? unattendedWorkflowOwner(scope, runId) : unattendedRuntimeOwner(scope)) : undefined;
-  if (runId) {
+  // Only the action invoker uses this run scope. Agent and script sessions need explicit consent.
+  if (runId && scope.sessionId === `wf:${runId}`) {
     const [workflowConsent] = await db.select({ definition: workflowDefinitions.definition, runDefinition: workflowRuns.definition })
       .from(workflowAccountGrants)
       .innerJoin(workflowDefinitions, and(

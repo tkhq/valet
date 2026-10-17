@@ -70,7 +70,10 @@ it("does not grant permissions to agent saves and retires consent after an agent
   const created = await createWorkflowDefinition(deps, agent, { name: "Agent draft", definition, teamId: team.id });
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
-  await updateWorkflowDefinition(deps, owner, created.id, { definition });
+  const { allowWorkflowPermissions, revokeOwnWorkflowAccounts } = await import("../workflows/permissions.js");
+  expect((await allowWorkflowPermissions(deps, owner, created.id, undefined))?.ok).toBe(true);
+  expect(await revokeOwnWorkflowAccounts(deps, agent, created.id)).toBe(false);
+  expect(await revokeOwnWorkflowAccounts(deps, { ...owner, humanAccountConsent: false }, created.id)).toBe(false);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(1);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(1);
   await updateWorkflowDefinition(deps, agent, created.id, { definition: { ...definition, nodes: definition.nodes.map(n => n.id === "read" ? { ...n, params: { value: "changed" } } : n) } });
@@ -119,4 +122,42 @@ it("saves account consent for dynamic tools inside foreach steps", async () => {
     { ownerType: "team", ownerId: team.id, actorUserId: `team:${team.id}` });
   expect(await canBorrowCredential(p.db, { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`,
     service: "fixture_account", memberId: "local-user", sessionId: "wf:dynamic-run" })).toBe(true);
+});
+
+it("does not restore revoked permissions on layout-only or unchanged human saves", async () => {
+  const { p, team, deps, owner, baseUrl } = await setup();
+  const saved = await createWorkflowDefinition(deps, owner, { name: "Review steps", definition, teamId: team.id });
+  const changed = { ...definition, nodes: definition.nodes.map(node => node.id === "read" ? { ...node, params: { value: "agent edit" } } : node) };
+  await updateWorkflowDefinition(deps, { ...owner, agentEditor: true }, saved.id, { definition: changed });
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  await updateWorkflowDefinition(deps, owner, saved.id, { definition: { ...changed, ui: { nodes: { read: { position: { x: 10, y: 20 } } } } } });
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  await updateWorkflowDefinition(deps, owner, saved.id, { definition: changed });
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  const reviewed = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST" });
+  expect(reviewed.status).toBe(200);
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(1);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(1);
+});
+
+it("lets a member revoke only their own workflow account consent", async () => {
+  const { p, team, deps, owner, baseUrl } = await setup();
+  await addMember(p.db, { teamId: team.id, userId: "test-member", role: "member" });
+  await p.engineCredentials.save({ type: "user", id: "test-member" }, "fixture_account", { type: "api_key", apiKey: "test-fixture" });
+  await shareCredential(p.db, { teamId: team.id, service: "fixture_account", userId: "test-member", createdAt: 2 });
+  const saved = await createWorkflowDefinition(deps, owner, { name: "Revocable accounts", definition, teamId: team.id });
+  const headers = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+  expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers, body: JSON.stringify({ actionIds: [] }) })).status).toBe(200);
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(2);
+  expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/accounts`, { method: "DELETE", headers })).status).toBe(200);
+  expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ memberId: "local-user" }]);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(1);
+  // A layout save cannot re-create consent the member explicitly withdrew.
+  await updateWorkflowDefinition(deps, { ...owner, userId: "test-member", principal: { type: "user", id: "test-member" } }, saved.id,
+    { definition: { ...definition, ui: { viewport: { x: 0, y: 0, zoom: 1 } } } });
+  expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ memberId: "local-user" }]);
+  expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/accounts`, { method: "DELETE", headers: { "x-valet-test-user-id": "test-admin" } })).status).toBe(404);
 });

@@ -141,16 +141,18 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
 ## Human save authorization (2026-10-16)
 
 A browser save authorizes known direct tool actions for this workflow when the
-person owns it or administers its team. Explicit organization, team, and personal
+person owns it or administers its team. Layout-only and unchanged saves do not restore grants. Explicit organization, team, and personal
 restrictions remain authoritative. Agent, CLI, MCP, and API-key saves do not grant
 new permissions. Agent-created workflows need one human permission review.
 
 For team workflows, a browser save also authorizes the saving person's accounts
-already shared with that team for the declared tool services. This includes
+already shared with that team for the declared direct tool services, excluding GitHub. This includes
 services with dynamic tools and foreach tool bodies. `workflow_account_grants`
 binds consent to the organization, workflow, team, member, service, and current
 share generation. It does not grant team-wide account consent. Another member
 must approve their own account. Human review nodes remain explicit decisions.
+
+Saved workflow consent applies only to direct tool invocation contexts. Workflow agents and sandbox scripts keep their existing separate account approval paths.
 
 Borrowing checks the live run owner, actor, team membership, source account,
 share generation, and saved definition. A run with different steps cannot use
@@ -161,7 +163,7 @@ grants, as before. Layout-only edits preserve grants.
 Definition saves, snapshots, revocation, and new grants commit together under
 the definition lock. The Review permissions action also authorizes the person's
 shared accounts, including when no action needs a policy grant. Reset saved
-permissions removes both kinds of grant. Existing workflows are not silently
+permissions removes both kinds of grant. A member can also stop use of their own shared accounts without resetting action permissions or another member's consent. Existing workflows are not silently
 backfilled, and parked approval gates are not answered during deployment.
 
 The application schema repair adds the grant table and lookup index without

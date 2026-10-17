@@ -3,7 +3,7 @@
  */
 import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { saveWorkflowAccountConsent } from "../services/workflow-account-consent.js";
+import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { sameWorkflowSteps } from "./definition-version.js";
 import { credentials, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
@@ -76,7 +76,7 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
 /** Credential services referenced by direct and foreach tool steps, including dynamic tools. */
 export function workflowCredentialServices(deps: WorkflowServiceDeps, definition: unknown): string[] {
   return [...new Set(toolNodeRefs(definition).map((ref) =>
-    deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))];
+    deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))].filter(service => service !== "github");
 }
 
 /** Predicts the policy resolution of every tool node for the stored owner.
@@ -296,6 +296,18 @@ export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner
     const summary = await getWorkflowDefinition(scopedDeps, owner, workflowId);
     if (!summary || !(await canGrantWorkflowPermissions(scopedDeps, owner, summary))) return false;
     await revokeWorkflowGrants(tx, owner.orgId, workflowId);
+    return true;
+  });
+}
+
+/** A member can withdraw their own account consent without resetting teammates or action permissions. */
+export async function revokeOwnWorkflowAccounts(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+  if (!owner.humanAccountConsent || owner.agentEditor || owner.principal?.type !== "user") return false;
+  return deps.db.transaction(async tx => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const summary = await getWorkflowDefinition({ ...deps, db: tx }, owner, workflowId);
+    if (summary?.ownerType !== "team") return false;
+    await revokeWorkflowAccountConsent(tx, owner.orgId, workflowId, owner.userId);
     return true;
   });
 }
