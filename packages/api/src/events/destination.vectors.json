@@ -27,7 +27,7 @@
       "binding": null,
       "claim": { "sessionId": "sess-tri", "threadId": "thread-tri", "waiterId": "wk-3" }
     },
-    "expected": { "kind": "skip", "reason": "claim:thread-tri" }
+    "expected": { "kind": "skip", "reason": "claimed by thread thread-tri" }
   },
   {
     "name": "a claim on a conversational event redirects the delivery to the claiming thread",
@@ -195,6 +195,6 @@
       "binding": null,
       "claim": { "sessionId": "sess-sched-claim", "threadId": "thread-sched-claim", "waiterId": "wk-5" }
     },
-    "expected": { "kind": "skip", "reason": "claim:thread-sched-claim" }
+    "expected": { "kind": "skip", "reason": "claimed by thread thread-sched-claim" }
   }
 ]

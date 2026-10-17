@@ -26,7 +26,7 @@ describe("delivery destination metrics", () => {
 
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
-    recordDeliveryDestination(destinationMetricReason({ kind: "skip", reason: "claim:thr-1" }));
+    recordDeliveryDestination(destinationMetricReason({ kind: "skip", reason: "claimed by thread thr-1" }));
     recordDeliveryDestination("pin_unavailable");
     await provider.forceFlush();
 

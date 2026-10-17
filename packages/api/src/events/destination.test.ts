@@ -24,7 +24,7 @@ function isDestinationShaped(value: unknown): value is Destination {
     );
   }
   if (row.kind === "skip") {
-    return typeof row.reason === "string" && row.reason.startsWith("claim:");
+    return typeof row.reason === "string" && row.reason.startsWith("claimed by thread ");
   }
   return false;
 }
