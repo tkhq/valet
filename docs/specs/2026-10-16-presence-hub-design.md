@@ -96,7 +96,7 @@ Pass criterion: all steps, in one run, from a clean start.
    | New | Replaces |
    |---|---|
    | `/presence` | `/events` (Channels), `/workflows` Triggers |
-   | `/presence/places/$key` | `/channel?key=` |
+   | `/presence/places/$subject` | `/channel?key=` |
    | `/presence/listeners/$id` | the Subscriptions tab's inline edit and review |
    | `/presence/routines` | `/workflows` Triggers (schedules) |
    | `/presence/activity` | `/events?tab=log` and the legacy `tab` values |
@@ -195,7 +195,9 @@ Pass criterion: all steps, in one run, from a clean start.
    Log, with one change: each row leads with a sentence, `<event in words>
    in <place> → <outcome>`, where the outcome is `replied in <thread>`,
    `delivered to <thread>`, `claimed by <thread>`, `started <workflow> run`,
-   `skipped: <reason>`, or `no listener`.
+   `skipped: <reason>`, or `no listener`. A delivery that is pending,
+   failed, or dead reads as its delivery status line, such as `retries in
+   8 minutes, after 2 attempts`.
 2. The receipt stages stay available under a disclosure. The event page
    keeps its payload and redeliver control.
 
@@ -296,3 +298,81 @@ Pass criterion: all steps, in one run, from a clean start.
   target is this workflow, because a sentence needs each rule's filters and
   target. Routines come from the workflow's trigger list. A row opens the
   listener or routine page; the panel does not edit a row in place.
+- **Activity rows withhold a hidden claiming thread everywhere.** A
+  skipped row's `detail` is one of its deliveries' skip texts. When that
+  text names a claiming thread the viewer may not open, the row reads
+  `Skipped, claimed by another thread.`, as the delivery does.
+- **Some `presence` names stay (Part H step 1).** The workflow
+  `definition.presence`, the run parameter `presence`, and the queue item
+  `metadata.presence` keep their names. They are outside the subscription
+  target and the schedule that Part H renames. Each is typed `Appearance`,
+  and the UI labels each `Appears as`.
+- **Agent tool ids keep `presence` (Part H step 1).** The tool
+  `events.set_subscription_presence` and the `presence` input of
+  `events.propose_subscription` keep their names, because stored tool
+  policies name the tool ids. Both tools store `appearance`.
+- **A second refusal (Part H step 5).** A write that sends both `assistant`
+  and `orchestrator` is refused with `Send assistant, not orchestrator.`, in
+  the same way as the `appearance` refusal of Part H step 2.
+- **Validator errors may say `appearance`.** An API validator error names
+  the wire field, so it may say `appearance`. UI copy says `Appears as`. The
+  copy lint for INV-H2 covers UI copy only.
+- **Old routes redirect at the leaf (Part A step 4).** Each replaced leaf
+  route has its own `beforeLoad` redirect. A redirect on a parent layout
+  route would run for every child URL and send each child to the parent's
+  target. The Runs tab is the route file `presence.runs.index.tsx` under a
+  `presence.runs.tsx` layout, so `/presence/runs/$runId` nests beside it.
+- **The `/workflows?tab=runs` row has no live source.** No link in the app
+  or the api builds that URL today. The row stays so that an old bookmark
+  or a later link lands on the Runs tab.
+- **The places API accepts a channel-only Slack key (Part B step 3).** An
+  old `/channel?key=slack:<channel>` link and a thread's channel chip name a
+  channel without its Slack workspace. `GET /api/presence/places/:subject`
+  resolves `slack:<channel>` to `slack:<team>/<channel>` with the org's
+  Slack workspace. If the org has no Slack workspace, the route answers 404
+  with `That Slack channel has no workspace in its link. Pick the channel
+  from Places.` The web adds the workspace from the places list before it
+  links, so the API resolution is a fallback.
+- **The All listeners view is in the URL (Part B step 4).** The toggle
+  writes `?view=all`, so Back and a shared link keep the view.
+- **The place page header (Part B step 3).** The line under the name is the
+  service, plus the reach label (`Across acme/api`, `Everywhere in Slack`)
+  when listeners list there. Until the place loads, the title reads
+  `Loading…`, and after a failed read it reads `Not available`. The title
+  never shows the place key.
+- **The place page thread headings (Part B step 3).** The Threads section
+  has three lists: `Threads for <name>` (the subject threads), `Following`,
+  and `Active now`.
+- **A service-wide row hides when it is empty (Part B step 2).** The Slack
+  workspace row, `github:*`, and `linear:*` show only when a listener lists
+  there or a thread is active there. Otherwise their children are the
+  group's top rows, because the group heading names the service.
+- **Event names come from a short-name table (Part C step 1).** The catalog
+  carries a description for each event key, not a short label. The web keeps
+  a table of short names (`mentions`, `pull request reviews`, `completed
+  checks`) for common keys. Other keys read as the picker's description. A
+  `label` field on catalog entries would replace the table.
+- **R4 reads `completed checks` (acceptance H3).** The catalog has no filter
+  on a check's conclusion, so the sentence cannot say `failed checks`. R4
+  reads `Listens on acme/api for completed checks`.
+- **`One thread per team` does not appear (Part C steps 1 and 2).** The web
+  derives the subject kind from the event keys. A Linear key gives `issue`,
+  never `team`, so the option and the `<does>` text for a team never show.
+- **Conversational keys are a key-level approximation (Part C step 1).** A
+  listener on `slack.app_mention`, `slack.message`, or a GitHub comment key
+  reads as conversational, so a `new` policy reads `replies in a new
+  thread`. The same rule picks `replied in` over `delivered to` in Activity.
+  The rule reads the key only: a `slack.message` that no one addressed to
+  Valet still reads `replied in`.
+- **Cron in words covers common forms (Part D step 1).** `cronInWords`
+  reads every N minutes, hourly, daily, weekdays, one weekday, and a day of
+  the month. Any other expression reads `On the schedule <expr>`. The words
+  ignore the timezone. The Routines tab adds the timezone in parentheses
+  when it is not UTC.
+- **The routine page is a search param (Part D step 2).** One routine opens
+  at `/presence/routines?routine=<id>` inside the Routines tab, not at its
+  own route.
+- **A preselected place's filter follows the events (Part B step 3).** The
+  wizard pins the place's filter. An event without the filter's field drops
+  it, and a later event with the field brings it back. A filter the reader
+  removed stays removed.
