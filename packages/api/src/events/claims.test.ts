@@ -144,6 +144,29 @@ describe("resolveClaims: Scenario C", () => {
     expect(d.waiters.get("w-inc")).toBe("suppress");
   });
 
+  it("C3b: a reply the follow router delivers suppresses t-inc's digest, with no rule matched (one owner)", async () => {
+    const f = fakes();
+    f.deps.followRoute = async () => SRE;
+    f.bindings.set("team:sre", { sessionId: "s-inc", threadId: "t-inc", via: "follow" });
+    const reply = slackEvent("slack.message", "1.0", { payload: { channel: "C900", user: "U001", text: "on it", ts: "1.6", thread_ts: "1.0" } });
+    const d = await resolve(f, { event: reply, matched: [], candidates: [tInc(reply)] });
+    expect(d.waiters.get("w-inc")).toBe("suppress");
+    expect(d.deliveries.size).toBe(0);
+    // With rule P, P takes the binding stamp, and the dispatcher skips it (follow_routed).
+    const withP = await resolve(f, { event: reply, matched: [P], candidates: [tInc(reply)] });
+    expect(withP.waiters.get("w-inc")).toBe("suppress");
+    expect(withP.deliveries.get("P")).toMatchObject({ kind: "target", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] });
+  });
+
+  it("C3b: a failing follow route check lets the waiter append (INV-D6)", async () => {
+    const f = fakes();
+    f.deps.followRoute = async () => { throw new Error("db down"); };
+    f.bindings.set("team:sre", { sessionId: "s-inc", threadId: "t-inc", via: "follow" });
+    const reply = slackEvent("slack.message", "1.0", { payload: { channel: "C900", user: "U001", text: "on it", ts: "1.7", thread_ts: "1.0" } });
+    const d = await resolve(f, { event: reply, matched: [], candidates: [tInc(reply)] });
+    expect(d.waiters.get("w-inc") ?? "append").toBe("append");
+  });
+
   it("C4: a mention that the sender gate refuses reaches t-inc as one digest", async () => {
     const { message, mention } = twins();
     // The team gate refused U002, so the mention matched no subscription.

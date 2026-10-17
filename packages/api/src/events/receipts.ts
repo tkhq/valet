@@ -72,13 +72,13 @@ export async function appendReceiptStage(db: AppDb, receiptId: string | undefine
 export function destinationReceiptStage(
   ids: { subscriptionId: string; deliveryId: string },
   outcome: { kind: "key"; key: string; reason: string } | { kind: "target"; sessionId: string; threadId: string; reason: string }
-    | { kind: "skip"; reason: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string },
+    | { kind: "skip"; reason: string; outcome?: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string },
 ): { stage: string; outcome: string; detail: string } {
   const prefix = `Subscription ${ids.subscriptionId}, delivery ${ids.deliveryId}:`;
   switch (outcome.kind) {
     case "key": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} thread key ${outcome.key}.` };
     case "target": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} session ${outcome.sessionId}, thread ${outcome.threadId}.` };
-    case "skip": return { stage: "destination", outcome: "claim_skip", detail: `${prefix} skipped, ${outcome.reason}.` };
+    case "skip": return { stage: "destination", outcome: outcome.outcome ?? "claim_skip", detail: `${prefix} skipped, ${outcome.reason}.` };
     case "pin_unavailable": return { stage: "destination", outcome: "pin_unavailable", detail: `${prefix} pinned session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive deliveries.` };
   }
 }

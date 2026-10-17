@@ -122,6 +122,7 @@ and R3 exists.
 | C1 | `U001` posts a top-level message in `C900` with no mention. | `t-inc` receives one `event.matched` digest. P's delivery is `skipped` with `claimed by thread t-inc`. No thread with key `subject:slack:T001/C900` exists. |
 | C2 | `U001` posts `<@U-BOT> status?` in `C900`, Slack thread `X`. | M delivers the mention to `t-inc` as an inbound message with the Slack origin. `t-inc` receives exactly one turn for it and no digest. A `followed_threads` row binds `X` to `t-inc`. |
 | C3 | `U003` replies in `X`. | `t-inc` receives the reply once, through the binding. The waiter appends no digest. |
+| C3b | `U001`, a linked member, replies in `X`. | The follow router delivers the reply to `t-inc`. `t-inc` receives exactly one turn for it and no digest. P's delivery is `skipped` with `the followed thread delivers this reply`. |
 | C4 | `U002` posts `<@U-BOT> is the replica healthy?` in `C900`. | The team gate refuses `U002`. `t-inc` receives one digest. No `slack.app_mention` delivery exists. |
 | C5 | `U001` posts a mention in `X2`. | `t-s` receives it through its binding. `t-inc` receives one digest for the channel message. |
 | C6 | Team `platform` has a mention rule on `C900` and no waiter. A user linked to both teams posts a mention in a new Slack thread. | `platform`'s rule opens a `platform` thread. M delivers to `t-inc`. Each team receives the mention once. |
@@ -278,6 +279,15 @@ incident routing spec's Parts A and B.
    of a candidate whose thread equals the binding's thread. Other candidates
    append theirs. The `target` stamp names the suppressed waiters in
    `suppressedWaiterIds`. A binding delivery never ends a waiter.
+   - A followed reply has one owner: the follow router. When the router
+     will deliver a `slack.message` to a stored follow binding and admit its
+     sender (`followRouteFor`), ingest treats it as an assistant delivery
+     of the binding's owner, even when no rule of that owner matched. The
+     waiters in the bound thread append no digest. The dispatcher skips a
+     `slack.message` delivery whose destination is that binding with
+     `Skipped, the followed thread delivers this reply.` and reason
+     `follow_routed`. If the route check fails, the waiters append
+     (INV-D6).
 5. A once-mode waiter is a candidate. When it is the redirect target, the
    delivery counts as its match. The redirect stamp names the target in
    `matchedWaiterId`, in once mode and in stream mode. After the inbound
@@ -364,7 +374,9 @@ event wakeups spec Part A.
 3. Counter `valet_event_delivery_destination_total{reason}` with reason in
    `policy_new`, `policy_subject`, `policy_own`, `policy_existing`,
    `conversation_follow`, `conversation_pull_request`, `claim_redirect`,
-   `claim_skip`, `claim_fallback`, `claim_recovered`, `pin_unavailable`.
+   `claim_skip`, `claim_fallback`, `claim_recovered`, `follow_routed`,
+   `pin_unavailable`. `follow_routed` counts a rule delivery that the follow
+   router owns (Part C step 4).
    `claim_fallback` and `claim_recovered` count the repairs of Part C step
    7. A fallback's receipt `destination` stage records outcome
    `claim_fallback`. A rising `pin_unavailable` pages a

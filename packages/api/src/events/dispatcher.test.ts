@@ -794,6 +794,49 @@ describe("EventDispatcher", () => {
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
     });
 
+    /** A `slack.message` reply in Slack thread 1.2 by `user`, stamped to the follow binding's thread. */
+    async function dispatchFollowedReply(user: string, text: string) {
+      const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] };
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator" }, ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.message", eventKeys: ["slack.message"], refs: { channel: "C1" }, summary: "Reply",
+        payload: { type: "message", channel: "C1", user, text, ts: `1.${5 + text.length}`, thread_ts: "1.2" }, actor: { externalId: user },
+        destination: stamp,
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }));
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.5" }),
+        slackBotUserId: async () => "U-BOT",
+      }).pollOnce();
+      return { deliver, deliveryId };
+    }
+
+    async function seedFollowToInc() {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      await upsertFollowedThread(tdb.appDb, {
+        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+        ownerType: "team", ownerId: "team-x", createdBy: "member-9", target: { sessionId: "sess-inc", threadId: "thr-inc" },
+      });
+    }
+
+    it("skips a followed reply that the follow router delivers: one owner (C3b, follow_routed)", async () => {
+      await seedFollowToInc();
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the followed thread delivers this reply." });
+      expect(recordDestination.mock.calls).toEqual([["follow_routed"]]);
+    });
+
+    it("delivers a followed reply that the follow router refuses (C3, unlinked sender)", async () => {
+      await seedFollowToInc();
+      const { deliver, deliveryId } = await dispatchFollowedReply("U-unlinked", "replica caught up");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(recordDestination.mock.calls).toEqual([["conversation_follow"]]);
+    });
+
     it("a refused sender dead-letters before a target stamp runs", async () => {
       // No identity link for U9: the team mention gate refuses the sender.
       await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });

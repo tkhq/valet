@@ -838,6 +838,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // A claim redirect to a once-mode waiter ends that waiter after the
     // delivery lands, with one terminal signal.
     endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
+    // The follow router's predicate and the Slack twin need the bot id.
+    slackBotUserId: (orgId) => waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }).slackBotUserId(orgId),
     // A claimed waiter gets its digest back when its claim delivery is
     // skipped after ingest (`events/claim-recovery.ts`).
     recoverClaimedDigest: (args) => appendClaimedWaiterDigest(

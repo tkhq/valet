@@ -21,7 +21,8 @@ import {
   type WaiterCandidate,
   type WaiterMatchDeps,
 } from "./waiters.js";
-import { mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
+import { followRouteFor } from "../channels/follow-router.js";
+import { isPrincipalType, mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
@@ -487,6 +488,11 @@ async function resolveEventClaims(
     teamCovered: async (subscriptionId, e) => {
       const sub = byId.get(subscriptionId);
       return sub ? teamCovered(sub, e) : false;
+    },
+    followRoute: async (e) => {
+      if (service !== "slack" || e.key !== "slack.message") return null;
+      const follow = await followRouteFor(db, { orgId, botUserId: await deps.waiters?.slackBotUserId(orgId), payload: e.payload });
+      return follow && isPrincipalType(follow.ownerType) ? { type: follow.ownerType, id: follow.ownerId } : null;
     },
     ...deps.claims,
   };

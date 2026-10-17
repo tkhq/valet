@@ -48,6 +48,13 @@ export interface ClaimDeps {
    * delivers nothing, so it claims nothing.
    */
   teamCovered(subscriptionId: string, event: NormalizedEvent): Promise<boolean>;
+  /**
+   * The owner of the follow binding that the follow router delivers this
+   * event to, or null (`followRouteFor`). The router is the one owner of a
+   * followed reply, so the waiters in the bound thread append no digest
+   * for it (Part C step 4). Absent: no event is follow-routed.
+   */
+  followRoute?(event: NormalizedEvent): Promise<Principal | null>;
 }
 
 export interface ResolveClaimsArgs {
@@ -69,7 +76,7 @@ export function isAssistantTarget(target: unknown): boolean {
   return typeof target === "object" && target !== null && "kind" in target && target.kind === "orchestrator";
 }
 
-function isPrincipalType(value: string): value is Principal["type"] {
+export function isPrincipalType(value: string): value is Principal["type"] {
   return value === "user" || value === "team" || value === "org";
 }
 
@@ -146,6 +153,7 @@ async function resolveOwner(
   args: ResolveClaimsArgs,
   owner: Principal,
   hasAssistantDelivery: boolean,
+  followRouted: boolean,
 ): Promise<OwnerResult | null> {
   const mine = args.candidates.filter((c) => c.accepted && c.session.ownerType === owner.type && c.session.ownerId === owner.id);
   const claims: WaiterCandidate[] = [];
@@ -160,7 +168,8 @@ async function resolveOwner(
   const twin = args.twin;
   const mentionComing = args.event.key === "slack.message" && twin?.key === "slack.app_mention"
     && await deps.mentionCovered(owner, twin);
-  if (!hasAssistantDelivery && !mentionComing) return null;
+  // The follow router delivers a followed reply like a subscription would.
+  if (!hasAssistantDelivery && !mentionComing && !followRouted) return null;
 
   const binding = await args.binding(owner);
   const waiters = new Map<string, WaiterDecision>(claims.map((c) => [c.waiter.id, "append"]));
@@ -221,13 +230,27 @@ async function resolveOwner(
  */
 export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): Promise<ClaimDecision> {
   const decision: ClaimDecision = { deliveries: new Map(), waiters: new Map(), failedOwners: 0 };
-  const owners = new Map<string, { owner: Principal; subscriptions: ClaimSubscription[] }>();
+  const owners = new Map<string, { owner: Principal; subscriptions: ClaimSubscription[]; followRouted: boolean }>();
   for (const sub of args.matched) {
     if (!isAssistantTarget(sub.target)) continue;
     const owner: Principal = { type: sub.ownerType, id: sub.ownerId };
-    const entry = owners.get(ownerKey(owner)) ?? { owner, subscriptions: [] };
+    const entry = owners.get(ownerKey(owner)) ?? { owner, subscriptions: [], followRouted: false };
     entry.subscriptions.push(sub);
     owners.set(ownerKey(owner), entry);
+  }
+  // A reply that the follow router delivers counts as an assistant delivery
+  // of the binding's owner, even when no rule of that owner matched it.
+  let routedOwner: Principal | null = null;
+  try {
+    routedOwner = (await deps.followRoute?.(args.event)) ?? null;
+  } catch (error) {
+    // Without the answer the bound thread's waiters append: duplication, never loss (INV-D6).
+    console.error(`[event-claims] the follow route check failed in org ${args.orgId}`, error);
+  }
+  if (routedOwner) {
+    const entry = owners.get(ownerKey(routedOwner)) ?? { owner: routedOwner, subscriptions: [], followRouted: false };
+    entry.followRouted = true;
+    owners.set(ownerKey(routedOwner), entry);
   }
   // The mention twin can suppress a digest for an owner whose rules did not
   // match the message itself (Part C step 8).
@@ -235,18 +258,18 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
     for (const c of args.candidates) {
       if (!c.accepted || !isPrincipalType(c.session.ownerType)) continue;
       const owner: Principal = { type: c.session.ownerType, id: c.session.ownerId };
-      if (!owners.has(ownerKey(owner))) owners.set(ownerKey(owner), { owner, subscriptions: [] });
+      if (!owners.has(ownerKey(owner))) owners.set(ownerKey(owner), { owner, subscriptions: [], followRouted: false });
     }
   }
 
-  for (const { owner, subscriptions } of owners.values()) {
+  for (const { owner, subscriptions, followRouted } of owners.values()) {
     let result: OwnerResult | null;
     const delivering: ClaimSubscription[] = [];
     try {
       // A team-covered personal rule delivers nothing (the dispatcher skips
       // it), so it neither claims nor takes a stamp.
       for (const sub of subscriptions) if (!(await deps.teamCovered(sub.id, args.event))) delivering.push(sub);
-      result = await resolveOwner(deps, args, owner, delivering.length > 0);
+      result = await resolveOwner(deps, args, owner, delivering.length > 0, followRouted);
     } catch (error) {
       decision.failedOwners += 1;
       console.error(`[event-claims] claim resolution failed for a ${owner.type} owner in org ${args.orgId}`, error);
