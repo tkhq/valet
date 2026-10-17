@@ -375,7 +375,7 @@ describe("WorkflowEditorPage", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     // The panel lives in a drawer, which starts closed, so the scoped read
     // only happens after the toolbar button opens it.
-    fireEvent.click(screen.getByRole("button", { name: "Listeners and routines" }));
+    fireEvent.click(screen.getByRole("button", { name: "What starts it" }));
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
     expect(screen.queryByText(/Triggers/)).toBeNull();
   });

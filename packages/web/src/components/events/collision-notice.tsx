@@ -106,10 +106,10 @@ export function CollisionNotice({
     >
       <p className="text-xs font-medium text-ink">
         {committed
-          ? `${intent === "save" ? "Saved" : "Created"}. This rule fires alongside existing rules:`
+          ? `${intent === "save" ? "Saved" : "Created"}. These also fire for the same events:`
           : report.blocking.length > 0
-            ? "Not saved: this rule covers everything these rules already handle. All of them would fire together."
-            : "This rule overlaps with existing rules:"}
+            ? "Not saved: these already handle everything this covers. All of them would fire together."
+            : "This overlaps with what Valet already does:"}
       </p>
       <ul className="mt-1 divide-y divide-line/60">
         {report.blocking.map((c) => (
@@ -121,7 +121,7 @@ export function CollisionNotice({
       </ul>
       {blocked && (
         <p className="mt-1 text-xs text-muted">
-          Narrow the channels or filters so the rules stay separate, or{" "}
+          Narrow the channels or filters so they stay separate, or{" "}
           {intent === "save" ? "save" : "create"} it anyway to accept the double delivery.
         </p>
       )}

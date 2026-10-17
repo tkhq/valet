@@ -350,7 +350,7 @@ function WorkflowEditorPane({
             // copy-lint: allow trigger
             onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
-            Listeners and routines
+            What starts it
           </Button>
 
 
@@ -538,7 +538,7 @@ function WorkflowEditorPane({
         </div>
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
-          <DrawerShell title="Listeners and routines" onClose={() => setDrawer(null)}>
+          <DrawerShell title="What starts it" onClose={() => setDrawer(null)}>
             <TriggersPanel workflowId={workflowId} startNew={newTrigger} />
           </DrawerShell>
         )}
@@ -666,6 +666,7 @@ export function restoreErrorMessage(err: unknown): string {
   const invalid = validationMessages(err);
   if (!invalid) return errorText(err, "The restore failed. Try again.");
   return (
+    // copy-lint: allow rule
     "This version was not restored. It does not pass the current validation rules. " +
     `Correct these in the editor, then save: ${invalid.join("; ")}`
   );

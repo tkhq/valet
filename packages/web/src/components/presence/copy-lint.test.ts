@@ -29,7 +29,12 @@ const HUB_DIALOGS = [
   "components/events/event-log.tsx",
   "components/events/receipts-panel.tsx",
   "components/events/team-slack-setup.tsx",
+  "components/events/collision-notice.tsx",
+  "components/events/filter-editor.tsx",
+  "components/events/prompt-fields.tsx",
+  "components/events/redeliver-button.tsx",
   "routes/workflows.index.tsx",
+  "routes/workflows.$workflowId.tsx",
 ] as const;
 const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");

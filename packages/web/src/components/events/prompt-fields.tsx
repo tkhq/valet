@@ -108,7 +108,7 @@ export function PromptFields({
       </p>
       {followsThread && (
         <p className="text-xs text-muted">
-          Both fields apply to the mention that starts a thread. While the rule follows that
+          Both fields apply to the mention that starts a thread. While Valet follows that
           thread, later messages reach the assistant as they are written.
         </p>
       )}
