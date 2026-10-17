@@ -876,7 +876,9 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await p.db.insert(teamMembers).values({ teamId: TEAM, userId: USER, role: "admin" });
     const subscription = (id: string, eventKeys: string[], filters: SubscriptionFilter[], follow = false): typeof eventSubscriptions.$inferInsert => ({
       id, orgId: ORG, ownerType: "team", ownerId: TEAM, createdBy: USER, name: id, eventKeys, filters,
-      target: { kind: "orchestrator", ...(follow ? { follow: true } : {}) }, enabled: true, createdAt: now, updatedAt: now,
+      // A follow rule opens one thread per mention (policy `new`), as in
+      // spec 2026-10-16 Scenario T10.
+      target: { kind: "orchestrator", ...(follow ? { follow: true, thread: { mode: "new" } } : {}) }, enabled: true, createdAt: now, updatedAt: now,
     });
     await p.db.insert(eventSubscriptions).values([
       subscription("sub-incidents", ["slack.channel_created"], [{ field: "channel_name", op: "prefix", value: "inc-" }]),
@@ -919,7 +921,9 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const e1 = await awaitSignals(u, "slack.channel_created", 1, tInc.sessionId, tInc.threadId);
     expect(e1).toHaveLength(1);
     const thread = await p.engineStore.getThread(tInc.sessionId, tInc.threadId);
-    expect(thread?.key).toBe("slack-events:C900");
+    // The rule sets no thread policy, so it lands in its own thread (spec
+    // 2026-10-16: delivery threads, Part A step 3), not a channel events thread.
+    expect(thread?.key).toBe("sub:sub-incidents");
 
     // E2: the agent joins, posts the thread link, and arms the stream wait.
     const e2 = await poll(async () => u.agent.results.slice(before), (r) => r.length >= 3, "E2's three tool results");
@@ -1017,7 +1021,8 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     expect(await queuedSignals(u, "slack.app_mention")).toHaveLength(1);
 
     // M6: the agent cancels the watching waiter. A later mention opens its own
-    // thread, keyed by its Slack post, and the dispatcher binds a follow.
+    // thread, keyed by its delivery (policy `new`), and the dispatcher binds a
+    // follow to that thread.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U002", "incident closed, stop watching"));
     u.clock.now += 60_000;
@@ -1032,8 +1037,8 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const later = await poll(() => queuedWith(u, "who is on call?"), (rows) => rows.length > 0, "the later app_mention delivery");
     expect(later).toHaveLength(1);
     expect(later[0]?.threadId).not.toBe(tInc.threadId);
-    expect((await p.engineStore.getThread(later[0]?.sessionId ?? "", later[0]?.threadId ?? ""))?.key).toBe(`slack:C900:${laterTs}`);
+    expect((await p.engineStore.getThread(later[0]?.sessionId ?? "", later[0]?.threadId ?? ""))?.key).toMatch(/^sub:sub-mentions:/);
     expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: laterTs }))
-      .toMatchObject({ ownerType: "team", ownerId: TEAM });
+      .toMatchObject({ ownerType: "team", ownerId: TEAM, sessionId: later[0]?.sessionId, threadId: later[0]?.threadId });
   }, 90_000);
 });
