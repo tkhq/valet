@@ -40,6 +40,11 @@ const catalogData = {
           description: "A pull request was opened",
           filters: [{ field: "branch", description: "Base branch" }],
         },
+        {
+          key: "github.check_run.completed",
+          description: "A check completed",
+          filters: [{ field: "repo", description: "Repository" }],
+        },
       ],
     },
   ],
@@ -103,8 +108,9 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 
 // The thread picker reads the network; the Runs in tests stop before a pick.
+// It names the workspace whose threads it would list.
 vi.mock("~/components/presence/thread-picker", () => ({
-  ThreadPicker: () => <p>Thread picker</p>,
+  ThreadPicker: ({ workspace }: { workspace: string }) => <p>Thread picker for {workspace}</p>,
 }));
 
 import { ApiError } from "~/api/client";
@@ -811,6 +817,82 @@ describe("AutomationWizard", () => {
       expect(screen.getByText("Pick a thread.")).toBeTruthy();
       expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
     });
+  });
+
+  describe("preselected place", () => {
+    const INCIDENTS = { subject: "slack:T1/C900", service: "slack" as const, label: "#incidents" };
+    const ACME_API = { subject: "github:acme/api", service: "github" as const, label: "acme/api" };
+
+    function checkedRunsIn(): string {
+      const radios = within(screen.getByRole("group", { name: "Runs in" })).getAllByRole("radio");
+      return radios.find((r) => r instanceof HTMLInputElement && r.checked)?.parentElement?.textContent ?? "";
+    }
+
+    it("a mention rule opens on the place's channel and replies in a new thread (H5)", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      pickOutcome(/Reply to Slack mentions/);
+      clickNext();
+      expect(screen.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
+      expect(checkedRunsIn()).toBe("A new thread each time");
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Incident replies" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+      const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+      expect(body.eventKeys).toEqual(["slack.app_mention"]);
+      expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]);
+      expect(body.target).toMatchObject({ kind: "assistant", assistant: "user", thread: { mode: "new" } });
+    });
+
+    it("an event rule offers only the place's service and filters on its repository (H6)", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={ACME_API} />);
+      pickOutcome(/Send a notification/);
+      clickNext();
+      expect(screen.queryByRole("checkbox", { name: /slack\.app_mention/ })).toBeNull();
+      fireEvent.click(screen.getByRole("checkbox", { name: /github\.check_run\.completed/ }));
+      clickNext();
+      expect(checkedRunsIn()).toBe("One thread per pull request");
+      const options = within(screen.getByRole("group", { name: "Runs in" })).getAllByRole("radio").map((r) => r.parentElement?.textContent);
+      expect(options).toEqual(["A new thread each time", "One thread per pull request", "This listener's thread", "An existing thread…"]);
+      fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
+      expect(screen.getByText("Thread picker for user")).toBeTruthy();
+      fireEvent.click(screen.getByRole("radio", { name: "One thread per pull request" }));
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Failed checks" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+      const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+      expect(body.filters).toEqual([{ field: "repo", op: "eq", value: "acme/api", label: "acme/api" }]);
+      expect(body.target).toMatchObject({ thread: { mode: "subject" } });
+    });
+
+    it("in a team workspace, the thread picker lists the team's threads (Review Focus 3)", () => {
+      scopeTeamId = "t_platform";
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      clickNext();
+      fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
+      expect(screen.getByText("Thread picker for t_platform")).toBeTruthy();
+      expect(screen.queryByText("Thread picker for user")).toBeNull();
+    });
+
+    it("a service-wide place names no filter", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={{ subject: "slack:T1", service: "slack", label: "Slack" }} />);
+      clickNext();
+      expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
+    });
+  });
+
+  it("a preselected workflow opens on the workflow outcome and posts that workflow", () => {
+    workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }, { id: "wf_2", name: "Triage" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} preselectedWorkflowId="wf_2" />);
+    expect((screen.getByLabelText(/Run a workflow on an event/) as HTMLInputElement).checked).toBe(true);
+    clickNext();
+    fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+    clickNext();
+    expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_2");
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Triage PRs" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.target).toEqual({ kind: "workflow", workflowId: "wf_2" });
   });
 
   it("a clean create still closes the dialog", () => {

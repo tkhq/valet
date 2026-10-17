@@ -2,6 +2,7 @@ import { type AssistantThreadPolicy, type Appearance, validateAppearance } from 
 import { RunsInField } from "~/components/presence/runs-in-field";
 import { defaultWizardThreadPolicy, subjectKindForKeys } from "~/components/presence/thread-policy-copy";
 import { AppearanceSettings } from "~/components/presence/appearance-settings";
+import { placeFilter, type PreselectedPlace } from "~/components/presence/place-filter";
 import { AutomationReview } from "./automation-review";
 import { parseSlackThreadLink } from "./slack-thread-preset";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
@@ -121,19 +122,42 @@ function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   return { labels: ["What", "Match", "Then", "Review"], count: 4 };
 }
 
+/** The reply step's channels for a preselected Slack channel, else none. */
+function placeChannels(place: PreselectedPlace | undefined): SelectedChannel[] {
+  const filter = place ? placeFilter(place) : null;
+  return filter?.field === "channel" ? [{ id: filter.value, label: filter.label }] : [];
+}
+
+/** The event outcomes' first filter row for a preselected place, else none. */
+function placeFilterRows(place: PreselectedPlace | undefined): UiFilterRow[] {
+  const filter = place ? placeFilter(place) : null;
+  if (filter === null) return [];
+  return [{ id: crypto.randomUUID(), field: filter.field, op: "eq", value: filter.value, label: filter.label }];
+}
+
 export function AutomationWizard({
   open,
   onOpenChange,
   replyTeam,
   onCloseAutoFocus,
+  preselectedPlace,
+  preselectedWorkflowId,
 }: {
   replyTeam?: { id: string; name: string };
   onCloseAutoFocus?: (event: Event) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Opens on one place: its service is the only one the event picker
+   * offers, and its channel, repository, or Linear team is the first filter.
+   * The wizard reads it at mount; a new place needs a new wizard. */
+  preselectedPlace?: PreselectedPlace;
+  /** Opens on "Run a workflow on an event" with this workflow as the target.
+   * Read at mount, like `preselectedPlace`. */
+  preselectedWorkflowId?: string;
 }) {
   const catalogQ = useEventCatalog();
-  const services = catalogQ.data?.services ?? [];
+  const allServices = catalogQ.data?.services ?? [];
+  const services = preselectedPlace ? allServices.filter((s) => s.service === preselectedPlace.service) : allServices;
   const workflowsQ = useWorkflows();
   const createSubscription = useCreateEventSubscription();
   const createSchedule = useCreateSchedule();
@@ -143,12 +167,16 @@ export function AutomationWizard({
   const scopedTeamId = scopedTeam?.id;
 
   const [step, setStep] = useState<Step>(replyTeam ? 2 : 1);
-  const [outcome, setOutcome] = useState<Outcome>("reply");
+  const [outcome, setOutcome] = useState<Outcome>(preselectedWorkflowId !== undefined ? "workflow" : "reply");
   const [threadLink, setThreadLink] = useState("");
   const threadPreset = parseSlackThreadLink(threadLink);
   const [appearance, setAppearance] = useState<Appearance>({});
   const [name, setName] = useState("");
-  const { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(services);
+  const { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
+    services,
+    [],
+    () => placeFilterRows(preselectedPlace),
+  );
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState(defaultTimezone());
   const [prompt, setPrompt] = useState("");
@@ -160,13 +188,14 @@ export function AutomationWizard({
   });
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
-  const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
+  const [target, setTarget] = useState<TargetChoice>(() =>
+    preselectedWorkflowId !== undefined ? { kind: "workflow", workflowId: preselectedWorkflowId } : initialTarget(scopedTeamId));
   // The reply outcome's own channel selection and follow toggle. Held apart
   // from `filterRows` so the raw-filter machinery stays owned by the other
   // outcomes. `anyChannel` is the explicit opt-out of the channel requirement
   // a mention rule carries (off by default) — shared with the event outcomes,
   // where the same flag rides a raw `slack.app_mention` selection.
-  const [replyChannels, setReplyChannels] = useState<SelectedChannel[]>([]);
+  const [replyChannels, setReplyChannels] = useState<SelectedChannel[]>(() => placeChannels(preselectedPlace));
   const [anyChannel, setAnyChannel] = useState(false);
   // Who may invoke a team assistant by mention. A bot invited into a channel
   // answers everyone in that channel by default; team-only stays one click
@@ -191,12 +220,13 @@ export function AutomationWizard({
   } | null>(null);
 
   // A checked "Any channel" (or picked channels) must not ride into a
-  // different outcome's flow, so an outcome switch resets both.
+  // different outcome's flow, so an outcome switch resets both. The channels
+  // go back to the preselected place's channel, when there is one.
   function chooseOutcome(next: Outcome) {
     setOutcome(next);
     setThreadChoice(undefined);
     setAnyChannel(false);
-    setReplyChannels([]);
+    setReplyChannels(placeChannels(preselectedPlace));
   }
 
   // A manual target choice wins: once the reader picks a target, a later
@@ -206,7 +236,8 @@ export function AutomationWizard({
   // target whose team is no longer the active workspace is stale. The Then
   // step would show no team radio while the create still posts that team, so
   // the target drops back to the workspace seed and follows it again.
-  const userTouched = useRef(false);
+  // A preselected workflow is a choice made for the reader, so it wins too.
+  const userTouched = useRef(preselectedWorkflowId !== undefined);
   function chooseTarget(next: TargetChoice) {
     userTouched.current = true;
     setTarget(next);

@@ -13,16 +13,19 @@ export function PresencePlaceholder({ children }: { children: ReactNode }) {
   return <EmptyRow>{children}</EmptyRow>;
 }
 
-/** A Presence detail page: a link back to its tab, a title, and a body. */
+/** A Presence detail page: a link back to its tab, a title, an optional
+ * line under the title, and a body. */
 export function PresenceDetailPage({
   back,
   backLabel,
   title,
+  subtitle,
   children,
 }: {
   back: PresenceListPath;
   backLabel: string;
   title: string;
+  subtitle?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -32,6 +35,7 @@ export function PresenceDetailPage({
           ← {backLabel}
         </Link>
         <h1 className="mt-2 break-words font-display text-2xl text-ink">{title}</h1>
+        {subtitle !== undefined && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
         <div className="mt-6">{children}</div>
       </div>
     </div>

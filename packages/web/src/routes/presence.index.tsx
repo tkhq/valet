@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { PresencePlaceholder } from "~/components/presence/page-shell";
+import { PlacesTab, type PlacesView } from "~/components/presence/places-tab";
 
 /** `/presence`: the Places tab, the index of the Presence section. It replaces the Channels tab of `/events`. */
 export const Route = createFileRoute("/presence/")({
-  component: PlacesTab,
+  component: PlacesTabRoute,
 });
 
-export function PlacesTab() {
-  return <PresencePlaceholder>This tab lists the channels, repositories, and teams where Valet listens.</PresencePlaceholder>;
+function PlacesTabRoute() {
+  const [view, setView] = useState<PlacesView>("places");
+  return <PlacesTab view={view} onViewChange={setView} />;
 }

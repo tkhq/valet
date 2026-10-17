@@ -4,13 +4,13 @@ import { TabBar, tabPanelId, pageClass } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventLog, type LogFilter } from "~/components/events/event-log";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
-import { ChannelsPanel } from "~/components/channels/channels-panel";
 import { textParam } from "~/lib/search-params";
 import { redirectToPresence } from "./-presence-redirects";
 
-/** Channels, the Log (events and problems in one list), and subscriptions.
- * Legacy tab URLs (`activity`, `logs`, `problems`, `receipts`) open the Log. */
-type TabId = "channels" | "log" | "subscriptions";
+/** The Log (events and problems in one list) and subscriptions. The
+ * Channels tab moved to the Presence Places tab. Legacy tab URLs
+ * (`activity`, `logs`, `problems`, `receipts`) open the Log. */
+type TabId = "log" | "subscriptions";
 
 interface EventsSearch {
   tab?: TabId;
@@ -34,8 +34,8 @@ export function readEventsSearch(raw: unknown): EventsSearch {
 }
 
 /** Redirect-only: `/events` now opens Presence (`-presence-redirects.ts`).
- * `validateSearch` and `EventsPage` stay until the Places and Activity tabs
- * replace them. */
+ * `validateSearch` and `EventsPage` stay until the Activity tab and the
+ * listener page replace them. */
 export const Route = createFileRoute("/events/")({
   beforeLoad: redirectToPresence("/events"),
   validateSearch: readEventsSearch,
@@ -43,7 +43,6 @@ export const Route = createFileRoute("/events/")({
 
 const TABS_LABEL = "Events sections";
 const TABS = [
-  { id: "channels", label: "Channels" },
   { id: "log", label: "Log" },
   { id: "subscriptions", label: "Subscriptions" },
 ] as const;
@@ -53,9 +52,9 @@ export function EventsPage() {
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
-  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "channels");
+  const [selectedTab, setTab] = useState<TabId>(search.tab ?? "log");
   const tab = selectedTab;
-  useEffect(() => setTab(search.tab ?? "channels"), [search.tab]);
+  useEffect(() => setTab(search.tab ?? "log"), [search.tab]);
 
   /** Writes the Log's filters to the URL, so Back and a shared link restore them. */
   function setLog(next: Partial<Pick<EventsSearch, "status" | "q">>) {
@@ -76,7 +75,7 @@ export function EventsPage() {
       to: "/events",
       search: (previous) => {
         const { tab: _tab, ...rest } = readEventsSearch(previous);
-        return next === "channels" ? rest : { ...rest, tab: next };
+        return next === "log" ? rest : { ...rest, tab: next };
       },
     });
   }
@@ -102,7 +101,6 @@ export function EventsPage() {
           aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
           className="mt-6"
         >
-          {tab === "channels" && <ChannelsPanel />}
           {tab === "log" && (
             <EventLog
               filter={search.status ?? "all"}

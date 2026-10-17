@@ -13,7 +13,8 @@ import type {
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
-  ChannelDetailResponse,
+  ListPresencePlacesResponse,
+  PresencePlaceDetailResponse,
   ThreadChannelActivity,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -625,8 +626,11 @@ export const api = {
     request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
   clearIntegrationLimit: (owner: OwnerFilter) =>
     request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
-  getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
-    request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
+  /** `scope` is the workspace key: `user`, or a team id. */
+  listPresencePlaces: (scope: string) =>
+    request<ListPresencePlacesResponse>("GET", `/presence/places?scope=${encodeURIComponent(scope)}`),
+  getPresencePlace: (scope: string, subject: string) =>
+    request<PresencePlaceDetailResponse>("GET", `/presence/places/${encodeURIComponent(subject)}?scope=${encodeURIComponent(scope)}`),
   getThreadChannelActivity: (threadId: string) =>
     request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */

@@ -115,8 +115,6 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
-vi.mock("~/components/channels/channels-panel", () => ({ ChannelsPanel: () => <p>Channels list</p> }));
-
 /** The props the page last gave the Log. Its own behaviour is `event-log.test.tsx`'s. */
 let logProps: { filter: string; query: string; onFilterChange: (next: string) => void } | undefined;
 vi.mock("~/components/events/event-log", () => ({
@@ -211,15 +209,14 @@ afterEach(() => {
   navigateCalls.length = 0;
 });
 
-describe("EventsPage — Channels", () => {
-  it("opens on Channels when the URL names no tab", () => {
-    render(<EventsPage />);
-    expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByText("Channels list")).toBeTruthy();
-  });
-});
-
 describe("EventsPage — Log", () => {
+  it("opens on the Log when the URL names no tab", () => {
+    render(<EventsPage />);
+    expect(screen.queryByRole("tab", { name: "Channels" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Log" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("Log list")).toBeTruthy();
+  });
+
   it("opens the Log from the old Activity, Event Logs, and Problems links", () => {
     for (const tab of ["activity", "logs", "problems"]) {
       expect(readEventsSearch({ tab }).tab).toBe("log");
@@ -245,12 +242,12 @@ describe("EventsPage — Log", () => {
   });
 
   it("writes tab changes to the URL so history restores the selected tab", async () => {
-    const page = render(<EventsPage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
-    expect(searchState).toEqual({ tab: "log" });
+    const page = render(<TooltipProvider><EventsPage /></TooltipProvider>);
+    fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
+    expect(searchState).toEqual({ tab: "subscriptions" });
     searchState = {};
-    page.rerender(<EventsPage />);
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Channels" }).getAttribute("aria-selected")).toBe("true"));
+    page.rerender(<TooltipProvider><EventsPage /></TooltipProvider>);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Log" }).getAttribute("aria-selected")).toBe("true"));
   });
 });
 
