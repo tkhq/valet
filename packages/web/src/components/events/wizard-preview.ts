@@ -85,8 +85,11 @@ function replyFilters(state: WizardState): EventSubscriptionFilterWire[] {
   ];
 }
 
+/** An assistant target as the wire types it. */
+type AssistantTargetWire = Extract<EventSubscriptionTargetWire, { kind: "assistant" }>;
+
 /** The assistant fields of a target: the workspace's assistant, never a workflow. */
-function assistantOf(target: WizardTarget): EventSubscriptionTargetWire {
+function assistantOf(target: WizardTarget): AssistantTargetWire {
   if (target.kind !== "assistant") return { kind: "assistant", assistant: "user" };
   return target.assistant === "team"
     ? { kind: "assistant", assistant: "team", teamId: target.teamId }

@@ -59,7 +59,7 @@ const sentenceCatalog: GetWorkflowTriggerCatalogResponse["catalog"] = catalogDat
   entries: s.entries.map((e) => ({
     key: e.key,
     description: e.description,
-    filters: e.filters.map((f) => ({ field: f.field, description: f.description ?? "" })),
+    filters: e.filters.map((f) => ({ field: f.field, description: "description" in f ? f.description : "" })),
   })),
 }));
 
