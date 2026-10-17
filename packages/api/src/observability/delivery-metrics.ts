@@ -12,11 +12,14 @@ import type { Destination, DestinationReason } from "../events/destination.js";
  * `claim_recovered`: a claimed waiter got its digest back because the
  * dispatcher skipped the claim delivery for a reason decided after ingest,
  * or `claim_fallback`: a stamped thread could no longer take the delivery
- * at dispatch, so it landed by the binding or the rule's policy, or
- * `follow_routed`: the follow router delivers the reply, so the rule skips it.
+ * at dispatch, so it landed by the binding or the rule's policy,
+ * `follow_routed`: the follow router delivers the reply, so the rule skips
+ * it, or `mention_covered`: the post's `app_mention` half delivers it, so
+ * the rule skips the `slack.message` half.
  */
 export type DeliveryDestinationMetricReason =
-  | DestinationReason | "claim_skip" | "pin_unavailable" | "claim_recovered" | "claim_fallback" | "follow_routed";
+  | DestinationReason | "claim_skip" | "pin_unavailable" | "claim_recovered" | "claim_fallback"
+  | "follow_routed" | "mention_covered";
 
 /** A sink for one delivery's destination reason: the counter, or a test's recorder. */
 export type DestinationRecorder = (reason: DeliveryDestinationMetricReason) => void;

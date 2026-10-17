@@ -342,23 +342,24 @@ describe("api integration: claims acceptance scenario", () => {
     expect(await queuedWith(u, "is the replica healthy?")).toEqual([expect.objectContaining(tInc)]);
     expect(await queuedSignals(u, "slack.app_mention")).toHaveLength(2);
 
-    // C5: a mention in X2. t-s receives it through its binding, and t-inc,
-    // which is not the bound thread, appends the channel message's digest.
+    // C5: a mention in X2. t-s receives it through its binding as one turn,
+    // and t-inc, which is not the bound thread, appends the channel
+    // message's digest.
     const c5Text = `<@${BOT_USER}> rollback ready?`;
     await mention(u, "U001", c5Text, x2);
     const c5 = await settled(u, "M", 3);
     expect(c5).toMatchObject({ status: "delivered", destination: { kind: "target", ...tS, reason: "conversation_follow" } });
     expect(await landings(u, c5.id)).toEqual([tS]);
-    // P's message half also follows the X2 binding into t-s, so t-s gets a
-    // second turn for the post. Spec Deviations, "Both halves of a mention in
-    // a bound Slack thread", records this gap.
-    expect(await settled(u, "P", 6)).toMatchObject({ status: "delivered", destination: { kind: "target", ...tS, reason: "conversation_follow" } });
+    // P's message half follows the X2 binding too, but the mention delivers
+    // the post, so P skips it (mention_covered).
+    expect(await settled(u, "P", 6)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
     await tick(u);
     const c5Digests = await awaitSignals(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
     expect(c5Digests[2]?.content).toContain("rollback ready?");
     const c5Turns = await queuedWith(u, "rollback ready?");
     expect(c5Turns.filter((t) => t.threadId === tInc.threadId)).toHaveLength(1);
-    expect(c5Turns.every((t) => t.threadId === tInc.threadId || t.threadId === tS.threadId)).toBe(true);
+    expect(c5Turns.filter((t) => t.threadId === tS.threadId)).toHaveLength(1);
+    expect(c5Turns).toHaveLength(2);
 
     // C6: team platform has its own mention rule and no waiter. A member of
     // both teams mentions the bot: each team receives the mention once.
@@ -383,16 +384,34 @@ describe("api integration: claims acceptance scenario", () => {
     await tick(u);
     await expectNoNewSignal(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
 
+    // C2b: C2 with the halves in the other order. The app_mention arrives
+    // and is dispatched first, so its follow binds Slack thread Y to t-inc
+    // before the slack.message half arrives. The message half then follows
+    // that binding, and P skips it because the mention delivered the post.
+    const c2bText = `<@${BOT_USER}> any errors left?`;
+    const y = nextSlackTs();
+    await postSlack(u, { type: "app_mention", channel: "C900", user: "U001", text: c2bText, ts: y, team: SLACK_TEAM, event_ts: y });
+    expect(await settled(u, "M", 5)).toMatchObject({ status: "delivered", destination: { kind: "target", ...tInc, reason: "claim_redirect" } });
+    await postSlack(u, { ...slackMessage("C900", "U001", c2bText), ts: y });
+    expect(await settled(u, "P", 8)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
+    await tick(u);
+    await expectNoNewSignal(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
+    // Team platform's own mention rule (C6) gives platform its own turn.
+    const c2bTurns = await queuedWith(u, "any errors left?");
+    expect(c2bTurns.filter((t) => t.threadId === tInc.threadId)).toHaveLength(1);
+    expect(await settled(u, "M-platform", 2)).toMatchObject({ status: "delivered" });
+    expect(c2bTurns).toHaveLength(2);
+
     // C7: the agent in t-inc cancels its waiter. P then delivers a channel
     // message to a new subject thread for the channel.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U001", "incident closed, stop watching"));
-    expect(await settled(u, "P", 8)).toMatchObject(skippedFor(tInc));
+    expect(await settled(u, "P", 9)).toMatchObject(skippedFor(tInc));
     await tick(u);
     await poll(() => p.engineStore.getWakeup(waiterId), (w) => w?.status !== "running", "the agent to cancel the waiter");
     expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "cancelled" });
     await postSlack(u, slackMessage("C900", "U001", "postmortem at 15:00"));
-    const c7 = await settled(u, "P", 9);
+    const c7 = await settled(u, "P", 10);
     expect(c7.status).toBe("delivered");
     const [channelThread] = await landings(u, c7.id);
     if (!channelThread) throw new Error("P's delivery landed nowhere");

@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { eq, sql } from "drizzle-orm";
-import type { ChannelOrigin } from "@valet/engine";
+import type { ChannelOrigin, ValetPlugin } from "@valet/engine";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -795,7 +795,7 @@ describe("EventDispatcher", () => {
     });
 
     /** A `slack.message` reply in Slack thread 1.2 by `user`, stamped to the follow binding's thread. */
-    async function dispatchFollowedReply(user: string, text: string) {
+    async function dispatchFollowedReply(user: string, text: string, plugins: ValetPlugin[] = []) {
       const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] };
       const { deliveryId } = await seedDelivery({
         target: { kind: "orchestrator" }, ownerType: "team", ownerId: "team-x", service: "slack",
@@ -807,7 +807,7 @@ describe("EventDispatcher", () => {
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
         resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.5" }),
-        slackBotUserId: async () => "U-BOT",
+        slackBotUserId: async () => "U-BOT", plugins,
       }).pollOnce();
       return { deliver, deliveryId };
     }
@@ -827,6 +827,25 @@ describe("EventDispatcher", () => {
       expect(deliver).not.toHaveBeenCalled();
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the followed thread delivers this reply." });
       expect(recordDestination.mock.calls).toEqual([["follow_routed"]]);
+    });
+
+    it("skips the message half of a mention that a rule of the owner delivers (C5, mention_covered)", async () => {
+      await seedFollowToInc();
+      const now = Date.now();
+      await tdb.appDb.insert(eventSubscriptions).values({
+        id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
+        target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+      });
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin]);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
+      expect(recordDestination.mock.calls).toEqual([["mention_covered"]]);
+    });
+
+    it("delivers the message half when no rule of the owner delivers the mention", async () => {
+      await seedFollowToInc();
+      const { deliver } = await dispatchFollowedReply("U9", "<@U-BOT> anyone?", [slackPlugin]);
+      expect(deliver).toHaveBeenCalledOnce();
     });
 
     it("delivers a followed reply that the follow router refuses (C3, unlinked sender)", async () => {

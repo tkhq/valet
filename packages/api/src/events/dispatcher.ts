@@ -36,7 +36,8 @@ import { definitionVersionId } from "../workflows/definition-version.js";
 import { findFollowedThread, repointFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
-import { allCatalogEntries } from "./ingest.js";
+import { allCatalogEntries, conversationalTwinOf } from "./ingest.js";
+import { mentionCoveredBy } from "./claims.js";
 import { followRouteFor } from "../channels/follow-router.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, type InboundChannelMessage } from "../services/channel-messages.js";
@@ -249,6 +250,12 @@ export async function recordSkippedDelivery(db: AppDb, args: {
     destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination),
     destinationStageMarker(args.deliveryId));
   if (recorded !== "exists") recordDestination("claim_skip");
+}
+
+/** Why another path owns a delivery, as its skip text and counter reason. */
+interface OwnedElsewhere {
+  text: string;
+  reason: "follow_routed" | "mention_covered";
 }
 
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
@@ -710,15 +717,19 @@ export class EventDispatcher {
 
   /**
    * Why another path owns a `slack.message` delivery that follows a follow
-   * binding, or null (spec Part C step 4). One post gives one turn: the
-   * follow router delivers the reply to the bound thread, so the rule skips
-   * it (`follow_routed`).
+   * binding, or null (spec Part C steps 4 and 8). One post gives one turn:
+   * - The follow router delivers the reply to the bound thread, so the
+   *   rule skips it (`follow_routed`).
+   * - The post addresses the bot, and an assistant rule of the owner
+   *   delivers its `app_mention` half (sender gate and team coverage
+   *   included), so the rule skips the message half (`mention_covered`).
+   *   The mention's stamp names the suppressed waiters for recovery.
    */
   private async ownedElsewhere(
     sub: typeof eventSubscriptions.$inferSelect,
     event: typeof events.$inferSelect,
     destination: Destination,
-  ): Promise<{ text: string; reason: "follow_routed" } | null> {
+  ): Promise<OwnedElsewhere | null> {
     if (event.eventKey !== "slack.message" || destination.kind === "skip" || destination.reason !== "conversation_follow") return null;
     const { db } = this.deps;
     const botUserId = await this.deps.slackBotUserId?.(event.orgId);
@@ -727,13 +738,21 @@ export class EventDispatcher {
     if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread) {
       return { text: "the followed thread delivers this reply", reason: "follow_routed" };
     }
-    return null;
+    const plugins = this.deps.plugins ?? [];
+    const twin = await conversationalTwinOf(plugins, { slackBotUserId: async () => botUserId }, event.orgId, event.service, normalizedEventFromRow(event));
+    if (twin?.key !== "slack.app_mention") return null;
+    const subs = await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, event.orgId),
+      eq(eventSubscriptions.ownerType, sub.ownerType), eq(eventSubscriptions.ownerId, sub.ownerId), eq(eventSubscriptions.enabled, true)));
+    const catalog = allCatalogEntries(plugins);
+    const covered = await mentionCoveredBy(db, subs, { type: sub.ownerType, id: sub.ownerId }, twin, catalog,
+      (rule, mention) => hasTeamCoverage(db, rule, { eventKey: mention.key, payload: mention.payload, subjects: mention.subjects ?? null }, catalog));
+    return covered ? { text: "the mention delivers this post", reason: "mention_covered" } : null;
   }
 
   /** Settles a delivery that another path owns: skipped, with its receipt stage and counter. */
   private async skipDelivery(
     args: { deliveryId: string; subscriptionId: string; attempts: number; orgId: string; eventId: string },
-    owned: { text: string; reason: "follow_routed" },
+    owned: OwnedElsewhere,
   ): Promise<void> {
     const { db } = this.deps;
     await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${owned.text}.`, attempts: args.attempts + 1 })
