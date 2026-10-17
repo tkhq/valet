@@ -19,7 +19,7 @@ const namesCache = new Map<string, { names: Map<string, string>; expiresAt: numb
  * Slack channel names through the Slack plugin's channel option resolver, with
  * the org's credential. No credential, or a provider error, leaves the ids.
  */
-function slackChannelNames(c: Context<AppEnv>): ChannelNames {
+export function slackChannelNames(c: Context<AppEnv>): ChannelNames {
   return async () => {
     const orgId = c.var.user.orgId;
     const cached = namesCache.get(orgId);
@@ -53,7 +53,7 @@ workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
 });
 
 /** Of a runtime's threads, the ones this request may see (`thread-access.ts`). */
-function threadsShownTo(c: Context<AppEnv>, owner: { type: string }): ThreadsShown {
+export function threadsShownTo(c: Context<AppEnv>, owner: { type: string }): ThreadsShown {
   return async (sessionId, threadIds) => new Set((await keepVisibleThreads(c, owner,
     threadIds.map((threadId) => ({ sessionId, threadId })))).map((row) => row.threadId));
 }

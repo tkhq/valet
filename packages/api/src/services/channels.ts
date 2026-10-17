@@ -34,7 +34,7 @@ interface Loaded {
 }
 
 /** The session of the workspace's runtime, or null before its first use. */
-async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Promise<string | null> {
+export async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Promise<string | null> {
   const [row] = await db.select({ sessionId: assistants.sessionId }).from(assistants)
     .where(and(eq(assistants.orgId, orgId), eq(assistants.ownerType, owner.type), eq(assistants.ownerId, owner.id),
       sql`${assistants.archivedAt} IS NULL`))
@@ -42,7 +42,8 @@ async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Pro
   return row?.sessionId ?? null;
 }
 
-function channelFilterIds(filters: unknown): { ids: string[]; labels: Map<string, string> } {
+/** The channel ids an exact `channel` filter names, and the names the filter carries. */
+export function channelFilterIds(filters: unknown): { ids: string[]; labels: Map<string, string> } {
   const ids: string[] = [];
   const labels = new Map<string, string>();
   if (!Array.isArray(filters)) return { ids, labels };

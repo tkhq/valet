@@ -90,7 +90,7 @@ const FEED_MAX_LIMIT = 100;
 /** The jsonb columns come back `unknown`; their shapes are owned by
  * `validateSubscriptionWrite` (`events/subscription-write.ts`), the one gate
  * in front of every write to this table. */
-function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSubscriptionWire {
+export function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSubscriptionWire {
   return {
     id: row.id,
     name: row.name,
@@ -118,7 +118,7 @@ function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSu
 
 /** `refs`/`actor` jsonb shapes are owned by the ingest writer
  * (`events/ingest.ts`), which only stores `NormalizedEvent` fields. */
-function rowToEventSummary(row: typeof events.$inferSelect): EventSummaryWire {
+export function rowToEventSummary(row: typeof events.$inferSelect): EventSummaryWire {
   return {
     id: row.id,
     service: row.service,

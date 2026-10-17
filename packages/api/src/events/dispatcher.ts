@@ -214,6 +214,12 @@ export function deliveryThreadPolicy(
   return { mode: "own" };
 }
 
+/** A stored event's natural subject from the plugin that owns its service, or null (spec Part D). */
+export function eventNaturalSubject(plugins: readonly ValetPlugin[], event: typeof events.$inferSelect): { subject: string; label: string } | null {
+  const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
+  return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
+}
+
 /** The stored event row as the plugin contract's `NormalizedEvent`, for `naturalSubject`. */
 function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEvent {
   const actor = event.actor;
@@ -689,8 +695,7 @@ export class EventDispatcher {
 
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */
   private naturalSubject(event: typeof events.$inferSelect): { subject: string; label: string } | null {
-    const plugin = (this.deps.plugins ?? []).find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
-    return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
+    return eventNaturalSubject(this.deps.plugins ?? [], event);
   }
 
   /**

@@ -1089,6 +1089,68 @@ export interface ChannelDetailResponse {
   messages: ChannelMessage[];
 }
 
+// ── Presence hub places (spec 2026-10-16: presence hub, Parts B and G) ──
+
+/** A service that has places. */
+export type PresencePlaceService = "slack" | "github" | "linear";
+
+/**
+ * One place a workspace is present in, keyed by its subject: a Slack channel
+ * (`slack:<team>/<channel>`), a repository (`github:<owner>/<repo>`), a pull
+ * request or issue (`github:<owner>/<repo>#<n>`), a Linear team
+ * (`linear:team/<KEY>`) or issue (`linear:<ID>`). A parent row holds the
+ * listeners that name no single place: `slack:<team>` (the Slack workspace),
+ * a repository, a Linear team, or `github:*` and `linear:*` for a listener
+ * that names no repository or team.
+ */
+export interface PresencePlaceWire {
+  subject: string;
+  /** `#incidents`, `acme/api#12`, `ENG-42`; a parent row reads `Across acme/api` or `Everywhere in Slack`. */
+  label: string;
+  service: PresencePlaceService;
+  /** The parent place's subject, or null for a top-level row. */
+  parent: string | null;
+  /** Listeners placed at this row. A listener that names no single place counts at its parent only. */
+  listenerCount: number;
+  /** Threads with a running event waiter on this place. */
+  activeThreadCount: number;
+  lastActivityAt: number | null;
+}
+
+/** `GET /api/presence/places?scope=<workspace>`. Rows are ordered Slack, GitHub, Linear, then newest activity first. */
+export interface ListPresencePlacesResponse {
+  places: PresencePlaceWire[];
+}
+
+/** `GET /api/presence/places/:subject?scope=<workspace>`. A parent row's thread lists include its child places' threads. */
+export interface PresencePlaceDetailResponse {
+  place: PresencePlaceWire;
+  /** The listeners placed at this row. */
+  listeners: EventSubscriptionWire[];
+  threads: {
+    /** Subject threads (`subject:<key>`) of this place and its child places. */
+    subject: ChannelConversation[];
+    /** Threads that follow a Slack thread in this place. */
+    following: ChannelConversation[];
+    /** Threads with a running event waiter on this place. */
+    active: ChannelConversation[];
+  };
+  /** Events from the last 30 days that reached this workspace's listeners, newest first. */
+  activity: EventSummaryWire[];
+}
+
+/** A listener or routine that delivers into a thread. */
+export interface ThreadFeederWire {
+  id: string;
+  name: string;
+}
+
+/** `GET /api/presence/feeders?sessionId=<id>&threadId=<id>`. */
+export interface ListThreadFeedersResponse {
+  listeners: ThreadFeederWire[];
+  routines: ThreadFeederWire[];
+}
+
 /** `GET /api/sessions/:id/threads/:threadId/channel-activity`. */
 export interface ThreadChannelActivity {
   /** Messages this thread sent to, and received from, its channel. */
