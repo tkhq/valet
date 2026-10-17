@@ -508,6 +508,11 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       });
       expect(createWfNoGrantRes.status).toBe(201);
       const wfNoGrant = (await createWfNoGrantRes.json()) as CreateWorkflowResponse;
+      // Human creation authorizes declared actions. Reset to exercise runtime gates.
+      const savedPermissionsNoGrant = await fetch(`${baseUrl}/api/workflows/${wfNoGrant.id}/permissions`, { headers: HEADERS });
+      expect(await savedPermissionsNoGrant.json()).toMatchObject({ nodes: [expect.objectContaining({ mode: "allow", provenance: "workflow_grant" })] });
+      expect((await fetch(`${baseUrl}/api/workflows/${wfNoGrant.id}/permissions/allow`, { method: "DELETE", headers: HEADERS })).status).toBe(200);
+
 
       const startNoGrantRes = await fetch(`${baseUrl}/api/workflows/${wfNoGrant.id}/runs`, {
         method: "POST",
@@ -581,6 +586,11 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       });
       expect(createWfGrantRes.status).toBe(201);
       const wfGrant = (await createWfGrantRes.json()) as CreateWorkflowResponse;
+      // Human creation authorizes declared actions. Reset to exercise runtime gates.
+      const savedPermissionsGrant = await fetch(`${baseUrl}/api/workflows/${wfGrant.id}/permissions`, { headers: HEADERS });
+      expect(await savedPermissionsGrant.json()).toMatchObject({ nodes: [expect.objectContaining({ mode: "allow", provenance: "workflow_grant" })] });
+      expect((await fetch(`${baseUrl}/api/workflows/${wfGrant.id}/permissions/allow`, { method: "DELETE", headers: HEADERS })).status).toBe(200);
+
 
       const startGrantRes = await fetch(`${baseUrl}/api/workflows/${wfGrant.id}/runs`, {
         method: "POST",

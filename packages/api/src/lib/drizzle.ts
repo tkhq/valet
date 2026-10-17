@@ -460,6 +460,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "granted_by" text NOT NULL, "created_at" bigint NOT NULL
 );` },
   { describe: "workflow grant lookup", probe: { kind: "index", index: "workflow_action_grants_workflow" }, sql: 'CREATE INDEX IF NOT EXISTS "workflow_action_grants_workflow" ON "workflow_action_grants" ("org_id", "workflow_id")' },
+  { describe: "workflow account grants", probe: { kind: "table", table: "workflow_account_grants" }, sql: `CREATE TABLE IF NOT EXISTS "workflow_account_grants" (
+  "org_id" text NOT NULL, "workflow_id" text NOT NULL, "team_id" text NOT NULL,
+  "service" text NOT NULL, "member_id" text NOT NULL, "share_generation" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "workflow_id", "team_id", "service", "member_id")
+)` },
+  { describe: "workflow account share lookup", probe: { kind: "index", index: "workflow_account_grants_share" }, sql: 'CREATE INDEX IF NOT EXISTS "workflow_account_grants_share" ON "workflow_account_grants" ("team_id", "service", "member_id")' },
   { describe: "workspace briefing cache", probe: { kind: "table", table: "workspace_briefing_cache" }, sql: `CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
     "org_id" text NOT NULL, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
     "version" text NOT NULL, "evidence_hash" text, "response" jsonb,

@@ -389,3 +389,69 @@ describe("workflow grant isolation", () => {
     expect(await preview.json()).toMatchObject({ nodes: expect.arrayContaining([expect.objectContaining({ nodeId: "ship", mode: "require_approval" })]) });
   });
 });
+
+
+describe("human workflow saves authorize declared actions", () => {
+  const definition = {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "ship", type: "tool", service: "widgets", action: "deploy", params: {} },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "ship" }, { from: "ship", to: "stop" }],
+  };
+
+  it.each([false, true])("grants personal or team workflow actions on creation (team=%s)", async (teamOwned) => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = teamOwned ? await createTeam(api.providers.db, { orgId: "local-org", name: "Save permissions", creatorUserId: "local-user" }) : undefined;
+    const response = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Saved automation", definition, teamId: team?.id }),
+    });
+    expect(response.status).toBe(201);
+    const saved = await response.json();
+    if (!saved || typeof saved !== "object" || !("id" in saved) || typeof saved.id !== "string") throw new Error("Missing workflow ID");
+    const permissions = await fetch(`${api.baseUrl}/api/workflows/${saved.id}/permissions`);
+    expect(await permissions.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "allow", provenance: "workflow_grant" })] });
+    const grants = await api.providers.db.select().from(workflowActionGrants);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ workflowId: saved.id, ownerId: team?.id ?? "local-user", grantedBy: "local-user" });
+    // The grant never quiets the same action in an unrelated workflow.
+    const other = await insertWorkflow(api, { definition });
+    const unrelated = await fetch(`${api.baseUrl}/api/workflows/${other}/permissions`);
+    expect(await unrelated.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "require_approval" })] });
+  });
+
+  it("authorizes a newly added action on a human save, but keeps explicit restrictions", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const id = await insertWorkflow(api, { definition });
+    await api.providers.db.insert(actionPolicies).values({
+      id: "save-org-gate", orgId: "local-org", principalType: "org", principalId: "local-org",
+      actionId: "widgets.purge", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const next = { ...definition, nodes: [...definition.nodes, { id: "purge", type: "tool", service: "widgets", action: "purge", params: {} }],
+      edges: [...definition.edges, { from: "trigger", to: "purge" }] };
+    const saved = await fetch(`${api.baseUrl}/api/workflows/${id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ definition: next }),
+    });
+    expect(saved.status).toBe(200);
+    const permissions = await fetch(`${api.baseUrl}/api/workflows/${id}/permissions`);
+    expect(await permissions.json()).toMatchObject({ nodes: expect.arrayContaining([
+      expect.objectContaining({ nodeId: "ship", mode: "allow" }),
+      expect.objectContaining({ nodeId: "purge", mode: "require_approval", provenance: "org_policy" }),
+    ]) });
+  });
+
+  it("does not let a non-admin team member grant action permission by saving", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Member save", creatorUserId: "local-user" });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const response = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST", headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ name: "Member workflow", definition, teamId: team.id }),
+    });
+    expect(response.status).toBe(201);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+});

@@ -3,6 +3,7 @@
  */
 import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
+import { saveWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { sameWorkflowSteps } from "./definition-version.js";
 import { credentials, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
@@ -70,6 +71,12 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
       ? (n.params as Record<string, unknown>)
       : undefined;
   return { nodeId, service: n.service, action: n.action, params };
+}
+
+/** Credential services referenced by direct and foreach tool steps, including dynamic tools. */
+export function workflowCredentialServices(deps: WorkflowServiceDeps, definition: unknown): string[] {
+  return [...new Set(toolNodeRefs(definition).map((ref) =>
+    deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))];
 }
 
 /** Predicts the policy resolution of every tool node for the stored owner.
@@ -156,9 +163,22 @@ export async function analyzeDefinitionPermissions(
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
+    // The invoker uses a member's shared account only after the team's own
+    // connection, an organization-provided one, and a team 1Password item,
+    // never for GitHub, and asks that member. The preview reads no vault, so
+    // the flag says the run may ask.
+    const credentialService = entry?.actionPlugin.credentialService ?? ref.service;
+    let sharedAccount = false;
+    if (teamId !== undefined && teamOwn !== undefined && !teamOwn.has(credentialService) && credentialService !== "github"
+      && !findCredentialDeclaration(entry ? [entry.plugin] : [], credentialService)?.requires?.orgCredential) {
+      if (!sharedServices.has(credentialService)) {
+        sharedServices.set(credentialService, (await membersSharing(deps.db, teamId, credentialService)).length > 0);
+      }
+      sharedAccount = sharedServices.get(credentialService) === true;
+    }
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
     if (!entry || !action) {
-      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" });
+      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown", ...(sharedAccount ? { sharedAccount: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
@@ -179,19 +199,6 @@ export async function analyzeDefinitionPermissions(
     // The mode reads templates literally, as the workflow grant does; the
     // flag says when a rule keys on a value the run renders.
     const runtimeParams = dependsOnTemplates(rows, { service: ref.service, actionId }, templatedPaths(ref.params));
-    // The invoker uses a member's shared account only after the team's own
-    // connection, an organization-provided one, and a team 1Password item,
-    // never for GitHub, and asks that member. The preview reads no vault, so
-    // the flag says the run may ask.
-    const credentialService = entry.actionPlugin.credentialService ?? ref.service;
-    let sharedAccount = false;
-    if (teamId !== undefined && teamOwn !== undefined && !teamOwn.has(credentialService) && credentialService !== "github"
-      && !findCredentialDeclaration([entry.plugin], credentialService)?.requires?.orgCredential) {
-      if (!sharedServices.has(credentialService)) {
-        sharedServices.set(credentialService, (await membersSharing(deps.db, teamId, credentialService)).length > 0);
-      }
-      sharedAccount = sharedServices.get(credentialService) === true;
-    }
     nodes.push({
       nodeId: ref.nodeId,
       service: ref.service,
@@ -223,8 +230,10 @@ export async function prepareWorkflowPermissions(
 ): Promise<AllowWorkflowPermissionsOutcome> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
-  if (!(await canGrantWorkflowPermissions(deps, owner, summary))) {
-    return { ok: false, badRequest: "Only the workflow owner or a team admin can manage its permissions." };
+  const ownAccountsOnly = actionIds?.length === 0 && summary.ownerType === "team"
+    && owner.humanAccountConsent === true && !owner.agentEditor && owner.principal?.type === "user";
+  if (!ownAccountsOnly && !(await canGrantWorkflowPermissions(deps, owner, summary))) {
+    return { ok: false, badRequest: "Only the workflow owner or a team admin can grant action permissions. To allow your accounts, choose Allow my shared accounts." };
   }
   const analysis = await analyzeDefinitionPermissions(deps, owner, summary);
 
@@ -281,10 +290,14 @@ export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, own
 }
 
 export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
-  const summary = await getWorkflowDefinition(deps, owner, workflowId);
-  if (!summary || !(await canGrantWorkflowPermissions(deps, owner, summary))) return false;
-  await revokeWorkflowGrants(deps.db, owner.orgId, workflowId);
-  return true;
+  return deps.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const scopedDeps = { ...deps, db: tx };
+    const summary = await getWorkflowDefinition(scopedDeps, owner, workflowId);
+    if (!summary || !(await canGrantWorkflowPermissions(scopedDeps, owner, summary))) return false;
+    await revokeWorkflowGrants(tx, owner.orgId, workflowId);
+    return true;
+  });
 }
 
 export async function persistWorkflowPermissions(db: AppQueryable, grants: (typeof workflowActionGrants.$inferInsert)[]) {
@@ -297,13 +310,20 @@ export async function allowWorkflowPermissions(deps: WorkflowServiceDeps, owner:
   // Lock the definition and compare the steps again, as an approval for the
   // whole workflow does: an edit that committed after the read above must not
   // keep grants for steps nobody reviewed. A later edit waits on this lock,
-  // and its revoke-after-write removes the grants.
+  // and revokes grants in the same transaction.
   const current = await deps.db.transaction(async (tx) => {
-    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} FOR UPDATE`) as {
+    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`) as {
       rows: Array<{ definition: unknown }>;
     };
     if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, prepared.definition)) return false;
     await persistWorkflowPermissions(tx, prepared.grants);
+    if (owner.humanAccountConsent && !owner.agentEditor && owner.principal?.type === "user") {
+      const summary = await getWorkflowDefinition({ ...deps, db: tx }, owner, workflowId);
+      if (summary?.ownerType === "team") await saveWorkflowAccountConsent(tx, {
+        orgId: owner.orgId, workflowId, teamId: summary.ownerId, userId: owner.userId,
+        services: workflowCredentialServices(deps, prepared.definition),
+      });
+    }
     return true;
   });
   return current ? prepared : { ok: false, badRequest: "This workflow's steps changed while you allowed them. Review the steps again, then allow them." };

@@ -51,6 +51,7 @@ let permissionsData: {
     riskLevel?: string;
     mode: "allow" | "require_approval" | "deny" | "unknown";
     provenance?: string;
+    sharedAccount?: true;
   }>;
 } = { nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
@@ -559,6 +560,26 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     permissionsData = { nodes: [] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
+  });
+
+  it("offers account consent when the tool action itself is already allowed", async () => {
+    permissionsData = { nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText(/accounts already shared with its team/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save workflow permissions" }));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
+  });
+
+  it("can review shared accounts separately from action grants", async () => {
+    workflowData.ownerType = "team";
+    workflowData.ownerId = "team-1";
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+      fireEvent.click(await screen.findByRole("button", { name: "Allow my shared accounts" }));
+      await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
+    } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
   });
 
   it("pre-approves through the dialog: lists the actions, confirms, closes", async () => {

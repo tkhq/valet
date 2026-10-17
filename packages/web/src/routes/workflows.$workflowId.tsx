@@ -308,10 +308,10 @@ function WorkflowEditorPane({
     if (open) { setBlockedActions([]); setReviewedActions(gatingActions); }
   }
 
-  async function handlePreapprove() {
+  async function handlePreapprove(accountsOnly = false) {
     let result;
     try {
-      result = await allowPermissions.mutateAsync(reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []));
+      result = await allowPermissions.mutateAsync(accountsOnly ? [] : reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []));
     } catch {
       // `allowPermissions.error` renders the message inside the dialog.
       return;
@@ -415,9 +415,10 @@ function WorkflowEditorPane({
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
+            <p>Saving authorizes the actions you can approve and your shared accounts for this workflow. Other members approve their own accounts.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
-              {gatingActions.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
               <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
             </div>
             {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
@@ -474,6 +475,7 @@ function WorkflowEditorPane({
           title="Pre-approve actions"
           description={
             "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
+            "Also allow this workflow to use your accounts already shared with its team. Other members approve their own accounts. " +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
@@ -489,6 +491,9 @@ function WorkflowEditorPane({
             <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
               Cancel
             </Button>
+            {ownerType === "team" && reviewedActions.length > 0 && <Button type="button" variant="secondary" disabled={allowPermissions.isPending} onClick={() => void handlePreapprove(true)}>
+              Allow my shared accounts
+            </Button>}
             <Button
               type="button"
               data-testid="preapprove-confirm"
@@ -497,6 +502,8 @@ function WorkflowEditorPane({
             >
               {allowPermissions.isPending
                 ? "Pre-approving…"
+                : reviewedActions.length === 0
+                  ? "Save workflow permissions"
                 : reviewedActions.length === 1
                   ? "Pre-approve 1 action"
                   : `Pre-approve ${reviewedActions.length} actions`}
