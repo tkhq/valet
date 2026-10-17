@@ -398,7 +398,7 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
   org's Slack workspace; with none, it answers 404 `That Slack channel has
   no workspace in its link. Pick the channel from the rail.`
 - **Event names come from a short-name table (Part C step 2).** The catalog
-  carries a description for each key, not a short label. A `label` field on
+  carries a description for each key and no short label. A `label` field on
   catalog entries would replace the table.
 - **R4 reads `a check completes` (acceptance P3).** The catalog has no
   filter on a check's conclusion, so the sentence cannot say `fails`.
