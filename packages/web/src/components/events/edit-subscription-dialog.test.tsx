@@ -19,6 +19,12 @@ vi.mock("~/api/events", () => ({
   ] }] }, isLoading: false, error: null }),
   usePatchEventSubscription: () => ({ mutate: patch, isPending: false }),
 }));
+// The thread picker reads the network; emit one fixed pick instead.
+vi.mock("~/components/presence/thread-picker", () => ({
+  ThreadPicker: ({ onPick }: { onPick: (p: { mode: "existing"; sessionId: string; threadId: string }, title: string) => void }) => (
+    <button type="button" onClick={() => onPick({ mode: "existing", sessionId: "s1", threadId: "t1" }, "Deploys")}>Pick Deploys</button>
+  ),
+}));
 const sub: EventSubscriptionWire = {
   id: "sub-1", name: "Replies", ownerType: "user", ownerId: "u1",
   eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "in", value: ["C1", "C2"], labels: ["#one", "#two"] }],
@@ -129,4 +135,47 @@ it("rejects an insecure avatar URL before sending a subscription edit", () => {
   save();
   expect(patch).not.toHaveBeenCalled();
   expect(screen.getAllByText(/Enter an HTTPS URL/).length).toBeGreaterThan(0);
+});
+
+describe("EditSubscriptionDialog Runs in", () => {
+  it("shows the effective policy of a rule with none stored and sends nothing when unchanged", () => {
+    const close = edit();
+    expect(screen.getByRole<HTMLInputElement>("radio", { name: "A new thread each time" }).checked).toBe(true);
+    expect(screen.getByRole("radio", { name: "One thread per channel" })).toBeTruthy();
+    save();
+    expect(patch).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith(false);
+  });
+
+  it("submits a changed policy", () => {
+    edit();
+    fireEvent.click(screen.getByRole("radio", { name: "This listener's thread" }));
+    save();
+    expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { thread: { mode: "own" } } });
+  });
+
+  it("submits a picked existing thread and refuses a save before the pick", () => {
+    edit();
+    fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
+    save();
+    expect(patch).not.toHaveBeenCalled();
+    expect(screen.getByText("Pick a thread for Runs in, or choose another option.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Pick Deploys" }));
+    save();
+    expect(patch.mock.calls[0][0]).toEqual({
+      id: "sub-1", body: { thread: { mode: "existing", sessionId: "s1", threadId: "t1" } },
+    });
+  });
+
+  it("reads a Slack message rule with no stored policy as a new thread, and an own pick as shared", () => {
+    edit({ ...sub, eventKeys: ["slack.message"], target: { kind: "orchestrator", orchestrator: "user" } });
+    expect(screen.getByRole<HTMLInputElement>("radio", { name: "A new thread each time" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: "This listener's thread" }));
+    expect(screen.getByText("Messages from several Slack conversations will share this thread.")).toBeTruthy();
+  });
+
+  it("offers no Runs in on a workflow target", () => {
+    edit({ ...sub, target: { kind: "workflow", workflowId: "wf_1" } });
+    expect(screen.queryByRole("group", { name: "Runs in" })).toBeNull();
+  });
 });
