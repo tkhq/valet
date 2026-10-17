@@ -387,7 +387,10 @@ Pass criterion: all steps, in one run, from a clean start.
   when it is not UTC.
 - **The routine page is a search param (Part D step 2).** One routine opens
   at `/presence/routines?routine=<id>` inside the Routines tab, not at its
-  own route.
+  own route. So an old routine proposal link,
+  `/workflows?tab=scheduled&review=<id>` (or `tab=triggers`), redirects
+  with `review` renamed to `routine`. Stored thread messages hold these
+  links, and Part A step 4's carried `review` would open the list instead.
 - **A preselected place's filter follows the events (Part B step 3).** The
   wizard pins the place's filter. An event without the filter's field drops
   it, and a later event with the field brings it back. A filter the reader
@@ -415,13 +418,14 @@ Pass criterion: all steps, in one run, from a clean start.
   every non-test file under `components/presence/`, every
   `routes/presence*.tsx`, and each reused dialog the hub opens:
   `workflows/trigger-dialog.tsx` and, under `events/`,
-  `edit-subscription-dialog.tsx`, `delivery-preferences.tsx`, `event-match-step.tsx`,
-  `automation-review.tsx`, and `automation-wizard.tsx`. It checks string literals, template text, and JSX
-  text. It skips imports, types, object keys, comparisons, `case` labels,
-  the values of code properties (`key`, `mode`, `kind`, `type`, `id`, `tab`,
-  `status`, `view`, `outcome`), non-copy JSX attributes (`className`, `to`,
-  `href`, `idPrefix`, and similar), and strings with no space that hold `.`, `_`, `:`,
-  `/`, `*`, `$`, or `-`. A line marked `// copy-lint: allow <word>`, or the
+  `edit-subscription-dialog.tsx`, `delivery-preferences.tsx`,
+  `event-match-step.tsx`, `automation-review.tsx`, and
+  `automation-wizard.tsx`. It checks string literals, template text, and
+  JSX text. It skips imports, types, object keys, comparisons, `case`
+  labels, the values of code properties (`key`, `mode`, `kind`, `type`,
+  `id`, `tab`, `status`, `view`, `outcome`), non-copy JSX attributes
+  (`className`, `to`, `href`, `idPrefix`, and similar), and strings with no
+  space that hold `.`, `_`, `:`, `/`, `*`, `$`, or `-`. A line marked `// copy-lint: allow <word>`, or the
   line after the marker, may use that word.
 - **Copy lint allowances.** The workflow editor
   (`routes/presence.workflows.$workflowId.tsx`) keeps the drawer state value

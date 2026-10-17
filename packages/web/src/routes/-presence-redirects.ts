@@ -7,7 +7,8 @@ import { redirect } from "@tanstack/react-router";
  * for at least one release, and this file is the one place that lists them.
  *
  * A row keeps every search param it does not consume, so `workspace`,
- * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged.
+ * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged. A
+ * Scheduled review link consumes `review` and sends it as `routine`.
  *
  * The file name starts with `-`, so the router does not publish it as a
  * route.
@@ -129,6 +130,16 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     mapParams: sameParams,
     mapSearch: (search) => search,
     example: { params: { eventId: "ev-1" }, search: {} },
+  },
+  {
+    from: "/workflows",
+    when: "a Scheduled review link (a stored routine proposal)",
+    matches: (search) => tabIs("scheduled", "triggers")(search) && text(search, "review") !== undefined,
+    to: "/presence/routines",
+    mapParams: noParams,
+    // The Routines tab opens one routine by `routine`, not `review`.
+    mapSearch: (search) => ({ ...without(search, "tab", "review"), routine: text(search, "review") }),
+    example: { params: {}, search: { tab: "scheduled", review: "sch-1" } },
   },
   {
     from: "/workflows",

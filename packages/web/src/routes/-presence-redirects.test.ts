@@ -96,12 +96,16 @@ describe("presence redirect table", () => {
     });
   });
 
-  it.each(["scheduled", "triggers"])("sends /workflows?tab=%s to Routines and keeps review", (tab) => {
-    expect(target("/workflows", {}, { tab, review: "sch-1" })).toEqual({
+  it.each(["scheduled", "triggers"])("sends a /workflows?tab=%s review link to that routine's page", (tab) => {
+    expect(target("/workflows", {}, { tab, review: "sch-1", workspace: "t1" })).toEqual({
       to: "/presence/routines",
       params: {},
-      search: { review: "sch-1" },
+      search: { routine: "sch-1", workspace: "t1" },
     });
+  });
+
+  it.each(["scheduled", "triggers"])("sends /workflows?tab=%s with no review to Routines", (tab) => {
+    expect(target("/workflows", {}, { tab })).toEqual({ to: "/presence/routines", params: {}, search: {} });
   });
 
   it("sends /workflows?tab=runs to the Runs tab", () => {
