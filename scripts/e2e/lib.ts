@@ -114,9 +114,10 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/openai-images.test.ts",
   // Wakeups acceptance runs keyless: a faux model and a scripted virtual sandbox.
   "src/integration/wakeups-acceptance.test.ts",
-  // Event wakeups and delivery threads acceptance run keyless: a faux model, the GitHub
-  // fixture, and a fetch stub for Slack and Linear.
+  // Event wakeups, claims, and delivery threads acceptance run keyless: a faux model,
+  // the GitHub fixture, and a fetch stub for Slack and Linear.
   "src/integration/event-wakeups.test.ts",
+  "src/integration/event-claims.test.ts",
   "src/integration/delivery-threads.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
