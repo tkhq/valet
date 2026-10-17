@@ -8,9 +8,9 @@ type AnnouncementDeps = Pick<Providers, "db" | "engineCredentials" | "onePasswor
 
 export const WORKFLOW_THREADS_ANNOUNCEMENT: ProductAnnouncement = {
   id: "workflow-run-threads-in-automations-v1",
-  title: "Workflow run threads moved to Automations",
-  body: "Open Automations to find workflow runs and their conversations. Your existing run history is still available.",
-  action: { label: "Open Automations", href: "/workflows" },
+  title: "Workflow run threads moved to Presence",
+  body: "Open Presence to find workflow runs and their conversations. Your existing run history is still available.",
+  action: { label: "Open Presence", href: "/presence/workflows" },
 };
 
 async function hasExistingWorkflowThread(deps: AnnouncementDeps, userId: string, orgId: string, activatedAt: number): Promise<boolean> {
