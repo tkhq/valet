@@ -11,6 +11,7 @@ import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
   useRevokeWorkflowPermissions,
+  useRevokeOwnWorkflowAccounts,
   useCopyWorkflow,
   useRunDetail,
   useStartRun,
@@ -188,6 +189,7 @@ function WorkflowEditorPane({
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
   const revokePermissions = useRevokeWorkflowPermissions(workflowId);
+  const revokeAccounts = useRevokeOwnWorkflowAccounts(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
   const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
@@ -208,6 +210,8 @@ function WorkflowEditorPane({
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
+  const [reviewedAccountConsent, setReviewedAccountConsent] = useState<GetWorkflowPermissionsResponse["accountConsent"]>();
+  const [reviewedDefinitionToken, setReviewedDefinitionToken] = useState<string | undefined>();
   const [reviewedActions, setReviewedActions] = useState<WorkflowNodePermissionWire[]>([]);
   // The last pre-approval's leftovers: gating actions an org policy keeps
   // gated, which only an org admin can change. Shown until the next attempt.
@@ -305,13 +309,22 @@ function WorkflowEditorPane({
     // Reopening starts a fresh attempt: drop the previous attempt's blocked
     // notice, or it reads as this attempt's result. Clearing on CLOSE would
     // never show the notice at all — a confirm sets it and then closes.
-    if (open) { setBlockedActions([]); setReviewedActions(gatingActions); }
+    if (open) {
+      setBlockedActions([]);
+      setReviewedActions(gatingActions);
+      setReviewedDefinitionToken(permissions?.definitionToken);
+      setReviewedAccountConsent(permissions?.accountConsent ? { ...permissions.accountConsent, services: [...permissions.accountConsent.services] } : undefined);
+    }
   }
 
-  async function handlePreapprove() {
+  async function handlePreapprove(accountsOnly = false) {
+    if (!reviewedDefinitionToken) return;
     let result;
     try {
-      result = await allowPermissions.mutateAsync(reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []));
+      result = await allowPermissions.mutateAsync({
+        actionIds: accountsOnly ? [] : reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []),
+        definitionToken: reviewedDefinitionToken,
+      });
     } catch {
       // `allowPermissions.error` renders the message inside the dialog.
       return;
@@ -415,11 +428,15 @@ function WorkflowEditorPane({
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
+            <p>Saving step changes authorizes the actions you can approve and your shared accounts for direct tool steps. Other members approve their own accounts.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
-              {gatingActions.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {ownerType === "team" && <Button size="sm" variant="ghost" disabled={revokeAccounts.isPending} onClick={() => revokeAccounts.mutate()}>Remove my account permission</Button>}
               <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
             </div>
+            {revokeAccounts.isSuccess && <p role="status">Your saved workflow account permission was removed. Existing run and team permissions still apply.</p>}
+            {revokeAccounts.error && <p role="alert">{revokeAccounts.error.message}</p>}
             {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
           </>}
         </div>
@@ -474,6 +491,7 @@ function WorkflowEditorPane({
           title="Pre-approve actions"
           description={
             "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
+            (reviewedAccountConsent ? "Also allow direct tool steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
@@ -485,25 +503,37 @@ function WorkflowEditorPane({
               </li>
             ))}
           </ul>
+          {reviewedAccountConsent && <section className="space-y-1 py-2">
+            <p className="text-sm font-medium">Accounts shared with {reviewedAccountConsent.teamName}</p>
+            <p className="text-xs text-muted">This workflow may use your shared accounts for these services in direct tool steps.</p>
+            <ul data-testid="preapprove-account-services" className="space-y-1 text-xs">
+              {reviewedAccountConsent.services.map(service => <li key={service} className="font-mono">{service}</li>)}
+            </ul>
+          </section>}
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
               Cancel
             </Button>
+            {reviewedAccountConsent && reviewedActions.length > 0 && <Button type="button" variant="secondary" disabled={allowPermissions.isPending || !reviewedDefinitionToken} onClick={() => void handlePreapprove(true)}>
+              Allow my shared accounts
+            </Button>}
             <Button
               type="button"
               data-testid="preapprove-confirm"
-              disabled={allowPermissions.isPending}
+              disabled={allowPermissions.isPending || !reviewedDefinitionToken}
               onClick={() => void handlePreapprove()}
             >
               {allowPermissions.isPending
                 ? "Pre-approving…"
+                : reviewedActions.length === 0
+                  ? "Save workflow permissions"
                 : reviewedActions.length === 1
                   ? "Pre-approve 1 action"
                   : `Pre-approve ${reviewedActions.length} actions`}
             </Button>
           </DialogFooter>
           {allowPermissions.error != null && (
-            <p className="text-xs text-danger-500">{allowPermissions.error.message}</p>
+            <p className="text-xs text-danger-500">{errorText(allowPermissions.error)}</p>
           )}
         </DialogContent>
       </Dialog>

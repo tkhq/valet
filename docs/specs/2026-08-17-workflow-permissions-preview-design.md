@@ -136,3 +136,51 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
   after the save (the detail invalidation refetches it).
 - `unknown` actions are excluded from both the badge and the bulk allow; a
   run that reaches one can still gate on its resolved risk level.
+
+
+## Human save authorization (2026-10-16)
+
+Human creation, personal copies, team copies, and template installation share the same transactional authorization helper. A browser save of step changes authorizes known direct tool actions for this workflow when the
+person owns it or administers its team. Layout-only and unchanged saves do not restore grants. Explicit organization, team, and personal
+restrictions remain authoritative. CLI, MCP, and API-key saves do not grant
+new permissions.
+
+An assistant save counts as the person's own save only when that person's
+signed-in prompt started the turn (`ToolContext.interactiveActor`). This covers
+`save_workflow`, `patch_workflow`, `update_model`, and `add_aggregate`. The
+grant uses that person's reach, not the assistant's team principal. Turns from
+events, signals, schedules, channel senders without a Valet account, workflow
+steps, and delegated child work grant nothing. A workflow they create needs one
+human permission review.
+
+For team workflows, a browser save also authorizes the saving person's accounts
+already shared with that team for the declared direct tool services, excluding GitHub. This includes
+services with dynamic tools and foreach tool bodies. `workflow_account_grants`
+binds consent to the organization, workflow, team, member, service, and current
+share generation. It does not grant team-wide account consent. Another member
+must approve their own account. Human review nodes remain explicit decisions.
+
+Saved workflow consent applies only to direct tool invocation contexts. Workflow agents and sandbox scripts keep their existing separate account approval paths.
+
+A run's account gate also offers the lender "Always allow for this workflow".
+It needs the lender's signed-in browser answer. It saves the same
+`workflow_account_grants` row for that one service, only while the run's steps
+match the saved definition. Otherwise it returns `stale_workflow` and grants
+nothing. "Always allow for this team" stays the wider choice.
+
+Borrowing checks the live run owner, actor, team membership, source account,
+share generation, and saved definition. A run with different steps cannot use
+this consent. Step edits retire all saved account consent. A human edit can
+renew only that person's consent. Agent and non-admin edits also revoke action
+grants, as before. Layout-only edits preserve grants.
+
+Definition saves, snapshots, revocation, and new grants commit together under
+the definition lock. The Review permissions action also authorizes the person's
+shared accounts, including when no action needs a policy grant. Reset saved
+permissions removes both kinds of grant. A member can also stop use of their own shared accounts without resetting action permissions or another member's consent. Existing workflows are not silently
+backfilled, and parked approval gates are not answered during deployment.
+
+The application schema repair adds the grant table and lookup index without
+deleting existing folders, workflows, credentials, or approval history.
+
+Permission review returns a definition token for the exact stored graph, ownership, and credential-service scope shown. The dialog displays the named team and complete direct-tool service scope, including allowed and dynamic actions, and keeps that scope and token while open. Confirmation checks it under the definition lock before saving action or account grants. Missing tokens fail closed; changed definitions return a conflict and require a fresh review.

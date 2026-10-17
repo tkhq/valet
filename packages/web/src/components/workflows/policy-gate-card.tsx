@@ -125,7 +125,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       )}
 
       {gate.approver && (
-        <p className="text-xs text-muted">{borrowScopeCopy}{gate.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs. Choose Stop sharing in Integrations to revoke it. Action approvals still apply." : ""}</p>
+        <p className="text-xs text-muted">{borrowScopeCopy} Always allow for this workflow covers its later runs until someone changes its steps.{gate.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs. Choose Stop sharing in Integrations to revoke it. Action approvals still apply." : ""}</p>
       )}
 
       {/* Note input */}
@@ -142,6 +142,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         {gate.approver ? (
           <>
           <Button size="sm" onClick={() => fireApprove("run")} disabled={busy}>Allow for this run</Button>
+          <Button size="sm" variant="secondary" onClick={() => fireApprove("workflow")} disabled={busy}>Always allow for this workflow</Button>
           {gate.approver.allowTeamConsent && <Button size="sm" variant="secondary" onClick={() => fireApprove("team_account")} disabled={busy}>Always allow for this team</Button>}
           </>
         ) : <>
@@ -204,7 +205,9 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         title={confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
         description={
           confirmation?.approved && gate.approver
-            ? borrowScopeCopy
+            ? confirmation.scope === "workflow"
+              ? `Valet can use your ${gate.serviceDisplayName || service || "shared"} account in later runs of this workflow until someone changes its steps or you stop sharing. Action approvals still apply.`
+              : borrowScopeCopy
             : confirmation?.scope === "workflow"
             ? `Allow ${serviceAction} for future runs of this workflow only, until its saved permissions are reset. Existing policy restrictions remain in effect.`
             : confirmation?.scope === "run"

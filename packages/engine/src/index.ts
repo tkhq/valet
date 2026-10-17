@@ -228,6 +228,8 @@ export {
   DecisionGateExpiredError,
   isDecisionGateWithdrawn,
   isDecisionGateExpired,
+  isUnattendedWorkflowRefusal,
+  UNATTENDED_WORKFLOW_DECISION,
   GATE_EXPIRY_DEFAULT_MS,
   deterministicGateId,
   findStickyTerminalGate,

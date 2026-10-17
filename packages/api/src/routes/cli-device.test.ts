@@ -291,7 +291,9 @@ describe("valet login device sign-in", () => {
     const created = await fetch(`${base}/api/workflows`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ name: "Deploy", definition: deployWorkflow("staging") }) });
     expect(created.status).toBe(201);
     const { id } = (await created.json()) as { id: string };
-    expect((await fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: "{}" })).status).toBe(200);
+    const permissionReview: unknown = await (await fetch(`${base}/api/workflows/${id}/permissions`, { headers: json(cookie, base) })).json();
+    if (!permissionReview || typeof permissionReview !== "object" || !("definitionToken" in permissionReview)) throw new Error("Missing reviewed definition token.");
+    expect((await fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ definitionToken: permissionReview.definitionToken }) })).status).toBe(200);
     const grants = () => testApi.providers.db.select().from(workflowActionGrants);
     expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
 

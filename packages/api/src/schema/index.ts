@@ -2862,6 +2862,20 @@ export const workflowActionGrants = pgTable("workflow_action_grants", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [index("workflow_action_grants_workflow").on(t.orgId, t.workflowId)]);
 
+/** A member's account consent for one workflow and the current share. */
+export const workflowAccountGrants = pgTable("workflow_account_grants", {
+  orgId: text("org_id").notNull(),
+  workflowId: text("workflow_id").notNull(),
+  teamId: text("team_id").notNull(),
+  service: text("service").notNull(),
+  memberId: text("member_id").notNull(),
+  shareGeneration: text("share_generation").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [
+  primaryKey({ columns: [t.orgId, t.workflowId, t.teamId, t.service, t.memberId] }),
+  index("workflow_account_grants_share").on(t.teamId, t.service, t.memberId),
+]);
+
 /** Verified Slack requests waiting for durable consumer delivery. Payloads are encrypted. */
 export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
   id: text("id").primaryKey(),

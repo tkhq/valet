@@ -72,7 +72,7 @@ import { workflowRunStepCosts } from "../workflows/step-cost.js";
 import { workflowRunModelChanges } from "../workflows/model-drift.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
-import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions, revokeOwnWorkflowAccounts } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -660,15 +660,22 @@ workflowsRouter.get("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/permissions", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
-  if (nodes === null) return c.json({ error: "workflow not found" }, 404);
-  const resp: GetWorkflowPermissionsResponse = { nodes };
+  const resp: GetWorkflowPermissionsResponse | null = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (resp === null) return c.json({ error: "workflow not found" }, 404);
   return c.json(resp);
 });
 
 workflowsRouter.delete("/:id/permissions/allow", async (c) => {
   const { deps, owner } = serviceCtx(c);
   if (!(await revokeWorkflowPermissions(deps, owner, c.req.param("id")))) return c.json({ error: "Workflow not found or permission management is not allowed." }, 404);
+  return c.json({ ok: true });
+});
+
+workflowsRouter.delete("/:id/permissions/accounts", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeOwnWorkflowAccounts(deps, owner, c.req.param("id")))) {
+    return c.json({ error: "Workflow not found or account consent cannot be changed here. Sign in and open a team workflow you can access." }, 404);
+  }
   return c.json({ ok: true });
 });
 
@@ -679,7 +686,7 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
   // and a bare array has no own `actionIds`, so it would silently take the
   // "omitted → pre-approve all" branch — a narrowing request must never
   // widen on a permissions-granting route.
-  let body: AllowWorkflowPermissionsRequest = {};
+  let body: Partial<AllowWorkflowPermissionsRequest> = {};
   try {
     const text = await c.req.text();
     if (text.length > 0) {
@@ -701,9 +708,12 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
     }
   }
 
-  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
+  if (typeof body.definitionToken !== "string" || !/^[a-f0-9]{64}$/.test(body.definitionToken)) {
+    return c.json({ error: "definitionToken must identify the reviewed workflow. Refresh the permissions review, then try again." }, 400);
+  }
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds, body.definitionToken);
   if (outcome === null) return c.json({ error: "workflow not found" }, 404);
-  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, outcome.stale ? 409 : 400);
 
   const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);

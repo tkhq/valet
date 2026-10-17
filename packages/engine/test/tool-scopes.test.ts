@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
-import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
-import { CONTINUATION_TOOL_SCOPE_KEY } from "@valet/shared";
+import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type DecisionResolution, type ToolDef } from "../src/index.js";
+import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
   it("persists a continuation ceiling per thread and replaces it for a new task", async () => {
@@ -120,5 +120,80 @@ describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
     await restored.thread().setToolFocus({ tools: ["bash"], actions: ["slack.*"] });
     expect(restored.thread().effectiveToolScope()).toEqual({ tools: [], actions: [] });
     faux.unregister();
+  });
+});
+
+describe("unattended workflow tasks", () => {
+  const askQuestion = builtinTools.find((tool) => tool.name === "ask_question");
+  /** Runs one turn whose tool asks for a decision. An attended turn only reports its flag. */
+  async function decide(provider: string, purpose: "workflow" | "orchestrator", opts: { metadata?: Record<string, unknown>; ask: boolean }) {
+    if (!askQuestion) throw new Error("ask_question missing");
+    const faux = registerFauxProvider({ provider });
+    const seen: { unattended?: boolean; resolution?: DecisionResolution; askText?: string } = {};
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const tools: ToolDef[] = [
+        { name: "needs_decision", description: "Needs a decision", parameters: Type.Object({}), execute: async (_args, ctx) => {
+          seen.unattended = ctx.unattendedWorkflow;
+          if (ctx.unattendedWorkflow) seen.resolution = await ctx.requestDecision({ type: "approval", title: "Send it?", resumeKey: "needs_decision" });
+          return { text: "checked" };
+        } },
+        { ...askQuestion, execute: async (args, ctx) => {
+          const result = await askQuestion.execute(args, ctx);
+          seen.askText = result.text;
+          return result;
+        } },
+      ];
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose, model: faux.getModel(), builtinTools: [], tools });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("needs_decision", {})], { stopReason: "toolUse" }),
+        ...(opts.ask ? [fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which channel?" })], { stopReason: "toolUse" })] : []),
+        fauxAssistantMessage("done"),
+      ]);
+      const receipt = await session.prompt("report", { metadata: opts.metadata ?? {} });
+      const result = await session.thread().awaitResult(receipt.queueItemId);
+      return { seen, outcome: result.outcome, gates: await store.listDecisionGates(session.id) };
+    } finally { faux.unregister(); }
+  }
+
+  it.each([
+    ["a workflow step session", "workflow", {}],
+    ["a workflow task in an assistant thread", "orchestrator", { [UNATTENDED_WORKFLOW_KEY]: true }],
+  ] as const)("refuses every decision in %s before a gate opens", async (label, purpose, metadata) => {
+    const { seen, outcome, gates } = await decide(`unattended-${purpose}`, purpose, { metadata, ask: true });
+    expect(outcome, label).toBe("completed");
+    expect(seen.unattended, label).toBe(true);
+    expect(seen.resolution, label).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
+    expect(seen.askText, label).toContain("this is an unattended workflow run");
+    expect(seen.askText, label).toContain("Say in the result what was missing");
+    // The refused approval is on record for the workflow; nothing is pending.
+    expect(gates.map((gate) => ({ status: gate.status, resolvedBy: gate.resolution?.resolvedBy, type: gate.type })), label)
+      .toEqual([{ status: "resolved", resolvedBy: UNATTENDED_WORKFLOW_DECISION, type: "approval" }]);
+  });
+
+  it("refuses tool discovery through a teammate's account without failing the step", async () => {
+    const faux = registerFauxProvider({ provider: "unattended-discovery" });
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      let refusal: DecisionResolution | undefined;
+      const tools: ToolDef[] = [{ name: "list_granola", description: "Lists tools", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        refusal = await ctx.requestDecision({ type: "approval", title: "Let a teammate use your Granola account?", resumeKey: "granola.__valet_discovery__:{}",
+          context: { tool_id: "granola.__valet_discovery__" } });
+        return { text: "listed" };
+      } }];
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose: "workflow", model: faux.getModel(), builtinTools: [], tools });
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("list_granola", {})], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+      const receipt = await session.prompt("roll up", {});
+      await session.thread().awaitResult(receipt.queueItemId);
+      expect(refusal).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
+      expect(await store.listDecisionGates(session.id)).toEqual([]);
+    } finally { faux.unregister(); }
+  });
+
+  it("leaves a person's own prompt in an assistant thread attended", async () => {
+    const { seen } = await decide("attended-orchestrator", "orchestrator", { ask: false });
+    expect(seen.unattended).toBeUndefined();
   });
 });
