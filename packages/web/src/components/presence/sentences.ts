@@ -251,8 +251,8 @@ function pinnedThread(threads: ThreadTitles, threadId: string): string {
   return title === undefined ? "the pinned thread" : `the ${title} thread`;
 }
 
-/** The `<do>` of a line (spec Part C step 2). */
-function presenceDoes(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): string {
+/** The `<do>` of a line (spec Part C step 2), such as `reply in a new thread`. */
+export function presenceDoes(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): string {
   const target = sub.target;
   if (target.kind === "workflow") {
     return `run ${workflowName(workflows, target.workflowId) ?? "a workflow"}`;

@@ -21,7 +21,7 @@ import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-p
  * Mount only while open: the form seeds from `sub` at mount, so mount time
  * must be open time (the same rule the wizard's header comment states).
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   EventSubscriptionCollisionsWire,
   EventSubscriptionWire,
@@ -60,6 +60,7 @@ export function EditSubscriptionDialog({
   targetLabel,
   review = false,
   replacesNote,
+  focus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -70,7 +71,11 @@ export function EditSubscriptionDialog({
   review?: boolean;
   /** The name of the subscription this proposal replaces, when it has one. */
   replacesNote?: string;
+  /** The field that takes focus when the dialog opens. `appearance` opens
+   * on Appears as, for a place page's overflow menu item of that name. */
+  focus?: "appearance";
 }) {
+  const appearanceRef = useRef<HTMLDivElement>(null);
   const catalogQ = useEventCatalog();
   const patch = usePatchEventSubscription();
   const services = catalogQ.data?.services ?? [];
@@ -184,6 +189,14 @@ export function EditSubscriptionDialog({
         title={`${review ? "Review" : "Edit"} ${sub.name}`}
         description={review ? (sub.enabled ? `${sub.name} is already on. Review its current configuration.` : "Review the saved proposal. It stays off until you turn it on.") : "Change what this matches. A save keeps its target."}
         className="max-w-lg"
+        onOpenAutoFocus={(event) => {
+          if (focus !== "appearance") return;
+          const input = appearanceRef.current?.querySelector("input");
+          if (!input) return;
+          event.preventDefault();
+          input.focus();
+          input.scrollIntoView?.({ block: "center" });
+        }}
       >
         <div className="space-y-4">
           <div className="grid gap-1">
@@ -244,7 +257,9 @@ export function EditSubscriptionDialog({
 
           {sub.ownerType === "user" && sub.target.kind === "assistant" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
 
-          <AppearanceSettings value={appearance} onChange={setAppearance} subscription disabled={patch.isPending} />
+          <div ref={appearanceRef}>
+            <AppearanceSettings value={appearance} onChange={setAppearance} subscription disabled={patch.isPending} />
+          </div>
 
           <AutomationReview follow={sub.target.kind === "assistant" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
             result={sub.target.kind === "assistant" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}

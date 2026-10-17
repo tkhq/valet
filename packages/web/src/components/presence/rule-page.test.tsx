@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * The listener page (docs/specs/2026-10-16-presence-hub-design.md Part C
- * steps 4 to 6; acceptance H7): the sentence, enable or disable, edit,
- * **Appears as**, the delivery list, this listener's receipts, the problem
- * badge with the picker inline, and the paused copy.
+ * One line of presence on its page (docs/specs/2026-10-16-presence-hub-design.md
+ * Part D; acceptance P7, P8): the place breadcrumb, the sentence as the
+ * title, the fact strip with Edit, enable or disable, the problem with the
+ * picker, the delivery list, this line's receipts for an administrator, and
+ * the paused copy.
  *
  * The api client is mocked at the transport, so the real query hooks run.
  */
@@ -49,6 +50,7 @@ vi.mock("~/api/client", async (importOriginal) => {
       listThreads: (sessionId: string, opts?: ListThreadsOpts) => listThreads(sessionId, opts),
       getThreadAddress: (id: string) => getThreadAddress(id),
       patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) => patchEventSubscription(id, body),
+      listPresencePlaces: async () => ({ places: [] }),
     },
   };
 });
@@ -169,24 +171,62 @@ describe("RulePage", () => {
     expect(screen.getByText("Editing Failed checks")).toBeTruthy();
   });
 
-  it("shows Appears as, with the default when the listener sets none", async () => {
-    listEventSubscriptions.mockResolvedValue({
-      subscriptions: [
-        listener({ id: "M", name: "Mentions", target: { kind: "assistant", appearance: { displayName: "SRE Bot" }, thread: { mode: "new" } } }),
-        listener({}),
-      ],
-    });
-    renderPage("M");
-    const appears = await screen.findByRole("region", { name: "Appears as" });
-    expect(within(appears).getByText("SRE Bot")).toBeTruthy();
-    expect(screen.getByText("When a check completes on acme/api, work in a new thread each time, as SRE Bot.")).toBeTruthy();
-  });
-
-  it("names Valet in Appears as when the listener sets no appearance", async () => {
+  it("shows the place breadcrumb, the sentence as the title, and the fact strip (P7)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    const appears = await screen.findByRole("region", { name: "Appears as" });
-    expect(within(appears).getByText("Valet")).toBeTruthy();
+    const title = await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform CI thread." });
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(crumbs.textContent).toBe("acme/api›Failed checks");
+    expect(within(crumbs).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github:acme/api");
+
+    const facts = screen.getByLabelText("Facts");
+    expect(title.compareDocumentPosition(facts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const pairs = [...facts.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+    expect(pairs).toEqual([
+      ["When", "Completed check"],
+      ["Do", "work in the Platform CI thread"],
+      ["Runs in", "The thread Platform CI"],
+      ["Appears as", "Valet"],
+    ]);
+  });
+
+  it("names the appearance in the fact strip and joins events by or", async () => {
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [listener({
+        id: "M", name: "Mentions",
+        eventKeys: ["github.check_run.completed", "github.pull_request_review.submitted"],
+        target: { kind: "assistant", appearance: { displayName: "SRE Bot" }, thread: { mode: "new" } },
+      })],
+    });
+    renderPage("M");
+    const facts = await screen.findByLabelText("Facts");
+    const value = (term: string) => [...facts.querySelectorAll("dt")].find((dt) => dt.textContent === term)?.nextElementSibling?.textContent;
+    expect(value("When")).toMatch(/ or /);
+    expect(value("Runs in")).toBe("A new thread each time");
+    expect(value("Appears as")).toBe("SRE Bot");
+  });
+
+  it("links a Slack channel line's breadcrumb to its channel", async () => {
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [listener({
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
+        target: { kind: "assistant", thread: { mode: "new" } },
+      })],
+    });
+    renderPage();
+    const link = await screen.findByRole("link", { name: "#incidents" });
+    expect(link.getAttribute("href")).toBe("/presence/places/slack:C900");
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("#incidents›Failed checks");
+  });
+
+  it("falls back to Presence in the breadcrumb for a line with no one place", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ filters: [] })] });
+    renderPage();
+    await screen.findByRole("heading", { level: 2, name: /^When a check completes on any repository/ });
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(crumbs.textContent).toBe("Presence›Failed checks");
+    expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
   });
 
   it("lists deliveries by reason: delivered to, claimed by, and the dead-letter text", async () => {
@@ -222,7 +262,10 @@ describe("RulePage", () => {
       nextCursor: null, lastReceiptAt: 1_000, retentionDays: 7,
     });
     renderPage();
-    const receipts = await screen.findByRole("region", { name: "Receipts" });
+    const summary = await screen.findByText("Receipts", { selector: "summary" });
+    const receipts = summary.closest("details");
+    if (receipts === null) throw new Error("Receipts is not a disclosure");
+    expect(receipts.open).toBe(false);
     expect(await within(receipts).findByText("Completed check · excluded by its filters")).toBeTruthy();
     // The last stage reads in words, not as its identifier.
     expect(within(receipts).getByText(/Presence matching: Excluded by filters/)).toBeTruthy();
@@ -230,20 +273,19 @@ describe("RulePage", () => {
     expect(listEventReceipts).toHaveBeenCalledWith({ subscriptionId: "R4", limit: 10 });
   });
 
-  it("tells a member that receipts are for administrators, and reads none", async () => {
+  it("shows a member no receipts, and reads none", async () => {
     orgRole = "member";
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    const receipts = await screen.findByRole("region", { name: "Receipts" });
-    expect(within(receipts).getByText("Receipts are available to organization administrators.")).toBeTruthy();
+    await screen.findByRole("switch", { name: "Turn off Failed checks" });
+    expect(screen.queryByText("Receipts")).toBeNull();
     expect(listEventReceipts).not.toHaveBeenCalled();
   });
 
-  it("shows the problem badge, the archived text, and the picker inline; a pick repins the listener (H7)", async () => {
+  it("shows the archived text and the picker; a pick repins the line (P7, P8)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ problem: PIN_TEXT })] });
     renderPage();
-    expect(await screen.findByText("Thread archived")).toBeTruthy();
-    const problem = screen.getByRole("region", { name: "Problem" });
+    const problem = await screen.findByRole("region", { name: "Problem" });
     expect(await within(problem).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", {

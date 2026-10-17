@@ -36,7 +36,7 @@ describe("PresenceDetailPage", () => {
     expect(within(crumbs).getByRole("link", { name: "Routines" }).getAttribute("href")).toBe("/presence/routines?workspace=t1");
     expect(within(crumbs).getByText("Morning summary").getAttribute("aria-current")).toBe("page");
     expect(within(crumbs).getAllByRole("link")).toHaveLength(1);
-    expect(screen.getByRole("heading", { level: 1, name: "Morning summary" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Morning summary" })).toBeTruthy();
     expect(screen.getByText("Every day at 9:00")).toBeTruthy();
     expect(screen.getByText("body")).toBeTruthy();
   });

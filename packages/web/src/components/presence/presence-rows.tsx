@@ -5,6 +5,7 @@
  */
 import { Link } from "@tanstack/react-router";
 import type { EventSubscriptionWire } from "@valet/api/wire";
+import type { AssistantThreadPolicy } from "@valet/shared";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
@@ -26,6 +27,48 @@ export function usePresenceSentence(
   const threads: ThreadTitles = { ...knownThreads, ...pinned };
   const workflowNames = workflows.data?.workflows ?? [];
   return (sub) => presenceSentence(sub, catalog.data?.catalog, workflowNames, threads);
+}
+
+/** Coverage copy for a personal line that a team line paused (Part C step 3). */
+export const PAUSED_BY_TEAM = "Paused: the team already listens for this.";
+
+/** True when a team line paused this personal line. */
+export function pausedByTeam(sub: EventSubscriptionWire): boolean {
+  return !sub.enabled && sub.target.kind === "assistant" && sub.target.overlapPausedAt !== undefined;
+}
+
+/** Mirrors the server's mutation gate for a personal line: only its owner
+ * changes it. The server checks a team or org line, and names the problem
+ * when it refuses. */
+export function lineReadOnly(sub: EventSubscriptionWire, meId: string | undefined): boolean {
+  return sub.ownerType === "user" && meId !== undefined && sub.ownerId !== meId;
+}
+
+/** The workspace key whose threads the picker lists: `user` or a team id.
+ * The org assistant has no thread list here. */
+export function lineWorkspace(sub: EventSubscriptionWire): string | undefined {
+  if (sub.ownerType === "user") return "user";
+  if (sub.ownerType === "team") return sub.ownerId;
+  return undefined;
+}
+
+/** The thread policy a line stores, for an assistant target. */
+export function storedPolicy(sub: EventSubscriptionWire): AssistantThreadPolicy | undefined {
+  return sub.target.kind === "assistant" ? sub.target.thread ?? undefined : undefined;
+}
+
+/** The title of a line's pinned thread, when it pins one and the title is known. */
+export function pinnedTitle(sub: EventSubscriptionWire, titles: ThreadTitles): string | undefined {
+  const pin = storedPolicy(sub);
+  return pin?.mode === "existing" ? titles[pin.threadId]?.title ?? undefined : undefined;
+}
+
+/** What a workflow target or an assistant target does, for the edit dialog's read-only line. */
+export function targetLabel(sub: EventSubscriptionWire, workflowName: string | undefined): string {
+  if (sub.target.kind === "workflow") return `Runs ${workflowName ?? "a workflow"}`;
+  if (sub.target.assistant === "org") return "The organization's assistant";
+  if (sub.target.assistant === "team") return "The team's assistant";
+  return "Your assistant";
 }
 
 /** A paused line says so beside its sentence. */

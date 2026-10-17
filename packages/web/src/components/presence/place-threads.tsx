@@ -1,6 +1,6 @@
 /**
  * The **Threads** section of a place page
- * (docs/specs/2026-10-16-presence-hub-design.md Part B step 3): the
+ * (docs/specs/2026-10-16-presence-hub-design.md Part C step 5): the
  * place's own threads (one per channel, pull request, or issue), the threads following a Slack thread here, and the threads
  * active here now. Each row links to the Valet thread, and to the provider
  * when the place has a link.
@@ -14,10 +14,19 @@ import { SERVICE_NAMES } from "./places";
 
 type PlaceThreadLists = PresencePlaceDetailResponse["threads"];
 
-/** The three lists, in order. The first names the place, such as `Threads for acme/api`. */
-function groups(label: string): readonly { key: keyof PlaceThreadLists; title: string }[] {
+/** The place's own threads, by service: one per pull request in a
+ * repository, one per issue in a Linear team. A Slack channel's own thread
+ * names the channel. */
+function subjectGroupTitle(service: PresencePlaceService, label: string): string {
+  if (service === "github") return "One thread per pull request";
+  if (service === "linear") return "One thread per issue";
+  return `Threads for ${label}`;
+}
+
+/** The three lists, in order. */
+function groups(service: PresencePlaceService, label: string): readonly { key: keyof PlaceThreadLists; title: string }[] {
   return [
-    { key: "subject", title: `Threads for ${label}` },
+    { key: "subject", title: subjectGroupTitle(service, label) },
     { key: "following", title: "Following" },
     { key: "active", title: "Active now" },
   ];
@@ -42,7 +51,7 @@ export function PlaceThreads({ threads, service, label }: {
       </div>
       {total === 0 && <EmptyRow className="py-1">No Valet thread works here yet.</EmptyRow>}
       <div className="space-y-4">
-        {groups(label).filter((group) => threads[group.key].length > 0).map((group) => (
+        {groups(service, label).filter((group) => threads[group.key].length > 0).map((group) => (
           <div key={group.key}>
             <h3 className="mb-2 text-sm font-medium text-ink">{group.title}</h3>
             <ul aria-label={group.title} className={cn(cardClass, "list-none divide-y divide-line")}>

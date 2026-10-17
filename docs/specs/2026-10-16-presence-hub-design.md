@@ -423,6 +423,17 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
   test files, and the `idPrefix` attribute.
 - **A routine page is read-only until it knows the viewer (Part E step 2).**
   Team and org routines are editable only by a member with access.
+- **The place page edits Appears as in the edit dialog (Part C step 6).**
+  The overflow menu item `Appears as` opens the existing edit dialog with
+  focus on its Appears as field. The section shows each line's name and
+  avatar with `Set by <name>`, and has no inline form.
+- **A Slack channel's own threads keep their title (Part C step 5).** The
+  subject group reads `One thread per pull request` on a repository and
+  `One thread per issue` on a Linear team. On a Slack channel it reads
+  `Threads for <channel>`.
+- **A workflow line has no Runs in fact (Part D step 1).** A workflow
+  target starts a run, not a thread, so its fact strip shows When, Do, and
+  Appears as.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, the routine

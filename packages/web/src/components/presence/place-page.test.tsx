@@ -1,34 +1,43 @@
 // @vitest-environment jsdom
 /**
- * The place page (docs/specs/2026-10-16-presence-hub-design.md Part B step 3;
- * acceptance H3, H4, H5): the five sections in order, the listener
- * sentences, **Add** opening the wizard on this place, and the threads.
+ * The place page (docs/specs/2026-10-16-presence-hub-design.md Part C;
+ * acceptance P3, P4, P5, P8): the sections in order, each line as a
+ * sentence with its switch, overflow menu, and inline problem, **Listen
+ * for…** opening the wizard on this place, and the threads.
  *
  * The api client is mocked at the transport, so the real query hooks run:
  * the page read carries the switcher's workspace as `scope`, and a pinned
  * thread's title comes from the thread list read.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   EventSubscriptionWire,
   ListThreadsResponse,
+  PatchEventSubscriptionRequest,
   PresencePlaceDetailResponse,
 } from "@valet/api/wire";
+import type { AssistantThreadPolicy } from "@valet/shared";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
-  Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children: ReactNode; className?: string }) => {
-    const href = Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to);
-    return <a href={href} className={className}>{children}</a>;
+  Link: ({ to, params, search, children, className }: {
+    to: string; params?: Record<string, string>; search?: Record<string, string>; children: ReactNode; className?: string;
+  }) => {
+    const path = Object.entries(params ?? {}).reduce((p, [key, value]) => p.replace(`$${key}`, value), to);
+    const query = new URLSearchParams(search ?? {}).toString();
+    return <a href={query ? `${path}?${query}` : path} className={className}>{children}</a>;
   },
 }));
 
 const getPresencePlace = vi.fn<(scope: string, subject: string) => Promise<PresencePlaceDetailResponse>>();
 type ListThreadsOpts = { threadId?: string; archived?: boolean };
 const listThreads = vi.fn<(sessionId: string, opts?: ListThreadsOpts) => Promise<ListThreadsResponse>>();
+const patchEventSubscription = vi.fn<(id: string, body: PatchEventSubscriptionRequest) => Promise<EventSubscriptionWire>>();
+const deleteEventSubscription = vi.fn<(id: string) => Promise<void>>();
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
   return {
@@ -37,6 +46,8 @@ vi.mock("~/api/client", async (importOriginal) => {
       ...actual.api,
       getPresencePlace: (scope: string, subject: string) => getPresencePlace(scope, subject),
       listThreads: (sessionId: string, opts?: ListThreadsOpts) => listThreads(sessionId, opts),
+      patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) => patchEventSubscription(id, body),
+      deleteEventSubscription: (id: string) => deleteEventSubscription(id),
     },
   };
 });
@@ -61,7 +72,33 @@ vi.mock("~/components/events/automation-wizard", () => ({
   },
 }));
 
+let meId = "u-001";
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: meId, orgId: "acme", orgRole: "member" } }),
+}));
+
+/** The dialog is its own suite's; here it records the line and the field it opened on. */
+vi.mock("~/components/events/edit-subscription-dialog", () => ({
+  EditSubscriptionDialog: ({ sub, focus }: { sub: EventSubscriptionWire; focus?: string }) => (
+    <p>Editing {sub.name}{focus ? ` at ${focus}` : ""}</p>
+  ),
+}));
+
+/** The picker lists real threads in its own suite; here one pick stands in. */
+vi.mock("./thread-picker", () => ({
+  ThreadPicker: ({ workspace, onPick }: {
+    workspace: string;
+    onPick: (policy: Extract<AssistantThreadPolicy, { mode: "existing" }>, title: string) => void;
+  }) => (
+    <button type="button" onClick={() => onPick({ mode: "existing", sessionId: "s-ws", threadId: "t-ops" }, "Platform Ops")}>
+      Pick Platform Ops from {workspace}
+    </button>
+  ),
+}));
+
 import { PlacePage } from "./place-page";
+
+const PIN_TEXT = "Pick another thread for this rule in Presence.";
 
 function listener(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {
@@ -148,53 +185,85 @@ beforeEach(() => {
   getPresencePlace.mockReset();
   listThreads.mockReset();
   wizardProps.mockReset();
+  patchEventSubscription.mockReset();
+  deleteEventSubscription.mockReset();
+  meId = "u-001";
+  patchEventSubscription.mockImplementation(async (id, body) => ({ ...R4, id, ...(body.enabled !== undefined ? { enabled: body.enabled } : {}) }));
+  deleteEventSubscription.mockResolvedValue(undefined);
   listThreads.mockResolvedValue({
     threads: [{ id: "t-ci", sessionId: "s-ws", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1 }],
   });
 });
+
+function sectionsInOrder(names: readonly string[]) {
+  const sections = names.map((name) => screen.getByRole("region", { name }));
+  for (let i = 1; i < sections.length; i++) {
+    expect(sections[i - 1]!.compareDocumentPosition(sections[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+  return sections;
+}
 
 describe("PlacePage", () => {
   it("titles the page by a neutral word, never the raw key, until the place loads or when it fails", async () => {
     let fail: (err: Error) => void = () => {};
     getPresencePlace.mockReturnValue(new Promise((_resolve, reject) => { fail = reject; }));
     renderPage("slack:T1/C900");
-    expect(screen.getByRole("heading", { level: 1, name: "Loading…" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Loading…" })).toBeTruthy();
     expect(screen.queryByText("slack:T1/C900")).toBeNull();
     fail(new Error("boom"));
-    expect(await screen.findByRole("heading", { level: 1, name: "Not available" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "Not available" })).toBeTruthy();
     expect(screen.queryByText("slack:T1/C900")).toBeNull();
   });
 
-  it("shows the header, Listeners, Threads, and Recent activity in order (H3)", async () => {
+  it("shows the header, Valet here, Threads, and Recent activity in order (P3)", async () => {
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
-    const heading = await screen.findByRole("heading", { level: 1, name: "acme/api" });
+    const heading = await screen.findByRole("heading", { level: 2, name: "acme/api" });
     expect(getPresencePlace).toHaveBeenCalledWith("user", "github:acme/api");
-    expect(screen.getByText("GitHub · Across acme/api")).toBeTruthy();
+    // The subtitle is the service alone.
+    expect(screen.getByText("GitHub")).toBeTruthy();
+    expect(screen.queryByText(/Across acme\/api/)).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("Presence›acme/api");
 
-    const listeners = screen.getByRole("region", { name: "Valet here" });
-    expect(within(listeners).getByText(
-      "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
-    )).toBeTruthy();
-    expect(await within(listeners).findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
+    const [here, threadsSection, activity] = sectionsInOrder(["Valet here", "Threads", "Recent activity"]);
+    expect(heading.compareDocumentPosition(here!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(here!).getByRole("link", {
+      name: "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
+    }).getAttribute("href")).toBe("/presence/rules/R1");
+    expect(await within(here!).findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
 
-    const threads = screen.getByRole("list", { name: "Threads for acme/api" });
-    expect(within(threads).getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/threads/t-12");
-    expect(within(threads).getByRole("link", { name: "acme/api#13" })).toBeTruthy();
+    const subjectThreads = within(threadsSection!).getByRole("list", { name: "One thread per pull request" });
+    expect(within(subjectThreads).getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/threads/t-12");
+    expect(within(subjectThreads).getByRole("link", { name: "acme/api#13" })).toBeTruthy();
 
-    const activity = screen.getByRole("region", { name: "Recent activity" });
-    expect(within(activity).getByRole("link", { name: "Completed check in acme/api" }).getAttribute("href")).toBe("/presence/events/ev-1");
+    expect(within(activity!).getByRole("link", { name: "Completed check in acme/api" }).getAttribute("href")).toBe("/presence/events/ev-1");
+    expect(within(activity!).getByRole("link", { name: "View all" }).getAttribute("href")).toBe("/presence/activity?q=acme%2Fapi");
 
-    // No listener here sets an appearance, so that section is absent.
+    // No line here sets an appearance, so that section is absent.
     expect(screen.queryByRole("region", { name: "Appears as" })).toBeNull();
-    const order = [heading, listeners, screen.getByRole("region", { name: "Threads" }), activity];
-    for (let i = 1; i < order.length; i++) {
-      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    }
   });
 
-  it("names an archived pinned thread, as the listener page does", async () => {
+  it("names a Linear team's subject threads by issue", async () => {
+    getPresencePlace.mockResolvedValue({
+      ...ACME_API,
+      place: { ...ACME_API.place, subject: "linear:team/ENG", label: "ENG", service: "linear" },
+      listeners: [],
+      threads: { subject: [conversation("t-42", "ENG-42")], following: [], active: [] },
+    });
+    renderPage("linear:team/ENG");
+    expect(await screen.findByRole("list", { name: "One thread per issue" })).toBeTruthy();
+  });
+
+  it("shows ten activity rows at most", async () => {
+    const events = Array.from({ length: 12 }, (_, i) => ({ ...ACME_API.activity[0]!, id: `ev-${i}` }));
+    getPresencePlace.mockResolvedValue({ ...ACME_API, activity: events });
+    renderPage("github:acme/api");
+    const activity = await screen.findByRole("region", { name: "Recent activity" });
+    expect(within(activity).getAllByRole("link", { name: "Completed check in acme/api" })).toHaveLength(10);
+  });
+
+  it("names an archived pinned thread, as the line's page does", async () => {
     // The open list leaves the archived thread out; the archived list has it.
     listThreads.mockImplementation(async (_sessionId, opts) => ({
       threads: opts?.archived
@@ -203,29 +272,24 @@ describe("PlacePage", () => {
     }));
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
-    const listeners = await screen.findByRole("region", { name: "Valet here" });
-    expect(await within(listeners).findByText("When a check completes on acme/api, work in the Old CI thread.")).toBeTruthy();
+    const here = await screen.findByRole("region", { name: "Valet here" });
+    expect(await within(here).findByText("When a check completes on acme/api, work in the Old CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
 
-  it("reads the team workspace's place, with Appears as, Following, and Active now in order (H4)", async () => {
+  it("reads the team workspace's place, with Threads, Appears as, and Recent activity in order (P4)", async () => {
     scopeTeamId = "sre";
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
-    await screen.findByRole("heading", { level: 1, name: "#incidents" });
+    await screen.findByRole("heading", { level: 2, name: "#incidents" });
     expect(getPresencePlace).toHaveBeenCalledWith("sre", "slack:T1/C900");
 
-    const sections = ["Valet here", "Appears as", "Threads", "Recent activity"].map((name) => screen.getByRole("region", { name }));
-    for (let i = 1; i < sections.length; i++) {
-      expect(sections[i - 1]!.compareDocumentPosition(sections[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    }
-    const listeners = within(sections[0]!);
-    expect(listeners.getByText("When someone mentions Valet in #incidents, reply in a new thread, as SRE Bot.")).toBeTruthy();
-    expect(listeners.getByText("When someone posts a message in #incidents, work in the t-inc thread.")).toBeTruthy();
+    const [here, , appearsAs] = sectionsInOrder(["Valet here", "Threads", "Appears as", "Recent activity"]);
+    expect(within(here!).getByText("When someone mentions Valet in #incidents, reply in a new thread, as SRE Bot.")).toBeTruthy();
+    expect(within(here!).getByText("When someone posts a message in #incidents, work in the t-inc thread.")).toBeTruthy();
 
-    const appears = within(sections[1]!);
-    expect(appears.getByText("SRE Bot")).toBeTruthy();
-    expect(appears.getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/rules/M");
+    expect(within(appearsAs!).getByText("SRE Bot")).toBeTruthy();
+    expect(within(appearsAs!).getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/rules/M");
 
     expect(within(screen.getByRole("list", { name: "Active now" })).getByRole("link", { name: "t-inc" }).getAttribute("href")).toBe("/threads/t-inc");
     const following = within(screen.getByRole("list", { name: "Following" }));
@@ -233,10 +297,10 @@ describe("PlacePage", () => {
     expect(following.getByRole("link", { name: /Slack thread/ }).getAttribute("href")).toBe("https://acme.slack.com/archives/C900/p1");
   });
 
-  it("opens the wizard on this place from Add (H5)", async () => {
+  it("opens the wizard on this place from Listen for… (P5)", async () => {
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
-    fireEvent.click(await screen.findByRole("button", { name: "Listen for… in #incidents" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Listen for…" }));
     expect(screen.getByText("Wizard for #incidents")).toBeTruthy();
     expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
       open: true,
@@ -244,7 +308,88 @@ describe("PlacePage", () => {
     }));
   });
 
-  it("says when nothing listens or works here", async () => {
+  it("turns a line off and on from its switch", async () => {
+    getPresencePlace.mockResolvedValue({ ...ACME_API, listeners: [R4, { ...R1, enabled: false }] });
+    renderPage("github:acme/api");
+    fireEvent.click(await screen.findByRole("switch", { name: "Turn off Failed checks" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", { enabled: false }));
+    fireEvent.click(screen.getByRole("switch", { name: "Turn on R1" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R1", { enabled: true }));
+  });
+
+  it("offers Edit, Appears as, and Delete in a line's overflow menu", async () => {
+    const user = userEvent.setup();
+    getPresencePlace.mockResolvedValue(ACME_API);
+    renderPage("github:acme/api");
+
+    await user.click(await screen.findByRole("button", { name: "More for Failed checks" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(screen.getByText("Editing Failed checks")).toBeTruthy();
+  });
+
+  it("opens the edit dialog on its appearance field from Appears as", async () => {
+    const user = userEvent.setup();
+    getPresencePlace.mockResolvedValue(ACME_API);
+    renderPage("github:acme/api");
+
+    await user.click(await screen.findByRole("button", { name: "More for Failed checks" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Appears as" }));
+    expect(screen.getByText("Editing Failed checks at appearance")).toBeTruthy();
+  });
+
+  it("asks before Delete, then deletes the line", async () => {
+    const user = userEvent.setup();
+    getPresencePlace.mockResolvedValue(ACME_API);
+    renderPage("github:acme/api");
+
+    await user.click(await screen.findByRole("button", { name: "More for Failed checks" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete \"Failed checks\"?" });
+    expect(within(dialog).getByText("Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
+    expect(deleteEventSubscription).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("R4"));
+  });
+
+  it("shows a line's problem inline with the picker; a pick repins the line (P3, P8)", async () => {
+    getPresencePlace.mockResolvedValue({ ...ACME_API, listeners: [R1, { ...R4, problem: PIN_TEXT }] });
+    renderPage("github:acme/api");
+    const here = await screen.findByRole("region", { name: "Valet here" });
+    const problem = within(here).getByRole("group", { name: "Problem" });
+    expect(await within(problem).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", {
+      thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" },
+    }));
+  });
+
+  it("says a team line paused this personal line", async () => {
+    getPresencePlace.mockResolvedValue({
+      ...ACME_API,
+      listeners: [{ ...R1, enabled: false, target: { kind: "assistant", thread: { mode: "subject" }, overlapPausedAt: 5 } }],
+    });
+    renderPage("github:acme/api");
+    const here = await screen.findByRole("region", { name: "Valet here" });
+    expect(within(here).getByRole("status").textContent).toBe("Paused: the team already listens for this.");
+  });
+
+  it("hides the picker and disables the controls on another member's personal line", async () => {
+    const user = userEvent.setup();
+    meId = "u-002";
+    getPresencePlace.mockResolvedValue({ ...ACME_API, listeners: [{ ...R4, problem: PIN_TEXT }] });
+    renderPage("github:acme/api");
+    const here = await screen.findByRole("region", { name: "Valet here" });
+    expect(await within(here).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    expect(within(here).queryByRole("button", { name: /^Pick / })).toBeNull();
+    expect(within(here).getByText("Only its owner can change this.")).toBeTruthy();
+    expect(within(here).getByRole("switch", { name: "Turn off Failed checks" })).toHaveProperty("disabled", true);
+    await user.click(within(here).getByRole("button", { name: "More for Failed checks" }));
+    for (const name of ["Edit", "Appears as", "Delete"]) {
+      expect((await screen.findByRole("menuitem", { name })).getAttribute("aria-disabled")).toBe("true");
+    }
+  });
+
+  it("says when nothing is set up or works here", async () => {
     getPresencePlace.mockResolvedValue({
       ...ACME_API,
       place: { ...ACME_API.place, listenerCount: 0, scopeLabel: undefined },
@@ -253,10 +398,11 @@ describe("PlacePage", () => {
       activity: [],
     });
     renderPage("github:acme/api");
-    expect(await screen.findByText("Nothing is set up here yet. Select Listen for… to add something.")).toBeTruthy();
+    const here = await screen.findByRole("region", { name: "Valet here" });
+    expect(within(here).getByText("Nothing is set up here yet.")).toBeTruthy();
+    expect(within(here).getByRole("button", { name: "Listen for…" })).toBeTruthy();
     expect(screen.getByText("No Valet thread works here yet.")).toBeTruthy();
     expect(screen.getByText("Nothing happened here in the last 30 days.")).toBeTruthy();
-    expect(screen.getByText("GitHub")).toBeTruthy();
   });
 
   it("shows the server's refusal when the read fails", async () => {

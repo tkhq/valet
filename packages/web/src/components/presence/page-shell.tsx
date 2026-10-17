@@ -11,7 +11,8 @@ export interface PresenceCrumb {
 }
 
 /**
- * A Presence detail page in the pane: a breadcrumb, a title, an optional
+ * A Presence detail page in the pane: a breadcrumb, a title (an `h2` under
+ * the section shell's `Presence` heading), an optional
  * line under the title, and a body. The section shell owns the page frame
  * and the rail (docs/specs/2026-10-16-presence-hub-design.md Part A step 6).
  */
@@ -29,7 +30,7 @@ export function PresenceDetailPage({
   return (
     <div className="min-w-0">
       <Breadcrumb crumbs={crumbs} />
-      <h1 className="mt-2 break-words font-display text-2xl text-ink">{title}</h1>
+      <h2 className="mt-2 break-words font-display text-2xl text-ink">{title}</h2>
       {subtitle !== undefined && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
       <div className="mt-6">{children}</div>
     </div>

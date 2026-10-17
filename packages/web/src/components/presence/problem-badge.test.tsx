@@ -48,4 +48,14 @@ describe("ThreadProblem", () => {
     expect(screen.getByText("Select Edit, then choose another option under Runs in.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
   });
+
+  it("draws a box by default and none inline under a row", () => {
+    const { rerender } = render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace="user" onPick={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "Problem" }).className).toMatch(/border/);
+    rerender(<ThreadProblem problem={PIN_UNAVAILABLE} workspace="user" onPick={vi.fn()} variant="inline" />);
+    const inline = screen.getByRole("group", { name: "Problem" });
+    expect(inline.className).not.toMatch(/border/);
+    expect(inline.className).toMatch(/mt-2/);
+    expect(screen.getByRole("button", { name: "Pick" })).toBeTruthy();
+  });
 });

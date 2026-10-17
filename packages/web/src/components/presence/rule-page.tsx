@@ -1,15 +1,16 @@
 /**
  * One line of presence on its own page (docs/specs/2026-10-16-presence-hub-design.md
- * Part D): the sentence, enable or disable, edit (the existing dialog, where
- * **Runs in** is editable), **Appears as**, the delivery list, and this
- * line's receipts. A line whose pinned thread no longer accepts deliveries
- * shows its problem with the thread picker inline.
+ * Part D): a breadcrumb to its place, the sentence as the title, a fact
+ * strip (When, Do, Runs in, Appears as) with **Edit** (the existing dialog,
+ * where **Runs in** is editable), enable or disable, the problem with the
+ * thread picker, the delivery list, and, for an administrator, this line's
+ * receipts under a disclosure.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { EventReceiptWire, EventSubscriptionWire, ReceiptSubscriptionDecision } from "@valet/api/wire";
-import type { AssistantThreadPolicy } from "@valet/shared";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
+import { placeOfSubject, usePlaceSubject } from "~/api/presence";
 import {
   useRuleDeliveries,
   useRuleReceipts,
@@ -21,53 +22,74 @@ import { DeliveryList } from "~/components/events/delivery-list";
 import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import { receiptLabel } from "~/components/events/receipts-panel";
 import {
-  Avatar, AvatarFallback, AvatarImage, Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection, cardClass,
+  Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkList, cardClass,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
-import { PresenceDetailPage } from "./page-shell";
-import { ProblemBadge, ThreadProblem } from "./problem-badge";
-import { eventInWords, presenceSentence } from "./sentences";
+import { PresenceDetailPage, type PresenceCrumb } from "./page-shell";
+import { ThreadProblem } from "./problem-badge";
+import {
+  PAUSED_BY_TEAM, lineReadOnly, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel,
+} from "./presence-rows";
+import { eventInWords, presenceDoes, presenceSentence, runsInLabel, type ThreadTitles } from "./sentences";
+import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
 
-/** Coverage copy for a personal line that a team line paused (Part C step 3). */
-export const PAUSED_BY_TEAM = "Paused: the team already listens for this.";
+/** The one place a line names in its filters, as a crumb label and a place
+ * key. Null when no filter names exactly one place. A Slack channel filter
+ * carries no Slack workspace id, so its key is `slack:<channel>`, and the
+ * places list resolves it (`usePlaceSubject`). */
+export function linePlace(sub: EventSubscriptionWire): { label: string; key: string } | null {
+  for (const field of ["channel", "repo", "team"] as const) {
+    const filter = sub.filters.find((f) => f.field === field && f.op === "eq");
+    if (filter === undefined || typeof filter.value !== "string" || filter.value.length === 0) continue;
+    const value = filter.value;
+    if (field === "channel") {
+      return { label: filter.label?.trim() || `#${value}`, key: `slack:${value}` };
+    }
+    const key = field === "repo" ? placeOfSubject(`github:${value}`) : placeOfSubject(`linear:team/${value}`);
+    return key === null ? null : { label: value, key };
+  }
+  return null;
+}
 
 export function RulePage({ id }: { id: string }) {
   const subsQ = useEventSubscriptions();
   const sub = subsQ.data?.subscriptions.find((s) => s.id === id);
-  const title = sub?.name ?? "Presence";
+  if (sub !== undefined) return <RuleBody sub={sub} />;
+  const title = subsQ.isPending ? "Loading…" : "Not available";
   return (
     <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title}>
       {subsQ.isPending && <LoadingRow />}
       {subsQ.isError && (
         <ErrorRow>{errorText(subsQ.error, "Could not load this page. Reload the page to try again.")}</ErrorRow>
       )}
-      {subsQ.isSuccess && sub === undefined && (
+      {subsQ.isSuccess && (
         <EmptyRow>This page does not exist, or you cannot see it. Pick a place from the rail.</EmptyRow>
       )}
-      {sub !== undefined && <RuleBody sub={sub} />}
     </PresenceDetailPage>
   );
 }
 
-/** The workspace key whose threads the picker lists: `user` or a team id.
- * The org assistant has no thread list here. */
-function workspaceOf(sub: EventSubscriptionWire): string | undefined {
-  if (sub.ownerType === "user") return "user";
-  if (sub.ownerType === "team") return sub.ownerId;
-  return undefined;
-}
-
-function storedPolicy(sub: EventSubscriptionWire): AssistantThreadPolicy | undefined {
-  return sub.target.kind === "assistant" ? sub.target.thread ?? undefined : undefined;
-}
-
-/** What a workflow target or an assistant target does, for the edit dialog's read-only line. */
-function targetLabel(sub: EventSubscriptionWire, workflowName: string | undefined): string {
-  if (sub.target.kind === "workflow") return `Runs ${workflowName ?? "a workflow"}`;
-  if (sub.target.assistant === "org") return "The organization's assistant";
-  if (sub.target.assistant === "team") return "The team's assistant";
-  return "Your assistant";
+/** The fact strip's values (spec Part D step 1). */
+function lineFacts(
+  sub: EventSubscriptionWire,
+  workflows: ReadonlyArray<{ id: string; name: string }>,
+  threads: ThreadTitles,
+): readonly { term: string; value: string }[] {
+  const facts = [
+    { term: "When", value: sub.eventKeys.map((key) => eventInWords(key)).join(" or ") },
+    { term: "Do", value: presenceDoes(sub, workflows, threads) },
+  ];
+  // A workflow target starts a run, not a thread, so it has no Runs in.
+  if (sub.target.kind === "assistant") {
+    const policy = displayThreadPolicy(sub.target, sub.eventKeys);
+    facts.push({
+      term: "Runs in",
+      value: runsInLabel(policy, subjectKindForKeys(sub.eventKeys), "presence", pinnedTitle(sub, threads)),
+    });
+  }
+  facts.push({ term: "Appears as", value: sub.target.appearance?.displayName?.trim() || "Valet" });
+  return facts;
 }
 
 function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
@@ -75,21 +97,20 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   const workflows = useWorkflows();
   const me = useMe();
   const patch = usePatchEventSubscription();
-  const pinTitle = usePinnedThreadTitle(storedPolicy(sub));
+  const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
+  const place = linePlace(sub);
+  const placeKey = usePlaceSubject(place?.key ?? "");
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const workflowNames = workflows.data?.workflows ?? [];
-  const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitle);
-  const pin = storedPolicy(sub);
-  const pinThreadTitle = pin?.mode === "existing" ? pinTitle[pin.threadId]?.title ?? undefined : undefined;
-  const workspace = workspaceOf(sub);
-  const pausedByTeam = !sub.enabled && sub.target.kind === "assistant" && sub.target.overlapPausedAt !== undefined;
-  // Mirrors the server's mutation gate for a personal rule. A team or org
-  // rule is checked by the server, which names the problem when it refuses.
-  const readOnly = sub.ownerType === "user" && me.data !== undefined && sub.ownerId !== me.data.id;
+  const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitles);
+  const readOnly = lineReadOnly(sub, me.data?.id);
   const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
   const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
+  const parent: PresenceCrumb = place === null
+    ? { label: "Presence", to: "/presence" }
+    : { label: place.label, to: "/presence/places/$subject", params: { subject: placeKey } };
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
@@ -97,13 +118,20 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   }
 
   return (
-    <div className="space-y-8">
-      <section aria-label={sub.name} className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="min-w-0 text-base text-ink [overflow-wrap:anywhere]">{sentence}</p>
-          <ProblemBadge problem={sub.problem} />
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
+    <PresenceDetailPage crumbs={[parent, { label: sub.name }]} title={sentence}>
+      <div className="space-y-8">
+        <section aria-label={sub.name} className="space-y-3">
+          <div className="flex flex-wrap items-start gap-3">
+            <dl aria-label="Facts" className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
+              {lineFacts(sub, workflowNames, pinTitles).map((fact) => (
+                <div key={fact.term} className="contents">
+                  <dt className="text-muted">{fact.term}</dt>
+                  <dd className="text-ink [overflow-wrap:anywhere]">{fact.value}</dd>
+                </div>
+              ))}
+            </dl>
+            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+          </div>
           <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <Switch
               checked={sub.enabled}
@@ -113,58 +141,34 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
             />
             {sub.enabled ? "On" : "Off"}
           </label>
-          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
-        </div>
-        {pausedByTeam && <p role="status" className="text-sm text-warning-fg">{PAUSED_BY_TEAM}</p>}
-        {readOnly && !sub.problem && <p className="text-xs text-muted">Only its owner can change {sub.name}.</p>}
-        {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
-        {sub.problem && (
-          <ThreadProblem
-            problem={sub.problem}
-            threadTitle={pinThreadTitle}
-            workspace={workspace}
-            readOnly={readOnly}
-            onPick={(thread) => save({ thread })}
-            pending={patch.isPending}
+          {pausedByTeam(sub) && <p role="status" className="text-sm text-warning-fg">{PAUSED_BY_TEAM}</p>}
+          {readOnly && !sub.problem && <p className="text-xs text-muted">Only its owner can change {sub.name}.</p>}
+          {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
+          {sub.problem && (
+            <ThreadProblem
+              problem={sub.problem}
+              threadTitle={pinnedTitle(sub, pinTitles)}
+              workspace={lineWorkspace(sub)}
+              readOnly={readOnly}
+              onPick={(thread) => save({ thread })}
+              pending={patch.isPending}
+            />
+          )}
+        </section>
+
+        <RuleDeliveries id={sub.id} name={sub.name} />
+        {me.data?.orgRole === "admin" && <RuleReceipts id={sub.id} name={sub.name} />}
+
+        {editing && (
+          <EditSubscriptionDialog
+            open
+            onOpenChange={setEditing}
+            sub={sub}
+            targetLabel={targetLabel(sub, workflowName)}
           />
         )}
-      </section>
-
-      <AppearsAs sub={sub} />
-      <RuleDeliveries id={sub.id} name={sub.name} />
-      <RuleReceipts id={sub.id} name={sub.name} admin={me.data?.orgRole === "admin"} />
-
-      {editing && (
-        <EditSubscriptionDialog
-          open
-          onOpenChange={setEditing}
-          sub={sub}
-          targetLabel={targetLabel(sub, workflowName)}
-        />
-      )}
-    </div>
-  );
-}
-
-function AppearsAs({ sub }: { sub: EventSubscriptionWire }) {
-  const appearance = sub.target.appearance ?? {};
-  const custom = appearance.displayName?.trim();
-  const name = custom || "Valet";
-  return (
-    <WorkSection title="Appears as">
-      <WorkRow
-        title={(
-          <span className="inline-flex items-center gap-2">
-            <Avatar size="sm">
-              {appearance.avatarUrl && <AvatarImage src={appearance.avatarUrl} alt="" />}
-              <AvatarFallback>{name.charAt(0).toUpperCase()}</AvatarFallback>
-            </Avatar>
-            {name}
-          </span>
-        )}
-        detail={custom ? "To change it, select Edit." : "The default name. To set another, select Edit."}
-      />
-    </WorkSection>
+      </div>
+    </PresenceDetailPage>
   );
 }
 
@@ -208,29 +212,34 @@ export function lastStageInWords(receipt: EventReceiptWire): string | undefined 
   return last ? `${receiptLabel(last.stage)}: ${receiptLabel(last.outcome)}` : undefined;
 }
 
-function RuleReceipts({ id, name, admin }: { id: string; name: string; admin: boolean }) {
-  const receiptsQ = useRuleReceipts(id, admin);
+/** This line's receipts, for an administrator, under a closed disclosure. */
+function RuleReceipts({ id, name }: { id: string; name: string }) {
+  const receiptsQ = useRuleReceipts(id, true);
   const receipts = receiptsQ.data?.receipts ?? [];
   return (
-    <WorkSection title="Receipts">
-      {!admin && <EmptyRow className="px-4 py-3">Receipts are available to organization administrators.</EmptyRow>}
-      {admin && receiptsQ.isPending && <LoadingRow className="px-4" />}
-      {admin && receiptsQ.isError && (
-        <ErrorRow className="px-4">{errorText(receiptsQ.error, "Could not load the receipts. Reload the page to try again.")}</ErrorRow>
-      )}
-      {admin && receiptsQ.isSuccess && receipts.length === 0 && (
-        <EmptyRow className="px-4 py-3">No receipt names {name} in the last 7 days.</EmptyRow>
-      )}
-      {receipts.map((receipt) => (
-        <WorkRow
-          key={receipt.id}
-          time={receipt.createdAt}
-          title={receipt.eventId
-            ? <Link to="/presence/events/$eventId" params={{ eventId: receipt.eventId }}>{receiptLine(receipt, id)}</Link>
-            : receiptLine(receipt, id)}
-          detail={lastStageInWords(receipt)}
-        />
-      ))}
-    </WorkSection>
+    <details className="group">
+      <summary className="cursor-pointer font-display text-lg">Receipts</summary>
+      <div className="mt-3">
+        <WorkList>
+          {receiptsQ.isPending && <LoadingRow className="px-4" />}
+          {receiptsQ.isError && (
+            <ErrorRow className="px-4">{errorText(receiptsQ.error, "Could not load the receipts. Reload the page to try again.")}</ErrorRow>
+          )}
+          {receiptsQ.isSuccess && receipts.length === 0 && (
+            <EmptyRow className="px-4 py-3">No receipt names {name} in the last 7 days.</EmptyRow>
+          )}
+          {receipts.map((receipt) => (
+            <WorkRow
+              key={receipt.id}
+              time={receipt.createdAt}
+              title={receipt.eventId
+                ? <Link to="/presence/events/$eventId" params={{ eventId: receipt.eventId }}>{receiptLine(receipt, id)}</Link>
+                : receiptLine(receipt, id)}
+              detail={lastStageInWords(receipt)}
+            />
+          ))}
+        </WorkList>
+      </div>
+    </details>
   );
 }

@@ -129,13 +129,13 @@ describe("INV-H5: the rail is the only navigation under the top nav", () => {
 
   it("opens a place page in the pane with a breadcrumb", async () => {
     mountApp("/presence/places/slack:T1%2FC900");
-    expect(await screen.findByRole("heading", { level: 1, name: "#incidents" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "#incidents" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("Presence›#incidents");
   });
 
   it("redirects a revision 1 rule URL to its rule page", async () => {
     const router = mountApp("/presence/listeners/sub-1?workspace=user");
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/sub-1"));
-    expect(await screen.findByRole("heading", { level: 1, name: "Incident intake" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 2, name: "When someone mentions Valet in #incidents, reply in a new thread." })).toBeTruthy();
   });
 });

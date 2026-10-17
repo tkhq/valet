@@ -45,6 +45,7 @@ export function ThreadProblem({
   pending = false,
   error,
   readOnly = false,
+  variant = "box",
 }: {
   problem: string;
   /** The archived pin's title, when the caller knows it. */
@@ -56,11 +57,14 @@ export function ThreadProblem({
   onPick: (policy: Extract<AssistantThreadPolicy, { mode: "existing" }>) => void;
   pending?: boolean;
   error?: string | null;
+  /** `box` frames the problem on a page of its own. `inline` sits under a
+   * row in a list, without the frame. */
+  variant?: "box" | "inline";
 }) {
   const pin = problem === PIN_UNAVAILABLE;
   const text = pin ? pinProblemText(threadTitle) : problem;
-  return (
-    <section aria-label="Problem" className="space-y-2 rounded-md border border-danger-500 bg-danger-wash p-3">
+  const body = (
+    <>
       <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">{text}</p>
       {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this.</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
@@ -69,6 +73,14 @@ export function ThreadProblem({
       )}
       {pending && <p className="text-xs text-muted">Saving…</p>}
       {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
+    </>
+  );
+  if (variant === "inline") {
+    return <div role="group" aria-label="Problem" className="mt-2 space-y-2">{body}</div>;
+  }
+  return (
+    <section aria-label="Problem" className="space-y-2 rounded-md border border-danger-500 bg-danger-wash p-3">
+      {body}
     </section>
   );
 }
