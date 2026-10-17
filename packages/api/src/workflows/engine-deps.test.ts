@@ -663,21 +663,21 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     expect((await engineStore.getQueueItem(spared.sessionId, spared.queueItemId))?.status).not.toBe("settled");
   });
 
-  it("keeps a second run moving while the first parks on an approval gate", async () => {
-    // The incident this reverts: a gate holds its thread's claim until
-    // someone answers it (72 hours by default), and a thread runs its queue
-    // in series. On a shared thread, the second run of the same workflow
-    // waited behind the first run's unanswered approval.
+  it("refuses an approval in a workflow run before a gate opens and keeps each run on its own thread", async () => {
+    // Nobody watches a run, so a gate would hold its thread until it expires
+    // (72 hours by default). The engine refuses the request instead, and the
+    // turn reports that the step needs approval.
     const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
     vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
     try {
+      let executed = false;
       const gated: PluginAction = {
         id: "demo.review",
         name: "review",
-        description: "critical-risk fixture action, so calling it opens an approval gate",
+        description: "critical-risk fixture action, so calling it needs approval",
         riskLevel: "critical",
         parameters: Type.Object({}),
-        execute: async () => ({ success: true, data: { reviewed: true } }),
+        execute: async () => { executed = true; return { success: true, data: { reviewed: true } }; },
       };
       const plugin: ValetPlugin = {
         name: "demo", version: "0.0.1",
@@ -687,7 +687,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
         actionPluginByService, credentials: engineCredentials });
-      await seedRun(api, "run_parked", "wf_gate");
+      await seedRun(api, "run_first", "wf_gate");
       await workflowStore.createRun("run_next", { workflowId: "wf_gate", definitionVersionId: "v1" },
         { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: LOCAL_USER.id });
       const submit = (runId: string, text: string) => deps.promptOrchestrator(text, {
@@ -695,33 +695,33 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
         ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
       });
 
-      // The first run's turn calls the critical-risk action and blocks.
+      let toolResult = "";
       faux.setResponses([
         fauxAssistantMessage(
           [fauxToolCall("call_tool", { tool_id: "demo.review", params: {}, summary: "review it" }, { id: "tc-gate" })],
           { stopReason: "toolUse" },
         ),
+        (context) => {
+          const last = context.messages.at(-1);
+          toolResult = last?.role === "toolResult" ? last.content.map((part) => part.type === "text" ? part.text : "").join("") : "";
+          return fauxAssistantMessage("The review step needs approval before the next run.");
+        },
       ]);
-      const parked = await submit("run_parked", "first run");
+      const first = await submit("run_first", "first run");
       await vi.waitFor(async () => {
-        const gates = await engineStore.listDecisionGates(parked.sessionId, parked.threadId);
-        expect(gates.filter((gate) => gate.status === "pending")).toHaveLength(1);
+        expect((await engineStore.getQueueItem(first.sessionId, first.queueItemId))?.status).toBe("settled");
       }, { timeout: 15_000, interval: 50 });
+      expect(toolResult).toContain("no one can approve during an unattended workflow run");
+      expect(executed).toBe(false);
+      expect(await engineStore.listDecisionGates(first.sessionId, first.threadId)).toEqual([]);
 
-      // The second run of the SAME workflow, dispatched while that gate is
-      // open. Its own thread lets its turn run and settle.
       faux.appendResponses([fauxAssistantMessage("second run reported")]);
       const next = await submit("run_next", "second run");
-      expect(next.sessionId).toBe(parked.sessionId);
-      expect(next.threadId).not.toBe(parked.threadId);
+      expect(next.sessionId).toBe(first.sessionId);
+      expect(next.threadId).not.toBe(first.threadId);
       await vi.waitFor(async () => {
         expect((await engineStore.getQueueItem(next.sessionId, next.queueItemId))?.status).toBe("settled");
       }, { timeout: 15_000, interval: 50 });
-
-      // The first run is still waiting for its answer, as it should be.
-      expect((await engineStore.getQueueItem(parked.sessionId, parked.queueItemId))?.status).not.toBe("settled");
-      const stillPending = await engineStore.listDecisionGates(parked.sessionId, parked.threadId);
-      expect(stillPending.filter((gate) => gate.status === "pending")).toHaveLength(1);
     } finally {
       faux.unregister();
     }

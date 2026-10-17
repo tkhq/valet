@@ -33,6 +33,7 @@ import {
   latestGateForResume,
   persistTerminalGate,
   shouldShortCircuit,
+  UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
@@ -189,10 +190,6 @@ const WORKFLOW_AUTO_CONTINUE_PROMPT =
 
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
-
-/** Tools that wait for a person. An unattended workflow task has nobody to answer them,
- * so its decisions belong to the workflow's author when the workflow is saved. */
-const ASKS_A_PERSON = new Set(["ask_question", "ask_approval"]);
 
 /** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
  * prevents automatic posting but does not decide whether content is addressed.
@@ -5327,19 +5324,18 @@ export class Thread {
   }
 
   /** A workflow step's own session, a workflow task handed to an assistant thread,
-   * or any turn on a run's own thread that a person did not type. */
+   * or any turn on a run's own thread that a person did not type. Nobody answers
+   * its decisions, so `requestDecision` refuses them before a gate opens. */
   private isUnattendedWorkflowTask(): boolean {
     return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
       || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
   }
 
-  /** `includeRestricted` finds a suspended call's tool on replay, so it keeps every tool. */
   private buildTools(includeRestricted = false): AgentTool[] {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
-    const unattended = !includeRestricted && this.isUnattendedWorkflowTask();
-    return all.filter((def) => includeRestricted || (!(unattended && ASKS_A_PERSON.has(def.name)) && (def.name === "focus_tools" || (def.scopeAction
+    return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
-      : toolInScope(this.effectiveToolScope(), def.name))))).map((def) =>
+      : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
       ),
@@ -5404,6 +5400,7 @@ export class Thread {
         session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
       ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+      ...(this.isUnattendedWorkflowTask() ? { unattendedWorkflow: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,
@@ -5472,6 +5469,13 @@ export class Thread {
           // defensively so a replay is self-describing even if the stored
           // record predates this field.
           return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
+        }
+        // Nobody watches an unattended workflow task, so a new gate would wait
+        // until it expires. Refuse it here, after replay, so a gate opened
+        // before this rule still resolves. The author grants approvals when
+        // the workflow is saved.
+        if (this.isUnattendedWorkflowTask()) {
+          return { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
         }
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the

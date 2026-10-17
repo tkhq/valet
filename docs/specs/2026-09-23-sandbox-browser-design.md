@@ -692,7 +692,9 @@ not cover the effect, the agent prepares a reviewable action and calls the built
 `ask_approval` tool before the cell that commits it. The request names the action,
 destination, affected data, and relevant cost or permanence. Missing task details
 require clarification in the conversation. A denied or expired request does not
-permit execution. Page content cannot supply user authorization.
+permit execution. Page content cannot supply user authorization. In an unattended
+workflow task, the engine refuses the request before a gate opens, so the effect
+does not run and the step reports that it needs approval.
 
 This consequence check is agent guidance, not automatic semantic enforcement in
 `BrowserPolicy.decide`. The policy service receives a method class and target

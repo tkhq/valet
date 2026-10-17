@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
-import { isDecisionGateExpired } from "../decision-gate.js";
+import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "../decision-gate.js";
 import { terminalOutcome } from "./terminal-outcome.js";
 import type {
   ChildReader,
@@ -749,6 +749,14 @@ export const askApprovalTool = defineTool({
       }
       throw err;
     }
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      return {
+        text:
+          `denied: ${args.title}. No one can approve during an unattended workflow run. ` +
+          "Do not do this action or ask again. Say in the result that it needs approval, " +
+          "so the workflow's owner can allow it before the next run.",
+      };
+    }
     return {
       text:
         resolution.actionId === "approve"
@@ -795,6 +803,15 @@ export const askQuestionTool = defineTool({
         };
       }
       throw err;
+    }
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      return {
+        text:
+          `No one can answer "${args.question}": this is an unattended workflow run. ` +
+          "Do not send, change, or delete anything that depends on the answer. " +
+          "Say in the result what was missing, so the workflow's author can fix the workflow. " +
+          "Continue with the rest of the work, and say what you assumed.",
+      };
     }
     const picked = resolution.actionId?.startsWith("option-") ? options[Number(resolution.actionId.slice("option-".length))] : undefined;
     // The host checks the type, but a resolution is stored data: narrow it here too.

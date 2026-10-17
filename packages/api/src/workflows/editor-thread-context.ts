@@ -37,8 +37,8 @@ export function isWorkflowRunThread(thread: { key: string }): boolean {
   return /^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key);
 }
 
-/** Nobody answers questions during a run. The engine offers no tool that waits
- * for a person on a run thread's signal turns (`unattendedThread` in
+/** Nobody answers questions during a run. The engine refuses every decision on
+ * a run thread's signal turns before a gate opens (`unattendedThread` in
  * `engine/host.ts`), so the rule covers every signal message: the run's own
  * `workflow.request` (`engine-deps.ts#promptOrchestrator`) and anything that
  * continues it, such as a delegated task's `child.settled`. A guess about what
@@ -47,7 +47,7 @@ export function isWorkflowRunThread(thread: { key: string }): boolean {
 export function workflowRunThreadContext(thread: { key: string }): string | undefined {
   if (!isWorkflowRunThread(thread)) return undefined;
   return [
-    "Nobody answers questions during this run, and no tool here can ask one.",
+    "Nobody can answer a question or approve an action during this run.",
     "If a fact that a send, change, or delete needs is missing or in conflict, do not do that action.",
     "This covers what the action says, such as a price or a time, and where it goes.",
     "Say in the result what was missing, so the workflow's author can fix the workflow.",

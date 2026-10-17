@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, getApiProvider, registerApiProvider, registerFauxProvider, Type, unregisterApiProviders, type TranscriptContext } from "@earendil-works/pi-ai/compat";
-import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type DecisionResolution, type ToolDef } from "../src/index.js";
 import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
@@ -124,52 +124,54 @@ describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
 });
 
 describe("unattended workflow tasks", () => {
-  const ASKS = ["ask_question", "ask_approval"];
-  /** The tool names the engine offered on the turn's first model request. */
-  async function offeredTools(provider: string, purpose: "workflow" | "orchestrator", metadata: Record<string, unknown>): Promise<string[]> {
+  const askQuestion = builtinTools.find((tool) => tool.name === "ask_question");
+  /** Runs one turn whose tool asks for a decision. An attended turn only reports its flag. */
+  async function decide(provider: string, purpose: "workflow" | "orchestrator", opts: { metadata?: Record<string, unknown>; ask: boolean }) {
+    if (!askQuestion) throw new Error("ask_question missing");
     const faux = registerFauxProvider({ provider });
-    const original = getApiProvider(faux.api);
-    if (!original) throw new Error("faux provider missing");
-    let offered: string[] | undefined;
-    // The transcript declares tools on system messages as they are added or removed.
-    const record = (context: TranscriptContext) => {
-      if (offered) return;
-      const names = new Set<string>();
-      for (const message of context.messages) {
-        if (message.role !== "system") continue;
-        for (const tool of message.toolsAdded ?? []) names.add(tool.name);
-        for (const tool of message.toolsRemoved ?? []) names.delete(tool.name);
-      }
-      offered = [...names];
-    };
-    registerApiProvider({ api: faux.api,
-      stream: (model, context, options) => { record(context); return original.stream(model, context, options); },
-      streamSimple: (model, context, options) => { record(context); return original.streamSimple(model, context, options); },
-    }, `${provider}-recorder`);
+    const seen: { unattended?: boolean; resolution?: DecisionResolution; askText?: string } = {};
     try {
-      const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
-      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose, model: faux.getModel(), builtinTools });
-      faux.setResponses([fauxAssistantMessage("done")]);
-      const receipt = await session.prompt("report", { metadata });
-      await session.thread().awaitResult(receipt.queueItemId);
-      return offered ?? [];
-    } finally {
-      unregisterApiProviders(`${provider}-recorder`);
-      faux.unregister();
-    }
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const tools: ToolDef[] = [
+        { name: "needs_decision", description: "Needs a decision", parameters: Type.Object({}), execute: async (_args, ctx) => {
+          seen.unattended = ctx.unattendedWorkflow;
+          if (ctx.unattendedWorkflow) seen.resolution = await ctx.requestDecision({ type: "approval", title: "Send it?", resumeKey: "needs_decision" });
+          return { text: "checked" };
+        } },
+        { ...askQuestion, execute: async (args, ctx) => {
+          const result = await askQuestion.execute(args, ctx);
+          seen.askText = result.text;
+          return result;
+        } },
+      ];
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose, model: faux.getModel(), builtinTools: [], tools });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("needs_decision", {})], { stopReason: "toolUse" }),
+        ...(opts.ask ? [fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which channel?" })], { stopReason: "toolUse" })] : []),
+        fauxAssistantMessage("done"),
+      ]);
+      const receipt = await session.prompt("report", { metadata: opts.metadata ?? {} });
+      const result = await session.thread().awaitResult(receipt.queueItemId);
+      return { seen, outcome: result.outcome, gates: await store.listDecisionGates(session.id) };
+    } finally { faux.unregister(); }
   }
 
   it.each([
     ["a workflow step session", "workflow", {}],
     ["a workflow task in an assistant thread", "orchestrator", { [UNATTENDED_WORKFLOW_KEY]: true }],
-  ] as const)("does not offer tools that wait for a person to %s", async (label, purpose, metadata) => {
-    const offered = await offeredTools(`unattended-${purpose}`, purpose, metadata);
-    expect(offered, label).toContain("read");
-    for (const name of ASKS) expect(offered, label).not.toContain(name);
+  ] as const)("refuses every decision in %s before a gate opens", async (label, purpose, metadata) => {
+    const { seen, outcome, gates } = await decide(`unattended-${purpose}`, purpose, { metadata, ask: true });
+    expect(outcome, label).toBe("completed");
+    expect(seen.unattended, label).toBe(true);
+    expect(seen.resolution, label).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
+    expect(seen.askText, label).toContain("this is an unattended workflow run");
+    expect(seen.askText, label).toContain("Say in the result what was missing");
+    expect(gates, label).toEqual([]);
   });
 
-  it("still offers them to a person's own prompt in an assistant thread", async () => {
-    const offered = await offeredTools("attended-orchestrator", "orchestrator", {});
-    for (const name of ASKS) expect(offered).toContain(name);
+  it("leaves a person's own prompt in an assistant thread attended", async () => {
+    const { seen } = await decide("attended-orchestrator", "orchestrator", { ask: false });
+    expect(seen.unattended).toBeUndefined();
   });
 });

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@earendil-works/pi-ai/compat";
-import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "@valet/engine";
-import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
+import { Type } from "typebox";
+import { Engine, InMemoryEventStream, InMemorySessionStore, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type ToolDef } from "@valet/engine";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { isWorkflowRunThread, workflowConversationKey, workflowEditorThreadContext, workflowRunThreadContext, workflowThreadContext } from "./editor-thread-context.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
 describe("workflow editor context", () => {
@@ -50,7 +51,7 @@ describe("workflow run thread context", () => {
       expect(isWorkflowRunThread({ key })).toBe(true);
       const lines = sentences(workflowThreadContext({ key }) ?? "");
       expect(lines.filter(line => line.includes("ask_question"))).toEqual([]);
-      expect(lines).toContain("Nobody answers questions during this run, and no tool here can ask one.");
+      expect(lines).toContain("Nobody can answer a question or approve an action during this run.");
       // A known recipient with two conflicting prices still holds the action.
       expect(lines).toContain("If a fact that a send, change, or delete needs is missing or in conflict, do not do that action.");
       expect(lines).toContain("This covers what the action says, such as a price or a time, and where it goes.");
@@ -94,23 +95,22 @@ describe("workflow run thread context", () => {
       expect(asked[1]).toBe("Ask me which projects before you inspect them.");
     } finally { session.suspendTimers(); faux.unregister(); }
   });
-  it("offers no tool that waits for a person to a run thread's child.settled turn, but keeps them for a person's reply", async () => {
-    const faux = registerFauxProvider({ provider: "workflow-run-thread-tools" });
-    const offered: string[][] = [];
-    // The transcript declares tools on system messages as they are added or removed.
-    const record = (context: { messages: Message[] }) => {
-      const names = new Set<string>();
-      for (const message of context.messages) {
-        if (message.role !== "system") continue;
-        for (const tool of message.toolsAdded ?? []) names.add(tool.name);
-        for (const tool of message.toolsRemoved ?? []) names.delete(tool.name);
-      }
-      offered.push([...names]);
-      return fauxAssistantMessage("done");
-    };
-    faux.setResponses([record, record]);
-    const session = await new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } }).createSession({
-      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), threadSystemContext: workflowThreadContext, unattendedThread: isWorkflowRunThread,
+  it("refuses decisions on a run thread's child.settled turn, while a person's reply stays attended", async () => {
+    const faux = registerFauxProvider({ provider: "workflow-run-thread-decisions" });
+    const seen: Array<{ unattended?: boolean; resolvedBy?: string }> = [];
+    const tool: ToolDef = { name: "needs_decision", description: "Needs a decision", parameters: Type.Object({}), execute: async (_args, ctx) => {
+      // Only the unattended turn asks: an attended gate would wait for a person.
+      const resolution = ctx.unattendedWorkflow ? await ctx.requestDecision({ type: "approval", title: "Send it?", resumeKey: "needs_decision" }) : undefined;
+      seen.push({ unattended: ctx.unattendedWorkflow, resolvedBy: resolution?.resolvedBy });
+      return { text: "checked" };
+    } };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("needs_decision", {})], { stopReason: "toolUse" }), fauxAssistantMessage("done"),
+      fauxAssistantMessage([fauxToolCall("needs_decision", {})], { stopReason: "toolUse" }), fauxAssistantMessage("done"),
+    ]);
+    const store = new InMemorySessionStore();
+    const session = await new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } }).createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool], threadSystemContext: workflowThreadContext, unattendedThread: isWorkflowRunThread,
     });
     try {
       const thread = await session.createThread(workflowRunThreadKey("wfrun_abc"));
@@ -118,10 +118,8 @@ describe("workflow run thread context", () => {
       await thread.awaitResult(settled.queueItemId);
       const reply = await thread.submitPrompt("Which projects should I check?", { author: { id: "u", interactive: true } });
       await thread.awaitResult(reply.queueItemId);
-      expect(offered[0]).toContain("read");
-      expect(offered[0]).not.toContain("ask_question");
-      expect(offered[0]).not.toContain("ask_approval");
-      expect(offered[1]).toContain("ask_question");
+      expect(seen).toEqual([{ unattended: true, resolvedBy: UNATTENDED_WORKFLOW_DECISION }, { unattended: undefined, resolvedBy: undefined }]);
+      expect(await store.listDecisionGates(session.id)).toEqual([]);
     } finally { session.suspendTimers(); faux.unregister(); }
   });
 });

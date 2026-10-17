@@ -1579,7 +1579,9 @@ describe("interactive actor provenance", () => {
       purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator" as const,
       workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
     };
-    const session = await engine.createSession(options);
+    // A workflow session refuses new gates, so this gate opens before that
+    // rule (as an orchestrator) and must still resolve after the restart.
+    const session = await engine.createSession(kind === "workflow" ? { ...options, purpose: "orchestrator" as const } : options);
     const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
     const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }) };
     const receipt = await session.prompt(content, kind === "authorless" ? {} : { author });

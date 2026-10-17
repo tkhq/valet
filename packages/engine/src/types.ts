@@ -720,6 +720,9 @@ export interface ToolContext {
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */
   externalSender?: boolean;
+  /** Nobody watches this workflow task. `requestDecision` refuses new gates,
+   * and the decision tools return a fail-closed result instead of asking. */
+  unattendedWorkflow?: boolean;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
