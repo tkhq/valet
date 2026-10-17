@@ -35,6 +35,9 @@ const HUB_DIALOGS = [
   "components/events/redeliver-button.tsx",
   "routes/workflows.index.tsx",
   "routes/workflows.$workflowId.tsx",
+  "lib/event-log-labels.ts",
+  "components/session/tool-renderers/automation-proposal.tsx",
+  "components/settings/teams-panel.tsx",
 ] as const;
 const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");

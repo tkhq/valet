@@ -11,7 +11,7 @@ const ids = ["events.propose_subscription", "workflows.propose_trigger", "workfl
 function ProposalBody({ result }: ToolRendererProps) {
   const data = record(structuredResult(result));
   const proposal = record(data?.proposal) ?? record(record(data?.data)?.proposal);
-  if (!proposal || typeof proposal.id !== "string" || !["subscription", "schedule"].includes(String(proposal.kind))) return <ToolBody>{resultText(result)}</ToolBody>;
+  if (!proposal || typeof proposal.id !== "string" || (proposal.kind !== "subscription" && proposal.kind !== "schedule")) return <ToolBody>{resultText(result)}</ToolBody>;
   const config = record(proposal.config);
   const target = record(config?.target);
   const keys = Array.isArray(config?.eventKeys) ? config.eventKeys.filter((key): key is string => typeof key === "string") : [];
@@ -28,12 +28,12 @@ function ProposalBody({ result }: ToolRendererProps) {
       destination={workflowId ?? "Workspace assistant"} />
     <p className="text-xs text-muted">Open the saved configuration to review its current settings. This preview does not grant permissions.</p>
     {schedule ? <Link className="text-sm text-moss underline" to="/presence/routines" search={{ routine: proposal.id }}>Review routine</Link>
-      : <Link className="text-sm text-moss underline" to="/presence/rules/$id" params={{ id: proposal.id }}>Review listener</Link>}
+      : <Link className="text-sm text-moss underline" to="/presence/rules/$id" params={{ id: proposal.id }}>Review</Link>}
   </div>;
 }
 export const automationProposalRenderer: ToolRenderer = {
   matches: (name, args) => ids.some(id => name === id.replace(".", "__") || (name === "call_tool" && record(args)?.tool_id === id)),
   category: "write", Icon: ClipboardCheck,
-  formatTarget: () => "Automation proposal",
+  formatTarget: () => "Proposal",
   Body: ProposalBody,
 };
