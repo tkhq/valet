@@ -19,7 +19,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
-import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql, threadSlackChannelsSql } from "../services/thread-access.js";
+import { governingThreadKeySql, isOutsideReader, outsideReaderMayReach, sharedWithWholeTeamSql, threadSlackChannelsSql } from "../services/thread-access.js";
 import {
   namespaceInternalDispatchId,
   PendingCapError,
@@ -1529,15 +1529,24 @@ async function childReachableFrom(
   const governing = governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link");
   const channels = threadSlackChannelsSql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`);
   const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing, channels)} AS shared,
-    (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key
-    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; key: string | null; shared: boolean; reader_key: string | null }> };
+    ${channels} AS channels,
+    (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key,
+    ${threadSlackChannelsSql(sql`${parentSessionId}`, sql`${readerThreadId}`)} AS reader_channels
+    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{
+      owner_type: string; key: string | null; shared: boolean; channels: string[] | null; reader_key: string | null; reader_channels: string[] | null;
+    }> };
   const parent = result.rows[0];
   // A parent that is gone leaves nobody to say who may read its child.
   if (!parent) return false;
   if (parent.owner_type !== "team") return true;
-  // A Slack, Telegram, or GitHub conversation reaches only what it may read
-  // with `thread_read` (`services/thread-access.ts#threadReadAccess`).
-  if (isOutsideThreadKey(parent.reader_key)) return outsideReaderMayReach(parent.reader_key!, parent.key, parent.shared === true);
+  // A Slack, Telegram, or GitHub conversation, or a thread holding Slack
+  // content, reaches only what it may read with `thread_read`
+  // (`services/thread-access.ts#threadReadAccess`).
+  const readerChannels = parent.reader_channels ?? [];
+  if (isOutsideReader(parent.reader_key, readerChannels)) {
+    return outsideReaderMayReach({ key: parent.reader_key, channels: readerChannels },
+      { key: parent.key, channels: parent.channels ?? [] }, parent.shared === true);
+  }
   return parent.shared === true;
 }
 

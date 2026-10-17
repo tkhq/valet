@@ -7,6 +7,7 @@ import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { agentSessions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
+import { SLACK_CHANNELS_METADATA_KEY, threadSlackChannelsSql } from "../services/thread-access.js";
 import { changeThreadProjects, readThreadProjects, ThreadProjectsConflict, ThreadProjectsImportConflict } from "../services/thread-projects.js";
 import { threadProjectsMutationSchema } from "../services/thread-projects-schema.js";
 import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
@@ -31,12 +32,15 @@ async function activeThreads(c: Context<AppEnv>, session: { id: string; ownerTyp
   const canSee = threadsVisibleTo(c, session);
   for (let offset = 0; offset < ids.length; offset += 100) {
     const batch = ids.slice(offset, offset + 100);
-    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key FROM engine_threads t
+    // The thread's recorded Slack channels gate it with its key (`services/thread-access.ts`).
+    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key, ${threadSlackChannelsSql(sql`t.session_id`, sql`t.id`)} AS channels FROM engine_threads t
       LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
       WHERE t.session_id = ${session.id} AND m.archived_at IS NULL
       AND t.id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
-    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable() })) }).parse(result);
-    for (const thread of rows) if (await canSee(thread.key)) visible.add(thread.id);
+    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable(), channels: z.array(z.string()).nullable() })) }).parse(result);
+    for (const thread of rows) {
+      if (await canSee({ key: thread.key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: thread.channels ?? [] } })) visible.add(thread.id);
+    }
   }
   return visible;
 }
