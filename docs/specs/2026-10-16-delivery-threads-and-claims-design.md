@@ -121,10 +121,11 @@ and R3 exists.
 |---|---|---|
 | C1 | `U001` posts a top-level message in `C900` with no mention. | `t-inc` receives one `event.matched` digest. P's delivery is `skipped` with `claimed by thread t-inc`. No thread with key `subject:slack:T001/C900` exists. |
 | C2 | `U001` posts `<@U-BOT> status?` in `C900`, Slack thread `X`. | M delivers the mention to `t-inc` as an inbound message with the Slack origin. `t-inc` receives exactly one turn for it and no digest. A `followed_threads` row binds `X` to `t-inc`. |
+| C2b | C2 with the halves in the other order: the `slack.app_mention` arrives and is delivered before its `slack.message`, in a new Slack thread `Y`. | M delivers the mention to `t-inc` and binds `Y` to it. P's delivery of the message half is `skipped` with `the mention delivers this post`. `t-inc` receives exactly one turn for the post and no digest. |
 | C3 | `U003` replies in `X`. | `t-inc` receives the reply once, through the binding. The waiter appends no digest. |
 | C3b | `U001`, a linked member, replies in `X`. | The follow router delivers the reply to `t-inc`. `t-inc` receives exactly one turn for it and no digest. P's delivery is `skipped` with `the followed thread delivers this reply`. |
 | C4 | `U002` posts `<@U-BOT> is the replica healthy?` in `C900`. | The team gate refuses `U002`. `t-inc` receives one digest. No `slack.app_mention` delivery exists. |
-| C5 | `U001` posts a mention in `X2`. | `t-s` receives it through its binding. `t-inc` receives one digest for the channel message. |
+| C5 | `U001` posts a mention in `X2`. | `t-s` receives exactly one turn for it, through its binding. P's delivery is `skipped` with `the mention delivers this post`. `t-inc` receives one digest for the channel message. |
 | C6 | Team `platform` has a mention rule on `C900` and no waiter. A user linked to both teams posts a mention in a new Slack thread. | `platform`'s rule opens a `platform` thread. M delivers to `t-inc`. Each team receives the mention once. |
 | C7 | The agent in `t-inc` calls `wakeup_cancel`. `U001` posts a top-level message. | P delivers to a new thread with key `subject:slack:T001/C900` and the channel label as its title (Part D). |
 | C8 | A human review lands on `#12`. | `t-pr` receives one digest. R1's delivery is `skipped` with `claimed by thread t-pr`. No `acme/api#12` subject thread is created for this delivery. |
@@ -315,6 +316,14 @@ incident routing spec's Parts A and B.
      waiters append theirs (C5). The sender gate (`mentionSenderActor`)
      applies to that prediction, and a team-covered personal rule does not
      count.
+   - At dispatch, a `slack.message` delivery whose destination is a follow
+     binding (stamped `conversation_follow` or resolved from the binding)
+     is skipped with `Skipped, the mention delivers this post.` and reason
+     `mention_covered` when its `conversationalTwin` is a
+     `slack.app_mention` that an assistant rule of the owner delivers
+     (`mentionCoveredBy`: sender gate and team coverage included). One
+     post gives one turn in either order of the halves (C2b, C5). The
+     mention's binding stamp names the suppressed waiters for recovery.
    - At both ingests, the candidate set merges the event's candidates with
      the twin's. A candidate that accepts only the twin carries no digest,
      so both halves choose the same redirect target. A `createdAt` tie
@@ -358,8 +367,9 @@ event wakeups spec Part A.
    `policy_new`, `policy_subject`, `policy_own`, `policy_existing`,
    `conversation_follow`, `conversation_pull_request`, `claim_redirect`,
    `claim_skip`, `claim_fallback`, `claim_recovered`, `follow_routed`,
-   `pin_unavailable`. `follow_routed` counts a rule delivery that the follow
-   router owns (Part C step 4).
+   `mention_covered`, `pin_unavailable`. `follow_routed` counts a rule
+   delivery that the follow router owns (Part C step 4). `mention_covered`
+   counts a message half that its mention delivers (Part C step 8).
    `claim_fallback` and `claim_recovered` count the repairs of Part C step
    7. A fallback's receipt `destination` stage records outcome
    `claim_fallback`. A rising `pin_unavailable` pages a
@@ -538,12 +548,6 @@ event wakeups spec Part A.
 - **A fallback after an admitted attempt misrecords.** A retry that flips to
   fallback after an earlier attempt was admitted records `claim_fallback`,
   though the event landed in the admitted thread. Only the record is wrong.
-- **Both halves of a mention in a bound Slack thread.** In C5, M delivers
-  the mention to `t-s` through the binding, and P's `slack.message` half
-  follows the same binding to `t-s`. `t-s` gets two turns for one post.
-  The follow router drops the message half of a bot mention, but the
-  dispatcher does not. INV-D1 holds per event; the two halves are two
-  events.
 - **The C7 title.** A `slack.message` event does not name its channel, so
   the Slack `naturalSubject` label falls back to the channel id (Part D).
   In the Scenario E universe, C7's thread title is `C900`.
