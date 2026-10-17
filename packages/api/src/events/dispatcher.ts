@@ -26,7 +26,7 @@ import type { Presence } from "@valet/shared";
  * becomes due again when the lease lapses.
  */
 import { slackEventChannel } from "../services/thread-access.js";
-import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SessionStore, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
@@ -48,10 +48,15 @@ import {
   newcomerAuthor,
 } from "./team-slack-gate.js";
 import { resolvePath } from "./match.js";
-import { loadSessionOwner } from "./waiters.js";
-import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
-import { isDeliverableTarget, PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
-import { resolveDestination, summaryTitle, type Destination } from "./destination.js";
+import {
+  PinUnavailableError,
+  PIN_UNAVAILABLE_MESSAGE,
+  TARGET_UNAVAILABLE_MESSAGE,
+  isDeliverableTarget,
+  type DeliveredThread,
+  type DeliveryDestination,
+} from "./assistant-delivery.js";
+import { readDestinationStamp, resolveDestination, summaryTitle, type Destination } from "./destination.js";
 import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
 import {
   destinationMetricReason,
@@ -129,23 +134,12 @@ export interface EventDispatcherDeps {
    */
   plugins?: ValetPlugin[];
   /**
-   * The engine store, for incident mention routing
-   * (`watching-waiter.ts`): a `slack.app_mention` in a channel that a stream
-   * event waiter of the same owner watches goes to that waiter's thread.
-   * Absent → no waiter claims a mention, and the rule's thread policy decides.
+   * Appends the event's digest to the waiter that a claim redirect named,
+   * when the dispatcher skips that delivery for a reason decided after
+   * ingest (`claim-recovery.ts`). Returns true when the waiter got a digest.
+   * Absent → the waiter does not see the event.
    */
-  engineStore?: Pick<SessionStore, "findEventWaiters">;
-  /**
-   * The claim source (spec 2026-10-16: delivery threads, Part C): a waiter
-   * thread of the owner that takes this delivery. Absent → the incident
-   * mention routing waiter (`watching-waiter.ts`), the only claim source
-   * until Part C lands.
-   */
-  claimFor?: (args: {
-    event: typeof events.$inferSelect;
-    origin: ChannelOrigin | null;
-    owner: { type: "user" | "team" | "org"; id: string };
-  }) => Promise<{ sessionId: string; threadId: string; waiterId: string } | null>;
+  recoverClaimedDigest?: (args: { waiterId: string; orgId: string; service: string; event: NormalizedEvent }) => Promise<boolean>;
   /**
    * Counts where a delivery landed (spec Part E step 3). Absent → the
    * `valet_event_delivery_destination` counter. Tests pass a recorder.
@@ -372,6 +366,7 @@ export class EventDispatcher {
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
           : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+        await this.recoverClaimedDigest(delivery.destination, event);
         return;
       }
 
@@ -470,40 +465,32 @@ export class EventDispatcher {
           return;
         }
         const owner = { type: sub.ownerType, id: sub.ownerId };
-        // Destination precedence (spec 2026-10-16: delivery threads, Part B
-        // step 1): a conversation binding, then a claim, then the policy.
-        const bindingEvent = { key: event.eventKey, payload: event.payload };
-        const found = await conversationBinding(db, event.orgId, owner, bindingEvent, origin);
-        const binding = found && found.via !== "legacy_follow" ? found : null;
+        // Ingest stamps the destination that a claim or a binding decided
+        // (spec 2026-10-16: delivery threads, Part C step 6). A retry reads
+        // the same stamp.
+        const stamp = readDestinationStamp(delivery.destination);
+        const destination = stamp ?? await this.unstampedDestination(sub, target, delivery.id, event, origin);
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
-          : parsedComment && binding?.via === "pull_request" ? parsedComment.message : undefined;
-        // A mention in a channel that this owner already watches goes to the
-        // watching thread (spec 2026-10-15: incident mention routing, Part A).
-        // The sender gate above has already run (Part C). This is today's
-        // only claim source.
-        const claim = found ? null : this.deps.claimFor
-          ? await this.deps.claimFor({ event, origin, owner })
-          : await this.watchingTarget(event, origin, slackChannel, owner);
-        const destination: Destination = found?.via === "legacy_follow"
-          // A follow bound before follows stored their thread keeps the
-          // Slack thread key it has always used.
-          ? { kind: "key", key: found.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
-          : resolveDestination({
-            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
-            event: {
-              deliveryId: delivery.id,
-              summary: event.summary,
-              naturalSubject: this.naturalSubject(event),
-              conversational: isConversationalEvent(bindingEvent, origin, binding),
-            },
-            binding,
-            claim,
-          });
+          : parsedComment && destination.kind === "target" && destination.reason === "conversation_pull_request"
+            ? parsedComment.message : undefined;
         const receiptIds = { subscriptionId: sub.id, deliveryId: delivery.id };
         if (destination.kind === "skip") {
           await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination },
             (reason) => this.recordDestination(reason));
+          return;
+        }
+        // A binding or claim thread can be archived or deleted between ingest
+        // and dispatch. The stamped target never falls back to another
+        // thread: the delivery dead-letters and creates no thread (INV-D3).
+        // A pin keeps its own check and text (`PinUnavailableError`).
+        if (stamp?.kind === "target" && stamp.reason !== "policy_existing"
+          && !(await isDeliverableTarget({ db }, event.orgId, owner, stamp))) {
+          await db.update(eventDeliveries).set({ status: "dead", lastError: TARGET_UNAVAILABLE_MESSAGE, attempts: delivery.attempts + 1 })
+            .where(eq(eventDeliveries.id, deliveryId));
+          await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
+            { kind: "target_unavailable", sessionId: stamp.sessionId, threadId: stamp.threadId, reason: stamp.reason }),
+          destinationStageMarker(delivery.id));
           return;
         }
         const author = teamMention
@@ -559,11 +546,11 @@ export class EventDispatcher {
         // threadKey is `{channelType}:{channelId}:{threadTs}`.
         // Message subscriptions already deliver later replies. A second follow
         // binding would submit each reply twice and outlive the subscription.
-        // A mention routed to a watching thread binds no follow: its event
-        // waiter already receives the later replies (Part B, INV-M2).
         // The follow binds the Slack thread to the thread the delivery landed
-        // in (spec 2026-10-16: delivery threads, Part B step 5).
-        if (target.follow && origin && event.eventKey === "slack.app_mention" && destination.reason !== "claim_redirect") {
+        // in (spec 2026-10-16: delivery threads, Part B step 5). A claim
+        // redirect binds too: the binding then carries the replies, and the
+        // waiter in that thread appends no digest for them (Part C step 4).
+        if (target.follow && origin && event.eventKey === "slack.app_mention") {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
             const key = {
@@ -630,27 +617,61 @@ export class EventDispatcher {
     return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
   }
 
-  /** The watching waiter's thread for a Slack mention, or null (Part A).
-   * The caller looks for a follow binding first, which outranks a claim. */
-  private async watchingTarget(
+  /**
+   * The destination of a delivery that ingest did not stamp: a row from
+   * before stamps, a resolver failure, or a delivery that no claim and no
+   * waiter-owner binding decided. It resolves from the binding and the
+   * policy only, never from waiters (spec Part C step 7), so a failure
+   * duplicates a delivery but never loses one (INV-D6).
+   */
+  private async unstampedDestination(
+    sub: typeof eventSubscriptions.$inferSelect,
+    target: SubscriptionTarget,
+    deliveryId: string,
     event: typeof events.$inferSelect,
     origin: ChannelOrigin | null,
-    channel: string | undefined,
-    owner: { type: "user" | "team" | "org"; id: string },
-  ): Promise<{ sessionId: string; threadId: string; waiterId: string } | null> {
-    const engineStore = this.deps.engineStore;
-    if (!engineStore || !origin || !channel || event.eventKey !== "slack.app_mention") return null;
-    const team = slackEventTeam(event.subjects, event.payload, channel);
-    if (!team) return null;
-    const db = this.deps.db;
-    return findWatchingWaiter(
-      {
-        engineStore,
-        sessionOwner: (sessionId) => loadSessionOwner(db, sessionId),
-        isDeliverableTarget: (target) => isDeliverableTarget({ db }, event.orgId, owner, target),
+  ): Promise<Destination> {
+    const bindingEvent = { key: event.eventKey, payload: event.payload };
+    const found = await conversationBinding(this.deps.db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, bindingEvent, origin);
+    // A follow bound before follows stored their thread keeps the Slack
+    // thread key it has always used.
+    if (found?.via === "legacy_follow") {
+      return { kind: "key", key: found.key, title: summaryTitle(event.summary), reason: "conversation_follow" };
+    }
+    return resolveDestination({
+      rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
+      event: {
+        deliveryId,
+        summary: event.summary,
+        naturalSubject: this.naturalSubject(event),
+        conversational: isConversationalEvent(bindingEvent, origin, found),
       },
-      event.orgId, owner, team, channel,
-    );
+      binding: found,
+      claim: null,
+    });
+  }
+
+  /**
+   * A named repair for the window between ingest and dispatch (CLAUDE.md,
+   * "Invariants: alert, don't auto-repair", rule 3). Ingest suppressed the
+   * digest of the waiter that a claim redirect names, and a team rule or a
+   * disabled rule now skips the delivery. That race is expected in normal
+   * operation: a rule can change at any moment. Without the repair the
+   * waiter would never see the event. The counter's `claim_recovered`
+   * reason records each repair.
+   */
+  private async recoverClaimedDigest(stamp: unknown, event: typeof events.$inferSelect): Promise<void> {
+    const destination = readDestinationStamp(stamp);
+    const recover = this.deps.recoverClaimedDigest;
+    if (!recover || destination?.kind !== "target" || destination.matchedWaiterId === undefined) return;
+    try {
+      const appended = await recover({
+        waiterId: destination.matchedWaiterId, orgId: event.orgId, service: event.service, event: normalizedEventFromRow(event),
+      });
+      if (appended) this.recordDestination("claim_recovered");
+    } catch (err) {
+      console.error(`event dispatch: recovering waiter ${destination.matchedWaiterId}'s digest failed; the waiter misses this event:`, err);
+    }
   }
 
   private async startWorkflow(

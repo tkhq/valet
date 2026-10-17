@@ -50,6 +50,8 @@ import { skillRepoReaderFactory } from "../services/content-source-credential.js
 import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { appendClaimedWaiterDigest } from "../events/claim-recovery.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { resolveScratchCaps, resolveWakeupLimits } from "../providers/sandbox-backend.js";
@@ -559,8 +561,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
     plugins,
-    // Routes a mention to the thread whose event waiter watches its channel.
-    engineStore,
+    // A claimed waiter gets its digest back when its claim delivery is
+    // skipped after ingest (`events/claim-recovery.ts`).
+    recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
+      waiterMatchDeps({ db, engineStore, engineCredentials, plugins, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
   });
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });

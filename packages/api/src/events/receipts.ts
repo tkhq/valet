@@ -72,7 +72,8 @@ export async function appendReceiptStage(db: AppDb, receiptId: string | undefine
 export function destinationReceiptStage(
   ids: { subscriptionId: string; deliveryId: string },
   outcome: { kind: "key"; key: string; reason: string } | { kind: "target"; sessionId: string; threadId: string; reason: string }
-    | { kind: "skip"; reason: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string },
+    | { kind: "skip"; reason: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string }
+    | { kind: "target_unavailable"; sessionId: string; threadId: string; reason: string },
 ): { stage: string; outcome: string; detail: string } {
   const prefix = `Subscription ${ids.subscriptionId}, delivery ${ids.deliveryId}:`;
   switch (outcome.kind) {
@@ -80,6 +81,7 @@ export function destinationReceiptStage(
     case "target": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} session ${outcome.sessionId}, thread ${outcome.threadId}.` };
     case "skip": return { stage: "destination", outcome: "claim_skip", detail: `${prefix} skipped, ${outcome.reason}.` };
     case "pin_unavailable": return { stage: "destination", outcome: "pin_unavailable", detail: `${prefix} pinned session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive deliveries.` };
+    case "target_unavailable": return { stage: "destination", outcome: "target_unavailable", detail: `${prefix} ${outcome.reason} session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive deliveries.` };
   }
 }
 

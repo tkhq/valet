@@ -70,6 +70,11 @@ export class PinUnavailableError extends Error {
   }
 }
 
+/** The text for an explicit target thread that can no longer take a
+ * delivery. The dispatcher dead-letters a stamped target with it (spec
+ * 2026-10-16: delivery threads and claims, Part C step 6). */
+export const TARGET_UNAVAILABLE_MESSAGE = "The original conversation was archived or deleted. Restore it before retrying delivery.";
+
 /** The thread a delivery landed in. `recovered` marks a retry that found
  * the delivery already admitted and submitted nothing new. */
 export interface DeliveredThread {
@@ -143,9 +148,9 @@ async function isTargetThreadLive(
 /**
  * True when `target` would resolve for `deliverToAssistantThread`. The
  * session names a live, non-archived assistant or execution of `owner` in
- * `orgId`, and its thread is not archived. Incident mention routing
- * (`watching-waiter.ts`) reuses this gate. It never chooses a watching
- * waiter that would dead-letter here.
+ * `orgId`, and its thread is not archived. Claim resolution
+ * (`claims.ts`) reuses this gate, so it never chooses a waiter thread that
+ * would dead-letter here.
  */
 export async function isDeliverableTarget(
   deps: { db: AppDb },
@@ -338,7 +343,7 @@ async function deliverToAssistantThreadInner(
   }
   if (destination.kind === "target") {
     if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, destination))) {
-      throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+      throw new Error(TARGET_UNAVAILABLE_MESSAGE);
     }
   }
   await thread.submitPrompt(signal, {

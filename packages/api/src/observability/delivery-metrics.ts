@@ -7,8 +7,12 @@
 import { metrics } from "@opentelemetry/api";
 import type { Destination, DestinationReason } from "../events/destination.js";
 
-/** The counter's reason label: a resolver reason, a claim skip, or a dead pin. */
-export type DeliveryDestinationMetricReason = DestinationReason | "claim_skip" | "pin_unavailable";
+/**
+ * The counter's reason label: a resolver reason, a claim skip, a dead pin,
+ * or `claim_recovered`: a claimed waiter got its digest back because the
+ * dispatcher skipped the claim delivery for a reason decided after ingest.
+ */
+export type DeliveryDestinationMetricReason = DestinationReason | "claim_skip" | "pin_unavailable" | "claim_recovered";
 
 /** A sink for one delivery's destination reason: the counter, or a test's recorder. */
 export type DestinationRecorder = (reason: DeliveryDestinationMetricReason) => void;
