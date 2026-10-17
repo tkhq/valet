@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Hono api, `@valet/engine` store (`findEventWaiters`), vitest.
 
-**Spec:** `docs/specs/2026-10-15-incident-mention-routing-design.md` (binding).
+**Spec:** the incident mention routing spec (2026-10-15), since folded into `docs/specs/2026-10-16-delivery-threads-and-claims-design.md` Part C and removed.
 
 ## Global Constraints
 
