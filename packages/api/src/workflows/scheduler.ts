@@ -22,7 +22,12 @@ import { readThreadPolicy } from "@valet/shared";
 import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
 import { resolveDestination } from "../events/destination.js";
-import { destinationMetricReason, recordDeliveryDestination } from "../observability/delivery-metrics.js";
+import {
+  destinationMetricReason,
+  recordDeliveryDestination,
+  type DeliveryDestinationMetricReason,
+  type DestinationRecorder,
+} from "../observability/delivery-metrics.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
@@ -41,6 +46,9 @@ export interface WorkflowSchedulerDeps {
   deliverToAssistant: AssistantDeliverFn;
   /** Injectable clock for tests. */
   now?: () => number;
+  /** Counts a dead pin (spec Part E step 3). Absent → the
+   * `valet_event_delivery_destination` counter. Tests pass a recorder. */
+  recordDestination?: DestinationRecorder;
 }
 
 /** Pure: the derived, idempotent run id for one (schedule, slot) fire. */
@@ -53,6 +61,10 @@ export class WorkflowScheduler {
   private ticking = false;
 
   constructor(private readonly deps: WorkflowSchedulerDeps) {}
+
+  private recordDestination(reason: DeliveryDestinationMetricReason): void {
+    (this.deps.recordDestination ?? recordDeliveryDestination)(reason);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -143,7 +155,7 @@ export class WorkflowScheduler {
         if (!(err instanceof PinUnavailableError)) throw err;
         return { error: PIN_UNAVAILABLE_MESSAGE, pinUnavailable: true };
       }
-      recordDeliveryDestination(destinationMetricReason(destination));
+      this.recordDestination(destinationMetricReason(destination));
       return "ok";
     }
 
@@ -213,7 +225,7 @@ export class WorkflowScheduler {
         .returning({ id: workflowSchedules.id });
       // The counter pages a person once per dead pin: only the fire that
       // disables the schedule counts, not a replica that re-fired the slot.
-      if (result.pinUnavailable && disabled.length > 0) recordDeliveryDestination("pin_unavailable");
+      if (result.pinUnavailable && disabled.length > 0) this.recordDestination("pin_unavailable");
       return;
     }
     await db

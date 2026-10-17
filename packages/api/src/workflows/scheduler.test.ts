@@ -21,12 +21,7 @@ import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { WorkflowScheduler } from "./scheduler.js";
 import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveryDestination } from "../events/assistant-delivery.js";
 import { eq } from "drizzle-orm";
-
-const recordDeliveryDestination = vi.hoisted(() => vi.fn());
-vi.mock("../observability/delivery-metrics.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../observability/delivery-metrics.js")>()),
-  recordDeliveryDestination,
-}));
+import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
 /** The thread a recording delivery fake reports it landed in. */
 const LANDED = { sessionId: "sess-landed", threadId: "thr-landed" };
@@ -195,7 +190,7 @@ describe("WorkflowScheduler thread policy", () => {
 
   it("counts a dead pin once, when it disables the schedule", async () => {
     await seedPromptSchedule("sched-pin-count", { mode: "existing", sessionId: "sess-1", threadId: "thr-1" });
-    recordDeliveryDestination.mockClear();
+    const recordDestination = vi.fn<DestinationRecorder>();
     // Two replicas fire the same slot: each delivery waits until both started.
     let started = 0;
     let bothStarted = () => {};
@@ -206,16 +201,16 @@ describe("WorkflowScheduler thread policy", () => {
       throw new PinUnavailableError();
     };
     const replica = () => new WorkflowScheduler({
-      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(), deliverToAssistant, now: () => 1_000,
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(), deliverToAssistant, now: () => 1_000, recordDestination,
     });
     const scheduler = replica();
     await Promise.all([scheduler.tick(), replica().tick()]);
     expect(started).toBe(2);
-    expect(recordDeliveryDestination.mock.calls).toEqual([["pin_unavailable"]]);
+    expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
 
     // A manual fire of the disabled schedule answers with the fix text and
     // does not page again.
     expect(await scheduler.fireNow({ userId: "user-1", orgId: "org-1" }, "sched-pin-count")).toEqual({ error: PIN_UNAVAILABLE_MESSAGE });
-    expect(recordDeliveryDestination.mock.calls).toEqual([["pin_unavailable"]]);
+    expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
   });
 });

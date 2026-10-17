@@ -10,6 +10,9 @@ import type { Destination, DestinationReason } from "../events/destination.js";
 /** The counter's reason label: a resolver reason, a claim skip, or a dead pin. */
 export type DeliveryDestinationMetricReason = DestinationReason | "claim_skip" | "pin_unavailable";
 
+/** A sink for one delivery's destination reason: the counter, or a test's recorder. */
+export type DestinationRecorder = (reason: DeliveryDestinationMetricReason) => void;
+
 type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
 let destinationCounter: Counter | undefined;
 

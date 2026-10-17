@@ -34,12 +34,11 @@ import {
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
 import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
 import { PinUnavailableError } from "./assistant-delivery.js";
+import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
-const recordDeliveryDestination = vi.hoisted(() => vi.fn());
-vi.mock("../observability/delivery-metrics.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../observability/delivery-metrics.js")>()),
-  recordDeliveryDestination,
-}));
+/** Records the destination counter's reasons. The dispatcher takes it as a
+ * dependency, so the tests need no module mock. */
+const recordDestination = vi.fn<DestinationRecorder>();
 
 const ORG = "org-1";
 /** The thread a recording delivery fake reports it landed in. */
@@ -1191,7 +1190,7 @@ describe("EventDispatcher", () => {
     function dispatcherWith(deliver: AssistantDeliverFn): EventDispatcher {
       return new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToAssistant: deliver, plugins: [githubPlugin],
+        deliverToAssistant: deliver, plugins: [githubPlugin], recordDestination,
       });
     }
 
@@ -1242,12 +1241,12 @@ describe("EventDispatcher", () => {
       const pin = { mode: "existing", sessionId: "sess-pin", threadId: "thr-pin" };
       const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: pin } });
       const deliver = vi.fn<AssistantDeliverFn>(async () => { throw new PinUnavailableError(); });
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await dispatcherWith(deliver).pollOnce();
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-pin", threadId: "thr-pin", reason: "policy_existing" });
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence." });
-      expect(recordDeliveryDestination.mock.calls).toEqual([["pin_unavailable"]]);
+      expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
     });
 
     it("records the destination stage on the event's receipt and counts the reason", async () => {
@@ -1255,29 +1254,29 @@ describe("EventDispatcher", () => {
       await tdb.appDb.insert(eventReceipts).values({
         id: "rcpt-1", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
       });
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
       const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.id, "rcpt-1"));
       expect(receipt?.stages).toEqual([expect.objectContaining({
         stage: "destination", outcome: "policy_own",
         detail: `Subscription ${subscriptionId}, delivery ${deliveryId}: thread key sub:${subscriptionId}.`,
       })]);
-      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+      expect(recordDestination.mock.calls).toEqual([["policy_own"]]);
     });
 
     it("a claim on an ambient event skips the delivery and never calls the seam (M4)", async () => {
       const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       const claimFor = vi.fn(async () => ({ sessionId: "sess-w", threadId: "thr-w", waiterId: "w-1" }));
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToAssistant: deliver, plugins: [githubPlugin], claimFor,
+        deliverToAssistant: deliver, plugins: [githubPlugin], claimFor, recordDestination,
       }).pollOnce();
       expect(claimFor).toHaveBeenCalledOnce();
       expect(deliver).not.toHaveBeenCalled();
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, claimed by thread thr-w." });
-      expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
+      expect(recordDestination.mock.calls).toEqual([["claim_skip"]]);
     });
 
     it("defaults an absent policy per delivery: new with a channel origin, own without one", async () => {
@@ -1306,33 +1305,33 @@ describe("EventDispatcher", () => {
       await tdb.appDb.insert(eventReceipts).values({
         id: "rcpt-retry", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
       });
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
       // The status write was lost: the delivery runs again and recovers its admission.
       await tdb.appDb.update(eventDeliveries).set({ status: "pending", nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => ({ ...LANDED, recovered: true }))).pollOnce();
       const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.id, "rcpt-retry"));
       expect(receipt?.stages).toHaveLength(1);
-      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+      expect(recordDestination.mock.calls).toEqual([["policy_own"]]);
     });
 
     it("does not count a recovered retry again when the event has no receipt", async () => {
       const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
       await tdb.appDb.update(eventDeliveries).set({ status: "pending", nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => ({ ...LANDED, recovered: true }))).pollOnce();
-      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+      expect(recordDestination.mock.calls).toEqual([["policy_own"]]);
     });
 
     it("a skip marks the delivery skipped and creates no thread (INV-D3)", async () => {
       const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
-      recordDeliveryDestination.mockClear();
+      recordDestination.mockClear();
       await recordSkippedDelivery(tdb.appDb, {
         deliveryId, subscriptionId, attempts: 0, orgId: ORG, eventId, destination: { kind: "skip", reason: "claimed by thread thr-w" },
-      });
+      }, recordDestination);
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", attempts: 1, lastError: "Skipped, claimed by thread thr-w." });
-      expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
+      expect(recordDestination.mock.calls).toEqual([["claim_skip"]]);
       const threads = await tdb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
       expect(threads.rows[0]?.n).toBe(0);
     });
