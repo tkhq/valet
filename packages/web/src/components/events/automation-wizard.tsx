@@ -142,6 +142,7 @@ export function AutomationWizard({
   onCloseAutoFocus,
   preselectedPlace,
   preselectedWorkflowId,
+  startOn = "listener",
 }: {
   replyTeam?: { id: string; name: string };
   onCloseAutoFocus?: (event: Event) => void;
@@ -154,6 +155,9 @@ export function AutomationWizard({
   /** Opens on "Run a workflow on an event" with this workflow as the target.
    * Read at mount, like `preselectedPlace`. */
   preselectedWorkflowId?: string;
+  /** The flow the wizard opens on: a listener (an event rule) or a routine
+   * (a schedule). Read at mount. */
+  startOn?: "listener" | "routine";
 }) {
   const catalogQ = useEventCatalog();
   const allServices = catalogQ.data?.services ?? [];
@@ -167,7 +171,9 @@ export function AutomationWizard({
   const scopedTeamId = scopedTeam?.id;
 
   const [step, setStep] = useState<Step>(replyTeam ? 2 : 1);
-  const [outcome, setOutcome] = useState<Outcome>(preselectedWorkflowId !== undefined ? "workflow" : "reply");
+  const [outcome, setOutcome] = useState<Outcome>(
+    startOn === "routine" ? "schedule" : preselectedWorkflowId !== undefined ? "workflow" : "reply",
+  );
   const [threadLink, setThreadLink] = useState("");
   const threadPreset = parseSlackThreadLink(threadLink);
   const [appearance, setAppearance] = useState<Appearance>({});

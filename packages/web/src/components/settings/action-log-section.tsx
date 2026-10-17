@@ -240,7 +240,7 @@ function LogRow({
         )}
         {entry.workflowExecutionId && (
           <Link
-            to="/workflows/runs/$runId"
+            to="/presence/runs/$runId"
             params={{ runId: entry.workflowExecutionId }}
             className="inline-flex min-h-11 items-center text-xs text-accent-600 underline sm:min-h-0"
           >

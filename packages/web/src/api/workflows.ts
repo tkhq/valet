@@ -23,6 +23,7 @@ import type {
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   ListWorkflowActionRequiredResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
@@ -161,6 +162,21 @@ export function useWorkflowRuns(
     queryKey: qkWorkflows.runs(id, page),
     queryFn: () => api.listWorkflowRuns(id, page),
     enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Every run in one workspace, newest first: the Presence Runs tab. Polls,
+ * because runs move; the same cadence as run detail. */
+export function useAllWorkflowRuns(
+  owner: OwnerFilter | undefined,
+  page?: WorkflowRunPage,
+  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
+) {
+  return useQuery<ListAllWorkflowRunsResponse>({
+    queryKey: qkWorkflows.allRuns(owner, page),
+    queryFn: () => api.listAllWorkflowRuns(owner, page),
+    refetchInterval: 5000,
     ...opts,
   });
 }

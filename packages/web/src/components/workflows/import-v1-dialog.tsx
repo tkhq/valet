@@ -100,7 +100,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
     }
     close();
     // The converter returns at least one workflow, so the import created one.
-    if (firstId !== undefined) void navigate({ to: "/workflows/$workflowId", params: { workflowId: firstId } });
+    if (firstId !== undefined) void navigate({ to: "/presence/workflows/$workflowId", params: { workflowId: firstId } });
   }
 
   function close(): void {

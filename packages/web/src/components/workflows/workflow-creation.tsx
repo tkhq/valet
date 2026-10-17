@@ -54,7 +54,7 @@ export function WorkflowCreation({ onBack, onBegin }: { onBack?: () => void; onB
         <Composer sessionId={conversation.data.sessionId} threadId={draftId} agentStatus="idle"
           submissionLock={preparing}
           beforeSend={prepare}
-          onSent={() => { if (mounted.current && workflowId.current) void navigate({ to: "/workflows/$workflowId", params: { workflowId: workflowId.current } }); }}
+          onSent={() => { if (mounted.current && workflowId.current) void navigate({ to: "/presence/workflows/$workflowId", params: { workflowId: workflowId.current } }); }}
         /></>}
   </div>;
 }

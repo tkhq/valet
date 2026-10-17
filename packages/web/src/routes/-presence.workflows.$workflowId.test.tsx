@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/workflows/$workflowId` editor page (plan decision 11): loads the
+ * `/presence/workflows/$workflowId` editor page (plan decision 11): loads the
  * fetched definition into the `Editor` (Task 8-10), Save fires the update
  * mutation with the edited definition, and Run starts a run then navigates
  * to its detail page. `WorkflowEditorPage` takes `workflowId` as a plain
@@ -161,6 +161,21 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
+// The panel lists the listeners that run this workflow from the rules list.
+vi.mock("~/api/events", () => ({
+  useEventSubscriptions: () => ({ data: { subscriptions: [] }, isPending: false, error: null }),
+}));
+
+// Thread titles for pinned listeners and routines; none here pins a thread.
+vi.mock("~/api/presence", () => ({ usePinnedThreadTitles: () => ({}) }));
+vi.mock("~/api/listener", () => ({ usePinnedThreadTitles: () => ({}) }));
+
+/** The wizard has its own suite. A stub names the flow it opened on. */
+vi.mock("~/components/events/automation-wizard", () => ({
+  AutomationWizard: ({ open, startOn }: { open: boolean; startOn?: string }) =>
+    open ? <div role="dialog" aria-label={startOn === "routine" ? "New routine" : "New listener"} /> : null,
+}));
+
 /** The assistant has a stable conversation address. SessionView renders its
  * header through a stub, so page tests do not need the chat transport. */
 vi.mock("~/hooks/use-workflow-assistant", () => ({
@@ -180,7 +195,7 @@ vi.mock("~/api/queries", async (importOriginal) => ({
 
 import { ApiError } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
-import { WorkflowEditorPage } from "./workflows.$workflowId";
+import { WorkflowEditorPage } from "./presence.workflows.$workflowId";
 
 /** JSON mode is deliberately behind the editor's overflow menu — the
  * assistant panel is the promoted path for changing a definition. */
@@ -292,7 +307,7 @@ describe("WorkflowEditorPage", () => {
     await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
-        to: "/workflows/runs/$runId",
+        to: "/presence/runs/$runId",
         params: { runId: "wfrun_1" },
       }),
     );
@@ -356,20 +371,21 @@ describe("WorkflowEditorPage", () => {
     expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
   });
 
-  it("renders the scoped triggers panel for this workflow", () => {
+  it("renders the listeners and routines panel for this workflow", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    // The panel lives in the Triggers drawer, which starts closed, so the
-    // scoped read only happens after the toolbar button opens it.
-    fireEvent.click(screen.getByRole("button", { name: "Triggers" }));
+    // The panel lives in a drawer, which starts closed, so the scoped read
+    // only happens after the toolbar button opens it.
+    fireEvent.click(screen.getByRole("button", { name: "Listeners and routines" }));
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    expect(screen.queryByText(/Triggers/)).toBeNull();
   });
 
-  it("opens a new trigger of the chosen kind when created from the new-workflow dialog", async () => {
+  it("opens the wizard on a listener for this workflow when created from the new-workflow dialog", async () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
-    expect(await screen.findByRole("dialog", { name: "New trigger" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "New listener" })).toBeTruthy();
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

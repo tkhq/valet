@@ -206,8 +206,8 @@ function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: strin
   const dismiss = useDismissRun();
   const failed = !row.needsApproval && row.outcome === "failed";
   const label = row.needsApproval ? "Approval needed" : failed ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
-  return <WorkRow title={<Link to="/workflows/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
-    badge={<Badge variant={failed ? "danger" : runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
+  return <WorkRow title={<Link to="/presence/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
+    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
     actions={failed ? <Button variant="ghost" size="sm" disabled={dismiss.isPending} onClick={() => dismiss.mutate(row.runId)}>Dismiss</Button> : undefined} />;
 }
 function ResultGroupRow({ group }: { group: ResultItem[] }) {
@@ -230,7 +230,7 @@ function ResultGroupRow({ group }: { group: ResultItem[] }) {
     actions={<>
       {threadId && pr && <Link to="/threads/$threadId" params={{ threadId }} className={textLinkClass}>Open thread</Link>}
       {threadId && !pr && latest.url && <a href={latest.url} target="_blank" rel="noopener noreferrer" className={textLinkClass}>Open in Slack</a>}
-      {runId && <Link to="/workflows/runs/$runId" params={{ runId }} className={textLinkClass}>Open run</Link>}
+      {runId && <Link to="/presence/runs/$runId" params={{ runId }} className={textLinkClass}>Open run</Link>}
     </>} />;
 }
 function PageControls({ cursor, next, onPage, label }: { cursor?: string; next?: string | null; onPage: (cursor?: string) => void; label: string }) {

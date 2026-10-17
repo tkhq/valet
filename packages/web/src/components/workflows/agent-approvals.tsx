@@ -13,7 +13,7 @@ export function WorkflowAgentApprovals({ sessionId }: { sessionId: string }) {
   const pending = decisions.error ? undefined : decisions.data?.gates.filter((gate) => gate.status === "pending");
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-4">
-      <Link to="/workflows/runs/$runId" params={{ runId }} className="text-sm underline">Open workflow run</Link>
+      <Link to="/presence/runs/$runId" params={{ runId }} className="text-sm underline">Open workflow run</Link>
       <h1 className="text-lg font-semibold">Workflow agent approvals</h1>
       {decisions.isLoading && <p>Loading approvals…</p>}
       {decisions.error && <p role="alert">Cannot load approvals. Check your access to this workflow, then reload the page.</p>}

@@ -895,6 +895,16 @@ describe("AutomationWizard", () => {
     expect(body.target).toEqual({ kind: "workflow", workflowId: "wf_2" });
   });
 
+  it("opens a routine with a preselected workflow on the schedule outcome", () => {
+    workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }, { id: "wf_2", name: "Triage" }] };
+    render(<AutomationWizard open onOpenChange={() => {}} preselectedWorkflowId="wf_2" startOn="routine" />);
+    expect((screen.getByLabelText(/On a schedule/) as HTMLInputElement).checked).toBe(true);
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * *" } });
+    clickNext();
+    expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_2");
+  });
+
   it("a clean create still closes the dialog", () => {
     const onOpenChange = vi.fn();
     createSubscription.mockImplementation(

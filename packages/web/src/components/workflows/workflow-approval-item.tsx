@@ -39,7 +39,7 @@ export function WorkflowApprovalItem({
             />
           </div>
           <Link
-            to="/workflows/$workflowId"
+            to="/presence/workflows/$workflowId"
             params={{ workflowId: item.workflowId }}
             // A long name would push the approve controls off screen in this
             // compact list: two lines, and the full name on hover.
@@ -57,7 +57,7 @@ export function WorkflowApprovalItem({
             {item.canReadRun !== false && item.trigger.triggerId && <span className="sr-only">{` (Trigger ID: ${item.trigger.triggerId})`}</span>}
           </div>
           {item.canReadRun !== false && <Link
-            to="/workflows/runs/$runId"
+            to="/presence/runs/$runId"
             params={{ runId: item.runId }}
             className="inline-flex min-h-11 items-center underline sm:min-h-0"
           >

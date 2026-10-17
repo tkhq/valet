@@ -65,7 +65,7 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
       setPresence({});
       setStart("manual");
       void navigate({
-        to: "/workflows/$workflowId",
+        to: "/presence/workflows/$workflowId",
         params: { workflowId: created.id },
         ...(start === "manual" ? {} : { search: { newTrigger: start } }),
       });

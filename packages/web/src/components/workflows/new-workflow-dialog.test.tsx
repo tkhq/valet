@@ -83,7 +83,7 @@ describe("NewWorkflowDialog", () => {
     expect((createMutateAsync.mock.calls[0]![0] as { name: string }).name).toBe("Weekly brief");
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(navigate).toHaveBeenCalledWith({
-      to: "/workflows/$workflowId",
+      to: "/presence/workflows/$workflowId",
       params: { workflowId: "wf_new" },
     });
   });
@@ -93,7 +93,7 @@ describe("NewWorkflowDialog", () => {
     fireEvent.click(screen.getByRole("radio", { name: /On a schedule/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({
-      to: "/workflows/$workflowId",
+      to: "/presence/workflows/$workflowId",
       params: { workflowId: "wf_new" },
       search: { newTrigger: "schedule" },
     }));

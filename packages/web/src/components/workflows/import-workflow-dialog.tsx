@@ -179,7 +179,7 @@ export function ImportWorkflowDialog({
         ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
       });
       close();
-      void navigate({ to: "/workflows/$workflowId", params: { workflowId: created.id } });
+      void navigate({ to: "/presence/workflows/$workflowId", params: { workflowId: created.id } });
     } catch (err) {
       // Nothing was created — the create route validates before it writes,
       // so a corrected file can be imported straight away.

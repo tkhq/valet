@@ -144,6 +144,7 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
   ListWorkflowVersionsResponse,
@@ -1175,6 +1176,14 @@ export const api = {
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
   listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
+  /** Every workflow run in one workspace, newest first. Paged by `nextCursor`. */
+  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (page?.limit) qs.set("limit", String(page.limit));
+    if (page?.cursor) qs.set("cursor", page.cursor);
+    const joined = [qs.toString(), ownerParams(owner)].filter(Boolean).join("&");
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${joined ? `?${joined}` : ""}`);
+  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>

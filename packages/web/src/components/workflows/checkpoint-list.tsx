@@ -316,7 +316,7 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
                 <span className="text-muted">Scoped agent logs were not recorded for this step.</span>
               )}
               {checkpoint.childRunId && (
-                <Link to="/workflows/runs/$runId" params={{ runId: checkpoint.childRunId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
+                <Link to="/presence/runs/$runId" params={{ runId: checkpoint.childRunId }} className="inline-flex min-h-11 items-center text-accent hover:underline sm:min-h-0">
                   Open child run
                 </Link>
               )}

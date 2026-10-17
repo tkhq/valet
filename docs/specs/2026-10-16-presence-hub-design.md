@@ -291,3 +291,8 @@ Pass criterion: all steps, in one run, from a clean start.
   `title` and `archived`, so a row reads `claimed by t-inc` after `t-inc`
   is archived. A claim whose thread the viewer may not open reads `claimed
   by another thread`.
+- **The editor's listeners come from the rules list (Part F step 2).** The
+  panel reads `GET /api/event-subscriptions` and keeps the rules whose
+  target is this workflow, because a sentence needs each rule's filters and
+  target. Routines come from the workflow's trigger list. A row opens the
+  listener or routine page; the panel does not edit a row in place.
