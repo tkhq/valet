@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DerivedEventDef, EventMatchSpec, NormalizedEvent } from "@valet/engine";
-import { derivedClausesAccept, keyMatches, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { derivedClausesAccept, keyMatches, matchClauses, needsPreviousStatus, toDigest } from "./waiter-match.js";
 
 const SELF_ID = "U-SELF";
 const OTHER_ID = "U-OTHER";
@@ -250,24 +250,6 @@ describe("needsPreviousStatus", () => {
   });
 });
 
-describe("mentionsBot", () => {
-  it("is true for a slack.message whose text mentions the bot", () => {
-    const e = event({ key: "slack.message", payload: { text: "hey <@U-BOT> look at this" } });
-    expect(mentionsBot(e, "U-BOT")).toBe(true);
-  });
-  it("is false when the text does not mention the bot", () => {
-    const e = event({ key: "slack.message", payload: { text: "hello there" } });
-    expect(mentionsBot(e, "U-BOT")).toBe(false);
-  });
-  it("is false for a non-slack.message key", () => {
-    const e = event({ key: "github.issue_comment.created", payload: { text: "<@U-BOT>" } });
-    expect(mentionsBot(e, "U-BOT")).toBe(false);
-  });
-  it("is false when botUserId is undefined", () => {
-    const e = event({ key: "slack.message", payload: { text: "<@U-BOT>" } });
-    expect(mentionsBot(e, undefined)).toBe(false);
-  });
-});
 
 describe("toDigest", () => {
   it("carries the core NormalizedEvent fields", () => {

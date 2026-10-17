@@ -13,7 +13,7 @@ import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js"
 import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { appMentionCoveredBy, matchEventWaiters, recordWaiterMatchFailure, waiterMatchStage, type WaiterMatchDeps } from "./waiters.js";
+import { appendWaiterDigests, evaluateWaiterCandidates, recordWaiterMatchFailure, waiterMatchStage, type WaiterMatchDeps } from "./waiters.js";
 
 export interface IngestDeps {
   db: AppDb;
@@ -277,13 +277,10 @@ export async function ingestEvent(
     if (deps.waiters) {
       const waiters = deps.waiters;
       try {
-        const result = await matchEventWaiters({
-          ...waiters,
-          // The mention rule reuses the subscriptions this ingest already read.
-          appMentionCovered: async (_orgId, mention) => appMentionCoveredBy(deps.db, subs, mention, deps.plugins),
-        }, orgId, service, event);
+        const candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
+        const appended = await appendWaiterDigests(waiters, service, candidates);
         // An event that no running waiter shares a subject with adds no stage.
-        if (result.candidates > 0) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(result.appended));
+        if (candidates.length > 0) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
       } catch (error) {
         recordWaiterMatchFailure(waiters);
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
