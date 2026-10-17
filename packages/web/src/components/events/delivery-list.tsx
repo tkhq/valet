@@ -24,7 +24,9 @@ const destinationLinkClass = cn(textLinkClass, "min-h-11 text-xs sm:min-h-0");
  * The delivery attempts made for one event: what each one was trying to
  * reach, where it got to, and when it tries again. Shared by the feed row
  * and the event page so the two never drift. A delivery links to the thread
- * or the workflow run it reached, when the API sends one.
+ * it reached, the thread whose waiter claimed it, or the workflow run it
+ * started, when the API sends one (spec 2026-10-16: delivery threads and
+ * claims, Part E step 2). A dead delivery shows its dead-letter text.
  */
 export function DeliveryList({
   deliveries,
@@ -49,13 +51,18 @@ export function DeliveryList({
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={DELIVERY_VARIANT[d.status]}>{d.status}</Badge>
             <span className="break-all text-xs text-ink">{d.subscriptionName ?? d.subscriptionId}</span>
-            <span className="text-xs text-muted">{deliveryStatusLine(d, now)}</span>
+            {!d.claimedBy && <span className="text-xs text-muted">{deliveryStatusLine(d, now)}</span>}
             {d.deliveredAt !== null && (
               <span className="text-xs text-muted">delivered {formatWhen(d.deliveredAt)}</span>
             )}
             {d.thread && (
               <Link to="/threads/$threadId" params={{ threadId: d.thread.threadId }} className={destinationLinkClass}>
-                Open thread
+                Delivered to thread
+              </Link>
+            )}
+            {d.claimedBy && (
+              <Link to="/threads/$threadId" params={{ threadId: d.claimedBy.threadId }} className={destinationLinkClass}>
+                Claimed by thread
               </Link>
             )}
             {d.runId && (

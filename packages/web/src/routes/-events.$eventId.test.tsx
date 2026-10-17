@@ -111,10 +111,10 @@ describe("EventDetailBody", () => {
         }}
       />,
     );
-    expect(screen.getByRole("link", { name: "Open thread" }).getAttribute("href")).toBe("/threads/th_1");
+    expect(screen.getByRole("link", { name: "Delivered to thread" }).getAttribute("href")).toBe("/threads/th_1");
     expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
     // The failing delivery reached nothing, so it links nowhere.
-    expect(screen.getAllByRole("link", { name: /^Open / })).toHaveLength(2);
+    expect(screen.getAllByRole("link")).toHaveLength(2);
   });
 
   it("confirms before redelivering, naming the subscriptions and the runs", async () => {
