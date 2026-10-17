@@ -3,7 +3,9 @@ import { RunsInField } from "~/components/presence/runs-in-field";
 import { defaultWizardThreadPolicy, subjectKindForKeys } from "~/components/presence/thread-policy-copy";
 import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { placeFilter, type PreselectedPlace } from "~/components/presence/place-filter";
+import { runsInLabel } from "~/components/presence/sentences";
 import { AutomationReview } from "./automation-review";
+import { wizardDraft, wizardSentence, type WhenService } from "./wizard-preview";
 import { parseSlackThreadLink } from "./slack-thread-preset";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
@@ -12,8 +14,11 @@ import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-p
  * UI copy names the result by its flow (spec 2026-10-16, Terminology): an
  * event rule is a **listener**, a schedule is a **routine**.
  *
- * The wizard is outcome-first. Step 1 asks what should happen, not which
- * primitive to build. The outcome then picks the steps and the store:
+ * Step 1 asks **When** (a Slack mention, a GitHub or Linear event, or a
+ * schedule) and **Do** (reply, follow a Slack thread, work on it, or run a
+ * workflow). The pair maps onto one outcome, and the outcome picks the steps
+ * and the store. A preview line under the step header reads the draft back
+ * as the sentence the Presence lists show (spec Part H):
  *
  *  - Reply to Slack mentions → a required multi-channel picker (or the
  *    explicit "Any channel" opt-out), which assistant answers, a "Keep
@@ -119,14 +124,30 @@ function threadWorkspaceFor(target: TargetChoice): string | undefined {
 
 function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   if (outcome === "reply") {
-    return { labels: ["What", "Reply", "Review"], count: 3 };
+    return { labels: ["When", "Reply", "Review"], count: 3 };
   }
-  return { labels: ["What", "Match", "Then", "Review"], count: 4 };
+  if (outcome === "schedule") {
+    return { labels: ["When", "Schedule", "Do", "Review"], count: 4 };
+  }
+  return { labels: ["When", "What", "Do", "Review"], count: 4 };
 }
 
-/** Outcomes that only Slack can serve: replies to mentions and one followed
- * thread. A place outside Slack never offers them. */
-const SLACK_ONLY_OUTCOMES: readonly Outcome[] = ["reply", "thread"];
+/** The Do choices. `reply` and `thread` are Slack only. */
+type DoChoice = "reply" | "thread" | "notify" | "workflow";
+
+const WHEN_CHOICES: { value: WhenService | "schedule"; title: string }[] = [
+  { value: "slack", title: "Someone mentions Valet in Slack" },
+  { value: "github", title: "Something happens on GitHub" },
+  { value: "linear", title: "Something happens in Linear" },
+  { value: "schedule", title: "On a schedule" },
+];
+
+const DO_CHOICES: { value: DoChoice; title: string; slackOnly: boolean }[] = [
+  { value: "reply", title: "Reply", slackOnly: true },
+  { value: "thread", title: "Follow a Slack thread", slackOnly: true },
+  { value: "notify", title: "Work on it", slackOnly: false },
+  { value: "workflow", title: "Run a workflow", slackOnly: false },
+];
 
 /** The outcome the wizard opens on. A routine opens on the schedule, a
  * preselected workflow on a workflow rule, and a place outside Slack on a
@@ -181,7 +202,9 @@ export function AutomationWizard({
 }) {
   const catalogQ = useEventCatalog();
   const allServices = catalogQ.data?.services ?? [];
-  const services = preselectedPlace ? allServices.filter((s) => s.service === preselectedPlace.service) : allServices;
+  // The When step's service. A place fixes it; the schedule and the raw
+  // outcome do not read it.
+  const [service, setService] = useState<WhenService>(preselectedPlace?.service ?? "slack");
   const workflowsQ = useWorkflows();
   const createSubscription = useCreateEventSubscription();
   const createSchedule = useCreateSchedule();
@@ -190,10 +213,14 @@ export function AutomationWizard({
   const scopedTeam = replyTeam ?? (ws?.kind === "team" ? ws.team : undefined);
   const scopedTeamId = scopedTeam?.id;
 
-  const [step, setStep] = useState<Step>(replyTeam ? 2 : 1);
+  // A routine opens on its schedule step (spec Part E step 3).
+  const [step, setStep] = useState<Step>(replyTeam || startOn === "routine" ? 2 : 1);
   // Read at mount, like the preselections it derives from.
   const [outcome, setOutcome] = useState<Outcome>(() => initialOutcome(startOn, preselectedWorkflowId, preselectedPlace));
-  const slackPlace = preselectedPlace === undefined || preselectedPlace.service === "slack";
+  // The event picker offers the place's service, else the When step's
+  // service for a notification or a workflow. The raw outcome offers all.
+  const pickerService = preselectedPlace?.service ?? (outcome === "notify" || outcome === "workflow" ? service : undefined);
+  const services = pickerService !== undefined ? allServices.filter((s) => s.service === pickerService) : allServices;
   const [threadLink, setThreadLink] = useState("");
   const threadPreset = parseSlackThreadLink(threadLink);
   const [appearance, setAppearance] = useState<Appearance>({});
@@ -237,7 +264,10 @@ export function AutomationWizard({
   // The default follows the outcome and the picked events, so it is derived,
   // not stored. A pick remembers its workspace: an existing thread of one
   // assistant is not valid after the target moves to another.
-  const [threadChoice, setThreadChoice] = useState<{ policy: AssistantThreadPolicy | null; workspace: string | undefined } | undefined>(undefined);
+  const [threadChoice, setThreadChoice] = useState<{ policy: AssistantThreadPolicy | null; workspace: string | undefined; title?: string } | undefined>(undefined);
+  // Runs in reads as a sentence until the reader selects Change. Once open,
+  // the field stays open for the wizard's life.
+  const [runsInOpen, setRunsInOpen] = useState(false);
   const [deliveryPreferences, setDeliveryPreferences] = useState<DeliveryPreferencesValue>({ deliveryPolicy: "always", pauseOnOverlap: true });
   const [error, setError] = useState<string | null>(null);
   // The collision report of the last create attempt (TKAI-294).
@@ -251,12 +281,43 @@ export function AutomationWizard({
 
   // A checked "Any channel" (or picked channels) must not ride into a
   // different outcome's flow, so an outcome switch resets both. The channels
-  // go back to the preselected place's channel, when there is one.
+  // go back to the preselected place's channel, when there is one. Picked
+  // events reset too, because another outcome can offer other services.
+  // A workflow outcome holds a workflow target, and the assistant outcomes
+  // hold an assistant target, so the preview and the create agree.
   function chooseOutcome(next: Outcome) {
+    if (next === outcome) return;
     setOutcome(next);
     setThreadChoice(undefined);
     setAnyChannel(false);
     setReplyChannels(placeChannels(preselectedPlace));
+    setKeys(new Set());
+    setFilterRows(placeRows);
+    if (next === "workflow" && target.kind !== "workflow") {
+      userTouched.current = true;
+      setTarget({ kind: "workflow", workflowId: workflows[0]?.id ?? "" });
+    } else if ((next === "reply" || next === "thread" || next === "notify") && target.kind === "workflow") {
+      userTouched.current = false;
+      setTarget(initialTarget(scopedTeamId));
+    }
+  }
+
+  // When: a service keeps a Do choice that the service offers, else takes
+  // the service's first one. A preselected workflow keeps Run a workflow.
+  function chooseWhen(next: WhenService | "schedule") {
+    if (next === "schedule") {
+      chooseOutcome("schedule");
+      return;
+    }
+    if (next !== service) {
+      setService(next);
+      setKeys(new Set());
+      setFilterRows(placeRows);
+    }
+    const kept =
+      outcome === "notify" || outcome === "workflow" || (next === "slack" && (outcome === "reply" || outcome === "thread"));
+    if (preselectedWorkflowId !== undefined) chooseOutcome("workflow");
+    else if (!kept) chooseOutcome(next === "slack" ? "reply" : "notify");
   }
 
   // A manual target choice wins: once the reader picks a target, a later
@@ -309,16 +370,47 @@ export function AutomationWizard({
     threadChoice === undefined || choiceStale ? defaultThread : threadChoice.policy;
   const threadReady = target.kind !== "assistant" || threadPolicy !== null;
   const ruleKind = isSchedule ? "routine" : "presence";
-  const runsIn = (idPrefix: string) => (
+  // The picked thread's title names an existing pin in the sentences.
+  const pinTitle = threadPolicy?.mode === "existing" ? threadChoice?.title : undefined;
+  const runsIn = (idPrefix: string) => runsInOpen ? (
     <RunsInField
       idPrefix={idPrefix}
       value={threadPolicy}
-      onChange={(policy) => setThreadChoice({ policy, workspace: threadWorkspace })}
+      onChange={(policy, title) => setThreadChoice({ policy, workspace: threadWorkspace, ...(title !== undefined ? { title } : {}) })}
       subjectKind={subjectKind}
       ruleKind={ruleKind}
       workspace={threadWorkspace}
       eventKeys={outcome === "reply" ? [SLACK_APP_MENTION] : isSchedule ? [] : [...keys]}
     />
+  ) : (
+    <div className="flex items-center gap-2 text-sm text-ink">
+      <span>Runs in: {threadPolicy !== null ? runsInLabel(threadPolicy, subjectKind, ruleKind, pinTitle) : "Pick a thread."}</span>
+      <Button type="button" variant="ghost" size="sm" onClick={() => setRunsInOpen(true)}>Change</Button>
+    </div>
+  );
+
+  // The preview: what Create stores, read back as the Presence sentence.
+  const previewSentence = wizardSentence(
+    wizardDraft({
+      outcome,
+      service,
+      keys: [...keys],
+      filterRows,
+      replyChannels,
+      anyChannel,
+      target: outcome === "reply" ? assistantTargetFrom(target) : target,
+      appearance,
+      name,
+      cron,
+      timezone,
+      prompt,
+      thread: threadPolicy,
+      follow,
+      threadLink,
+    }),
+    catalogQ.data?.services,
+    workflows,
+    pinTitle !== undefined && threadPolicy?.mode === "existing" ? { [threadPolicy.threadId]: { title: pinTitle } } : {},
   );
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
@@ -521,17 +613,24 @@ export function AutomationWizard({
       <DialogContent
         onCloseAutoFocus={onCloseAutoFocus}
         title={replyTeam ? "Set up Slack replies" : isSchedule ? "New routine" : "Listen for…"}
-        description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Pick what Valet does, then fill in the details."}
+        description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Choose when Valet acts and what it does."}
         className="max-w-lg"
       >
         {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 2 · {step === 2 ? "Reply" : "Review"}</p> : <StepHeader step={step} plan={plan} />}
+        <p aria-live="polite" data-testid="wizard-preview" className="mb-4 mt-2 rounded-md bg-ink-wash px-3 py-2 text-sm text-ink">
+          {previewSentence}
+        </p>
 
         <div className="space-y-4">
           {step === 1 && (
-            <OutcomeStep
+            <WhenDoStep
               outcome={outcome}
-              onChange={chooseOutcome}
-              outcomes={slackPlace ? OUTCOMES : OUTCOMES.filter((o) => !SLACK_ONLY_OUTCOMES.includes(o.value))}
+              service={service}
+              fixedService={preselectedPlace?.service}
+              fixedWorkflow={preselectedWorkflowId !== undefined}
+              onWhenChange={chooseWhen}
+              onDoChange={chooseOutcome}
+              onAdvanced={() => chooseOutcome("advanced")}
             />
           )}
 
@@ -607,7 +706,14 @@ export function AutomationWizard({
             <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />
           )}
 
-          {isLastStep && !isSchedule && <AppearanceSettings value={appearance} onChange={setAppearance} subscription />}
+          {isLastStep && !isSchedule && (
+            <details className="rounded-md border border-line px-3 py-2">
+              <summary className="cursor-pointer text-sm font-medium text-ink">Appears as</summary>
+              <div className="pt-2">
+                <AppearanceSettings value={appearance} onChange={setAppearance} subscription />
+              </div>
+            </details>
+          )}
 
           {isLastStep && (
             <ReviewStep
@@ -620,21 +726,7 @@ export function AutomationWizard({
               when={isSchedule ? `${cron} (${timezone})` : outcome === "reply" ? "Slack @-mention" : [...keys].join(", ")}
               scope={outcome === "reply" ? (anyChannel ? "Any accessible channel" : replyChannels.map(c => c.label).join(", ")) : isSchedule ? (scopedTeam?.name ?? "Personal") : describeFilters(filterRows) || "All matching events"}
               destination={describeTarget(target, workflows, teams, scopedTeam)}
-              summary={summarize({
-                outcome,
-                keys,
-                filterRows,
-                replyChannels,
-                anyChannel,
-                cron,
-                timezone,
-                target: outcome === "reply" ? mentionTargetFrom(target) : target,
-                audience,
-                follow,
-                workflows,
-                teams,
-                scopedTeam,
-              })}
+              summary={previewSentence}
             />
           )}
 
@@ -708,59 +800,59 @@ function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; coun
   );
 }
 
-const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
-  { value: "thread", title: "Follow a Slack thread", hint: "Follow future replies in one Slack thread." },
-  {
-    value: "reply",
-    title: "Reply to Slack mentions",
-    hint: "An assistant answers Slack @-mentions.",
-  },
-  {
-    value: "workflow",
-    title: "Run a workflow on an event",
-    hint: "Start a workflow when a connected integration reports an event.",
-  },
-  {
-    value: "notify",
-    title: "Send a notification",
-    hint: "Tell an assistant when a connected integration reports an event.",
-  },
-  {
-    value: "schedule",
-    title: "On a schedule",
-    hint: "Run an assistant or a workflow on a cron schedule you set.",
-  },
-  {
-    value: "advanced",
-    title: "Advanced: pick events and filters",
-    hint: "Pick raw event keys and filters, then what Valet does.",
-  },
-];
-
-function OutcomeStep({ outcome, onChange, outcomes }: {
+/** Step 1: When, then Do. Advanced picks raw events under a disclosure. */
+function WhenDoStep({ outcome, service, fixedService, fixedWorkflow, onWhenChange, onDoChange, onAdvanced }: {
   outcome: Outcome;
-  onChange: (o: Outcome) => void;
-  outcomes: readonly { value: Outcome; title: string; hint: string }[];
+  service: WhenService;
+  /** A place's service: the only When choice, selected. */
+  fixedService: WhenService | undefined;
+  /** A preselected workflow fixes Do on Run a workflow. */
+  fixedWorkflow: boolean;
+  onWhenChange: (next: WhenService | "schedule") => void;
+  onDoChange: (next: Outcome) => void;
+  onAdvanced: () => void;
 }) {
+  const when = outcome === "schedule" ? "schedule" : outcome === "advanced" ? null : service;
+  const whenChoices = fixedService !== undefined ? WHEN_CHOICES.filter((c) => c.value === fixedService) : WHEN_CHOICES;
+  const doChoices = DO_CHOICES.filter((c) => service === "slack" || !c.slackOnly);
   return (
-    <fieldset className="space-y-2">
-      <legend className="mb-1 text-sm font-medium text-ink">What should Valet do?</legend>
-      {outcomes.map((o) => (
-        <label key={o.value} className="flex min-h-11 items-start gap-2 text-sm text-ink sm:min-h-0">
-          <input
-            type="radio"
-            name="automation-outcome"
-            className="mt-0.5"
-            checked={outcome === o.value}
-            onChange={() => onChange(o.value)}
-          />
-          <span>
-            {o.title}
-            <span className="block text-xs text-muted">{o.hint}</span>
-          </span>
-        </label>
-      ))}
-    </fieldset>
+    <div className="space-y-4">
+      <fieldset className="space-y-2">
+        <legend className="mb-1 text-sm font-medium text-ink">When</legend>
+        {whenChoices.map((c) => (
+          <label key={c.value} className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+            <input type="radio" name="wizard-when" checked={when === c.value} onChange={() => onWhenChange(c.value)} />
+            {c.title}
+          </label>
+        ))}
+      </fieldset>
+      {when !== "schedule" && (
+        <fieldset className="space-y-2">
+          <legend className="mb-1 text-sm font-medium text-ink">Do</legend>
+          {doChoices.map((c) => (
+            <label key={c.value} className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <input
+                type="radio"
+                name="wizard-do"
+                checked={outcome === c.value}
+                disabled={fixedWorkflow && c.value !== "workflow"}
+                onChange={() => onDoChange(c.value)}
+              />
+              {c.title}
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <details open={outcome === "advanced"} className="text-sm text-ink">
+        <summary className="cursor-pointer text-sm text-muted">Advanced: pick events and filters</summary>
+        <div className="mt-2 space-y-1">
+          <p className="text-xs text-muted">Pick raw event keys and filters, then what Valet does.</p>
+          <Button type="button" variant="secondary" size="sm" aria-pressed={outcome === "advanced"} onClick={onAdvanced}>
+            Pick raw events
+          </Button>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -1358,63 +1450,4 @@ function opWord(op: UiFilterRow["op"]): string {
     case "regex":
       return "matches";
   }
-}
-
-/**
- * The plain-language sentence the Review step shows. Built from names, so a
- * reader confirms the rule without reading an id.
- */
-function summarize(args: {
-  outcome: Outcome;
-  keys: Set<string>;
-  filterRows: UiFilterRow[];
-  replyChannels: SelectedChannel[];
-  anyChannel: boolean;
-  cron: string;
-  timezone: string;
-  target: TargetChoice;
-  /** Read only for a team reply target. */
-  audience: EventSubscriptionAudienceWire;
-  follow: boolean;
-  workflows: { id: string; name: string }[];
-  teams: { id: string; name: string }[];
-  scopedTeam: { id: string; name: string } | undefined;
-}): string {
-  const then = describeTarget(args.target, args.workflows, args.teams, args.scopedTeam);
-
-  if (args.outcome === "reply") {
-    const names = args.replyChannels.map((c) => c.label);
-    const where = args.anyChannel
-      ? " in any channel the app can see"
-      : names.length > 0
-        ? ` in ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`}`
-        : "";
-    const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
-    if (args.target.kind === "assistant" && args.target.assistant === "team") {
-      const teamId = args.target.teamId;
-      const teamName = args.teams.find((t) => t.id === teamId)?.name ?? args.scopedTeam?.name ?? "the team";
-      const who =
-        args.audience === "organization"
-          ? "any member of the organization"
-          : `any linked member of ${teamName}`;
-      return `When ${who} @-mentions the app${where}, ${then}. A sender with no linked Slack account does not fire it.${trailing}`;
-    }
-    return `When you @-mention the app${where}, ${then}. Mentions by other people do not fire it.${trailing}`;
-  }
-
-  if (args.outcome === "schedule") {
-    const cron = args.cron.trim() || "the schedule";
-    return `On the cron schedule "${cron}" (${args.timezone.trim() || "UTC"}), ${then}.`;
-  }
-
-  const keys = [...args.keys];
-  const keyText =
-    keys.length === 0
-      ? "a matching event"
-      : keys.length === 1
-        ? keys[0]
-        : `${keys.slice(0, -1).join(", ")} or ${keys[keys.length - 1]}`;
-  const filters = describeFilters(args.filterRows);
-  const where = filters ? ` where ${filters}` : "";
-  return `When ${keyText} arrives${where}, ${then}.`;
 }

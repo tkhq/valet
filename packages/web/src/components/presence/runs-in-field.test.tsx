@@ -54,7 +54,7 @@ describe("RunsInField", () => {
     expect(radio(/An existing thread/).checked).toBe(true);
     expect(screen.getByText("Pick a thread.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Pick Deploys" }));
-    expect(onChange).toHaveBeenLastCalledWith({ mode: "existing", sessionId: "s1", threadId: "t1" });
+    expect(onChange).toHaveBeenLastCalledWith({ mode: "existing", sessionId: "s1", threadId: "t1" }, "Deploys");
     rerender(<RunsInField idPrefix="t" value={{ mode: "existing", sessionId: "s1", threadId: "t1" }} onChange={onChange} subjectKind="channel" ruleKind="presence" workspace="user" />);
     expect(screen.getByText("The thread Deploys")).toBeTruthy();
   });

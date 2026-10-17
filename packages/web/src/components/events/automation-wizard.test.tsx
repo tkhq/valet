@@ -131,8 +131,29 @@ function clickNext() {
   fireEvent.click(screen.getByRole("button", { name: /^Next$/ }));
 }
 
-function pickOutcome(label: RegExp) {
+function pickOutcome(label: RegExp | string) {
   fireEvent.click(screen.getByLabelText(label));
+}
+
+/** Step 1: the When choice, then the Do choice. */
+function pickWhenDo(when: string, todo?: string) {
+  fireEvent.click(screen.getByLabelText(when));
+  if (todo !== undefined) fireEvent.click(screen.getByLabelText(todo));
+}
+
+const GITHUB = "Something happens on GitHub";
+
+function pickAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: "Pick raw events" }));
+}
+
+function preview(): string {
+  return screen.getByTestId("wizard-preview").textContent ?? "";
+}
+
+/** Opens the Runs in field behind its Change button. */
+function openRunsIn() {
+  fireEvent.click(screen.getByRole("button", { name: "Change" }));
 }
 
 describe("AutomationWizard", () => {
@@ -180,7 +201,7 @@ describe("AutomationWizard", () => {
   it("homepage setup requires channels and an explicit team assistant, then saves that target", () => {
     render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
     expect(screen.getByRole("heading", { name: "Set up Slack replies" })).toBeTruthy();
-    expect(screen.queryByText("What should Valet do?")).toBeNull();
+    expect(screen.queryByRole("group", { name: "When" })).toBeNull();
     expect(screen.queryByLabelText("Personal workspace")).toBeNull();
     expect(screen.queryByText("Other")).toBeNull();
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
@@ -212,7 +233,7 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/does not run or change the team's workflows/)).toBeTruthy();
     addReplyChannel("C123");
     clickNext();
-    expect(screen.getByText(/any member of the organization/)).toBeTruthy();
+    expect(within(screen.getByLabelText("Summary")).getByText("Audience").nextElementSibling?.textContent).toBe("Anyone in the organization");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].audience).toBe("organization");
@@ -223,7 +244,7 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByLabelText(/Only members of Platform/));
     addReplyChannel("C123");
     clickNext();
-    expect(screen.getByText(/any linked member of Platform/)).toBeTruthy();
+    expect(within(screen.getByLabelText("Summary")).getByText("Audience").nextElementSibling?.textContent).toBe("Team members");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].audience).toBe("team");
@@ -278,7 +299,7 @@ describe("AutomationWizard", () => {
   it("reply step offers the team target with member-only copy", () => {
     scopeTeamId = "t_platform";
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    expect(screen.getByText(/An assistant answers Slack @-mentions/)).toBeTruthy();
+    expect((screen.getByLabelText("Reply") as HTMLInputElement).checked).toBe(true);
     clickNext();
     expect(screen.getByText(/Valet replies with the organization/)).toBeTruthy();
     expect(screen.getByText(/Choose below who may invoke it by mention/)).toBeTruthy();
@@ -289,7 +310,7 @@ describe("AutomationWizard", () => {
     clickNext();
     const review = within(screen.getByLabelText("Summary"));
     expect(review.getByText("Destination").nextElementSibling?.textContent).toBe("notify Platform's assistant");
-    expect(review.getByText("Result").nextElementSibling?.textContent).toContain("notify Platform's assistant");
+    expect(review.getByText("Result").nextElementSibling?.textContent).toBe("When someone mentions Valet in C123, reply in a new thread.");
   });
 
   it("a personal reply rule in a team workspace keeps creator-only copy and target", () => {
@@ -300,7 +321,7 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/do not reach your assistant/)).toBeTruthy();
     addReplyChannel("C123");
     clickNext();
-    expect(screen.getByText(/Mentions by other people do not fire it/)).toBeTruthy();
+    expect(within(screen.getByLabelText("Summary")).getByText("Destination").nextElementSibling?.textContent).toBe("notify your assistant");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Personal" } });
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "assistant", assistant: "user", follow: true, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
@@ -383,10 +404,10 @@ describe("AutomationWizard", () => {
     scopeTeamId = "t_platform";
     const view = render(<AutomationWizard open onOpenChange={() => {}} />);
 
-    pickOutcome(/Send a notification/);
-    clickNext(); // What
+    pickWhenDo(GITHUB, "Work on it");
+    clickNext(); // When
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
-    clickNext(); // Match
+    clickNext(); // What
 
     // The reader moves off the seeded team target and then picks it by hand
     // (a pick, not the seed, is what a workspace switch must not keep), then
@@ -411,8 +432,8 @@ describe("AutomationWizard", () => {
     workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
-    pickOutcome(/Run a workflow on an event/);
-    clickNext(); // What
+    pickWhenDo(GITHUB, "Run a workflow");
+    clickNext(); // When
 
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     clickNext(); // Match
@@ -433,7 +454,7 @@ describe("AutomationWizard", () => {
     scopeTeamId = "t_platform";
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
-    pickOutcome(/Advanced: pick events/);
+    pickAdvanced();
     clickNext(); // What
 
     // Step 2 — Match: the raw event picker. Pick the key, add a filter.
@@ -471,7 +492,7 @@ describe("AutomationWizard", () => {
 
   it("prunes only unsupported filters as selected events change", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    pickOutcome(/Advanced: pick events/);
+    pickAdvanced();
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
     fireEvent.click(screen.getByText(/^Add filter$/));
@@ -488,7 +509,7 @@ describe("AutomationWizard", () => {
 
   it.each(["", "C123"])("refuses invalid mention filters before creating (%s)", (value) => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    pickOutcome(/Advanced: pick events/);
+    pickAdvanced();
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
     fireEvent.click(screen.getByText(/^Add filter$/));
@@ -547,13 +568,13 @@ describe("AutomationWizard", () => {
   it("notify outcome posts the prompt templates it collected on the assistant target", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
-    pickOutcome(/Send a notification/);
-    clickNext(); // What
+    pickWhenDo(GITHUB, "Work on it");
+    clickNext(); // When
 
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
-    clickNext(); // Match
+    clickNext(); // What
 
-    // Step 3, Then: your assistant, plus what it should read.
+    // Step 3, Do: your assistant, plus what it should read.
     fireEvent.change(screen.getByLabelText(/Instructions for the assistant/), {
       target: { value: "Triage it. Answer in one sentence." },
     });
@@ -582,7 +603,7 @@ describe("AutomationWizard", () => {
     workflowsData = { workflows: [{ id: "wf-1", name: "Deploy" }] };
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
-    pickOutcome(/Run a workflow on an event/);
+    pickWhenDo(GITHUB, "Run a workflow");
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     clickNext();
@@ -622,7 +643,7 @@ describe("AutomationWizard", () => {
 
   it("blocks Next until the advanced Match step has an event", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    pickOutcome(/Advanced: pick events/);
+    pickAdvanced();
     clickNext(); // What → Match
     // No event key picked yet: Next is disabled.
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
@@ -733,6 +754,7 @@ describe("AutomationWizard", () => {
 
   describe("Runs in", () => {
     function checkedRunsIn(): string {
+      if (screen.queryByRole("group", { name: "Runs in" }) === null) openRunsIn();
       const fieldset = screen.getByRole("group", { name: "Runs in" });
       const radios = within(fieldset).getAllByRole("radio");
       const on = radios.find((r) => r instanceof HTMLInputElement && r.checked);
@@ -754,10 +776,11 @@ describe("AutomationWizard", () => {
 
     it("a notification with a subject defaults to one thread per subject", () => {
       render(<AutomationWizard open onOpenChange={() => {}} />);
-      pickOutcome(/Send a notification/);
+      pickWhenDo(GITHUB, "Work on it");
       clickNext();
       fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
       clickNext();
+      expect(screen.getByText("Runs in: One thread per pull request")).toBeTruthy();
       expect(checkedRunsIn()).toBe("One thread per pull request");
       clickNext();
       fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PRs" } });
@@ -768,7 +791,7 @@ describe("AutomationWizard", () => {
 
     it("an advanced rule defaults to its own thread, and a picked mode wins", () => {
       render(<AutomationWizard open onOpenChange={() => {}} />);
-      pickOutcome(/Advanced: pick events/);
+      pickAdvanced();
       clickNext();
       fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
       clickNext();
@@ -784,12 +807,13 @@ describe("AutomationWizard", () => {
     it("a workflow target shows no Runs in and posts no thread", () => {
       workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
       render(<AutomationWizard open onOpenChange={() => {}} />);
-      pickOutcome(/Run a workflow on an event/);
+      pickWhenDo(GITHUB, "Run a workflow");
       clickNext();
       fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
       clickNext();
       fireEvent.click(screen.getByLabelText(/Run a workflow/));
       expect(screen.queryByRole("group", { name: "Runs in" })).toBeNull();
+      expect(screen.queryByText(/^Runs in:/)).toBeNull();
     });
 
     it("a scheduled prompt offers no subject, defaults to its own thread, and posts thread at the top level", () => {
@@ -813,6 +837,7 @@ describe("AutomationWizard", () => {
       render(<AutomationWizard open onOpenChange={() => {}} />);
       clickNext();
       addReplyChannel("C123");
+      openRunsIn();
       fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
       expect(screen.getByText("Pick a thread.")).toBeTruthy();
       expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
@@ -824,13 +849,14 @@ describe("AutomationWizard", () => {
     const ACME_API = { subject: "github:acme/api", service: "github" as const, label: "acme/api" };
 
     function checkedRunsIn(): string {
+      if (screen.queryByRole("group", { name: "Runs in" }) === null) openRunsIn();
       const radios = within(screen.getByRole("group", { name: "Runs in" })).getAllByRole("radio");
       return radios.find((r) => r instanceof HTMLInputElement && r.checked)?.parentElement?.textContent ?? "";
     }
 
     it("a mention rule opens on the place's channel and replies in a new thread (H5)", () => {
       render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
-      pickOutcome(/Reply to Slack mentions/);
+      pickOutcome("Reply");
       clickNext();
       expect(screen.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
       expect(checkedRunsIn()).toBe("A new thread each time");
@@ -845,7 +871,7 @@ describe("AutomationWizard", () => {
 
     it("an event rule offers only the place's service and filters on its repository (H6)", () => {
       render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={ACME_API} />);
-      pickOutcome(/Send a notification/);
+      pickOutcome("Work on it");
       clickNext();
       expect(screen.queryByRole("checkbox", { name: /slack\.app_mention/ })).toBeNull();
       fireEvent.click(screen.getByRole("checkbox", { name: /github\.check_run\.completed/ }));
@@ -868,6 +894,7 @@ describe("AutomationWizard", () => {
       scopeTeamId = "t_platform";
       render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
       clickNext();
+      openRunsIn();
       fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
       expect(screen.getByText("Thread picker for t_platform")).toBeTruthy();
       expect(screen.queryByText("Thread picker for user")).toBeNull();
@@ -881,8 +908,10 @@ describe("AutomationWizard", () => {
 
     it("a place outside Slack opens on the notification and never offers a Slack channel picker", () => {
       render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={ACME_API} />);
-      expect((screen.getByLabelText(/Send a notification/) as HTMLInputElement).checked).toBe(true);
-      expect(screen.queryByLabelText(/Reply to Slack mentions/)).toBeNull();
+      expect((screen.getByLabelText("Something happens on GitHub") as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByLabelText("Work on it") as HTMLInputElement).checked).toBe(true);
+      expect(screen.queryByLabelText("Someone mentions Valet in Slack")).toBeNull();
+      expect(screen.queryByLabelText("Reply")).toBeNull();
       expect(screen.queryByLabelText(/Follow a Slack thread/)).toBeNull();
       clickNext();
       expect(screen.queryByLabelText("Channel id")).toBeNull();
@@ -915,7 +944,13 @@ describe("AutomationWizard", () => {
   it("a preselected workflow opens on the workflow outcome and posts that workflow", () => {
     workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }, { id: "wf_2", name: "Triage" }] };
     render(<AutomationWizard open onOpenChange={() => {}} preselectedWorkflowId="wf_2" />);
-    expect((screen.getByLabelText(/Run a workflow on an event/) as HTMLInputElement).checked).toBe(true);
+    const run = screen.getByLabelText("Run a workflow") as HTMLInputElement;
+    expect(run.checked).toBe(true);
+    expect((screen.getByLabelText("Work on it") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Reply") as HTMLInputElement).disabled).toBe(true);
+    pickOutcome(GITHUB);
+    expect(run.checked).toBe(true);
+    expect(preview()).toBe("When something happens on GitHub, run Triage.");
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     clickNext();
@@ -930,8 +965,8 @@ describe("AutomationWizard", () => {
   it("opens a routine with a preselected workflow on the schedule outcome", () => {
     workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }, { id: "wf_2", name: "Triage" }] };
     render(<AutomationWizard open onOpenChange={() => {}} preselectedWorkflowId="wf_2" startOn="routine" />);
-    expect((screen.getByLabelText(/On a schedule/) as HTMLInputElement).checked).toBe(true);
-    clickNext();
+    // The schedule step opens first.
+    expect(screen.getByText(/Schedule$/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * *" } });
     clickNext();
     expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_2");
@@ -940,7 +975,8 @@ describe("AutomationWizard", () => {
   it("names its flow: Listen for… for an event, New routine for a schedule", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
     expect(screen.getByRole("dialog", { name: "Listen for…" })).toBeTruthy();
-    expect(screen.getByText("What should Valet do?")).toBeTruthy();
+    expect(screen.getByText("Choose when Valet acts and what it does.")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "When" })).toBeTruthy();
     pickOutcome(/On a schedule/);
     expect(screen.getByRole("dialog", { name: "New routine" })).toBeTruthy();
     clickNext();
@@ -954,7 +990,7 @@ describe("AutomationWizard", () => {
 
   it("an event ends on Create", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    pickOutcome(/Send a notification/);
+    pickWhenDo(GITHUB, "Work on it");
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     clickNext();
@@ -973,5 +1009,144 @@ describe("AutomationWizard", () => {
     render(<AutomationWizard open onOpenChange={onOpenChange} />);
     createReplyRule("Clean rule");
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+  describe("When and Do (spec Part H)", () => {
+    const INCIDENTS = { subject: "slack:T1/C900", service: "slack" as const, label: "#incidents" };
+
+    it("opened from #incidents, the preview reads the default line before any field is touched (Review Focus 4)", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      const preview = screen.getByTestId("wizard-preview");
+      expect(preview.getAttribute("aria-live")).toBe("polite");
+      expect(preview.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+      fireEvent.click(screen.getByLabelText("Work on it"));
+      expect(preview.textContent).toBe("When someone mentions Valet in #incidents, work in its own thread.");
+    });
+
+    it("a place fixes When to its service", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      const when = within(screen.getByRole("group", { name: "When" }));
+      const radios = when.getAllByRole("radio");
+      expect(radios.map((r) => r.parentElement?.textContent)).toEqual(["Someone mentions Valet in Slack"]);
+      expect((radios[0] as HTMLInputElement).checked).toBe(true);
+      const todo = within(screen.getByRole("group", { name: "Do" }));
+      expect(todo.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([
+        "Reply", "Follow a Slack thread", "Work on it", "Run a workflow",
+      ]);
+    });
+
+    it("an unplaced wizard offers every When choice and hides Do for a schedule", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      const when = within(screen.getByRole("group", { name: "When" }));
+      expect(when.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual([
+        "Someone mentions Valet in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
+      ]);
+      fireEvent.click(screen.getByLabelText(GITHUB));
+      const todo = within(screen.getByRole("group", { name: "Do" }));
+      expect(todo.getAllByRole("radio").map((r) => r.parentElement?.textContent)).toEqual(["Work on it", "Run a workflow"]);
+      expect((screen.getByLabelText("Work on it") as HTMLInputElement).checked).toBe(true);
+      fireEvent.click(screen.getByLabelText("On a schedule"));
+      expect(screen.queryByRole("group", { name: "Do" })).toBeNull();
+    });
+
+    it.each([
+      ["Someone mentions Valet in Slack", "Reply", "Step 2 of 3 — Reply"],
+      ["Someone mentions Valet in Slack", "Follow a Slack thread", "Step 2 of 4 — What"],
+      ["Someone mentions Valet in Slack", "Work on it", "Step 2 of 4 — What"],
+      ["Something happens on GitHub", "Run a workflow", "Step 2 of 4 — What"],
+      ["On a schedule", undefined, "Step 2 of 4 — Schedule"],
+    ])("%s + %s leads to %s", (when, todo, header) => {
+      workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      pickWhenDo(when, todo);
+      expect(screen.getByText(/^Step 1 of \d — When$/)).toBeTruthy();
+      clickNext();
+      expect(screen.getByText(header)).toBeTruthy();
+    });
+
+    it("maps each pair onto the stored outcome", () => {
+      workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      // Slack + Reply: the channel picker.
+      clickNext();
+      expect(screen.getByLabelText("Channel id")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      // Slack + Follow: the thread link.
+      pickOutcome("Follow a Slack thread");
+      clickNext();
+      expect(screen.getByLabelText("Slack thread link")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      // Slack + Work on it: one Slack event, no GitHub events.
+      pickOutcome("Work on it");
+      clickNext();
+      expect(screen.getByRole("checkbox", { name: /slack\.app_mention/ })).toBeTruthy();
+      expect(screen.queryByRole("checkbox", { name: /github\./ })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      // GitHub + Run a workflow: GitHub events, then a workflow target.
+      pickWhenDo(GITHUB, "Run a workflow");
+      expect(preview()).toBe("When something happens on GitHub, run Deploy.");
+      clickNext();
+      expect(screen.queryByRole("checkbox", { name: /slack\./ })).toBeNull();
+      fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
+      clickNext();
+      expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_1");
+      expect(screen.queryByLabelText(/Notify your personal workspace/)).toBeNull();
+    });
+
+    it("Pick raw events opens the raw picker over every service", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      expect(screen.getByText("Advanced: pick events and filters").tagName).toBe("SUMMARY");
+      pickAdvanced();
+      clickNext();
+      expect(screen.getByRole("checkbox", { name: /slack\.app_mention/ })).toBeTruthy();
+      expect(screen.getByRole("checkbox", { name: /github\.pr\.opened/ })).toBeTruthy();
+    });
+
+    it("the preview text equals the review step's sentence", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      clickNext();
+      clickNext();
+      const result = within(screen.getByLabelText("Summary")).getByText("Result").nextElementSibling?.textContent;
+      expect(result).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+      expect(preview()).toBe(result);
+    });
+
+    it("a routine's preview names the schedule and the typed name", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} startOn="routine" />);
+      expect(screen.getByRole("dialog", { name: "New routine" })).toBeTruthy();
+      expect(preview()).toBe("On a schedule, this routine: work in its own thread.");
+      fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * 1-5" } });
+      fireEvent.change(screen.getByLabelText("Timezone"), { target: { value: "UTC" } });
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Daily digest" } });
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Routine name"), { target: { value: "Digest" } });
+      expect(preview()).toBe("Every weekday at 9:00, Digest: work in its own thread.");
+      expect(within(screen.getByLabelText("Summary")).getByText("Result").nextElementSibling?.textContent).toBe(preview());
+    });
+
+    it("Runs in reads as a sentence until Change opens the field, which then stays open", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      clickNext();
+      expect(screen.getByText("Runs in: A new thread each time")).toBeTruthy();
+      expect(screen.queryByRole("group", { name: "Runs in" })).toBeNull();
+      openRunsIn();
+      expect(screen.getByRole("group", { name: "Runs in" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
+      fireEvent.click(screen.getByRole("radio", { name: "Its own thread" }));
+      expect(preview()).toBe("When someone mentions Valet in #incidents, work in its own thread.");
+      clickNext();
+      fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      expect(screen.getByRole("group", { name: "Runs in" })).toBeTruthy();
+    });
+
+    it("Appears as sits behind a disclosure and feeds the preview", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} preselectedPlace={INCIDENTS} />);
+      clickNext();
+      clickNext();
+      const summary = screen.getAllByText("Appears as").find((el) => el.tagName === "SUMMARY");
+      expect(summary?.parentElement?.tagName).toBe("DETAILS");
+      fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Incident bot" } });
+      expect(preview()).toBe("When someone mentions Valet in #incidents, reply in a new thread, as Incident bot.");
+    });
   });
 });

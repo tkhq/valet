@@ -39,7 +39,8 @@ export function RunsInField({
 }: {
   idPrefix: string;
   value: AssistantThreadPolicy | null;
-  onChange: (next: AssistantThreadPolicy | null) => void;
+  /** `title` names the thread a reader picked from the thread list. */
+  onChange: (next: AssistantThreadPolicy | null, title?: string) => void;
   /** Null hides the subject option: the rule's events name no subject. */
   subjectKind: SubjectKind | null;
   ruleKind: RuleKind;
@@ -95,7 +96,7 @@ export function RunsInField({
               selectedThreadId={existing?.threadId}
               onPick={(policy, pickedTitle) => {
                 setPicked({ threadId: policy.threadId, title: pickedTitle });
-                onChange(policy);
+                onChange(policy, pickedTitle);
               }}
             />
           )}

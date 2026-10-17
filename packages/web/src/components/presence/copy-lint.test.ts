@@ -23,6 +23,7 @@ const HUB_DIALOGS = [
   "components/events/event-match-step.tsx",
   "components/events/automation-review.tsx",
   "components/events/automation-wizard.tsx",
+  "components/events/wizard-preview.ts",
   "components/events/delivery-list.tsx",
   "components/events/delivery-copy.ts",
   "components/events/event-log.tsx",
