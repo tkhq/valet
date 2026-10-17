@@ -678,6 +678,14 @@ export interface ValetPlugin {
    * without this hook offers no `subject` delivery mode (spec Part A step 4).
    */
   naturalSubject?(event: NormalizedEvent): { subject: string; label: string } | null;
+  /**
+   * Predicts the other half of a split delivery: one real-world action a
+   * provider reports as two separate events (spec Part C step 8, Part D).
+   * Returns null when the event implies no twin. `identity` carries
+   * provider-specific context the prediction needs, such as the bot's own
+   * user id, to decide whether the twin applies.
+   */
+  conversationalTwin?(event: NormalizedEvent, identity: { botUserId?: string }): NormalizedEvent | null;
   /** Provider-state status mapping for `from_status` resolution (spec Part E). */
   statusResolver?: StatusResolver;
 }
@@ -1065,6 +1073,10 @@ export function validateValetPlugin(
 
   if (v.naturalSubject !== undefined && typeof v.naturalSubject !== "function") {
     issues.push({ path: "naturalSubject", message: "must be a function when present" });
+  }
+
+  if (v.conversationalTwin !== undefined && typeof v.conversationalTwin !== "function") {
+    issues.push({ path: "conversationalTwin", message: "must be a function when present" });
   }
 
   if (v.statusResolver !== undefined) {
