@@ -130,7 +130,7 @@ function WorkflowRequestCard({ message, signal }: { message: Message; signal: Me
             {message.content ? <Markdown>{message.content}</Markdown> : <p className="text-muted">No report text.</p>}
           </div>
         </details>
-        {runId && <Link to="/presence/runs/$runId" params={{ runId }}
+        {runId && <Link to="/workflows/runs/$runId" params={{ runId }}
           className="absolute right-3 top-1.5 text-xs leading-4 text-muted hover:underline">Open run</Link>}
       </div>
     </div>

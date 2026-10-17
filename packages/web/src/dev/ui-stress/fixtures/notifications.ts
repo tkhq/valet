@@ -23,7 +23,7 @@ function notification(i: number): NotificationSummary {
     urgency: URGENCY[i % URGENCY.length]!,
     title,
     body: BODIES[i % BODIES.length],
-    href: i % 3 === 0 ? undefined : `/presence/runs/run-${i}`,
+    href: i % 3 === 0 ? undefined : `/workflows/runs/run-${i}`,
     sessionId: i % 2 === 0 ? `session-${i}` : undefined,
     createdAt: NOW - i * 13 * MINUTE,
     readAt: i % 9 === 8 ? NOW - i * MINUTE : undefined,

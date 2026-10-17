@@ -6,9 +6,12 @@ import { redirect } from "@tanstack/react-router";
  * `beforeLoad` throws `redirectToPresence(<its route>)`. The redirects stay
  * for at least one release, and this file is the one place that lists them.
  *
+ * Revision 2 moved Workflows and Runs back out of Presence, to their own
+ * `/workflows*` nav entry (spec Part A, Part G). `/presence/workflows*` and
+ * `/presence/runs*` are now the legacy side, redirecting to `/workflows*`.
+ *
  * A row keeps every search param it does not consume, so `workspace`,
- * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged. A
- * Scheduled review link consumes `review` and sends it as `routine`.
+ * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged.
  *
  * The file name starts with `-`, so the router does not publish it as a
  * route.
@@ -18,12 +21,13 @@ import { redirect } from "@tanstack/react-router";
 export type LegacyRoute =
   | "/events"
   | "/events/$eventId"
-  | "/workflows"
-  | "/workflows/$workflowId"
-  | "/workflows/runs/$runId"
+  | "/presence/workflows"
+  | "/presence/workflows/$workflowId"
+  | "/presence/runs"
+  | "/presence/runs/$runId"
   | "/channel";
 
-/** A Presence route that receives a redirect. */
+/** A route that receives a redirect from a legacy URL. */
 export type PresencePath =
   | "/presence"
   | "/presence/places/$subject"
@@ -31,10 +35,10 @@ export type PresencePath =
   | "/presence/routines"
   | "/presence/activity"
   | "/presence/events/$eventId"
-  | "/presence/workflows"
-  | "/presence/workflows/$workflowId"
-  | "/presence/runs"
-  | "/presence/runs/$runId";
+  | "/workflows"
+  | "/workflows/$workflowId"
+  | "/workflows/runs"
+  | "/workflows/runs/$runId";
 
 type Search = Record<string, unknown>;
 type Params = Record<string, string>;
@@ -132,53 +136,33 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     example: { params: { eventId: "ev-1" }, search: {} },
   },
   {
-    from: "/workflows",
-    when: "a Scheduled review link (a stored routine proposal)",
-    matches: (search) => tabIs("scheduled", "triggers")(search) && text(search, "review") !== undefined,
-    to: "/presence/routines",
-    mapParams: noParams,
-    // The Routines tab opens one routine by `routine`, not `review`.
-    mapSearch: (search) => ({ ...without(search, "tab", "review"), routine: text(search, "review") }),
-    example: { params: {}, search: { tab: "scheduled", review: "sch-1" } },
-  },
-  {
-    from: "/workflows",
-    when: "the Scheduled tab or its old name, triggers",
-    matches: tabIs("scheduled", "triggers"),
-    to: "/presence/routines",
-    mapParams: noParams,
-    mapSearch: dropTab,
-    example: { params: {}, search: { tab: "scheduled" } },
-  },
-  {
-    from: "/workflows",
-    when: "the Runs tab",
-    matches: tabIs("runs"),
-    to: "/presence/runs",
-    mapParams: noParams,
-    mapSearch: dropTab,
-    example: { params: {}, search: { tab: "runs" } },
-  },
-  {
-    from: "/workflows",
+    from: "/presence/workflows",
     when: "the workflow list",
-    to: "/presence/workflows",
-    mapParams: noParams,
-    mapSearch: dropTab,
+    to: "/workflows",
+    mapParams: sameParams,
+    mapSearch: (search) => search,
     example: { params: {}, search: {} },
   },
   {
-    from: "/workflows/$workflowId",
+    from: "/presence/workflows/$workflowId",
     when: "one workflow",
-    to: "/presence/workflows/$workflowId",
+    to: "/workflows/$workflowId",
     mapParams: sameParams,
     mapSearch: (search) => search,
     example: { params: { workflowId: "wf-1" }, search: {} },
   },
   {
-    from: "/workflows/runs/$runId",
+    from: "/presence/runs",
+    when: "every run",
+    to: "/workflows/runs",
+    mapParams: sameParams,
+    mapSearch: (search) => search,
+    example: { params: {}, search: {} },
+  },
+  {
+    from: "/presence/runs/$runId",
     when: "one run",
-    to: "/presence/runs/$runId",
+    to: "/workflows/runs/$runId",
     mapParams: sameParams,
     mapSearch: (search) => search,
     example: { params: { runId: "run-1" }, search: {} },

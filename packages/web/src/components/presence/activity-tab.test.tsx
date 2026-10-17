@@ -106,7 +106,7 @@ describe("ActivityTab rows", () => {
     renderTab();
     expect(screen.getByRole("link", { name: "Mention in #incidents" }).getAttribute("href")).toBe("/presence/events/ev-mention");
     expect(screen.getByRole("link", { name: "t-inc" }).getAttribute("href")).toBe("/threads/t-inc-id");
-    expect(screen.getByRole("link", { name: "started Triage failures run" }).getAttribute("href")).toBe("/presence/runs/run-1");
+    expect(screen.getByRole("link", { name: "started Triage failures run" }).getAttribute("href")).toBe("/workflows/runs/run-1");
   });
 
   it("names a claim by a thread the viewer may not open as another thread, never by id", () => {

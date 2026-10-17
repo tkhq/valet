@@ -92,7 +92,7 @@ describe("ImportV1Dialog", () => {
     paste(V1_PASTE);
     fireEvent.click(screen.getByRole("button", { name: "Import 1 workflow" }));
 
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence/workflows/$workflowId", params: { workflowId: "wf_new" } }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/workflows/$workflowId", params: { workflowId: "wf_new" } }));
     expect(createWorkflow).toHaveBeenCalledWith({
       name: "Nightly triage",
       definition: expect.objectContaining({ version: "dag/v1" }),

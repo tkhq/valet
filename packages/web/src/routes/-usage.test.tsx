@@ -825,7 +825,7 @@ describe("UsagePage — by-use-case table", () => {
     await waitFor(() => {
       expect(screen.getByText("Deploy pipeline")).toBeTruthy();
     });
-    expect(screen.getByText("Deploy pipeline").closest("a")?.getAttribute("href")).toBe("/presence/workflows/$workflowId");
+    expect(screen.getByText("Deploy pipeline").closest("a")?.getAttribute("href")).toBe("/workflows/$workflowId");
     expect(screen.getByText("4 runs")).toBeTruthy();
     expect(screen.getByText("summarize").closest("a")).toBeNull();
     // The average is over the runs the step ran in, and the label says so.

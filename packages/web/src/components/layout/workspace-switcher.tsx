@@ -27,26 +27,27 @@ import { cn } from "~/lib/cn";
  * already answers completely.
  *
  * Selecting a workspace keeps list pages in place. A Presence detail page
- * (a place, a listener, an event, a workflow, or a run) returns to its
- * Presence tab, so an old resource is not requested under the new owner.
- * Chat opens the selected workspace's thread list.
+ * (a place, a listener, an event) returns to its Presence tab, and a
+ * workflow or a run returns to its Workflows list, so an old resource is not
+ * requested under the new owner. Chat opens the selected workspace's thread
+ * list.
  *
  * A workspace with no assistant is therefore selectable now. It could not be
  * before, because the only thing selecting it did was open an assistant that
  * did not exist. A team with no assistant still owns skills and workflows.
  */
 /**
- * The Presence tab to open after a workspace switch, or `undefined` to stay.
- * A detail page returns to its tab. The Workflows tab reloads too, which
- * drops its `run` and `gate` params.
+ * The Presence or Workflows list to open after a workspace switch, or
+ * `undefined` to stay. A detail page returns to its list. The Workflows
+ * list reloads too, which drops its `run` and `gate` params.
  */
 export function presenceListAfterSwitch(
   pathname: string,
-): "/presence" | "/presence/activity" | "/presence/workflows" | "/presence/runs" | undefined {
+): "/presence" | "/presence/activity" | "/workflows" | "/workflows/runs" | undefined {
   if (pathname.startsWith("/presence/places/") || pathname.startsWith("/presence/listeners/")) return "/presence";
   if (pathname.startsWith("/presence/events/")) return "/presence/activity";
-  if (pathname === "/presence/workflows" || pathname.startsWith("/presence/workflows/")) return "/presence/workflows";
-  if (pathname.startsWith("/presence/runs/")) return "/presence/runs";
+  if (pathname === "/workflows" || (pathname.startsWith("/workflows/") && !pathname.startsWith("/workflows/runs"))) return "/workflows";
+  if (pathname.startsWith("/workflows/runs/")) return "/workflows/runs";
   return undefined;
 }
 

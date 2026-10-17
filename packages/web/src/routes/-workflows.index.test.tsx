@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The Workflows tab, `/presence/workflows` (spec Part F step 1): the
- * `/workflows` definitions list without change. Each row's name links
- * to `/presence/workflows/$workflowId` (the editor), Run starts a run and navigates
+ * The `/workflows` list page (spec Part G step 1): the definitions list.
+ * Each row's name links to `/workflows/$workflowId` (the editor), Run starts a run and navigates
  * to the run detail page, and "New workflow" opens `NewWorkflowDialog`
  * (review fix 1), which POSTs the entered name + a minimal trigger→stop
  * definition then navigates to its editor page. `<Link>`/`useNavigate` need
@@ -241,7 +240,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
-import { WorkflowsTab } from "./presence.workflows.index";
+import { WorkflowsTab } from "./workflows.index";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 
 /** `workspace` selects the workspace the page is being read in — what the
@@ -299,7 +298,7 @@ describe("WorkflowsTab", () => {
     await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
-        to: "/presence/runs/$runId",
+        to: "/workflows/runs/$runId",
         params: { runId: "wfrun_new" },
       }),
     );
@@ -362,7 +361,7 @@ describe("WorkflowsTab", () => {
 
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
-        to: "/presence/workflows/$workflowId",
+        to: "/workflows/$workflowId",
         params: { workflowId: "wf_new" },
       }),
     );

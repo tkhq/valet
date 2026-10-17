@@ -155,7 +155,7 @@ describe("workflow operations", () => {
     const details = container.querySelector("details")!;
     expect(details.open).toBe(false);
     expect(screen.getByText("completed")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/presence/runs/run-1");
+    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/run-1");
     fireEvent.click(container.querySelector("summary")!);
     expect(details.open).toBe(true);
     expect(screen.getByText("Workflow source 39")).toBeTruthy();

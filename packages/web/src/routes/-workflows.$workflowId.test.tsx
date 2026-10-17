@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/presence/workflows/$workflowId` editor page (plan decision 11): loads the
+ * `/workflows/$workflowId` editor page (plan decision 11): loads the
  * fetched definition into the `Editor` (Task 8-10), Save fires the update
  * mutation with the edited definition, and Run starts a run then navigates
  * to its detail page. `WorkflowEditorPage` takes `workflowId` as a plain
@@ -194,7 +194,7 @@ vi.mock("~/api/queries", async (importOriginal) => ({
 
 import { ApiError } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
-import { WorkflowEditorPage } from "./presence.workflows.$workflowId";
+import { WorkflowEditorPage } from "./workflows.$workflowId";
 
 /** JSON mode is deliberately behind the editor's overflow menu — the
  * assistant panel is the promoted path for changing a definition. */
@@ -306,7 +306,7 @@ describe("WorkflowEditorPage", () => {
     await waitFor(() => expect(startMutateAsync).toHaveBeenCalled());
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
-        to: "/presence/runs/$runId",
+        to: "/workflows/runs/$runId",
         params: { runId: "wfrun_1" },
       }),
     );

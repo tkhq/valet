@@ -51,7 +51,7 @@ export function useWorkflowsByListener(): Readonly<Record<string, string>> {
  */
 function Outcome({ outcome }: { outcome: ActivityOutcome }) {
   if (outcome.runId !== undefined) {
-    return <Link to="/presence/runs/$runId" params={{ runId: outcome.runId }} className={textLinkClass}>{outcome.words}</Link>;
+    return <Link to="/workflows/runs/$runId" params={{ runId: outcome.runId }} className={textLinkClass}>{outcome.words}</Link>;
   }
   const thread = outcome.thread;
   if (!thread) return <>{outcome.words}</>;

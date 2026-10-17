@@ -45,16 +45,16 @@ it("briefs one goal across conversations and runs with one concise summary", asy
   expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(false);
   fireEvent.click(screen.getByText("Details · 4 sources"));
   expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(true);
-  expect(screen.getByRole("link", { name: "Replay verification" }).getAttribute("href")).toBe("/presence/runs/run-verification");
+  expect(screen.getByRole("link", { name: "Replay verification" }).getAttribute("href")).toBe("/workflows/runs/run-verification");
 });
 it("links the run, not an invented conversation, when only workflow evidence exists", async () => {
   vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, latestThread: null, status: "updated", sources: [{ id: "run", kind: "workflow", title: "Verification run", updatedAt: 1, runId: "run" }, { id: "unknown", kind: "message", title: "Imported note", updatedAt: 1, url: "javascript:alert(1)" }] }], generatedAt: 100, coverage: "recent" });
   setup();
   expect(await screen.findByRole("link", { name: "Open run" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/presence/runs/run");
+  expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/run");
   expect(screen.queryByText("No linked conversation")).toBeNull();
   expect(screen.queryByRole("link", { name: "Open thread" })).toBeNull();
-  expect(screen.getByRole("link", { name: "Verification run" }).getAttribute("href")).toBe("/presence/runs/run");
+  expect(screen.getByRole("link", { name: "Verification run" }).getAttribute("href")).toBe("/workflows/runs/run");
   expect(screen.queryByRole("link", { name: "Imported note" })).toBeNull();
   expect(screen.getByText("Imported note")).toBeTruthy();
   expect(screen.queryByText("Next step")).toBeNull();

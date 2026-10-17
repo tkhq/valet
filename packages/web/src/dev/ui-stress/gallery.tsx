@@ -22,7 +22,7 @@ import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 import { EventDetailBody } from "~/routes/presence.events.$eventId";
 import { IntegrationsPage } from "~/routes/integrations";
 import { UsagePage } from "~/routes/usage";
-import { RunDetailBody } from "~/routes/presence.runs.$runId";
+import { RunDetailBody } from "~/routes/workflows.runs.$runId";
 import { uiStressClient } from "./client";
 import { LayoutAuditPanel } from "./layout-audit-panel";
 import { DECISION_FIRST_PAGE_COUNT, WORKFLOW_APPROVAL_COUNT } from "./fixtures/approvals";

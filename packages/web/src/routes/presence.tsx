@@ -5,10 +5,11 @@ import { WorkspaceClause } from "~/components/workspace-clause";
 
 /**
  * `/presence` layout: where Valet is, and what it does there (spec Part A).
- * It replaces the Events and Automation sections. The five tab pages render
+ * It replaces the Events and Automation sections. The three tab pages render
  * inside the section frame (title, subtitle, tabs). A detail page (a place,
- * a listener, an event, a workflow, or a run) renders its own page instead,
- * because the workflow editor and the run view need the full height.
+ * a listener, or an event) renders its own page instead. Workflows and Runs
+ * have their own top-nav entry at `/workflows` (spec Part G); they are not
+ * tabs of this section.
  */
 export const Route = createFileRoute("/presence")({
   component: PresenceLayout,
@@ -18,8 +19,6 @@ export const PRESENCE_TABS = [
   { id: "places", label: "Places", to: "/presence" },
   { id: "routines", label: "Routines", to: "/presence/routines" },
   { id: "activity", label: "Activity", to: "/presence/activity" },
-  { id: "workflows", label: "Workflows", to: "/presence/workflows" },
-  { id: "runs", label: "Runs", to: "/presence/runs" },
 ] as const;
 
 export type PresenceTabId = (typeof PRESENCE_TABS)[number]["id"];

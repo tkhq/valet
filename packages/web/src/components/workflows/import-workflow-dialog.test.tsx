@@ -123,7 +123,7 @@ describe("ImportWorkflowDialog — a pasted file", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
-        to: "/presence/workflows/$workflowId",
+        to: "/workflows/$workflowId",
         params: { workflowId: "wf_new" },
       }),
     );

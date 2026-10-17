@@ -96,7 +96,7 @@ describe("/dev/ui-stress", () => {
     expect(teamLinks.length).toBeGreaterThan(0);
     for (const link of teamLinks) expect(link.className).not.toContain("shrink-0");
     // A long workflow name is clamped in the approvals list, with the full name on hover.
-    const titles = [...document.querySelectorAll('[data-testid="action-required-item"] a[href^="/presence/workflows/"]')].filter((link) => link.classList.contains("line-clamp-2"));
+    const titles = [...document.querySelectorAll('[data-testid="action-required-item"] a[href^="/workflows/"]')].filter((link) => link.classList.contains("line-clamp-2"));
     expect(titles.length).toBeGreaterThan(0);
     for (const title of titles) expect(title.getAttribute("title")).toBe(title.textContent);
     // Gate and question buttons wrap their labels.

@@ -153,7 +153,7 @@ function ItemList({
         const canLink = item.sessionId !== null && !isRuntimeId;
         const labelEl = item.workflowId !== undefined && !item.isChild ? (
           <Link
-            to="/presence/workflows/$workflowId"
+            to="/workflows/$workflowId"
             params={{ workflowId: item.workflowId }}
             className="block min-h-11 max-w-full break-words py-3 text-moss hover:underline underline-offset-2 sm:min-h-0 sm:py-0"
           >

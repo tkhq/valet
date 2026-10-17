@@ -264,7 +264,7 @@ describe("RoutinePage", () => {
     });
     wrap(<RoutinePage id="S3" />);
     const history = await screen.findByRole("region", { name: "History" });
-    expect((await within(history).findByRole("link", { name: /wfrun_sch_S3_100/ })).getAttribute("href")).toBe("/presence/runs/wfrun_sch_S3_100");
+    expect((await within(history).findByRole("link", { name: /wfrun_sch_S3_100/ })).getAttribute("href")).toBe("/workflows/runs/wfrun_sch_S3_100");
     expect(within(history).queryByText(/wfrun_manual_1/)).toBeNull();
     expect(listWorkflowRuns).toHaveBeenCalledWith("wf-1");
   });

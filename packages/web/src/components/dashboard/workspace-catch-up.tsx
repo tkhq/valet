@@ -127,7 +127,7 @@ function BriefingCard({ briefing, onDismiss, dismissing }: { briefing: Workspace
         params={{ threadId: briefing.latestThread.threadId }}
         className={textLinkClass}
       >Open thread <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : latestRun ? <Link
-        to="/presence/runs/$runId"
+        to="/workflows/runs/$runId"
         params={{ runId: latestRun }}
         className={textLinkClass}
       >Open run <ArrowRight aria-hidden className="h-3.5 w-3.5" /></Link> : <span className="text-muted">No linked conversation</span>}
@@ -155,7 +155,7 @@ function BriefingSource({ source }: { source: WorkspaceBriefingSource }) {
     {source.token ? <Link to="/a/$token" params={{ token: source.token }} className={className}>{content}</Link>
       : source.kind === "thread" && source.threadId ? <Link to="/threads/$threadId" params={{ threadId: source.threadId }} className={className}>{content}</Link>
       : url ? <a href={url} target="_blank" rel="noopener noreferrer" className={className}>{content}<ArrowUpRight aria-hidden className="h-3 w-3 shrink-0" /></a>
-      : source.runId ? <Link to="/presence/runs/$runId" params={{ runId: source.runId }} className={className}>{content}</Link>
+      : source.runId ? <Link to="/workflows/runs/$runId" params={{ runId: source.runId }} className={className}>{content}</Link>
       : source.threadId ? <Link to="/threads/$threadId" params={{ threadId: source.threadId }} className={className}>{content}</Link>
       : <span className="inline-flex max-w-full items-center gap-1.5 px-2 py-1 text-xs text-muted">{content}</span>}
   </li>;

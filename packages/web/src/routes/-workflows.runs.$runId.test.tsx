@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/presence/runs/$runId` body rendering (plan decision 19): a parked run
+ * `/workflows/runs/$runId` body rendering (plan decision 19): a parked run
  * waiting on an approval signal shows the approval card; a settled run
  * hides the Cancel button. `RunDetailBody` is props-driven (see
  * `workflows.runs.$runId.tsx`) so this renders it directly without router
@@ -17,7 +17,7 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import type { WorkflowPendingGate, WorkflowRunDetail } from "@valet/api/wire";
-import { RunDetailBody } from "./presence.runs.$runId";
+import { RunDetailBody } from "./workflows.runs.$runId";
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
@@ -72,7 +72,7 @@ function renderInRouter(ui: React.ReactElement) {
   });
   const runRoute = createRoute({
     getParentRoute: () => rootRoute,
-    path: "/presence/runs/$runId",
+    path: "/workflows/runs/$runId",
     component: () => null,
   });
   const router = createRouter({
@@ -309,7 +309,7 @@ describe("RunDetailBody", () => {
     expect(screen.getByRole("button", { name: "View agent logs" }).getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("link", { name: "View agent logs" })).toBeNull();
     expect(screen.getByText("Open child run").getAttribute("href")).toBe(
-      "/presence/runs/wfrun_sub_1",
+      "/workflows/runs/wfrun_sub_1",
     );
     // A checkpoint carrying neither id gets no link row.
     expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);

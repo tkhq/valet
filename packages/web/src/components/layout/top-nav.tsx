@@ -193,6 +193,7 @@ export function TopNav() {
     { to: "/chat", label: "Threads" },
     { to: "/artifacts", label: "Artifacts" },
     { to: "/presence", label: "Presence" },
+    { to: "/workflows", label: "Workflows" },
     { to: "/usage", label: "Usage" },
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },

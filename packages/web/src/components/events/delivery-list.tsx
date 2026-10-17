@@ -87,7 +87,7 @@ export function DeliveryList({
               </Link>
             )}
             {d.runId && (
-              <Link to="/presence/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
+              <Link to="/workflows/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
                 Open run
               </Link>
             )}

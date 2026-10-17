@@ -25,9 +25,10 @@ describe("presence redirect table", () => {
       "/channel",
       "/events",
       "/events/$eventId",
-      "/workflows",
-      "/workflows/$workflowId",
-      "/workflows/runs/$runId",
+      "/presence/runs",
+      "/presence/runs/$runId",
+      "/presence/workflows",
+      "/presence/workflows/$workflowId",
     ]);
   });
 
@@ -88,41 +89,33 @@ describe("presence redirect table", () => {
     });
   });
 
-  it("sends the workflow list to the Workflows tab and keeps its params", () => {
-    expect(target("/workflows", {}, { workspace: "t1", run: "r1", gate: "g1" })).toEqual({
-      to: "/presence/workflows",
+  it("sends the legacy workflow list to /workflows and keeps its params", () => {
+    expect(target("/presence/workflows", {}, { workspace: "t1", run: "r1", gate: "g1" })).toEqual({
+      to: "/workflows",
       params: {},
       search: { workspace: "t1", run: "r1", gate: "g1" },
     });
   });
 
-  it.each(["scheduled", "triggers"])("sends a /workflows?tab=%s review link to that routine's page", (tab) => {
-    expect(target("/workflows", {}, { tab, review: "sch-1", workspace: "t1" })).toEqual({
-      to: "/presence/routines",
-      params: {},
-      search: { routine: "sch-1", workspace: "t1" },
-    });
-  });
-
-  it.each(["scheduled", "triggers"])("sends /workflows?tab=%s with no review to Routines", (tab) => {
-    expect(target("/workflows", {}, { tab })).toEqual({ to: "/presence/routines", params: {}, search: {} });
-  });
-
-  it("sends /workflows?tab=runs to the Runs tab", () => {
-    expect(target("/workflows", {}, { tab: "runs" })).toEqual({ to: "/presence/runs", params: {}, search: {} });
-  });
-
-  it("sends one workflow to its Presence URL and keeps newTrigger", () => {
-    expect(target("/workflows/$workflowId", { workflowId: "wf-1" }, { newTrigger: "event" })).toEqual({
-      to: "/presence/workflows/$workflowId",
+  it("sends one legacy workflow to its new URL and keeps newTrigger", () => {
+    expect(target("/presence/workflows/$workflowId", { workflowId: "wf-1" }, { newTrigger: "event" })).toEqual({
+      to: "/workflows/$workflowId",
       params: { workflowId: "wf-1" },
       search: { newTrigger: "event" },
     });
   });
 
-  it("sends one run to its Presence URL and keeps gate, view, and conversation", () => {
-    expect(target("/workflows/runs/$runId", { runId: "run-1" }, { gate: "n1", view: "details", conversation: "c1" })).toEqual({
-      to: "/presence/runs/$runId",
+  it("sends the legacy Runs list to /workflows/runs and keeps its params", () => {
+    expect(target("/presence/runs", {}, { workspace: "t1" })).toEqual({
+      to: "/workflows/runs",
+      params: {},
+      search: { workspace: "t1" },
+    });
+  });
+
+  it("sends one legacy run to its new URL and keeps gate, view, and conversation", () => {
+    expect(target("/presence/runs/$runId", { runId: "run-1" }, { gate: "n1", view: "details", conversation: "c1" })).toEqual({
+      to: "/workflows/runs/$runId",
       params: { runId: "run-1" },
       search: { gate: "n1", view: "details", conversation: "c1" },
     });
@@ -146,7 +139,7 @@ describe("presence redirect table", () => {
   });
 
   it("reads a search that is not an object as empty", () => {
-    expect(presenceRedirectFor("/workflows", {}, "tab=scheduled")).toEqual({ to: "/presence/workflows", params: {}, search: {} });
+    expect(presenceRedirectFor("/presence/workflows", {}, "tab=scheduled")).toEqual({ to: "/workflows", params: {}, search: {} });
   });
 
   it("matches every row with at least one test above", () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The Runs tab, `/presence/runs` (spec Part F step 1): every workflow run of
+ * The `/workflows/runs` view (spec Part G step 1): every workflow run of
  * the workspace the switcher names, newest first, each linked to its run
  * page, with a pager when the list has more pages.
  */
@@ -28,7 +28,7 @@ vi.mock("~/api/workflows", () => ({
   },
 }));
 
-import { RunsTab } from "./presence.runs.index";
+import { RunsTab } from "./workflows.runs.index";
 
 beforeEach(() => {
   owner = { ownerType: "user", ownerId: "u1" };
@@ -46,7 +46,7 @@ describe("RunsTab", () => {
     render(<RunsTab />);
     expect(runsFor).toHaveBeenCalledWith(owner, undefined, { enabled: true });
     const link = screen.getByText("Deploy pipeline").closest("a");
-    expect(link?.getAttribute("data-to")).toBe("/presence/runs/$runId");
+    expect(link?.getAttribute("data-to")).toBe("/workflows/runs/$runId");
     expect(link?.getAttribute("data-params")).toBe(JSON.stringify({ runId: "wfrun_1" }));
     expect(screen.getByText("wfrun_1")).toBeTruthy();
   });

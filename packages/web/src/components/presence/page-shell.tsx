@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { EmptyRow, pageClass } from "~/components/primitives";
 
 /** The tab pages a detail page returns to. */
-export type PresenceListPath = "/presence" | "/presence/activity" | "/presence/workflows" | "/presence/runs";
+export type PresenceListPath = "/presence" | "/presence/activity";
 
 /**
  * A placeholder body for a Presence page that a later change fills. It names

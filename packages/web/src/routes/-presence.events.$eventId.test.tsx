@@ -131,10 +131,10 @@ describe("EventDetailBody", () => {
       />,
     );
     expect(screen.getByRole("link", { name: "Delivered to thread" }).getAttribute("href")).toBe("/threads/th_1");
-    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/presence/runs/wfrun_evt_d3");
+    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
     // The sentence links the same thread and run.
     expect(screen.getByRole("link", { name: "a thread" }).getAttribute("href")).toBe("/threads/th_1");
-    expect(screen.getByRole("link", { name: "started a workflow run" }).getAttribute("href")).toBe("/presence/runs/wfrun_evt_d3");
+    expect(screen.getByRole("link", { name: "started a workflow run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
   });
 
   it("confirms before redelivering, naming the listeners and the runs", async () => {

@@ -163,7 +163,7 @@ function RoutineRuns({ routine, workflowId }: { routine: Routine; workflowId: st
 function RunRow({ run }: { run: WorkflowRunSummary }) {
   return (
     <WorkRow
-      title={<Link to="/presence/runs/$runId" params={{ runId: run.runId }}>Run {run.runId}</Link>}
+      title={<Link to="/workflows/runs/$runId" params={{ runId: run.runId }}>Run {run.runId}</Link>}
       badge={<RunStatusChip status={run.status} outcome={run.outcome} needsApproval={run.needsApproval ?? false} />}
       time={run.createdAt}
     />
