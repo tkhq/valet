@@ -461,6 +461,18 @@ describe("durable workflow grants", () => {
   it("preserves a personal deny", () => {
     expect(resolvePolicyDecision(rows({ workflowGrants, overrides: [override({ actionId: "gmail.send_email", mode: "deny" })] }), baseInput({ appliesIn: "workflow" }), undefined).mode).toBe("deny");
   });
+  it("applies to an agent step that declares the action", () => {
+    const decision = resolvePolicyDecision(rows({ workflowGrants }), baseInput({ agentStep: true }), undefined);
+    expect(decision).toMatchObject({ mode: "allow", provenance: { source: "workflow_grant", matchedGrantId: "wf-grant", baseMode: "require_approval" } });
+  });
+  it.each(["workflow", "session", "any"] as const)("yields an agent step to an explicit rule that applies in %s", (appliesIn) => {
+    const policies = [orgPolicy({ actionId: "gmail.send_email", mode: "require_approval", appliesIn })];
+    expect(resolvePolicyDecision(rows({ workflowGrants, policies }), baseInput({ agentStep: true }), undefined).mode).toBe("require_approval");
+  });
+  it("yields an agent step to a team rule scoped to workflows", () => {
+    const policies = [orgPolicy({ principalType: "team", actionId: "gmail.send_email", mode: "require_approval", appliesIn: "workflow" })];
+    expect(resolvePolicyDecision(rows({ workflowGrants, policies }), baseInput({ agentStep: true }), undefined).mode).toBe("require_approval");
+  });
 });
 
 describe("resolvePolicyDecision — partialParams (hosted provider tools)", () => {

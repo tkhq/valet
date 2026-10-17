@@ -14,6 +14,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { actionInvocations, agentSessions, credentialShares, runtimeGrants, workflowAccountGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import type { WorkflowStepGrant } from "../workflows/step-grants.js";
 
 /** Where a borrow approval applies: a session's thread, or a workflow run
  * (a `wf:<runId>:<node>` session). */
@@ -97,10 +98,12 @@ export async function isUnattendedTeamSession(
   return rows.length > 0;
 }
 
-/** Grants require a current teammate, or an unattended run owned by the team. */
+/** Grants require a current teammate, or an unattended run owned by the team.
+ * `step`: a checked workflow agent step (`workflows/step-grants.ts`). Saved
+ * workflow consent covers it for the services the step declares. */
 export async function canBorrowCredential(
   db: AppQueryable,
-  scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
+  scope: BorrowScope & { orgId: string; teamId: string; actorId?: string; step?: Pick<WorkflowStepGrant, "runId" | "services"> },
 ): Promise<boolean> {
   if (!scope.actorId || scope.service === "github") return false;
   const runId = workflowRunOf(scope.sessionId);
@@ -110,8 +113,11 @@ export async function canBorrowCredential(
   const memberAuthorization = sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
     WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`;
   const runtimeAuthorization = unattended ? (runId ? unattendedWorkflowOwner(scope, runId) : unattendedRuntimeOwner(scope)) : undefined;
-  // Only the action invoker uses this run scope. Agent and script sessions need explicit consent.
-  if (runId && scope.sessionId === `wf:${runId}`) {
+  // The action invoker's run scope, or an agent step the host checked. Its
+  // session can be an assistant's, with an app row and a team actor.
+  const step = scope.step?.services.includes(scope.service) ? scope.step : undefined;
+  const consentRunId = step?.runId ?? (runId && scope.sessionId === `wf:${runId}` ? runId : undefined);
+  if (consentRunId) {
     const [workflowConsent] = await db.select({ definition: workflowDefinitions.definition, runDefinition: workflowRuns.definition })
       .from(workflowAccountGrants)
       .innerJoin(workflowDefinitions, and(
@@ -119,7 +125,7 @@ export async function canBorrowCredential(
         eq(workflowDefinitions.orgId, workflowAccountGrants.orgId),
         eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, workflowAccountGrants.teamId),
       ))
-      .innerJoin(workflowRuns, and(eq(workflowRuns.id, runId), eq(workflowRuns.workflowId, workflowDefinitions.id)))
+      .innerJoin(workflowRuns, and(eq(workflowRuns.id, consentRunId), eq(workflowRuns.workflowId, workflowDefinitions.id)))
       .innerJoin(credentialShares, and(
         eq(credentialShares.teamId, workflowAccountGrants.teamId), eq(credentialShares.service, workflowAccountGrants.service),
         eq(credentialShares.userId, workflowAccountGrants.memberId), eq(credentialShares.generation, workflowAccountGrants.shareGeneration),
@@ -128,10 +134,10 @@ export async function canBorrowCredential(
         eq(workflowAccountGrants.orgId, scope.orgId), eq(workflowAccountGrants.teamId, scope.teamId),
         eq(workflowAccountGrants.service, scope.service), eq(workflowAccountGrants.memberId, scope.memberId),
         eq(workflowRuns.ownerType, "team"), eq(workflowRuns.ownerId, scope.teamId), eq(workflowRuns.orgId, scope.orgId),
-        unattended ? sql`(${workflowRuns.actorUserId} IS NULL OR ${workflowRuns.actorUserId} = ${scope.actorId})`
+        step ? undefined : unattended ? sql`(${workflowRuns.actorUserId} IS NULL OR ${workflowRuns.actorUserId} = ${scope.actorId})`
           : eq(workflowRuns.actorUserId, scope.actorId),
         memberAuthorization,
-        sql`NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = ${scope.sessionId})`,
+        step ? undefined : sql`NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = ${scope.sessionId})`,
         sql`EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.memberId})`,
         sql`EXISTS (SELECT 1 FROM credentials c WHERE c.owner_type = 'user' AND c.owner_id = ${scope.memberId} AND c.service = ${scope.service})`,
       )).limit(1);

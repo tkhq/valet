@@ -2299,6 +2299,10 @@ export interface WorkflowNodePermissionWire {
    * not when the person who starts it shares their own account, or when a
    * team 1Password item covers the service; the preview reads no vault. */
   sharedAccount?: true;
+  /** An exact action an agent step lists in `toolScope.actions`. The agent
+   * chooses when to call it and which values to send, so `mode` assumes any
+   * values. A dynamic action is `unknown` here and can still be granted. */
+  agentStep?: true;
 }
 
 export interface GetWorkflowPermissionsResponse {

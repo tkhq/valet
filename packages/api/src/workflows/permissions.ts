@@ -9,12 +9,14 @@ import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
-import { resolvePolicyDecision, type PolicyResolutionRows } from "../policies/resolution.js";
+import { resolvePolicyDecision, restrictivePolicyAnywhere, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
 import { parsePath } from "../policies/matchers.js";
 import { isDeadConnection } from "../services/credential-resolution.js";
 import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
+import { readToolScope } from "@valet/shared";
+import { entryService, isAgentStep, isExactAction } from "./tool-scope.js";
 import type {
   AllowWorkflowPermissionsResponse,
   GetWorkflowPermissionsResponse,
@@ -34,6 +36,8 @@ interface ToolNodeRef {
   service: string;
   action: string;
   params: Record<string, unknown> | undefined;
+  /** An exact action an agent step declares. The agent supplies every parameter. */
+  agentStep?: true;
 }
 
 function toolNodeRefs(definition: unknown): ToolNodeRef[] {
@@ -77,10 +81,36 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
   return { nodeId, service: n.service, action: n.action, params };
 }
 
-/** Credential services referenced by direct and foreach tool steps, including dynamic tools. */
+/** The `toolScope.actions` entries of each agent step, top-level or a
+ * foreach body. `nodeId` is the DISPLAYED node's id, as for tool bodies. */
+function agentStepNodes(definition: unknown): { nodeId: string; entries: string[] }[] {
+  if (typeof definition !== "object" || definition === null) return [];
+  const nodes = (definition as { nodes?: unknown }).nodes;
+  if (!Array.isArray(nodes)) return [];
+  const steps: { nodeId: string; entries: string[] }[] = [];
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null) continue;
+    const n = node as Record<string, unknown>;
+    if (typeof n.id !== "string") continue;
+    const step = n.type === "foreach" && typeof n.body === "object" && n.body !== null ? n.body as Record<string, unknown> : n;
+    if (isAgentStep(step)) steps.push({ nodeId: n.id, entries: readToolScope(step.toolScope)?.actions ?? [] });
+  }
+  return steps;
+}
+
+/** The exact actions agent steps declare. A `service.*` entry gets no grant. */
+function agentStepRefs(definition: unknown): ToolNodeRef[] {
+  return agentStepNodes(definition).flatMap(({ nodeId, entries }) => entries.filter(isExactAction).map((entry) => ({
+    nodeId, service: entryService(entry), action: entry.slice(entry.indexOf(".") + 1), params: undefined, agentStep: true as const,
+  })));
+}
+
+/** Credential services referenced by tool steps, including dynamic tools, and by every agent-step entry. */
 export function workflowCredentialServices(deps: WorkflowPermissionDeps, definition: unknown): string[] {
-  return [...new Set(toolNodeRefs(definition).map((ref) =>
-    deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))].filter(service => service !== "github");
+  const services = [...toolNodeRefs(definition).map((ref) => ref.service),
+    ...agentStepNodes(definition).flatMap((step) => step.entries.map(entryService))];
+  return [...new Set(services.map((service) =>
+    deps.actionPluginByService?.get(service)?.actionPlugin.credentialService ?? service))].filter(service => service !== "github");
 }
 
 /** Identifies the reviewed definition, owner, and credential services. */
@@ -152,7 +182,7 @@ export async function analyzeDefinitionPermissions(
   owner: WorkflowOwner,
   summary: WorkflowDefinitionSummary,
 ): Promise<WorkflowNodePermissionWire[]> {
-  const refs = toolNodeRefs(summary.definition);
+  const refs = [...toolNodeRefs(summary.definition), ...agentStepRefs(summary.definition)];
   if (refs.length === 0) return [];
 
   const now = Date.now();
@@ -196,25 +226,24 @@ export async function analyzeDefinitionPermissions(
       sharedAccount = sharedServices.get(credentialService) === true;
     }
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
+    const agentStep = ref.agentStep ? { agentStep: true as const } : {};
     if (!entry || !action) {
-      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown", ...(sharedAccount ? { sharedAccount: true as const } : {}) });
+      // An agent step names a dynamic action exactly, so its id is known.
+      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: ref.agentStep ? `${ref.service}.${ref.action}` : null,
+        mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
     // Preview what the run decides: schema defaults applied, as the invoker does.
     const prepared = ref.params === undefined ? undefined : prepareActionArgs(action.parameters, ref.params);
-    const decision = resolvePolicyDecision(
-      rows,
-      {
-        service: ref.service,
-        actionId,
-        riskLevel: action.riskLevel,
-        params: prepared?.ok ? prepared.args : ref.params,
-        appliesIn: "workflow",
-        now,
-      },
-      entry.actionPlugin.defaultApprovalMode,
-    );
+    // An agent step's call resolves as a session call with values the agent picks.
+    const input: PolicyResolutionInput = ref.agentStep
+      ? { service: ref.service, actionId, riskLevel: action.riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }
+      : { service: ref.service, actionId, riskLevel: action.riskLevel, params: prepared?.ok ? prepared.args : ref.params, appliesIn: "workflow", now };
+    const decision = resolvePolicyDecision(rows, input, entry.actionPlugin.defaultApprovalMode);
+    // The run refuses the grant under a rule scoped to workflows, so the review blocks it too.
+    const restriction = ref.agentStep && decision.mode === "require_approval" ? restrictivePolicyAnywhere(rows, input) : undefined;
+    const provenance = restriction ? (restriction.principalType === "team" ? "team_policy" : "org_policy") : decision.provenance.source;
     // The mode reads templates literally, as the workflow grant does; the
     // flag says when a rule keys on a value the run renders.
     const runtimeParams = dependsOnTemplates(rows, { service: ref.service, actionId }, templatedPaths(ref.params));
@@ -225,9 +254,10 @@ export async function analyzeDefinitionPermissions(
       actionId,
       riskLevel: action.riskLevel,
       mode: decision.mode,
-      provenance: decision.provenance.source,
+      provenance,
       ...(runtimeParams ? { runtimeParams: true as const } : {}),
       ...(sharedAccount ? { sharedAccount: true as const } : {}),
+      ...agentStep,
     });
   }
   return nodes;
@@ -239,6 +269,12 @@ export type AllowWorkflowPermissionsOutcome =
   | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown; definitionToken: string; credentialServices: string[] }
   | { ok: false; badRequest: string; stale?: true }
   | null;
+
+/** A step a run stops at unless the workflow's permissions allow it. An agent
+ * step's dynamic action has no risk to read before a run, so it counts. */
+export function needsGrant(node: Pick<WorkflowNodePermissionWire, "mode" | "agentStep">): boolean {
+  return node.mode === "require_approval" || (node.agentStep === true && node.mode === "unknown");
+}
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
 export async function prepareWorkflowPermissions(
@@ -260,7 +296,7 @@ export async function prepareWorkflowPermissions(
   // Dedupe: one override per qualified actionId, however many nodes call it.
   const gating = new Map<string, string>();
   for (const node of analysis) {
-    if (node.mode === "require_approval" && node.actionId !== null) {
+    if (needsGrant(node) && node.actionId !== null) {
       gating.set(node.actionId, node.service);
     }
   }
@@ -275,7 +311,7 @@ export async function prepareWorkflowPermissions(
           ok: false,
           badRequest:
             `"${id}" is not a gating action of this workflow. ` +
-            `Request only actionIds reported with mode "require_approval" by GET .../permissions.`,
+            `Request only actionIds that GET .../permissions reports with mode "require_approval", or agent-step actions it reports as "unknown".`,
         };
       }
     }

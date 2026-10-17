@@ -1392,6 +1392,11 @@ async function activeWorkflowOrigin(
 /** Returns null when the workflow doesn't exist (or isn't owned); an
  * `invalidInput` result when the caller's input fails the trigger's
  * declared dataSchema (routes map that to 400). Invalid origins are rejected. */
+/** A signed-in person's own browser request, never an MCP app, a CLI, an API key, or an assistant. */
+function personRequest(owner: WorkflowOwner): boolean {
+  return owner.humanAccountConsent === true && !owner.agentEditor && owner.principal?.type === "user";
+}
+
 export async function startWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
@@ -1403,6 +1408,10 @@ export async function startWorkflowRun(
   originToolScope?: import("@valet/shared").ToolScope,
   /** Finished checkpoints a retry from the failed step reuses (`retrySeedCheckpoints`). */
   seedFor?: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]>,
+  /** "agent": an agent started this run on its own, or a retry repeats such a
+   * run's input. "person": the caller checked that a person asked. Omitted:
+   * read from the owner (`personRequest`). */
+  startedBy?: "agent" | "person",
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1434,6 +1443,8 @@ export async function startWorkflowRun(
     definitionVersionId: versionId,
     input: trigger,
     ...(validOrigin ? { origin: validOrigin } : {}),
+    // Schedules, events, and webhooks start runs elsewhere and stay unmarked.
+    ...(startedBy === "agent" || (startedBy === undefined && !personRequest(owner)) ? { startedBy: "agent" as const } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1978,6 +1989,7 @@ export async function retryWorkflowRun(
       const current = dagDefinition(next.definition);
       return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
     } : undefined,
+    run.params.startedBy,
   );
   if (!started) return "workflow_deleted";
   return started;

@@ -6,7 +6,7 @@
  * so the admitted `child.settled` signal stays observable in the queue.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
+import { UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -273,12 +273,18 @@ describe("buildChildSpawner", () => {
     const parent = await api.providers.engineHost.sessionFor("parent-unattended", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
     const parentThread = parent.thread("signal:workflow:wfrun_child");
     const ctx = { parentSessionId: "parent-unattended", parentThreadId: parentThread.id, actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" } };
-    const unattended = await spawner({ prompt: "check the release" }, { ...ctx, unattendedWorkflow: true });
-    expect((await api.providers.engineStore.getQueueItem(unattended.childSessionId, unattended.queueItemId))?.metadata?.[UNATTENDED_WORKFLOW_KEY]).toBe(true);
-    const attended = await spawner({ prompt: "check the release" }, ctx);
+    const step = { runId: "wfrun_child", nodeId: "report" };
+    const dispatch = await parentThread.submitPrompt("report", { metadata: { [WORKFLOW_STEP_KEY]: step } });
+    const unattended = await spawner({ prompt: "check the release" }, { ...ctx, unattendedWorkflow: true, parentQueueItemId: dispatch.queueItemId });
+    const childMetadata = (await api.providers.engineStore.getQueueItem(unattended.childSessionId, unattended.queueItemId))?.metadata;
+    expect(childMetadata?.[UNATTENDED_WORKFLOW_KEY]).toBe(true);
+    // The child works in the parent's workflow step.
+    expect(childMetadata?.[WORKFLOW_STEP_KEY]).toEqual(step);
+    const attended = await spawner({ prompt: "check the release" }, { ...ctx, parentQueueItemId: dispatch.queueItemId });
     expect((await api.providers.engineStore.getQueueItem(attended.childSessionId, attended.queueItemId))?.metadata?.[UNATTENDED_WORKFLOW_KEY]).toBeUndefined();
-    expect(childSendPromptOptions({ ...ctx, unattendedWorkflow: true }, false).metadata[UNATTENDED_WORKFLOW_KEY]).toBe(true);
-    expect(childSendPromptOptions(ctx, false).metadata[UNATTENDED_WORKFLOW_KEY]).toBeUndefined();
+    expect((await api.providers.engineStore.getQueueItem(attended.childSessionId, attended.queueItemId))?.metadata?.[WORKFLOW_STEP_KEY]).toBeUndefined();
+    expect(childSendPromptOptions({ ...ctx, unattendedWorkflow: true, workflowStep: step }, false).metadata).toMatchObject({ [UNATTENDED_WORKFLOW_KEY]: true, [WORKFLOW_STEP_KEY]: step });
+    expect(childSendPromptOptions({ ...ctx, workflowStep: step }, false).metadata[WORKFLOW_STEP_KEY]).toBeUndefined();
   });
 
   it("keeps Problems metadata redacted in a child spawned from a channel turn", async () => {

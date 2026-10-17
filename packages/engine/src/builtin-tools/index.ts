@@ -585,6 +585,7 @@ export const childSendTool = defineTool({
         // The host keeps automatic channel replies only for a channel turn.
         ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
         ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
+        ...(ctx.queueItemId ? { parentQueueItemId: ctx.queueItemId } : {}),
       },
     );
     if (result === null) {
@@ -938,6 +939,7 @@ export const taskTool = defineTool({
       // the child.settled signal can inherit it (see ChildWatcher).
       ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
       ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
+      ...(ctx.queueItemId ? { parentQueueItemId: ctx.queueItemId } : {}),
     });
     return {
       text: [

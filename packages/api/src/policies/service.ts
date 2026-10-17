@@ -42,6 +42,7 @@ import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { WorkflowStepGrant } from "../workflows/step-grants.js";
 import { canAdministerTeam, isTeamMember } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
 import { upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
@@ -282,26 +283,30 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
     }));
   }
 
-  let workflowId = scope.workflowId;
+  const grantOwner = and(eq(workflowActionGrants.orgId, scope.orgId),
+    eq(workflowActionGrants.ownerType, teamId ? "team" : "user"), eq(workflowActionGrants.ownerId, teamId ?? userId ?? ""),
+    scope.workflowId ? eq(workflowActionGrants.workflowId, scope.workflowId) : undefined);
+  const savedWorkflow = and(eq(workflowDefinitions.id, workflowActionGrants.workflowId),
+    eq(workflowDefinitions.orgId, scope.orgId), eq(workflowDefinitions.ownerType, workflowActionGrants.ownerType),
+    eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId));
+  let workflowGrants: { id: string; actionId: string }[] = [];
   if (scope.workflowExecutionId) {
-    const [run] = await db.select({ workflowId: workflowRuns.workflowId, runDefinition: workflowRuns.definition, definition: workflowDefinitions.definition })
-      .from(workflowRuns)
-      .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowRuns.workflowId), eq(workflowDefinitions.orgId, scope.orgId)))
-      .where(eq(workflowRuns.id, scope.workflowExecutionId)).limit(1);
     // A workflow grant covers the saved steps a person reviewed, and every
     // step change revokes it. A run that started on other steps, such as a
-    // snapshot from before an edit, does not use it.
-    workflowId = run && (!workflowId || workflowId === run.workflowId) && sameWorkflowSteps(run.definition, run.runDefinition)
-      ? run.workflowId : undefined;
+    // snapshot from before an edit, does not use it. One statement reads the
+    // grants with both definitions, so an edit and a new approval between two
+    // reads cannot give this run another version's grants.
+    const rows = await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId,
+      definition: workflowDefinitions.definition, runDefinition: workflowRuns.definition })
+      .from(workflowActionGrants)
+      .innerJoin(workflowDefinitions, savedWorkflow)
+      .innerJoin(workflowRuns, and(eq(workflowRuns.id, scope.workflowExecutionId), eq(workflowRuns.workflowId, workflowActionGrants.workflowId)))
+      .where(grantOwner);
+    workflowGrants = rows.filter((row) => sameWorkflowSteps(row.definition, row.runDefinition)).map(({ id, actionId }) => ({ id, actionId }));
+  } else if (scope.workflowId) {
+    workflowGrants = await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
+      .from(workflowActionGrants).innerJoin(workflowDefinitions, savedWorkflow).where(grantOwner);
   }
-  const workflowGrants = workflowId ? await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
-    .from(workflowActionGrants)
-    .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowActionGrants.workflowId),
-      eq(workflowDefinitions.orgId, scope.orgId), eq(workflowDefinitions.ownerType, workflowActionGrants.ownerType),
-      eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId)))
-    .where(and(eq(workflowActionGrants.orgId, scope.orgId), eq(workflowActionGrants.workflowId, workflowId),
-      eq(workflowActionGrants.ownerType, teamId ? "team" : "user"),
-      eq(workflowActionGrants.ownerId, teamId ?? userId ?? ""))) : [];
   return { policies, grants, overrides, workflowGrants };
 }
 
@@ -337,6 +342,9 @@ export interface ResolveActionPolicyInput {
   externalSender?: boolean;
   /** See `PolicyResolutionInput.partialParams`. */
   partialParams?: boolean;
+  /** A workflow agent step that declares this exact action: its workflow's
+   * grants apply while its run has the saved steps. */
+  agentStep?: { workflowId: string; runId: string };
 }
 
 /**
@@ -351,6 +359,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
+    ...(input.agentStep ? { workflowId: input.agentStep.workflowId, workflowExecutionId: input.agentStep.runId } : {}),
     ...(input.externalSender ? { externalSender: true } : {}),
   });
   return resolvePolicyDecision(
@@ -365,6 +374,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
       workflowExecutionId: input.workflowExecutionId,
       now: input.now,
       ...(input.partialParams ? { partialParams: true } : {}),
+      ...(input.agentStep ? { agentStep: true } : {}),
     },
     input.pluginDefault,
   );
@@ -707,6 +717,9 @@ export interface PolicyResolverDeps {
   credentials?: CredentialStore;
   onePassword?: OnePasswordService;
   plugins?: ValetPlugin[];
+  /** The workflow agent step a call runs in, when its run may use saved
+   * workflow grants (`workflows/step-grants.ts`). Absent: no agent step does. */
+  workflowStepGrant?: (input: { orgId: string; sessionId: string; queueItemId?: string; teamId?: string; userId?: string }) => Promise<WorkflowStepGrant | undefined>;
 }
 
 /**
@@ -723,7 +736,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   /** The member whose shared account this team action would use, when no
    * account of the acting member's or the team's own answers. GitHub has the
    * organization App behind the team's row, so it never borrows. */
-  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
+  async function sharedAccountApprover(input: PolicyResolveInput, step: WorkflowStepGrant | undefined): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
     const service = credentialServiceFor(input.service);
     if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
     const sharers = await membersSharing(deps.db, input.teamId, service);
@@ -736,7 +749,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
           orgId: input.orgId, teamId: input.teamId,
           ...(input.userId && !input.externalSender ? { userId: input.userId } : {}),
           // A sender with no Valet account never rides a teammate's approval.
-          mayBorrow: async (memberId) => !input.externalSender && canBorrowCredential(deps.db, { orgId: input.orgId!, teamId: input.teamId!, actorId: input.userId, sessionId: input.sessionId, threadId: input.threadId, service, memberId }),
+          mayBorrow: async (memberId) => !input.externalSender && canBorrowCredential(deps.db, { orgId: input.orgId!, teamId: input.teamId!, actorId: input.userId, sessionId: input.sessionId, threadId: input.threadId, service, memberId, ...(step ? { step } : {}) }),
         },
         service,
         orgFallbackPolicy(deps.plugins, service),
@@ -778,6 +791,8 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         );
       }
 
+      const step = input.externalSender ? undefined : await deps.workflowStepGrant?.({ orgId: input.orgId, sessionId: input.sessionId,
+        ...(input.queueItemId ? { queueItemId: input.queueItemId } : {}), ...(input.teamId ? { teamId: input.teamId } : {}), ...(input.userId ? { userId: input.userId } : {}) });
       const decision = await resolveActionPolicy(deps.db, {
         orgId: input.orgId,
         teamId: input.teamId,
@@ -792,11 +807,12 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         now: clock(),
         ...(input.externalSender ? { externalSender: true } : {}),
         ...(input.partialParams ? { partialParams: true } : {}),
+        ...(step?.actions.includes(input.actionId) ? { agentStep: { workflowId: step.workflowId, runId: step.runId } } : {}),
       });
 
       if (decision.mode === "deny") return decision;
       // Another member's account: they answer, and nobody else can.
-      const approver = await sharedAccountApprover(input);
+      const approver = await sharedAccountApprover(input, step);
       if (approver) {
         if (!input.externalSender && (!input.userId || !input.teamId || (!await isTeamMember(deps.db, input.teamId, input.userId) && !await isUnattendedTeamSession(deps.db, {
           orgId: input.orgId, teamId: input.teamId, sessionId: input.sessionId, threadId: input.threadId, actorId: input.userId,

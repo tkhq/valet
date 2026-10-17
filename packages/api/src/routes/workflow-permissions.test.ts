@@ -517,3 +517,64 @@ it.each(["workflow", "owner"])("binds a permissions review to the current %s ide
   expect(approval.status).toBe(409);
   expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
 });
+
+describe("agent step permissions", () => {
+  const AGENT_DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "writer", type: "session", mode: "start", prompt: "Ship it.", toolScope: { actions: ["widgets.deploy", "widgets.list", "widgets.*", "granola.list_meetings"] } },
+      { id: "reporter", type: "orchestrator", prompt: "Report.", toolScope: { actions: ["widgets.purge"] } },
+      { id: "reader", type: "session", mode: "start", prompt: "Read." },
+    ],
+    edges: [{ from: "trigger", to: "writer" }, { from: "writer", to: "reporter" }, { from: "reporter", to: "reader" }],
+  };
+
+  it("reviews and grants only the exact actions agent steps list", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api, { definition: AGENT_DEFINITION });
+
+    const body = (await (await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse;
+    expect(body.nodes.map((n) => [n.nodeId, n.actionId, n.mode, n.agentStep])).toEqual([
+      ["writer", "widgets.deploy", "require_approval", true],
+      ["writer", "widgets.list", "allow", true],
+      ["writer", "granola.list_meetings", "unknown", true],
+      ["reporter", "widgets.purge", "require_approval", true],
+    ]);
+
+    const res = await reviewedApproval(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
+    expect(((await res.json()) as AllowWorkflowPermissionsResponse).allowed.sort()).toEqual(["granola.list_meetings", "widgets.deploy", "widgets.purge"]);
+    // The review then reads the agent rows as allowed, as the run does, so nothing asks twice.
+    const reviewed = (await (await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse;
+    expect(reviewed.nodes.find((n) => n.actionId === "widgets.deploy")).toMatchObject({ mode: "allow", provenance: "workflow_grant", agentStep: true });
+
+    await api.providers.workflowStore.createRun("agent-run", { workflowId: wfId, definitionVersionId: "v1" }, AGENT_DEFINITION, "v1",
+      { ownerType: "user", ownerId: "local-user", actorUserId: "local-user" });
+    const check = (agentStep: boolean) => resolveActionPolicy(api!.providers.db, {
+      orgId: "local-org", userId: "local-user", service: "widgets", actionId: "widgets.deploy", riskLevel: "high",
+      params: {}, appliesIn: "session", sessionId: "wf:agent-run:writer", pluginDefault: undefined, now: Date.now(),
+      ...(agentStep ? { agentStep: { workflowId: wfId, runId: "agent-run" } } : {}),
+    });
+    expect(await check(true)).toMatchObject({ mode: "allow", provenance: { source: "workflow_grant" } });
+    expect((await check(false)).mode).toBe("require_approval");
+
+    // An edit and a new approval after the step check: the run's steps no
+    // longer match the saved ones, so the grant lookup gives it nothing.
+    const edited = { ...AGENT_DEFINITION, nodes: AGENT_DEFINITION.nodes.slice(0, 2) };
+    await api.providers.db.update(workflowDefinitions).set({ definition: edited }).where(eq(workflowDefinitions.id, wfId));
+    expect((await check(true)).mode).toBe("require_approval");
+  });
+
+  it("blocks an agent-step grant that an org rule scoped to workflows keeps gated", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api, { definition: AGENT_DEFINITION });
+    await api.providers.db.insert(actionPolicies).values({
+      id: "pol_wf_only", orgId: "local-org", principalType: "org", principalId: "local-org", actionId: "widgets.deploy",
+      mode: "require_approval", appliesIn: "workflow", paramMatchers: [], origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const res = await reviewedApproval(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
+    const body = (await res.json()) as AllowWorkflowPermissionsResponse;
+    expect(body.blocked.map((b) => b.actionId)).toEqual(["widgets.deploy"]);
+    expect(body.allowed).not.toContain("widgets.deploy");
+  });
+});

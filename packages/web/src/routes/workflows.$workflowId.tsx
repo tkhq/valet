@@ -286,7 +286,7 @@ function WorkflowEditorPane({
   const gatingActions = useMemo(() => {
     const seen = new Map<string, WorkflowNodePermissionWire>();
     for (const node of permissions?.nodes ?? []) {
-      if (node.mode === "require_approval" && node.actionId !== null && !seen.has(node.actionId)) {
+      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown")) && node.actionId !== null && !seen.has(node.actionId)) {
         seen.set(node.actionId, node);
       }
     }
@@ -467,12 +467,13 @@ function WorkflowEditorPane({
         </summary>
         <div className="mt-2 space-y-2 text-xs">
           {permissionsError ? <p role="alert">Could not check permissions. Refresh before running.</p> : !permissions ? <p>Checking workflow actions…</p> : <>
-            {permissions.nodes.length === 0 && <p>No direct tool permissions detected. Agent and nested workflow actions are checked when they run.</p>}
+            {permissions.nodes.length === 0 && <p>No tool or agent step permissions detected. Nested workflow actions are checked when they run.</p>}
             <ul className="max-h-48 overflow-auto divide-y divide-line">{permissions.nodes.map((node) => <li key={`${node.nodeId}:${node.actionId ?? node.action}`} className="flex flex-col gap-1 py-2 sm:flex-row sm:justify-between sm:gap-3">
-              <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
-              <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
+              <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}{node.agentStep && <span className="font-sans text-muted"> · agent step</span>}</span>
+              <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? (node.agentStep ? "Risk unknown before a run" : "Checked at runtime") : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
             <p>A save allows nothing. Allow these steps once here, or approve the assistant's card. Any step change asks again. Other members approve their own accounts.</p>
+            <p>An agent step uses only the exact actions it lists. The agent chooses when to use them and which values to send.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
               {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
@@ -545,7 +546,8 @@ function WorkflowEditorPane({
           title="Pre-approve actions"
           description={
             "Allow these actions for every run of the current steps. A change to the steps asks again. Other workflows and chats keep their permissions. " +
-            (reviewedAccountConsent ? "Also allow direct tool steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
+            (reviewedAccountConsent ? "Also allow tool and agent steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
+            (reviewedActions.some((action) => action.agentStep) ? "In an agent step, the agent chooses when to use an action and which values to send. " : "") +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
@@ -559,7 +561,7 @@ function WorkflowEditorPane({
           </ul>
           {reviewedAccountConsent && <section className="space-y-1 py-2">
             <p className="text-sm font-medium">Accounts shared with {reviewedAccountConsent.teamName}</p>
-            <p className="text-xs text-muted">This workflow may use your shared accounts for these services in direct tool steps.</p>
+            <p className="text-xs text-muted">This workflow may use your shared accounts for these services in tool steps and agent steps.</p>
             <ul data-testid="preapprove-account-services" className="space-y-1 text-xs">
               {reviewedAccountConsent.services.map(service => <li key={service} className="font-mono">{service}</li>)}
             </ul>

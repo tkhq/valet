@@ -335,3 +335,27 @@ it("allows nothing on an assistant save; allow_permissions asks the person once 
   expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("approve")))).toMatchObject({ success: true, data: { allowed: [] } });
   expect(card).toHaveLength(3);
 });
+
+it("lists an agent step's exact actions and services, and the card says the agent picks the values", async () => {
+  const { p, team, deps } = await setup();
+  const plugin = workflowsActionPlugin(() => deps);
+  const save = plugin.actions.find((action) => action.id === "workflows.save_workflow");
+  const allow = plugin.actions.find((action) => action.id === "workflows.allow_permissions");
+  if (!save || !allow) throw new Error("workflow actions missing");
+  const agentDefinition = {
+    version: "dag/v1", nodes: [
+      { id: "start", type: "trigger" },
+      { id: "agent", type: "session", mode: "start", prompt: "Read the fixture.", toolScope: { actions: ["fixture.read"] } },
+      { id: "stop", type: "stop" },
+    ], edges: [{ from: "start", to: "agent" }, { from: "agent", to: "stop" }],
+  };
+  const saved = await save.execute({ name: "Agent step", definition: agentDefinition }, assistantTurn(team.id));
+  expect(saved).toMatchObject({ success: true, data: { needsApproval: ["fixture.read", "fixture_account shared account"] } });
+  const workflowId = saved.data && typeof saved.data === "object" && "workflowId" in saved.data ? saved.data.workflowId : undefined;
+  if (typeof workflowId !== "string") throw new Error("Missing workflow ID");
+  const card: { body?: string }[] = [];
+  const turn = assistantTurn(team.id, { requestDecision: async (req: { title: string; body?: string }) => { card.push(req); return { actionId: "approve", resolvedBy: "local-user", resolvedAt: 1 }; } });
+  expect(await allow.execute({ workflow_id: workflowId }, turn)).toMatchObject({ success: true, data: { allowed: ["fixture.read"], accounts: ["fixture_account"] } });
+  expect(card.at(-1)?.body).toContain("- agent: fixture.read (an agent step: the agent chooses when and with which values)");
+  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId, actionId: "fixture.read" }]);
+});
