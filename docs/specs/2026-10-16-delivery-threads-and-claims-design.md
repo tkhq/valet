@@ -426,6 +426,12 @@ event wakeups spec Part A.
 - **Counter name.** The OpenTelemetry instrument is
   `valet_event_delivery_destination`. The Prometheus exporter adds the
   `_total` suffix.
+- **Scenario T uses the GitHub catalog's real keys and filters.** The
+  catalog has no bare `github.pull_request_review` key; R1 and W use
+  `github.pull_request_review.submitted`. `github.check_run.completed` has
+  no conclusion filter; R4 filters on the repository, and the test sends
+  only failed check runs. The table's intent holds. A conclusion filter is
+  a catalog addition, not a thread policy change.
 
 ## Errata to other specs
 
