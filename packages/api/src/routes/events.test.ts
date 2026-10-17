@@ -2510,6 +2510,73 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     expect(row.target).toMatchObject({ thread: { mode: "existing", ...teamThread } });
   });
 
+  /** Answers Slack's membership check: `members` lists each private channel's members. */
+  async function connectSlack(a: TestApi, members: Record<string, string[]>) {
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    const realFetch = globalThis.fetch;
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      const channel = url.searchParams.get("channel") ?? "";
+      const body = url.pathname.endsWith("conversations.members")
+        ? { ok: true, members: members[channel] ?? [] }
+        : { ok: true, channel: { name: channel.toLowerCase(), is_private: members[channel] !== undefined } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+  }
+
+  it("lets a team rule pin a private-channel thread only for the channel's members", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values([
+      { teamId: "team_1", userId: "local-user", role: "member" },
+      { teamId: "team_1", userId: "test-member", role: "member" },
+    ]);
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const privateThread = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-incident",
+      key: "sub:incident", slackChannels: ["CPINPRIV"],
+    });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread } });
+    const asOutsider = { "x-valet-test-user-id": "test-member" };
+    try {
+      // A team member outside the private channel gets the cross-owner text.
+      const refused = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...privateThread }), asOutsider);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+      expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+      // A channel member may pin it.
+      const accepted = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...privateThread }));
+      expect(accepted.status).toBe(201);
+      const created = (await accepted.json()) as CreateEventSubscriptionResponse;
+
+      // A patch is checked against the person who sends it, not the rule's creator.
+      const repinned = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "existing", ...privateThread } }, asOutsider);
+      expect(repinned.status).toBe(400);
+      expect(await repinned.json()).toEqual({ error: CROSS_OWNER });
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
+  it("refuses a team rule's pin on a member's personal thread, even for that member", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const helper = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-helper",
+      key: "app-assistant:test-member",
+    });
+    const body = { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread: { mode: "existing", ...helper } } };
+    const res = await postSubscription(a.baseUrl, body, { "x-valet-test-user-id": "test-member" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
   it("patches the policy, refuses another owner's thread, and clears it with null", async () => {
     const a = await boot();
     const foreign = await seedAssistantThread(a.providers.db, {

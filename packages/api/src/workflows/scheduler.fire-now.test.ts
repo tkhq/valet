@@ -157,7 +157,7 @@ describe("WorkflowScheduler.fireNow", () => {
     if (!created.ok) throw new Error(created.error);
     const scheduleId = created.schedule.scheduleId;
 
-    await updateWorkflowSchedule(db, OWNER, scheduleId, { enabled: false }, FIXED_NOW - 500);
+    await updateWorkflowSchedule(armDeps(), OWNER, scheduleId, { enabled: false }, FIXED_NOW - 500);
 
     const { deliver, calls } = makeDeliver();
     const { host } = makeRunHost();

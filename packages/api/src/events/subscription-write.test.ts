@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
-import type { ValetPlugin } from "@valet/engine";
+import { InMemoryCredentialStore, type ValetPlugin } from "@valet/engine";
 import { validateSubscription } from "./subscription-write.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { existingThreadError, subjectModeAllowed } from "./thread-policy-write.js";
@@ -86,13 +86,15 @@ describe("existingThreadError", () => {
   it("fails closed on a malformed policy instead of reading it as own", async () => {
     const { appDb } = await freshTestPgDb();
     const owner = { type: "user" as const, id: "u1" };
-    expect(await existingThreadError(appDb, "org", owner, { mode: "existing" }))
+    const deps = { db: appDb, engineCredentials: new InMemoryCredentialStore() };
+    const writer = { orgId: "org", userId: "u1" };
+    expect(await existingThreadError(deps, writer, owner, { mode: "existing" }))
       .toBe("An existing thread needs sessionId and threadId.");
-    expect(await existingThreadError(appDb, "org", owner, { mode: "own", extra: 1 }))
+    expect(await existingThreadError(deps, writer, owner, { mode: "own", extra: 1 }))
       .toBe('Thread policy has an unknown field "extra". Remove it.');
-    expect(await existingThreadError(appDb, "org", owner, "existing"))
+    expect(await existingThreadError(deps, writer, owner, "existing"))
       .toBe("Thread policy must be an object with a mode.");
-    expect(await existingThreadError(appDb, "org", owner, { mode: "own" })).toBeNull();
-    expect(await existingThreadError(appDb, "org", owner, undefined)).toBeNull();
+    expect(await existingThreadError(deps, writer, owner, { mode: "own" })).toBeNull();
+    expect(await existingThreadError(deps, writer, owner, undefined)).toBeNull();
   });
 });

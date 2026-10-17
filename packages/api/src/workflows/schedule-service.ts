@@ -94,13 +94,13 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
 
 /**
  * Validate a schedule's thread policy (spec 2026-10-16: delivery threads,
- * Part A). Only an orchestrator-prompt schedule takes one, and never
+ * Part A). Only an assistant-prompt schedule takes one, and never
  * `subject`: a schedule firing has no subject. An `existing` thread must be
- * an open assistant thread of the schedule's owner.
+ * an open assistant thread of the schedule's owner that `writer` can read.
  */
 async function scheduleThreadError(
-  db: AppDb,
-  orgId: string,
+  deps: ScheduleThreadDeps,
+  writer: WorkflowOwner,
   owner: Principal,
   targetKind: "workflow" | "orchestrator",
   thread: unknown,
@@ -111,8 +111,14 @@ async function scheduleThreadError(
   const shapeError = validateThreadPolicy(thread);
   if (shapeError) return shapeError;
   if (readThreadPolicy(thread).mode === "subject") return NO_SUBJECT_ERROR;
-  return existingThreadError(db, orgId, owner, thread);
+  // A team key is no person: it reads only what the whole team shares.
+  const viewer = { orgId: writer.orgId, userId: writer.principal?.type === "team" ? undefined : writer.userId };
+  return existingThreadError({ db: deps.db, engineCredentials: deps.credentials, onePassword: deps.onePassword }, viewer, owner, thread);
 }
+
+/** What a schedule write reads beyond its own rows: the Slack credential the
+ * thread read gate uses when a schedule pins an existing thread. */
+export type ScheduleThreadDeps = Pick<TeamServiceReadinessDeps, "db" | "credentials" | "onePassword">;
 
 /**
  * A schedule arms unattended work, so creating one needs the credential
@@ -223,7 +229,7 @@ export async function createWorkflowSchedule(
   }
 
   if (input.thread !== undefined) {
-    const threadError = await scheduleThreadError(db, owner.orgId,
+    const threadError = await scheduleThreadError(deps, owner,
       { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, hasWorkflow ? "workflow" : "orchestrator", input.thread);
     if (threadError) return { ok: false, error: threadError };
   }
@@ -357,7 +363,7 @@ export interface WorkflowSchedulePatch {
  * transitions disabled → enabled (so a stale slot does not fire at once).
  */
 export async function updateWorkflowSchedule(
-  db: AppDb,
+  deps: ScheduleThreadDeps,
   owner: WorkflowOwner,
   scheduleId: string,
   patch: WorkflowSchedulePatch,
@@ -366,6 +372,7 @@ export async function updateWorkflowSchedule(
   | { ok: true; schedule: WorkflowScheduleSummary }
   | { ok: false; status: 400 | 404; error: string }
 > {
+  const db = deps.db;
   const row = await accessibleScheduleRow(db, owner, scheduleId);
   if (!row) return { ok: false, status: 404, error: "schedule not found" };
 
@@ -388,7 +395,7 @@ export async function updateWorkflowSchedule(
   }
 
   if (patch.thread !== undefined && patch.thread !== null) {
-    const threadError = await scheduleThreadError(db, owner.orgId,
+    const threadError = await scheduleThreadError(deps, owner,
       { type: row.ownerType, id: row.ownerId }, row.targetKind, patch.thread);
     if (threadError) return { ok: false, status: 400, error: threadError };
   }
