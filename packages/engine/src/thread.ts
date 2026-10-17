@@ -5323,6 +5323,17 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
+  /** Persists a refused approval as a resolved gate row for its submission. It
+   * is never pending, so no inbox, waiter, or attention wiring sees it. */
+  private async recordUnattendedRefusal(req: DecisionGateRequest, gateCtx: GateContext, resolution: DecisionResolution): Promise<void> {
+    const store = this.session.providers.store;
+    const prior = await store.listDecisionGatesForQueueItem(this.session.id, this.id, gateCtx.queueItemId);
+    const ordinal = prior.filter((gate) => gate.resumeKey === gateCtx.resumeKey)
+      .reduce((max, gate) => Math.max(max, gate.ordinal + 1), 0);
+    const { expiresAt: _expiresAt, ...gate } = fromRequest(req, { ...gateCtx, ordinal });
+    await store.saveDecisionGate(this.session.id, this.id, { ...gate, status: "resolved", resolution });
+  }
+
   /** A workflow step's own session, a workflow task handed to an assistant thread,
    * or any turn on a run's own thread that a person did not type. Nobody answers
    * its decisions, so `requestDecision` refuses them before a gate opens. */
@@ -5475,7 +5486,12 @@ export class Thread {
         // before this rule still resolves. The author grants approvals when
         // the workflow is saved.
         if (this.isUnattendedWorkflowTask()) {
-          return { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
+          const refusal: DecisionResolution = { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
+          // A refused approval means an action did not run. Record it as an
+          // already-resolved gate, never pending, so the workflow can fail the
+          // step after a restart too (`workflows/engine-deps.ts#awaitResult`).
+          if (req.type === "approval") await this.recordUnattendedRefusal(req, gateCtx, refusal);
+          return refusal;
         }
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the

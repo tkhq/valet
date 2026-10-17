@@ -119,7 +119,7 @@ describe("workflow run thread context", () => {
       const reply = await thread.submitPrompt("Which projects should I check?", { author: { id: "u", interactive: true } });
       await thread.awaitResult(reply.queueItemId);
       expect(seen).toEqual([{ unattended: true, resolvedBy: UNATTENDED_WORKFLOW_DECISION }, { unattended: undefined, resolvedBy: undefined }]);
-      expect(await store.listDecisionGates(session.id)).toEqual([]);
+      expect((await store.listDecisionGates(session.id)).map((gate) => gate.status)).toEqual(["resolved"]);
     } finally { session.suspendTimers(); faux.unregister(); }
   });
 });

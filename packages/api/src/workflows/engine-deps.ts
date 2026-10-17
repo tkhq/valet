@@ -38,6 +38,7 @@ import { runEventChannel, slackEventsThreadKey } from "../services/thread-access
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
+  isUnattendedWorkflowRefusal,
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
@@ -427,9 +428,23 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!thread) {
         throw new Error(`workflow engine-deps: thread not found: ${threadId} on session ${sessionId}`);
       }
-      return thread.awaitResult(queueItemId, {
+      const result = await thread.awaitResult(queueItemId, {
         resultSchema: awaitOpts?.resultSchema,
       });
+      if (result.outcome !== "completed") return result;
+      // A step whose approval was refused skipped that action, so the run must
+      // not report success. Failing the step notifies the run's owner.
+      const refused = (await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId))
+        .filter((gate) => gate.resolution !== undefined && isUnattendedWorkflowRefusal(gate.resolution));
+      if (refused.length === 0) return result;
+      return {
+        queueItemId,
+        outcome: "failed" as const,
+        error:
+          `This step needed approval nobody can give during a run: ${refused.map((gate) => `"${gate.title}"`).join(", ")}. ` +
+          "Before the next run, move the action to a tool step, which saving the workflow approves, " +
+          "ask a team admin to allow it by policy, or connect a team account for a teammate's shared account.",
+      };
     },
 
     async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {

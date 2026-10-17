@@ -713,7 +713,11 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       }, { timeout: 15_000, interval: 50 });
       expect(toolResult).toContain("no one can approve during an unattended workflow run");
       expect(executed).toBe(false);
-      expect(await engineStore.listDecisionGates(first.sessionId, first.threadId)).toEqual([]);
+      // Nothing waits, and the refused approval fails the step so the owner hears about it.
+      expect((await engineStore.listDecisionGates(first.sessionId, first.threadId)).map((gate) => gate.status)).toEqual(["resolved"]);
+      const settled = await deps.awaitResult(first.sessionId, first.threadId, first.queueItemId);
+      expect(settled.outcome).toBe("failed");
+      expect(settled.error).toContain("This step needed approval nobody can give during a run");
 
       faux.appendResponses([fauxAssistantMessage("second run reported")]);
       const next = await submit("run_next", "second run");

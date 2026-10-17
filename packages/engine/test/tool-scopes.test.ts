@@ -167,7 +167,9 @@ describe("unattended workflow tasks", () => {
     expect(seen.resolution, label).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
     expect(seen.askText, label).toContain("this is an unattended workflow run");
     expect(seen.askText, label).toContain("Say in the result what was missing");
-    expect(gates, label).toEqual([]);
+    // The refused approval is on record for the workflow; nothing is pending.
+    expect(gates.map((gate) => ({ status: gate.status, resolvedBy: gate.resolution?.resolvedBy, type: gate.type })), label)
+      .toEqual([{ status: "resolved", resolvedBy: UNATTENDED_WORKFLOW_DECISION, type: "approval" }]);
   });
 
   it("leaves a person's own prompt in an assistant thread attended", async () => {
