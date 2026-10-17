@@ -35,6 +35,10 @@ import {
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
 import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn, type EventDispatcherDeps } from "./dispatcher.js";
 import { PinUnavailableError, pinNarrowsMessage } from "./assistant-delivery.js";
+import { waiterMatchDeps } from "./waiters.js";
+import { PgSessionStore } from "@valet/store-postgres";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
 /** Records the destination counter's reasons. The dispatcher takes it as a
@@ -795,38 +799,84 @@ describe("EventDispatcher", () => {
     });
 
     /** A `slack.message` reply in Slack thread 1.2 by `user`, stamped to the follow binding's thread. */
-    async function dispatchFollowedReply(user: string, text: string, plugins: ValetPlugin[] = []) {
+    async function dispatchFollowedReply(user: string, text: string, plugins: ValetPlugin[] = [],
+      opts: { ts?: string; slackBotUserId?: EventDispatcherDeps["slackBotUserId"] } = {}) {
       const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] };
       const { deliveryId } = await seedDelivery({
         target: { kind: "orchestrator" }, ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.message", eventKeys: ["slack.message"], refs: { channel: "C1" }, summary: "Reply",
-        payload: { type: "message", channel: "C1", user, text, ts: `1.${5 + text.length}`, thread_ts: "1.2" }, actor: { externalId: user },
+        payload: { type: "message", channel: "C1", user, text, ts: opts.ts ?? "1.700000", thread_ts: "1.2" }, actor: { externalId: user },
         destination: stamp,
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }));
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
         resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.5" }),
-        slackBotUserId: async () => "U-BOT", plugins,
+        slackBotUserId: opts.slackBotUserId ?? (async () => "U-BOT"), plugins,
       }).pollOnce();
       return { deliver, deliveryId };
     }
 
-    async function seedFollowToInc() {
+    /** A follow binding to thr-inc. `lastSeenTs` is the router's cursor: by default the router passed the reply. */
+    async function seedFollowToInc(lastSeenTs: string | null = "1.700000") {
       await seedMentionMember("team-x");
       await seedSession("sess-inc", "team", "team-x", "thr-inc");
       await upsertFollowedThread(tdb.appDb, {
         orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
         ownerType: "team", ownerId: "team-x", createdBy: "member-9", target: { sessionId: "sess-inc", threadId: "thr-inc" },
+        ...(lastSeenTs !== null ? { lastSeenTs } : {}),
       });
     }
 
-    it("skips a followed reply that the follow router delivers: one owner (C3b, follow_routed)", async () => {
-      await seedFollowToInc();
+    it("skips a followed reply that the follow router delivered: one owner (C3b, follow_routed)", async () => {
+      // The router delivered the reply and advanced its cursor to the reply's ts.
+      await seedFollowToInc("1.700000");
       const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
       expect(deliver).not.toHaveBeenCalled();
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the followed thread delivers this reply." });
       expect(recordDestination.mock.calls).toEqual([["follow_routed"]]);
+    });
+
+    it("delivers a followed reply that came before the binding: the router dropped it (C3b, router-before-binding)", async () => {
+      // The mention's delivery bound the thread after the router ran, so the
+      // cursor is the mention's ts, before the reply.
+      await seedFollowToInc("1.200000");
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(recordDestination.mock.calls).toEqual([["conversation_follow"]]);
+    });
+
+    it("delivers a followed reply when the binding has no router cursor", async () => {
+      await seedFollowToInc(null);
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    });
+
+    it("treats a post that addresses a bot id resolved only from the token as a mention (C5)", async () => {
+      // A legacy installation: the credential has no `botUserId` metadata, so
+      // the id comes from auth.test, the same path the follow router's drain uses.
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+        Response.json({ ok: true, team_id: "T-LEGACY", bot_id: "B-BOT", user_id: "U-BOT" }));
+      try {
+        const credentials = new PgCredentialStore(tdb.pgdb, deriveSecretKey("test-key"));
+        await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-legacy", metadata: { teamId: "T-LEGACY" } });
+        const matchers = waiterMatchDeps({ db: tdb.appDb, engineStore: new PgSessionStore(tdb.pgdb), engineCredentials: credentials, plugins: [slackPlugin] });
+        await seedFollowToInc("1.200000");
+        const now = Date.now();
+        await tdb.appDb.insert(eventSubscriptions).values({
+          id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
+          target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+        });
+        const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin],
+          { slackBotUserId: (orgId) => matchers.slackBotUserId(orgId) });
+        expect(deliver).not.toHaveBeenCalled();
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
+        expect(recordDestination.mock.calls).toEqual([["mention_covered"]]);
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
 
     it("skips the message half of a mention that a rule of the owner delivers (C5, mention_covered)", async () => {

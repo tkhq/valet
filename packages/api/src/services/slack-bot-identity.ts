@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { credentialSecret, type StoredCredential } from "@valet/engine";
 import { verifySlackBotToken, type SlackWorkspaceIdentity } from "./slack-connect.js";
 
 interface IdentityInput {
@@ -41,4 +42,25 @@ export function resolveSlackBotIdentity(cacheOwner: object, input: IdentityInput
   const entry: CachedIdentity = { key, expiresAt: Infinity, result };
   identities.set(cacheOwner, entry);
   return result;
+}
+
+/**
+ * The Slack bot user id of an org's Slack credential. It is the stored
+ * `botUserId` metadata, or, for a legacy installation without it, the id
+ * that `resolveSlackBotIdentity` verifies from the saved token. The Slack
+ * inbox drain gives this id to the follow router, and the event matchers
+ * read it too, so the router, claim resolution, and the dispatcher agree on
+ * which posts address the bot. `cacheOwner` is the credential store.
+ */
+export async function slackBotUserIdOf(
+  cacheOwner: object,
+  orgId: string,
+  credential: StoredCredential | null | undefined,
+): Promise<string | undefined> {
+  const stored = credential?.metadata?.botUserId;
+  if (typeof stored === "string" && stored !== "") return stored;
+  const accessToken = credentialSecret(credential);
+  const teamId = credential?.metadata?.teamId;
+  if (!accessToken || typeof teamId !== "string" || teamId === "") return undefined;
+  return (await resolveSlackBotIdentity(cacheOwner, { orgId, accessToken, teamId }))?.botUserId;
 }

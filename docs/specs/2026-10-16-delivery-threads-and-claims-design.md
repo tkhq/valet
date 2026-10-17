@@ -287,8 +287,19 @@ incident routing spec's Parts A and B.
      waiters in the bound thread append no digest. The dispatcher skips a
      `slack.message` delivery whose destination is that binding with
      `Skipped, the followed thread delivers this reply.` and reason
-     `follow_routed`. If the route check fails, the waiters append
-     (INV-D6).
+     `follow_routed`, but only when the binding's router cursor
+     (`last_seen_ts`) is at or after the message's ts. The router advances
+     the cursor after it delivers. Otherwise the subscription delivers the
+     reply: this is a named repair for the window in which the binding
+     appears, or the sender becomes admitted, after the router ran. The
+     Slack inbox runs the follow router before subscription ingestion, so
+     the router has passed its own message before the dispatcher sees it.
+     If the route check fails, the waiters append (INV-D6), and ingest
+     records the `claim_resolution` failure stage and the waiter-match
+     failure counter.
+   - The follow router, claim resolution, and the dispatcher read one bot
+     user id (`slackBotUserIdOf`): the credential's `botUserId` metadata,
+     or the id that `auth.test` verifies for a legacy installation.
 5. A once-mode waiter is a candidate. When it is the redirect target, the
    delivery counts as its match. The redirect stamp names the target in
    `matchedWaiterId`, in once mode and in stream mode. After the inbound
@@ -606,6 +617,29 @@ event wakeups spec Part A.
 - **The C7 title.** A `slack.message` event does not name its channel, so
   the Slack `naturalSubject` label falls back to the channel id (Part D).
   In the Scenario E universe, C7's thread title is `C900`.
+
+- **A reply dropped before its binding can duplicate.** The follow router
+  drops a reply that arrives before its binding exists, or before its
+  sender is admitted. If the binding appears before dispatch, the
+  subscription delivers that reply (Part C step 4). The router cursor stays
+  at the mention, so the router's next gap re-hydration can include the
+  same reply again. This duplication is accepted (INV-D6). A reply that the
+  router passes because a later reply advanced the cursor reaches the
+  thread only as re-hydrated context.
+- **A failed router run can duplicate.** If the follow router throws, its
+  cursor stays put and the subscription delivers the reply. The inbox retry
+  then runs the router again, which can deliver the reply a second time.
+- **A `mention_covered` skip with no waiter trusts the mention.** For a
+  bound thread with no waiter, the dispatcher skips the message half when
+  the owner's mention rule will deliver the `app_mention` half. If that
+  mention delivery dies, no thread receives the post. The dead mention
+  delivery row is the visible record.
+- **`followRouteFor` reads the payload, the router reads the envelope.**
+  Claim resolution and the dispatcher pass the stored event payload, which
+  is the envelope's `event` object. The router parses the whole envelope
+  and drops the same posts: bot posts, subtypes, top-level messages, posts
+  that address the bot, and unadmitted senders. A unit test runs both on
+  the same raw Slack event.
 
 ## Errata to other specs
 

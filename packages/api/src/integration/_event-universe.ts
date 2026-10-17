@@ -659,7 +659,7 @@ export interface IncidentThread {
 export async function armIncident(u: Universe): Promise<IncidentThread> {
   const p = u.api.providers;
   await p.db.insert(eventSubscriptions).values(
-    // No thread policy: the rule lands in its own thread (spec 2026-10-16, Part A step 3).
+    // No thread policy: a channel event lands in its channel's subject thread (spec 2026-10-16, Part A step 3).
     ruleRow("sub-incidents", { type: "team", id: TEAM }, ["slack.channel_created"], [{ field: "channel_name", op: "prefix", value: "inc-" }], { kind: "orchestrator" }),
   );
   // E2's script runs in the turn that E1's signal starts.
@@ -693,7 +693,6 @@ export async function armIncident(u: Universe): Promise<IncidentThread> {
   expect(e1).toHaveLength(1);
   const thread = await p.engineStore.getThread(tInc.sessionId, tInc.threadId);
   // The rule sets no thread policy, so it lands in its own thread (spec
-  // 2026-10-16: delivery threads, Part A step 3), not a channel events thread.
   // The rule sets no thread policy, so the channel event lands in the
   // channel's subject thread (spec 2026-10-16: delivery threads, Part A
   // step 3), not a shared rule thread.

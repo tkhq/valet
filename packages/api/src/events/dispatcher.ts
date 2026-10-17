@@ -38,7 +38,7 @@ import { conversationBinding, isConversationalEvent } from "./conversation-bindi
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries, conversationalTwinOf } from "./ingest.js";
 import { mentionCoveredBy } from "./claims.js";
-import { followRouteFor } from "../channels/follow-router.js";
+import { followRouteFor, followRouterPassed } from "../channels/follow-router.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
 import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
@@ -152,7 +152,8 @@ export interface EventDispatcherDeps {
   recoverClaimedDigest?: (args: { waiterId: string; orgId: string; service: string; event: NormalizedEvent }) => Promise<boolean>;
   /**
    * The org's Slack bot user id, for the follow router's predicate and the
-   * `conversationalTwin` hook. Absent: no message text counts as
+   * `conversationalTwin` hook. Production resolves it like the follow
+   * router (`slackBotUserIdOf`). Absent: no message text counts as
    * addressed to the bot.
    */
   slackBotUserId?: (orgId: string) => Promise<string | undefined>;
@@ -727,8 +728,8 @@ export class EventDispatcher {
   /**
    * Why another path owns a `slack.message` delivery that follows a follow
    * binding, or null (spec Part C steps 4 and 8). One post gives one turn:
-   * - The follow router delivers the reply to the bound thread, so the
-   *   rule skips it (`follow_routed`).
+   * - The follow router delivers the reply to the bound thread, and its
+   *   cursor has passed the reply, so the rule skips it (`follow_routed`).
    * - The post addresses the bot, and an assistant rule of the owner
    *   delivers its `app_mention` half (sender gate and team coverage
    *   included), so the rule skips the message half (`mention_covered`).
@@ -744,7 +745,16 @@ export class EventDispatcher {
     const botUserId = await this.deps.slackBotUserId?.(event.orgId);
     const route = await followRouteFor(db, { orgId: event.orgId, ...(botUserId ? { botUserId } : {}), payload: event.payload });
     const sameThread = destination.kind === "key" || (route?.sessionId === destination.sessionId && route?.threadId === destination.threadId);
-    if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread) {
+    // A named repair for the router-before-binding window (CLAUDE.md,
+    // "Invariants: alert, don't auto-repair", rule 3). The router runs at
+    // webhook time and dispatch runs later. A binding can appear (the
+    // mention's delivery binds the thread) or the sender can become admitted
+    // in between, so the router dropped a reply that `followRouteFor` now
+    // routes. That is normal operation, not a defect. The rule skips only a
+    // reply that the router's cursor has passed. Otherwise the subscription
+    // delivers it, or the reply reaches no thread.
+    if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread
+      && followRouterPassed(route, event.payload)) {
       return { text: "the followed thread delivers this reply", reason: "follow_routed" };
     }
     const plugins = this.deps.plugins ?? [];

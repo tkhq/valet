@@ -10,7 +10,7 @@ import { ensureAssistantExecution } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { linkIdentity } from "./identity-links.js";
-import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
+import { followRouteFor, handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
 import { eq, sql } from "drizzle-orm";
 import { eventSubscriptions, sessionThreads, teams, teamMembers, orgMembers } from "../schema/index.js";
@@ -428,6 +428,36 @@ describe("handleFollowedMessage", () => {
       expect(prompts).toHaveLength(1);
       expect(prompts[0]).toMatchObject({ signal: { origin: { reply: "auto" } } });
     });
+  });
+
+  it("followRouteFor reads the Slack event payload the way the router reads its envelope", async () => {
+    // Claim resolution and the dispatcher call `followRouteFor` with the
+    // stored event payload (the envelope's `event`). The router reads the
+    // whole envelope. Both must agree on every message.
+    faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")));
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    const cases: Array<{ name: string; routed: boolean; follow: boolean; event: Record<string, unknown> }> = [
+      { name: "plain reply", routed: true, follow: true, event: { user: "U9", text: "on it" } },
+      { name: "addressed post", routed: false, follow: true, event: { user: "U9", text: "<@UBOT> on it" } },
+      { name: "bot post", routed: false, follow: true, event: { user: "U9", bot_id: "B1", text: "on it" } },
+      { name: "edit", routed: false, follow: true, event: { user: "U9", subtype: "message_changed", text: "on it" } },
+      { name: "unlinked sender", routed: false, follow: true, event: { user: "OTHER", text: "on it" } },
+      { name: "unfollowed thread", routed: false, follow: false, event: { user: "U9", text: "on it" } },
+    ];
+    for (const [i, c] of cases.entries()) {
+      const threadTs = `2.00000${i}`;
+      if (c.follow) {
+        await upsertFollowedThread(testDb.appDb, {
+          orgId: ORG, channelType: "slack", channelId: "C1", threadTs, ownerType: "user", ownerId: USER, createdBy: USER,
+        });
+      }
+      const event = { type: "message", channel: "C1", thread_ts: threadTs, ts: `3.00000${i}`, ...c.event };
+      const predicted = (await followRouteFor(testDb.appDb, { orgId: ORG, botUserId: "UBOT", payload: event })) !== null;
+      await handleFollowedMessage(deps, { orgId: ORG, raw: envelope(event, `EvEq${i}`) });
+      // The router advances the cursor only after it delivers.
+      const after = await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs });
+      expect({ name: c.name, predicted, delivered: after?.lastSeenTs === event.ts }).toEqual({ name: c.name, predicted: c.routed, delivered: c.routed });
+    }
   });
 
   it("routes a followed threaded message to the bound assistant thread as an overheard signal", async () => {
