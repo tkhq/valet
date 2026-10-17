@@ -320,6 +320,9 @@ export async function ingestEvent(
     let claims: ClaimDecision | null = null;
     if (waiters) {
       let twin: NormalizedEvent | null = null;
+      // A failed evaluation leaves the candidate set partial, so no claim
+      // resolves on it and every accepted waiter appends (INV-D6).
+      let evaluated = false;
       try {
         candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
         twin = await conversationalTwinOf(deps.plugins, waiters, orgId, service, event);
@@ -328,11 +331,12 @@ export async function ingestEvent(
         if (twin) {
           candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin));
         }
+        evaluated = true;
       } catch (error) {
         recordWaiterMatchFailure(waiters);
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
       }
-      if (candidates.some((c) => c.accepted)) {
+      if (evaluated && candidates.some((c) => c.accepted)) {
         try {
           claims = await resolveEventClaims(deps, { orgId, service, event, twin, subs, matched, candidates, catalog });
           if (claims.failedOwners > 0) {

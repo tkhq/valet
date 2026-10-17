@@ -236,6 +236,22 @@ describe("ingestEvent event waiter matching", () => {
     expect(nudge).not.toHaveBeenCalled();
   });
 
+  it("lets every waiter append when the twin's candidate evaluation throws (INV-D6)", async () => {
+    await subscribeAppMention();
+    await linkSender();
+    const find = store.findEventWaiters.bind(store);
+    let calls = 0;
+    vi.spyOn(store, "findEventWaiters").mockImplementation(async (subjects) => {
+      calls += 1;
+      if (calls === 2) throw new Error("the waiter index is unavailable");
+      return find(subjects);
+    });
+    await ingest(message("Ev-f4", "<@U-BOT> status?"), waiterDeps(), deliverable);
+    expect(calls).toBe(2);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-f4"]);
+    expect(failed).toHaveBeenCalled();
+  });
+
   it("stamps the mention's redirect to the waiting thread and appends no digest (C2)", async () => {
     await subscribeAppMention();
     await linkSender();

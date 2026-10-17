@@ -23,8 +23,9 @@ const MENTION_SUFFIX = ":mention";
  * original's channel, ts, user, text, subjects, refs, actor, and
  * occurredAt; only `key` and `dedupeKey` change.
  *
- * The twin is a prediction for matching only. Its `summary` and
- * `payload.type` are the original's, so it is never a delivery or digest body.
+ * The twin is a prediction for matching. Its `summary` and `payload.type`
+ * are the original's, so it is never a delivery body. Claim recovery may
+ * build a digest from it (`claim-recovery.ts`).
  */
 export function slackConversationalTwin(
   event: NormalizedEvent,

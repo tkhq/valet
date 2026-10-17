@@ -544,12 +544,21 @@ event wakeups spec Part A.
   twin can be the only claim, so the message delivery is skipped as
   claimed. The post then reaches that thread only when the predicted
   mention arrives. If Slack never sends it, no thread receives the post.
+  A claim resolver or candidate evaluation failure at the mention ingest
+  has the same result for a twin-only waiter: it gets no digest, and the
+  post still reaches the owner's rule thread. A candidate evaluation
+  failure resolves no claims, so every accepted waiter appends (INV-D6).
 - **Fallback can duplicate inside the race window.** A `claim_fallback`
   delivery can land in a thread that already holds an older waiter's digest
   for the same event. This duplication is accepted (INV-D6).
 - **A fallback after an admitted attempt misrecords.** A retry that flips to
   fallback after an earlier attempt was admitted records `claim_fallback`,
   though the event landed in the admitted thread. Only the record is wrong.
+- **Recovery can duplicate across the two halves of a mention.** Claim
+  recovery appends a digest for the event the dispatcher skipped. A waiter
+  can also hold the digest of the other half of the same Slack mention.
+  The two digests have different dedupe keys, so `appendEventMatch` keeps
+  both. This duplication is accepted (INV-D6).
 - **Valet's own pull request comment recovers nothing.** The dispatcher
   skips a comment that Valet wrote itself (`isOwnPullRequestWrite`) and does
   not give the `t-pr` waiter its suppressed digest. This is on purpose: the
