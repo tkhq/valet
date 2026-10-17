@@ -161,12 +161,14 @@ const CAUSE_LABEL: Record<string, string> = {
   rate: "too many events",
   deadline: "deadline reached",
   cancelled: "cancelled",
+  delivered: "arrived as a message",
 };
 
 /**
  * Pure: the outcome badge of a wakeup signal, or null when it reports no
  * end. A clean exit is `success`. A person's cancel is `neutral`: it is a
- * choice, not a failure. Every other end is `danger`.
+ * choice, not a failure. A once waiter whose event arrived in its thread
+ * as a message (`delivered`) is `success`. Every other end is `danger`.
  */
 export function wakeupOutcome(
   attrs: Record<string, string>,
@@ -179,7 +181,7 @@ export function wakeupOutcome(
   const words = CAUSE_LABEL[cause] ?? cause;
   return {
     label: exitCode !== undefined ? `${words} · exit ${exitCode}` : words,
-    tone: cause === "cancelled" ? "neutral" : "danger",
+    tone: cause === "cancelled" ? "neutral" : cause === "delivered" ? "success" : "danger",
   };
 }
 

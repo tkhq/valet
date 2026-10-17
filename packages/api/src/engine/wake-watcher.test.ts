@@ -1064,6 +1064,46 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(h.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it("ends a once-mode waiter that a claim redirect delivered to with exactly one event.ended signal (Part C step 5)", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow());
+    const watcher = h.watcher();
+    const target = { waiterId: "wk_ev", sessionId: "sess-1", threadId: "thread-1" };
+    expect(await watcher.endDeliveredWaiter(target)).toBe(true);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row).toMatchObject({ status: "done", cause: "fired" });
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const { content, opts } = signalOf(h.prompt.mock.calls[0]);
+    expect(opts).toMatchObject({ threadId: "thread-1", dispatchId: "wakeup:wk_ev:terminal", queueMode: "followup" });
+    expect(content).toMatchObject({ signalType: "event.ended", attributes: { cause: "delivered" } });
+    expect(h.wakeupEnded).toHaveBeenCalledWith("event", "fired");
+    // A retried delivery and a later sweep send no second terminal signal (INV-E5).
+    expect(await watcher.endDeliveredWaiter(target)).toBe(false);
+    await watcher.sweep(NOW + 1);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts a digest that arrived meanwhile in the one terminal event.matched signal", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)] }));
+    expect(await h.watcher().endDeliveredWaiter({ waiterId: "wk_ev", sessionId: "sess-1", threadId: "thread-1" })).toBe(true);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(signalOf(h.prompt.mock.calls[0]).content).toMatchObject({ signalType: "event.matched" });
+  });
+
+  it("leaves a stream waiter, or a waiter of another thread, running", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({}, false));
+    const watcher = h.watcher();
+    expect(await watcher.endDeliveredWaiter({ waiterId: "wk_ev", sessionId: "sess-1", threadId: "thread-1" })).toBe(false);
+    await h.store.createWakeup(eventRow({ id: "wk_once" }));
+    expect(await watcher.endDeliveredWaiter({ waiterId: "wk_once", sessionId: "sess-1", threadId: "thread-2" })).toBe(false);
+    expect(await watcher.endDeliveredWaiter({ waiterId: "wk_missing", sessionId: "sess-1", threadId: "thread-1" })).toBe(false);
+    expect((await h.store.getWakeup("wk_ev"))?.status).toBe("running");
+    expect((await h.store.getWakeup("wk_once"))?.status).toBe("running");
+    expect(h.prompt).not.toHaveBeenCalled();
+  });
+
   it("removes only the delivered digests in stream mode, so a digest appended meanwhile stays", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1), digest(2)] }, false));

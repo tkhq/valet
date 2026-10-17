@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { EventMatchDigest, EventMatchSpec, Wakeup } from "@valet/engine";
-import { decideEventWaiter, decideWakeup, EVENT_SIGNAL_MAX_BYTES, layoutStreamSignal, tail, LOG_TAIL_BYTES, WATCH_BUFFER_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
+import { decideDeliveredWaiter, decideEventWaiter, decideWakeup, EVENT_SIGNAL_MAX_BYTES, layoutStreamSignal, tail, LOG_TAIL_BYTES, WATCH_BUFFER_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
 
 interface Vector {
   name: string;
@@ -374,6 +374,27 @@ describe("decideEventWaiter (event wakeups spec, Part F)", () => {
     eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [], ...match },
     eventBuffer: [digest(1)],
     ...over,
+  });
+
+  it("delivered by redirect, no digest: ends done/fired with one event.ended signal (delivery claims Part C step 5)", () => {
+    const d = decideDeliveredWaiter(NOW, waiter({ eventBuffer: [] }));
+    expect(d).toMatchObject({ to: "done", cause: "fired", patch: { cause: "fired", endedAt: NOW, eventBuffer: [] } });
+    expect(d?.signals).toHaveLength(1);
+    expect(d?.signals[0]).toMatchObject({
+      signalType: "event.ended", dispatchId: "wakeup:wk_ev:terminal", attributes: { cause: "delivered" },
+      body: "The matching event arrived in this thread as a message. The wait ended.",
+    });
+  });
+
+  it("delivered by redirect with a buffered digest: the one terminal signal is event.matched", () => {
+    const d = decideDeliveredWaiter(NOW, waiter());
+    expect(d?.signals).toHaveLength(1);
+    expect(d?.signals[0]).toMatchObject({ signalType: "event.matched", dispatchId: "wakeup:wk_ev:terminal" });
+  });
+
+  it("delivered by redirect: a stream waiter or an ended waiter gets no decision", () => {
+    expect(decideDeliveredWaiter(NOW, waiter({}, { once: false }))).toBeNull();
+    expect(decideDeliveredWaiter(NOW, waiter({ status: "done" }))).toBeNull();
   });
 
   it("once mode, one digest: fires once as terminal and clears the buffer", () => {
