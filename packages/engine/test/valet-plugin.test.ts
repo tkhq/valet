@@ -756,4 +756,21 @@ describe("validateValetPlugin event contracts", () => {
       expect(res.issues.some((i) => i.path === "naturalSubject")).toBe(true);
     }
   });
+
+  it("accepts a plugin with a conversationalTwin function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      conversationalTwin: (_event: NormalizedEvent, _identity: { botUserId?: string }) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a conversationalTwin that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", conversationalTwin: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "conversationalTwin")).toBe(true);
+    }
+  });
 });

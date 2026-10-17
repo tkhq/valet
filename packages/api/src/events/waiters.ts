@@ -1,17 +1,21 @@
 /**
  * Event waiter matching during ingest (spec 2026-10-15: event wakeups,
- * Part E). `ingestEvent` calls `matchEventWaiters` for every normalized
- * event, before the early return for an event that no subscription matched,
- * inside its own error boundary (INV-E2).
+ * Part E). `ingestEvent` calls `evaluateWaiterCandidates` for every
+ * normalized event, before the early return for an event that no
+ * subscription matched, resolves claims over the candidates (spec
+ * 2026-10-16: delivery threads and claims, Part C), then calls
+ * `appendWaiterDigests`. Both run inside their own error boundary (INV-E2).
  *
  * The cost is one index lookup per event (`findEventWaiters`), independent
  * of the number of running waiters (INV-E6).
  */
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import {
   recordEventMatchFailed,
+  type ChannelOrigin,
   recordEventWaiterMatch,
   type DeriveContext,
+  type EventMatchDigest,
   type NormalizedEvent,
   type SessionStore,
   type ValetPlugin,
@@ -19,13 +23,13 @@ import {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
-import { agentSessions, eventSubscriptions } from "../schema/index.js";
+import { agentSessions } from "../schema/index.js";
 import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
+import { slackBotUserIdOf } from "../services/slack-bot-identity.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
-import { subscriptionMatchesEvent } from "./match.js";
-import { isTeamAssistantMention, mentionSenderActor } from "./team-slack-gate.js";
-import { anyMatch, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { anyMatch, matchClauses, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { channelOriginResolver } from "./channel-origin.js";
 
 /** The counters the matcher writes (spec Part J). Tests replace them. */
 export interface WaiterMatchMetrics {
@@ -58,10 +62,14 @@ export interface WaiterMatchDeps {
   /** Wakes the WakeWatcher for the waiters that got a digest. */
   nudge?: (wakeupIds: string[]) => void;
   now(): number;
-  /** Slack bot user id for the org, for the mention rule. */
+  /** Slack bot user id for the org, for the plugin's `conversationalTwin` hook. */
   slackBotUserId(orgId: string): Promise<string | undefined>;
-  /** True when an enabled slack.app_mention subscription matches this event's channel. */
-  appMentionCovered(orgId: string, event: NormalizedEvent): Promise<boolean>;
+  /**
+   * The channel origin of an event, as the dispatcher resolves it. Claim
+   * resolution reads it for the follow binding and the direct-message test.
+   * Absent → no origin: no follow binding is found at ingest.
+   */
+  channelOrigin?: (service: string, eventKey: string, payload: unknown) => ChannelOrigin | null;
   metrics?: Partial<WaiterMatchMetrics>;
 }
 
@@ -74,31 +82,42 @@ export function recordWaiterMatchFailure(deps: Pick<WaiterMatchDeps, "metrics">)
   metricsOf(deps).failed();
 }
 
-/** What one matching pass did: the candidates it read and the waiters that got a new digest. */
-export interface WaiterMatchResult {
-  candidates: number;
-  appended: number;
+/**
+ * One running waiter that shares a subject with the event, in the event's
+ * org. `accepted` is true when its clauses accept the event and the Slack
+ * visibility check holds. `digests` holds what the waiter appends when
+ * claim resolution lets it (spec 2026-10-16: delivery threads and claims,
+ * Part C).
+ */
+export interface WaiterCandidate {
+  waiter: Wakeup;
+  session: WaiterSession;
+  digests: EventMatchDigest[];
+  accepted: boolean;
 }
 
+/** What claim resolution decided for one waiter. A waiter with no decision appends. */
+export type WaiterDecision = "append" | "suppress";
+
 /**
- * Matches `event` against the running event waiters that share one of its
- * subjects (spec Part E, steps 1 to 6). `appended` counts the waiters that
- * got a new digest. A redelivered event that a waiter already holds or
- * already delivered does not count (INV-E4).
+ * Evaluates the running event waiters that share one of the event's
+ * subjects (spec Part E, steps 1 to 4) and returns them without appending.
+ * A candidate from another org, or whose session is gone, is left out
+ * (INV-E1).
  *
  * A failure for one candidate is logged and counted, and the other
- * candidates still match. A failure before the candidate loop throws.
+ * candidates still evaluate. A failure before the candidate loop throws.
  */
-export async function matchEventWaiters(
+export async function evaluateWaiterCandidates(
   deps: WaiterMatchDeps,
   orgId: string,
   service: string,
   event: NormalizedEvent,
-): Promise<WaiterMatchResult> {
+): Promise<WaiterCandidate[]> {
   const subjects = event.subjects ?? [];
-  if (subjects.length === 0) return { candidates: 0, appended: 0 };
-  const candidates = await deps.engineStore.findEventWaiters(subjects);
-  if (candidates.length === 0) return { candidates: 0, appended: 0 };
+  if (subjects.length === 0) return [];
+  const waiters = await deps.engineStore.findEventWaiters(subjects);
+  if (waiters.length === 0) return [];
 
   const metrics = metricsOf(deps);
   const derived = deps.plugins.flatMap((plugin) => plugin.derivedEvents ?? []);
@@ -116,20 +135,15 @@ export async function matchEventWaiters(
     }
     return answer;
   };
-  let mentionSkipped: Promise<boolean> | undefined;
-  const mentionRuleSkips = () => (mentionSkipped ??= (async () => {
-    if (event.key !== "slack.message") return false;
-    if (!mentionsBot(event, await deps.slackBotUserId(orgId))) return false;
-    return deps.appMentionCovered(orgId, event);
-  })());
 
-  const matchOne = async (waiter: Wakeup): Promise<boolean> => {
+  const evaluateOne = async (waiter: Wakeup): Promise<WaiterCandidate | null> => {
     const spec = waiter.eventMatch;
-    if (!spec) return false;
+    if (!spec) return null;
     // INV-E1: drop a candidate from another org before clause evaluation.
     const owner = await deps.sessionOrg(waiter.sessionId);
-    if (!owner || owner.orgId !== orgId) return false;
+    if (!owner || owner.orgId !== orgId) return null;
     const session: WaiterSession = { sessionId: waiter.sessionId, ...owner };
+    const rejected: WaiterCandidate = { waiter, session, digests: [], accepted: false };
 
     let candidate = event;
     if (needsPreviousStatus(spec, derived) && event.previousStatus === undefined) {
@@ -138,14 +152,11 @@ export async function matchEventWaiters(
       if (previous !== null) candidate = { ...event, previousStatus: previous };
     }
     const result = matchClauses(spec, candidate, derived);
-    if (!anyMatch(result)) return false;
-
-    // The mention reaches the agent once, through the app_mention subscription.
-    if (await mentionRuleSkips()) return false;
+    if (!anyMatch(result)) return rejected;
     if (service === "slack") {
       const channel = slackEventChannel({ service, refs: event.refs, payload: event.payload });
       // A Slack event with no channel cannot be checked, so it is dropped.
-      if (!channel || !(await stillVisible(session, channel))) return false;
+      if (!channel || !(await stillVisible(session, channel))) return rejected;
     }
     // A direct match and each derived match append their own digest, so a
     // mid-run failure goes out now and the derive digest waits (Part E).
@@ -153,27 +164,56 @@ export async function matchEventWaiters(
       ...(result.direct ? [toDigest(candidate)] : []),
       ...result.derive.map((key) => toDigest(candidate, key)),
     ];
-    let any = false;
-    for (const digest of digests) {
-      if (await deps.engineStore.appendEventMatch(waiter.id, digest, deps.now())) any = true;
-    }
-    return any;
+    return { waiter, session, digests, accepted: true };
   };
 
-  const appended: string[] = [];
-  for (const waiter of candidates) {
+  const candidates: WaiterCandidate[] = [];
+  for (const waiter of waiters) {
     try {
-      if (await matchOne(waiter)) {
-        appended.push(waiter.id);
-        metrics.matched(service);
-      }
+      const candidate = await evaluateOne(waiter);
+      if (candidate) candidates.push(candidate);
     } catch (error) {
       metrics.failed();
       console.error(`[event-waiters] matching failed for waiter ${waiter.id}`, error);
     }
   }
+  return candidates;
+}
+
+/**
+ * Appends the digests of every accepted candidate whose decision is not
+ * `suppress` (spec Part E, steps 5 and 6), then nudges the WakeWatcher
+ * once. Returns the number of waiters that got a new digest. A redelivered
+ * event that a waiter already holds or already delivered does not count
+ * (INV-E4). A failed append for one waiter is logged and counted, and the
+ * other waiters still append.
+ */
+export async function appendWaiterDigests(
+  deps: WaiterMatchDeps,
+  service: string,
+  candidates: ReadonlyArray<WaiterCandidate>,
+  decisions: ReadonlyMap<string, WaiterDecision> = new Map(),
+): Promise<number> {
+  const metrics = metricsOf(deps);
+  const appended: string[] = [];
+  for (const candidate of candidates) {
+    if (!candidate.accepted || decisions.get(candidate.waiter.id) === "suppress") continue;
+    try {
+      let any = false;
+      for (const digest of candidate.digests) {
+        if (await deps.engineStore.appendEventMatch(candidate.waiter.id, digest, deps.now())) any = true;
+      }
+      if (any) {
+        appended.push(candidate.waiter.id);
+        metrics.matched(service);
+      }
+    } catch (error) {
+      metrics.failed();
+      console.error(`[event-waiters] matching failed for waiter ${candidate.waiter.id}`, error);
+    }
+  }
   if (appended.length > 0) deps.nudge?.(appended);
-  return { candidates: candidates.length, appended: appended.length };
+  return appended.length;
 }
 
 /** The receipt stage for a matching pass (spec Part E, step 7). Metadata only. */
@@ -183,43 +223,6 @@ export function waiterMatchStage(count: number): { stage: string; outcome: strin
     outcome: count > 0 ? "matched" : "none",
     detail: `${count} event ${count === 1 ? "waiter" : "waiters"} matched.`,
   };
-}
-
-/** A subscription row, as far as the mention rule reads it. */
-export interface MentionRuleSubscription {
-  enabled: boolean;
-  orgId: string;
-  ownerType: string;
-  ownerId: string;
-  createdBy: string;
-  audience?: string | null;
-  target: unknown;
-  eventKeys: unknown;
-  filters: unknown;
-}
-
-/**
- * Whether one of `subs` is an enabled `slack.app_mention` subscription that
- * matches the event's payload under the subscription matcher AND whose
- * sender gate admits the sender (the Part E mention rule). The gate is the
- * dispatcher's own (`mentionSenderActor`), run without a drop log because
- * ingest already logged the denial. A mention that the gate refuses reaches
- * no subscription, so the event waiter receives it as a channel message.
- */
-export async function appMentionCoveredBy(
-  db: AppDb,
-  subs: ReadonlyArray<MentionRuleSubscription>,
-  event: NormalizedEvent,
-  plugins: ValetPlugin[],
-): Promise<boolean> {
-  const key = "slack.app_mention";
-  const catalog = plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === "slack").flatMap((t) => t.catalog);
-  for (const sub of subs) {
-    if (!sub.enabled) continue;
-    if (!subscriptionMatchesEvent(sub, key, event.payload, catalog, isTeamAssistantMention(sub, key), event.subjects)) continue;
-    if (await mentionSenderActor(db, sub, key, event.payload, false) !== null) return true;
-  }
-  return false;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -255,6 +258,7 @@ export async function loadSessionOwner(
 
 type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "plugins"> & {
   onePassword?: Providers["onePassword"];
+  channelHost?: Providers["channelHost"];
 };
 
 /**
@@ -301,10 +305,7 @@ async function linearAppToken(providers: WaiterProviders, orgId: string): Promis
   return stored.accessToken ?? null;
 }
 
-/**
- * The production matcher deps over the API's providers. Ingest replaces
- * `appMentionCovered` with a check over the subscriptions it already read.
- */
+/** The production matcher deps over the API's providers. */
 export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDepsOptions = {}): WaiterMatchDeps {
   const timeoutMs = opts.providerTimeoutMs ?? WAITER_PROVIDER_TIMEOUT_MS;
   const linearFetch = boundedFetch(opts.fetch ?? fetch, timeoutMs);
@@ -341,18 +342,12 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
       return withTimeout(resolver.resolve(ctx, ref), timeoutMs, null);
     },
     ...(opts.nudge ? { nudge: opts.nudge } : {}),
+    ...(providers.channelHost ? { channelOrigin: channelOriginResolver(providers.channelHost) } : {}),
     now: Date.now,
-    // The Slack connection stores the bot user id in the credential's
-    // metadata (`botUserId`), the same source the Slack inbox reads.
+    // The same resolution the Slack inbox drain gives the follow router
+    // (`slackBotUserIdOf`), so both agree on which posts address the bot.
     async slackBotUserId(orgId) {
-      const credential = await orgSlackCredential(providers, orgId);
-      const botUserId = credential?.metadata?.botUserId;
-      return typeof botUserId === "string" && botUserId ? botUserId : undefined;
-    },
-    async appMentionCovered(orgId, event) {
-      const subs = await providers.db.select().from(eventSubscriptions)
-        .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-      return appMentionCoveredBy(providers.db, subs, event, providers.plugins);
+      return slackBotUserIdOf(providers.engineCredentials, orgId, await orgSlackCredential(providers, orgId));
     },
   };
 }

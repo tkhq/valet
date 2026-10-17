@@ -5067,6 +5067,10 @@ export interface EventDeliveryWire {
   /** The assistant thread that received this delivery. Absent when the
    * delivery reached no thread, or when the viewer may not open it. */
   thread?: { sessionId: string; threadId: string };
+  /** The assistant thread whose event waiter claimed this skipped delivery
+   * (spec 2026-10-16: delivery threads and claims, Part E step 2). Absent
+   * when no waiter claimed it, or when the viewer may not open the thread. */
+  claimedBy?: { sessionId: string; threadId: string };
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;

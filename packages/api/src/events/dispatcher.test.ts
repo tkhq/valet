@@ -7,8 +7,9 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { eq, sql } from "drizzle-orm";
-import type { ChannelOrigin, EventClause, Wakeup } from "@valet/engine";
+import type { ChannelOrigin, ValetPlugin } from "@valet/engine";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -32,8 +33,12 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
+import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn, type EventDispatcherDeps } from "./dispatcher.js";
 import { PinUnavailableError } from "./assistant-delivery.js";
+import { waiterMatchDeps } from "./waiters.js";
+import { PgSessionStore } from "@valet/store-postgres";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
 /** Records the destination counter's reasons. The dispatcher takes it as a
@@ -70,6 +75,8 @@ interface SeedOpts {
   payload?: unknown;
   actor?: unknown;
   subjects?: string[];
+  /** The destination stamp ingest wrote (spec Part C step 6). */
+  destination?: unknown;
 }
 
 describe("EventDispatcher", () => {
@@ -122,6 +129,7 @@ describe("EventDispatcher", () => {
       attempts: opts.attempts ?? 0,
       nextAttemptAt: now - 1_000,
       createdAt: now,
+      destination: opts.destination ?? null,
     });
     return { eventId, subscriptionId, deliveryId };
   }
@@ -623,337 +631,514 @@ describe("EventDispatcher", () => {
   });
 
   /**
-   * Incident mention routing (spec 2026-10-15: incident mention routing).
-   * The waiter rows come from a fake `findEventWaiters`; the sessions they
-   * name are real `agent_sessions` (+ `assistants` / `assistant_executions` /
-   * `engine_threads`) rows, so the owner filter AND the deliverability gate
-   * (`isDeliverableTarget`, shared with `assistant-delivery.ts`) run for real.
+   * Stamp execution (spec 2026-10-16: delivery threads and claims, Part C
+   * steps 5 to 7). Ingest stamps the destination that a claim or a binding
+   * decided. The dispatcher executes the stamp and never consults waiters.
+   * An unstamped row resolves from the binding and the policy only.
    */
-  describe("incident mention routing", () => {
-    const CHANNEL_SUBJECT = "slack:T001/C1";
-
-    function waiter(id: string, sessionId: string, opts: {
-      createdAt: number; once?: boolean; subjects?: string[]; status?: Wakeup["status"];
-      clauses?: EventClause[]; primarySubject?: string;
-    }): Wakeup {
-      return {
-        id, sessionId, threadId: `thr-${id}`, kind: "event", status: opts.status ?? "running", reason: "Incident",
-        logOffset: 0, logTail: "", eventCount: 0, createdAt: opts.createdAt, updatedAt: opts.createdAt,
-        subjects: opts.subjects ?? [CHANNEL_SUBJECT],
-        eventMatch: {
-          clauses: opts.clauses ?? [{ key: "slack.message" }], once: opts.once ?? false, self: [],
-          ...(opts.primarySubject ? { primarySubject: opts.primarySubject } : {}),
-        },
-      };
-    }
-
-    /**
-     * A store whose `findEventWaiters` returns every seeded row and ignores
-     * the queried subjects. A real store filters by subject overlap
-     * (`subjects && $1`). That overlap never excludes a row that
-     * `findWatchingWaiter` keeps. Returning every row sends a waiter on a
-     * thread subject alone through `findWatchingWaiter`'s own subject
-     * filter, so the test checks that filter and not the fake.
-     */
-    function fakeStore(rows: Wakeup[]) {
-      const lookups: string[][] = [];
-      return {
-        lookups,
-        store: {
-          async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
-            lookups.push([...subjects]);
-            return rows;
-          },
-        },
-      };
-    }
-
-    /** One root assistant + governing thread per (owner, org), reused across
-     * every execution session of that owner (idempotent: `assistants` has a
-     * unique index per org/owner, so a second seed of the same owner is a
-     * no-op). */
-    async function seedAssistant(ownerType: "user" | "team", ownerId: string, orgId: string) {
-      const assistantId = `asst-${orgId}-${ownerType}-${ownerId}`;
-      const rootSessionId = `root-${assistantId}`;
-      const governingThreadId = `gov-${assistantId}`;
-      await tdb.appDb.insert(agentSessions).values({
-        id: rootSessionId, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1,
-      }).onConflictDoNothing();
-      await tdb.appDb.insert(assistants).values({
-        id: assistantId, orgId, ownerType, ownerId, sessionId: rootSessionId, createdAt: 1,
-      }).onConflictDoNothing();
-      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
-        VALUES (${governingThreadId}, ${rootSessionId}, ${governingThreadId}, 'idle', 'steer', 1, 1)
-        ON CONFLICT (id) DO NOTHING`);
-      return { assistantId, governingThreadId };
-    }
-
-    /** A deliverable watching-waiter session: a real execution of the
-     * owner's assistant, with its own thread. `deliverToAssistantThread`
-     * requires this shape for an explicit target. */
-    async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, threadId: string, orgId = ORG) {
-      const { assistantId, governingThreadId } = await seedAssistant(ownerType, ownerId, orgId);
-      await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
-      await tdb.appDb.insert(assistantExecutions).values({
-        sessionId: id, assistantId, conversationKey: `conv-${id}`, governingThreadId, createdAt: 1,
-      });
-      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
-        VALUES (${threadId}, ${id}, ${threadId}, 'idle', 'steer', 1, 1)`);
-    }
-
-    /** A session with no `assistants` or `assistant_executions` row: a
-     * team-owned child or plain session. Delivery to it dead-letters, so
-     * `findWatchingWaiter` skips it (Part A step 5). */
-    async function seedPlainSession(id: string, ownerType: "user" | "team", ownerId: string, orgId = ORG) {
-      await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
-    }
-
-    /** Marks a session's thread archived (display-state only, `session_threads`). */
-    async function archiveThread(sessionId: string, threadId: string) {
-      await tdb.appDb.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: 1, archivedAt: Date.now() });
-    }
-
-    async function dispatchMention(rows: Wakeup[], opts: { subjects?: string[]; payload?: Record<string, unknown>; origin?: ChannelOrigin } = {}) {
-      const { deliveryId } = await seedDelivery({
+  describe("stamped destinations", () => {
+    async function dispatchMention(opts: {
+      destination?: unknown; payload?: Record<string, unknown>; origin?: ChannelOrigin;
+      deliver?: AssistantDeliverFn;
+      endMatchedWaiter?: EventDispatcherDeps["endMatchedWaiter"];
+    } = {}) {
+      const { deliveryId, eventId } = await seedDelivery({
         target: { kind: "orchestrator", follow: true },
         ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
         refs: { channel: "C1", user: "U9" }, summary: "Mention",
         payload: opts.payload ?? { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" },
         actor: { externalId: "U9" },
-        subjects: opts.subjects ?? ["slack:T001", CHANNEL_SUBJECT, "slack:T001/C1/1.2"],
+        subjects: ["slack:T001", "slack:T001/C1", "slack:T001/C1/1.2"],
+        destination: opts.destination,
       });
-      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
-      const fake = fakeStore(rows);
+      const deliver = vi.fn<AssistantDeliverFn>(opts.deliver ?? (async () => LANDED));
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToAssistant: deliver,
+        deliverToAssistant: deliver, recordDestination,
         resolveChannelOrigin: () => opts.origin ?? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" },
-        engineStore: fake.store,
+        ...(opts.endMatchedWaiter ? { endMatchedWaiter: opts.endMatchedWaiter } : {}),
       }).pollOnce();
-      return { deliver, deliveryId, lookups: fake.lookups };
+      return { deliver, deliveryId, eventId };
+    }
+
+    /** One root assistant and governing thread per owner, reused by every
+     * execution session of that owner. */
+    async function seedAssistant(ownerType: "user" | "team", ownerId: string) {
+      const assistantId = `asst-${ownerType}-${ownerId}`;
+      const rootSessionId = `root-${assistantId}`;
+      const governingThreadId = `gov-${assistantId}`;
+      await tdb.appDb.insert(agentSessions).values({
+        id: rootSessionId, orgId: ORG, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1,
+      }).onConflictDoNothing();
+      await tdb.appDb.insert(assistants).values({ id: assistantId, orgId: ORG, ownerType, ownerId, sessionId: rootSessionId, createdAt: 1 })
+        .onConflictDoNothing();
+      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+        VALUES (${governingThreadId}, ${rootSessionId}, ${governingThreadId}, 'idle', 'steer', 1, 1)
+        ON CONFLICT (id) DO NOTHING`);
+      return { assistantId, governingThreadId };
+    }
+
+    /** A deliverable thread: a real execution session of the owner's
+     * assistant, so `isDeliverableTarget` runs for real. */
+    async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, threadId: string) {
+      const { assistantId, governingThreadId } = await seedAssistant(ownerType, ownerId);
+      await tdb.appDb.insert(agentSessions).values({ id, orgId: ORG, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+      await tdb.appDb.insert(assistantExecutions).values({ sessionId: id, assistantId, conversationKey: `conv-${id}`, governingThreadId, createdAt: 1 });
+      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+        VALUES (${threadId}, ${id}, ${threadId}, 'idle', 'steer', 1, 1)`);
     }
 
     const followKey = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" };
+    const redirect = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "claim_redirect" };
 
-    it("routes the mention to the newest watching waiter of the owner and binds no follow (Part A, Part B)", async () => {
+    beforeEach(() => { recordDestination.mockClear(); });
+
+    it("a skip stamp marks the row skipped with its reason and never calls the seam (C1, INV-D3)", async () => {
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator" }, destination: { kind: "skip", reason: "claimed by thread thr-w" },
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToAssistant: deliver, plugins: [githubPlugin], recordDestination,
+      }).pollOnce();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", attempts: 1, lastError: "Skipped, claimed by thread thr-w." });
+      expect(recordDestination.mock.calls).toEqual([["claim_skip"]]);
+      const threads = await tdb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
+      expect(threads.rows[0]?.n).toBe(0);
+    });
+
+    it("a target stamp delivers to its thread with the Slack origin and binds the follow (C2)", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-old", "team", "team-x", "thr-old");
-      await seedSession("sess-new", "team", "team-x", "thr-new");
-      const { deliver, deliveryId, lookups } = await dispatchMention([
-        waiter("old", "sess-old", { createdAt: 100 }),
-        waiter("new", "sess-new", { createdAt: 200 }),
-      ]);
-      expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const landed = { sessionId: "sess-inc", threadId: "thr-inc" };
+      const { deliver, deliveryId } = await dispatchMention({ destination: redirect, deliver: async () => landed });
       expect(deliver).toHaveBeenCalledOnce();
-      const args = deliver.mock.calls[0][0];
-      expect(args.destination).toEqual({ kind: "target", sessionId: "sess-new", threadId: "thr-new", reason: "claim_redirect" });
-      // The routed delivery keeps the subscription delivery's dispatch id and the Slack origin.
+      const args = deliver.mock.calls[0]![0];
+      expect(args.destination).toEqual(redirect);
       expect(args.dispatchId).toBe(`event:${deliveryId}`);
       expect(args.signal.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" });
+      expect(args.inbound).toBeDefined();
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
-      expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x", ...landed });
+      expect(recordDestination.mock.calls).toEqual([["claim_redirect"]]);
     });
 
-    it("never routes across owners or orgs (INV-M3)", async () => {
+    it("a once-mode redirect target ends after its delivery lands, once per delivery (Part C step 5)", async () => {
       await seedMentionMember("team-x");
-      await tdb.appDb.insert(teams).values({ id: "team-z", orgId: ORG, name: "Other", createdAt: Date.now() });
-      await seedSession("sess-mine", "team", "team-x", "thr-mine");
-      await seedSession("sess-other-team", "team", "team-z", "thr-other-team");
-      await seedSession("sess-other-org", "team", "team-x", "thr-other-org", "org-2");
-      await seedSession("sess-personal", "user", "member-9", "thr-personal");
-      const { deliver } = await dispatchMention([
-        waiter("mine", "sess-mine", { createdAt: 100 }),
-        waiter("other-team", "sess-other-team", { createdAt: 400 }),
-        waiter("other-org", "sess-other-org", { createdAt: 300 }),
-        waiter("personal", "sess-personal", { createdAt: 200 }),
-      ]);
-      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-mine", threadId: "thr-mine", reason: "claim_redirect" });
-    });
-
-    it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 4 and 7)", async () => {
-      await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x", "thr-sess-1");
-      await seedSession("sess-2", "team", "team-z", "thr-sess-2");
-      const { deliver } = await dispatchMention([
-        // A once-mode waiter waits for one reply, not a channel.
-        waiter("once", "sess-1", { createdAt: 100, once: true }),
-        // A waiter on a thread subject alone does not watch the channel.
-        waiter("thread", "sess-1", { createdAt: 200, subjects: ["slack:T001/C1/1.2"] }),
-        // A waiter that is no longer running.
-        waiter("done", "sess-1", { createdAt: 300, status: "done" }),
-        // Another owner's waiter.
-        waiter("other", "sess-2", { createdAt: 400 }),
-      ]);
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
-      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
-    });
-
-    it("finds the Slack team from the payload when the event row has no subjects", async () => {
-      await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x", "thr-w");
-      const { deliver, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
-        subjects: [],
-        payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2", team: "T001" },
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const order: string[] = [];
+      const endMatchedWaiter = vi.fn(async () => { order.push("end"); return true; });
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
+        destination: { ...redirect, matchedWaiterId: "w-once" },
       });
-      expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
-      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-w", reason: "claim_redirect" });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => { order.push("deliver"); return { sessionId: "sess-inc", threadId: "thr-inc" }; });
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }), endMatchedWaiter,
+      }).pollOnce();
+      expect(order).toEqual(["deliver", "end"]);
+      expect(endMatchedWaiter).toHaveBeenCalledWith({ waiterId: "w-once", sessionId: "sess-inc", threadId: "thr-inc" });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
     });
 
-    it("does not route a refused sender (Part C)", async () => {
+    it("a failed delivery does not end the waiter, and a failed end does not fail the delivery", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const endMatchedWaiter = vi.fn(async (): Promise<boolean> => { throw new Error("store down"); });
+      const destination = { ...redirect, matchedWaiterId: "w-once" };
+      const failing = await dispatchMention({ destination, endMatchedWaiter, deliver: async () => { throw new Error("transient"); } });
+      expect((await getDelivery(failing.deliveryId)).status).toBe("failed");
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+      const { deliveryId } = await dispatchMention({
+        destination, endMatchedWaiter, deliver: async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }),
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> again?", ts: "1.3" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.3", messageTs: "1.3" },
+      });
+      expect(endMatchedWaiter).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    });
+
+    /** A `slack.message` reply in Slack thread 1.2 by `user`, stamped to the follow binding's thread. */
+    async function dispatchFollowedReply(user: string, text: string, plugins: ValetPlugin[] = [],
+      opts: { ts?: string; slackBotUserId?: EventDispatcherDeps["slackBotUserId"] } = {}) {
+      const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] };
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator" }, ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.message", eventKeys: ["slack.message"], refs: { channel: "C1" }, summary: "Reply",
+        payload: { type: "message", channel: "C1", user, text, ts: opts.ts ?? "1.700000", thread_ts: "1.2" }, actor: { externalId: user },
+        destination: stamp,
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }));
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.5" }),
+        slackBotUserId: opts.slackBotUserId ?? (async () => "U-BOT"), plugins,
+      }).pollOnce();
+      return { deliver, deliveryId };
+    }
+
+    /** A follow binding to thr-inc. `lastSeenTs` is the router's cursor: by default the router passed the reply. */
+    async function seedFollowToInc(lastSeenTs: string | null = "1.700000") {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      await upsertFollowedThread(tdb.appDb, {
+        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+        ownerType: "team", ownerId: "team-x", createdBy: "member-9", target: { sessionId: "sess-inc", threadId: "thr-inc" },
+        ...(lastSeenTs !== null ? { lastSeenTs } : {}),
+      });
+    }
+
+    it("skips a followed reply that the follow router delivered: one owner (C3b, follow_routed)", async () => {
+      // The router delivered the reply and advanced its cursor to the reply's ts.
+      await seedFollowToInc("1.700000");
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the followed thread delivers this reply." });
+      expect(recordDestination.mock.calls).toEqual([["follow_routed"]]);
+    });
+
+    it("delivers a followed reply that came before the binding: the router dropped it (C3b, router-before-binding)", async () => {
+      // The mention's delivery bound the thread after the router ran, so the
+      // cursor is the mention's ts, before the reply.
+      await seedFollowToInc("1.200000");
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(recordDestination.mock.calls).toEqual([["conversation_follow"]]);
+    });
+
+    it("delivers a followed reply when the binding has no router cursor", async () => {
+      await seedFollowToInc(null);
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "on it");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    });
+
+    it("treats a post that addresses a bot id resolved only from the token as a mention (C5)", async () => {
+      // A legacy installation: the credential has no `botUserId` metadata, so
+      // the id comes from auth.test, the same path the follow router's drain uses.
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+        Response.json({ ok: true, team_id: "T-LEGACY", bot_id: "B-BOT", user_id: "U-BOT" }));
+      try {
+        const credentials = new PgCredentialStore(tdb.pgdb, deriveSecretKey("test-key"));
+        await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-legacy", metadata: { teamId: "T-LEGACY" } });
+        const matchers = waiterMatchDeps({ db: tdb.appDb, engineStore: new PgSessionStore(tdb.pgdb), engineCredentials: credentials, plugins: [slackPlugin] });
+        await seedFollowToInc("1.200000");
+        const now = Date.now();
+        await tdb.appDb.insert(eventSubscriptions).values({
+          id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
+          target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+        });
+        const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin],
+          { slackBotUserId: (orgId) => matchers.slackBotUserId(orgId) });
+        expect(deliver).not.toHaveBeenCalled();
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
+        expect(recordDestination.mock.calls).toEqual([["mention_covered"]]);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it("skips the message half of a mention that a rule of the owner delivers (C5, mention_covered)", async () => {
+      await seedFollowToInc();
+      const now = Date.now();
+      await tdb.appDb.insert(eventSubscriptions).values({
+        id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
+        target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+      });
+      const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin]);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, the mention delivers this post." });
+      expect(recordDestination.mock.calls).toEqual([["mention_covered"]]);
+    });
+
+    it("delivers the message half when no rule of the owner delivers the mention", async () => {
+      await seedFollowToInc();
+      const { deliver } = await dispatchFollowedReply("U9", "<@U-BOT> anyone?", [slackPlugin]);
+      expect(deliver).toHaveBeenCalledOnce();
+    });
+
+    it("delivers a followed reply that the follow router refuses (C3, unlinked sender)", async () => {
+      await seedFollowToInc();
+      const { deliver, deliveryId } = await dispatchFollowedReply("U-unlinked", "replica caught up");
+      expect(deliver).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(recordDestination.mock.calls).toEqual([["conversation_follow"]]);
+    });
+
+    it("a refused sender dead-letters before a target stamp runs", async () => {
       // No identity link for U9: the team mention gate refuses the sender.
       await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });
-      await seedSession("sess-1", "team", "team-x", "thr-w");
-      const { deliver, deliveryId, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })]);
+      const { deliver, deliveryId } = await dispatchMention({ destination: redirect });
       expect(deliver).not.toHaveBeenCalled();
-      expect(lookups).toEqual([]);
       expect((await getDelivery(deliveryId)).status).toBe("dead");
     });
 
-    // Part A step 5: `findWatchingWaiter` picks only a candidate that
-    // `deliverToAssistantThread` accepts. It reuses that function's own gate
-    // (`isDeliverableTarget`).
-    it("a newer waiter in a non-assistant session loses to an older assistant one", async () => {
+    it("a stamped redirect whose thread was archived after ingest lands in the rule's own thread (Review Focus 5, INV-D6)", async () => {
       await seedMentionMember("team-x");
-      // A plain `agent_sessions` row with no assistant wiring. Delivery
-      // with an explicit target to this session dead-letters.
-      await seedPlainSession("sess-plain", "team", "team-x");
-      await seedSession("sess-asst", "team", "team-x", "thr-asst");
-      const { deliver, deliveryId } = await dispatchMention([
-        waiter("plain", "sess-plain", { createdAt: 500 }),
-        waiter("asst", "sess-asst", { createdAt: 100 }),
-      ]);
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      // The agent archives the claim thread after ingest stamped it.
+      await tdb.appDb.insert(sessionThreads).values({ id: "thr-inc", sessionId: "sess-inc", createdAt: 1, archivedAt: Date.now() });
+      const { deliveryId, eventId, subscriptionId } = await seedDelivery({
+        target: { kind: "orchestrator", follow: true, thread: { mode: "own" } }, ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
+        destination: { ...redirect, matchedWaiterId: "w-once" },
+      });
+      await tdb.appDb.insert(eventReceipts).values({
+        id: "rcpt-claim", orgId: ORG, service: "slack", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      const endMatchedWaiter = vi.fn(async () => true);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }), endMatchedWaiter,
+      }).pollOnce();
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-asst", threadId: "thr-asst", reason: "claim_redirect" });
+      expect(deliver.mock.calls[0]![0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
-      expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
+      const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.eventId, eventId));
+      expect(receipt?.stages).toEqual([expect.objectContaining({ stage: "destination", outcome: "claim_fallback" })]);
+      expect(recordDestination.mock.calls).toEqual([["claim_fallback"]]);
+      // The fallback is not the claimed waiter's match, so it does not end it.
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
     });
 
-    it("skips a waiter on an archived thread and falls back to today's behavior", async () => {
-      await seedMentionMember("team-x");
-      await seedSession("sess-archived", "team", "team-x", "thr-archived");
-      await archiveThread("sess-archived", "thr-archived");
-      const { deliver, deliveryId } = await dispatchMention([
-        waiter("archived", "sess-archived", { createdAt: 100 }),
-      ]);
+    it("a stamped pull request binding still builds the inbound comment after the own-write and settle checks (C9)", async () => {
+      await seedSession("sess-pr", "user", "user-1", "thr-pr");
+      const url = "https://github.com/acme/app/pull/14";
+      const postedAt = Date.now() - OWN_WRITE_SETTLE_MS - 1_000;
+      const stamp = { kind: "target", sessionId: "sess-pr", threadId: "thr-pr", reason: "conversation_pull_request" };
+      const comment = (id: number, at: number) => ({
+        issue: { pull_request: { html_url: url } }, comment: { id, body: "Please rename it.", created_at: new Date(at).toISOString(), user: { login: "reviewer", type: "User" } },
+      });
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+        payload: comment(601, postedAt), destination: stamp,
+      });
+      // A fresh comment still waits for the own-write record, stamp or not.
+      const fresh = await seedDelivery({
+        target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+        payload: comment(602, Date.now()), destination: stamp,
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-pr", threadId: "thr-pr" }));
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+      }).pollOnce();
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+      const args = deliver.mock.calls[0]![0];
+      expect(args.destination).toEqual(stamp);
+      expect(args.inbound).toMatchObject({ providerMessageId: "601", text: "Please rename it." });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
-      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
+      expect(await getDelivery(fresh.deliveryId)).toMatchObject({ status: "pending", attempts: 0 });
     });
 
-    it("keeps a threaded mention in a Slack thread the same owner already follows (Part A step 1)", async () => {
+    it("an unstamped row lands by policy and never by a waiter (Part C step 7, INV-D6)", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x", "thr-w");
-      // The mention is a reply in Slack thread 1.1, which team-x already follows.
+      const { deliver, deliveryId } = await dispatchMention();
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0]![0].destination).toEqual({
+        kind: "key", key: expect.stringMatching(new RegExp(`:${deliveryId}$`)), title: "Mention", reason: "policy_new",
+      });
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
+      expect(recordDestination.mock.calls).toEqual([["policy_new"]]);
+    });
+
+    it("a stamp of the wrong shape reads as no stamp and lands by policy", async () => {
+      await seedMentionMember("team-x");
+      const { deliver } = await dispatchMention({ destination: { kind: "target", sessionId: "sess-inc" } });
+      expect(deliver.mock.calls[0]![0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+    });
+
+    it("a key stamp delivers by its key", async () => {
+      await seedMentionMember("team-x");
+      const stamp = { kind: "key", key: "subject:slack:T001/C1", title: "#incidents", reason: "policy_subject" };
+      const { deliver } = await dispatchMention({ destination: stamp });
+      expect(deliver.mock.calls[0]![0].destination).toEqual(stamp);
+    });
+
+    it("keeps a threaded mention in a Slack thread the same owner already follows (legacy follow, no stamp)", async () => {
+      await seedMentionMember("team-x");
       await upsertFollowedThread(tdb.appDb, {
         orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
         ownerType: "team", ownerId: "team-x", createdBy: "member-9",
       });
-      const { deliver, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
+      const { deliver } = await dispatchMention({
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", key: "slack:C1:1.1", reason: "conversation_follow" });
-      expect(lookups).toEqual([]);
-    });
-
-    it("routes a threaded mention when another owner follows its Slack thread", async () => {
-      await seedMentionMember("team-x");
-      await tdb.appDb.insert(teams).values({ id: "team-z", orgId: ORG, name: "Other", createdAt: Date.now() });
-      await seedSession("sess-1", "team", "team-x", "thr-w");
-      await upsertFollowedThread(tdb.appDb, {
-        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
-        ownerType: "team", ownerId: "team-z", createdBy: "member-9",
-      });
-      const { deliver } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
-        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
-        origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
-      });
-      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-w", reason: "claim_redirect" });
-    });
-
-    it("skips a waiter that would not receive every later channel message (Part A step 4)", async () => {
-      await seedMentionMember("team-x");
-      // Each waiter sits in its own deliverable session, so only the clause
-      // check can exclude it.
-      for (const id of ["other-key", "one-sender", "status", "primary"]) {
-        await seedSession(`sess-${id}`, "team", "team-x", `thr-${id}`);
-      }
-      const { deliver } = await dispatchMention([
-        // No slack.message clause at all.
-        waiter("other-key", "sess-other-key", { createdAt: 400, clauses: [{ key: "slack.reaction_added" }] }),
-        // A sender restriction.
-        waiter("one-sender", "sess-one-sender", { createdAt: 300, clauses: [{ key: "slack.message", actor: "U7" }] }),
-        // A status filter, which a Slack message never satisfies.
-        waiter("status", "sess-status", { createdAt: 200, clauses: [{ key: "slack.message", status: ["open"] }] }),
-        // A primary subject other than the channel.
-        waiter("primary", "sess-primary", { createdAt: 150, primarySubject: "slack:T001/C1/9.9" }),
-      ]);
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
-      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
-    });
-
-    it("accepts a waiter whose open slack.message clause sits beside narrower clauses", async () => {
-      await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x", "thr-mixed");
-      const { deliver } = await dispatchMention([
-        waiter("mixed", "sess-1", { createdAt: 100, clauses: [{ key: "slack.message", actor: "U7" }, { key: "slack.message", bots: false }] }),
-      ]);
-      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-mixed", reason: "claim_redirect" });
-    });
-
-    it("falls back to today's behavior and binds the follow when only invalid candidates watch the channel", async () => {
-      await seedMentionMember("team-x");
-      await seedPlainSession("sess-plain", "team", "team-x");
-      await seedSession("sess-archived", "team", "team-x", "thr-archived-2");
-      await archiveThread("sess-archived", "thr-archived-2");
-      const { deliver, deliveryId } = await dispatchMention([
-        waiter("plain", "sess-plain", { createdAt: 300 }),
-        waiter("archived", "sess-archived", { createdAt: 200 }),
-      ]);
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
-      expect((await getDelivery(deliveryId)).status).toBe("delivered");
-      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
-    });
-
-    it("binds the follow to the thread the mention landed in, and the binding wins the next mention (Part B step 5)", async () => {
-      await seedMentionMember("team-x");
-      const { deliver, deliveryId } = await dispatchMention([]);
-      // A follow rule with no policy opens a thread per mention (Part A step 3).
-      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
-      expect(deliver.mock.calls[0]?.[0].destination).toHaveProperty("key", expect.stringMatching(new RegExp(`:${deliveryId}$`)));
-      // The thread records the content's channel for its read gate.
-      expect(deliver.mock.calls[0]?.[0].slackChannel).toBe("C1");
-      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
-
-      // Point the follow at a live thread, then mention again inside the Slack thread.
-      await seedSession("sess-bound", "team", "team-x", "thr-bound");
-      await tdb.appDb.execute(sql`UPDATE followed_threads SET session_id = 'sess-bound', thread_id = 'thr-bound'`);
-      const second = await dispatchMention([], {
-        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> again", ts: "1.3", thread_ts: "1.2" },
-        origin: { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.3" },
-      });
-      expect(second.deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-bound", threadId: "thr-bound", reason: "conversation_follow" });
+      expect(deliver.mock.calls[0]![0].destination).toMatchObject({ kind: "key", key: "slack:C1:1.1", reason: "conversation_follow" });
     });
 
     it("ignores a follow binding whose thread was archived and lets the policy decide", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-bound", "team", "team-x", "thr-bound");
-      await archiveThread("sess-bound", "thr-bound");
+      await tdb.appDb.insert(agentSessions).values({ id: "sess-bound", orgId: ORG, userId: "member-9", ownerType: "team", ownerId: "team-x", workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+      await tdb.appDb.insert(sessionThreads).values({ id: "thr-bound", sessionId: "sess-bound", createdAt: 1, archivedAt: Date.now() });
       await upsertFollowedThread(tdb.appDb, {
         orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
         ownerType: "team", ownerId: "team-x", createdBy: "member-9", target: { sessionId: "sess-bound", threadId: "thr-bound" },
       });
-      const { deliver } = await dispatchMention([], {
+      const { deliver } = await dispatchMention({
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
-      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+      expect(deliver.mock.calls[0]![0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+    });
+
+    it("a redirect skipped as team-covered after ingest gives its waiter the digest once (claim_recovered)", async () => {
+      const db = tdb.appDb;
+      const stamp = { ...redirect, matchedWaiterId: "w-once" };
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp,
+      });
+      await db.insert(teams).values({ id: "coverage-team", orgId: ORG, name: "Coverage", createdAt: Date.now() });
+      await db.insert(eventSubscriptions).values({
+        id: "coverage-rule", orgId: ORG, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
+        eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+        enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const appended = new Set<string>();
+      const recover = vi.fn(async (args: { waiterId: string; event: { dedupeKey: string } }) => {
+        const key = `${args.waiterId}:${args.event.dedupeKey}`;
+        if (appended.has(key)) return false;
+        appended.add(key);
+        return true;
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      const dispatcher = new EventDispatcher({
+        db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToAssistant: deliver, plugins: [githubPlugin], recordDestination, recoverClaimedDigest: recover,
+      });
+      await dispatcher.pollOnce();
+      expect(deliver).not.toHaveBeenCalled();
+      expect((await getDelivery(deliveryId)).status).toBe("skipped");
+      expect(recover).toHaveBeenCalledOnce();
+      expect(recover.mock.calls[0]![0]).toMatchObject({ waiterId: "w-once", orgId: ORG, service: "github" });
+      expect(recordDestination.mock.calls).toEqual([["claim_recovered"]]);
+      // A skipped row never runs again, so the waiter gets the digest once.
+      await db.update(eventDeliveries).set({ nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+      await dispatcher.pollOnce();
+      expect(recover).toHaveBeenCalledOnce();
+      expect(appended.size).toBe(1);
+    });
+
+    it("a binding stamp skipped as team-covered gives its suppressed waiter the digest once, before the skipped write", async () => {
+      const db = tdb.appDb;
+      const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-stream"] };
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp });
+      await db.insert(teams).values({ id: "coverage-team", orgId: ORG, name: "Coverage", createdAt: Date.now() });
+      await db.insert(eventSubscriptions).values({
+        id: "coverage-rule", orgId: ORG, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
+        eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+        enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const statusAtRecover: string[] = [];
+      const recover = vi.fn(async () => {
+        statusAtRecover.push((await getDelivery(deliveryId)).status);
+        return true;
+      });
+      const endMatchedWaiter = vi.fn(async () => true);
+      const dispatcher = new EventDispatcher({
+        db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
+        plugins: [githubPlugin], recordDestination, recoverClaimedDigest: recover, endMatchedWaiter,
+      });
+      await dispatcher.pollOnce();
+      // The recovery runs while the row is still pending, so a crash before
+      // the skipped write retries the recovery instead of losing it.
+      expect(statusAtRecover).toEqual(["pending"]);
+      expect(recover).toHaveBeenCalledOnce();
+      expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-stream" })]);
+      expect((await getDelivery(deliveryId)).status).toBe("skipped");
+      expect(recordDestination.mock.calls).toEqual([["claim_recovered"]]);
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+    });
+
+    it("a binding delivery never ends a waiter it suppressed", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const endMatchedWaiter = vi.fn(async () => true);
+      const { deliveryId } = await dispatchMention({
+        destination: { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-once"] },
+        deliver: async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }), endMatchedWaiter,
+      });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+    });
+
+    describe("terminal paths recover suppressed digests (INV-D6)", () => {
+      const stamp = { ...redirect, matchedWaiterId: "w-inc" };
+
+      function dispatcherWith(recover: EventDispatcherDeps["recoverClaimedDigest"], deliver: AssistantDeliverFn = async () => LANDED) {
+        return new EventDispatcher({
+          db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: vi.fn(deliver),
+          recordDestination, recoverClaimedDigest: recover,
+          resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }),
+        });
+      }
+
+      function mentionDelivery() {
+        return seedDelivery({
+          target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+          eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
+          payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
+          destination: stamp,
+        });
+      }
+
+      it("a deleted rule", async () => {
+        const { deliveryId, subscriptionId } = await mentionDelivery();
+        await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
+        const recover = vi.fn(async () => true);
+        await dispatcherWith(recover).pollOnce();
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "event or subscription vanished" });
+        expect(recover).toHaveBeenCalledOnce();
+        expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-inc" })]);
+      });
+
+      it("a sender gate denial at dispatch", async () => {
+        // No identity link for U9: the team mention gate refuses the sender.
+        await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });
+        const { deliveryId } = await mentionDelivery();
+        const recover = vi.fn(async () => true);
+        await dispatcherWith(recover).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("dead");
+        expect(recover).toHaveBeenCalledOnce();
+      });
+
+      it("the last failed attempt, and not an earlier one", async () => {
+        await seedMentionMember("team-x");
+        await seedSession("sess-inc", "team", "team-x", "thr-inc");
+        const { deliveryId } = await mentionDelivery();
+        const recover = vi.fn(async () => true);
+        const failing = async (): Promise<never> => { throw new Error("transient"); };
+        await dispatcherWith(recover, failing).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("failed");
+        expect(recover).not.toHaveBeenCalled();
+        await tdb.appDb.update(eventDeliveries).set({ attempts: 4, nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+        await dispatcherWith(recover, failing).pollOnce();
+        expect((await getDelivery(deliveryId)).status).toBe("dead");
+        expect(recover).toHaveBeenCalledOnce();
+      });
+    });
+
+    it("a skip for a reason decided after ingest recovers nothing without a matched waiter", async () => {
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, destination: redirect });
+      await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
+      const recover = vi.fn(async () => true);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED), recordDestination, recoverClaimedDigest: recover,
+      }).pollOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("skipped");
+      expect(recover).not.toHaveBeenCalled();
+      expect(recordDestination).not.toHaveBeenCalled();
     });
   });
 
@@ -1227,21 +1412,6 @@ describe("EventDispatcher", () => {
         detail: `Subscription ${subscriptionId}, delivery ${deliveryId}: thread key sub:${subscriptionId}.`,
       })]);
       expect(recordDestination.mock.calls).toEqual([["policy_own"]]);
-    });
-
-    it("a claim on an ambient event skips the delivery and never calls the seam (M4)", async () => {
-      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
-      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
-      const claimFor = vi.fn(async () => ({ sessionId: "sess-w", threadId: "thr-w", waiterId: "w-1" }));
-      recordDestination.mockClear();
-      await new EventDispatcher({
-        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToAssistant: deliver, plugins: [githubPlugin], claimFor, recordDestination,
-      }).pollOnce();
-      expect(claimFor).toHaveBeenCalledOnce();
-      expect(deliver).not.toHaveBeenCalled();
-      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, claimed by thread thr-w." });
-      expect(recordDestination.mock.calls).toEqual([["claim_skip"]]);
     });
 
     it("defaults an absent policy per delivery: new with a channel origin, own without one", async () => {

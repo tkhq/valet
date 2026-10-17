@@ -143,9 +143,9 @@ async function isTargetThreadLive(
 /**
  * True when `target` would resolve for `deliverToAssistantThread`. The
  * session names a live, non-archived assistant or execution of `owner` in
- * `orgId`, and its thread is not archived. Incident mention routing
- * (`watching-waiter.ts`) reuses this gate. It never chooses a watching
- * waiter that would dead-letter here.
+ * `orgId`, and its thread is not archived. Claim resolution
+ * (`claims.ts`) reuses this gate, so it never chooses a waiter thread that
+ * would dead-letter here.
  */
 export async function isDeliverableTarget(
   deps: { db: AppDb },

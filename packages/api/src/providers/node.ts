@@ -78,6 +78,8 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { appendClaimedWaiterDigest } from "../events/claim-recovery.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -864,8 +866,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // The catalog a subscription's `{{payload.<field>}}` variable resolves
     // through. It is the same merged catalog the write validator uses.
     plugins,
-    // Routes a mention to the thread whose event waiter watches its channel.
-    engineStore,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
+    // The follow router's predicate and the Slack twin need the bot id.
+    slackBotUserId: (orgId) => waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }).slackBotUserId(orgId),
+    // A claimed waiter gets its digest back when its claim delivery is
+    // skipped after ingest (`events/claim-recovery.ts`).
+    recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
+      waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub

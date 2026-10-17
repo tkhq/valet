@@ -228,6 +228,7 @@ describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
     expect(isWakeupSignal({ signalType: "github.push", attributes: { wakeupId: "wk_1" } })).toBe(false);
     expect(wakeupOutcome({})).toBeNull();
     expect(wakeupOutcome({ cause: "cancelled" })).toEqual({ label: "cancelled", tone: "neutral" });
+    expect(wakeupOutcome({ cause: "delivered" })).toEqual({ label: "arrived as a message", tone: "success" });
     expect(wakeupOutcome({ cause: "exit", exitCode: "0" })).toEqual({ label: "exit 0", tone: "success" });
     expect(wakeupOutcome({ cause: "exit", exitCode: "2" })).toEqual({ label: "exit 2", tone: "danger" });
     expect(formatDurationSeconds("45")).toBe("45s");

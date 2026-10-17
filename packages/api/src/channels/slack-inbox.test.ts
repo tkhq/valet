@@ -991,7 +991,7 @@ describe("Slack receipt diagnostics", () => {
     const eventId = "Ev-receipt-retry";
     const body = envelope({ ...humanChannelMessage(), text: secretBody }, eventId);
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const first = await completedReceipt(eventId, "follow");
+    const first = await completedReceipt(eventId, "dispatch");
     expect(first.stages).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "verification", outcome: "verified" }),
       expect.objectContaining({ stage: "subscription_match", outcome: "matched" }),
@@ -1018,7 +1018,7 @@ describe("Slack receipt diagnostics", () => {
     const eventId = "Ev-classification";
     const body = envelope({ ...event, text: secretBody }, eventId);
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const receipt = await completedReceipt(eventId, "follow");
+    const receipt = await completedReceipt(eventId, "classification");
     expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "classification", outcome: "rejected" })]));
     expect(receipt.metadata).toEqual(expect.objectContaining({ rawType: "message" }));
     expect(await eventCount(api, eventId)).toBe(0);
@@ -1032,7 +1032,7 @@ describe("Slack receipt diagnostics", () => {
     await api.providers.channelHost.start();
     const body = envelope({ ...botFormMessage(), text: secretBody }, "Ev-missing-bot-id");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const receipt = await completedReceipt("Ev-missing-bot-id", "follow");
+    const receipt = await completedReceipt("Ev-missing-bot-id", "classification");
     expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "classification", outcome: "rejected" })]));
     expect(JSON.stringify(receipt.stages)).toMatch(/bot identity/i);
   });
@@ -1188,7 +1188,7 @@ describe("Slack receipt diagnostics", () => {
     vi.spyOn(signalDiagnostics, "writeDropLog").mockRejectedValue(new Error("diagnostic store unavailable"));
     const body = envelope({ ...botFormMessage(), bot_id: "BVALET", text: secretBody }, "Ev-classified-diagnostic-down");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const receipt = await completedReceipt("Ev-classified-diagnostic-down", "follow");
+    const receipt = await completedReceipt("Ev-classified-diagnostic-down", "classification");
     expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "classification", outcome: "rejected" })]));
     expect(receipt.stages).not.toEqual(expect.arrayContaining([expect.objectContaining({ stage: "ingestion", outcome: "failed" })]));
   });
@@ -1206,7 +1206,10 @@ describe("Slack receipt diagnostics", () => {
     if (failingConsumer === "follow") follow.mockRejectedValueOnce(failure);
     const body = envelope({ ...dmMessage(), text: secretBody }, "Ev-consumer-fail");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
-    const receipt = await completedReceipt("Ev-consumer-fail", "follow");
+    // Subscription ingestion runs last. Its event row shows that it finished.
+    const receipt = await completedReceipt("Ev-consumer-fail", failingConsumer);
+    const booted = api;
+    await expect.poll(() => eventCount(booted, "Ev-consumer-fail"), { timeout: 5_000 }).toBe(failingConsumer === "ingestion" ? 0 : 1);
     expect(channel).toHaveBeenCalled();
     expect(ingest).toHaveBeenCalled();
     expect(follow).toHaveBeenCalled();
