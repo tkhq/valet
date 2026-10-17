@@ -1,7 +1,11 @@
 import { Outlet, createFileRoute } from "@tanstack/react-router";
 
 /**
- * `/workflows` layout shell (plan decision 19). Thin — just an `<Outlet/>`
+ * `/workflows` layout shell. It holds no redirect: a parent `beforeLoad`
+ * runs for every child URL too, so each child route redirects for itself
+ * (`-presence-redirects.ts`).
+ *
+ * Originally: the layout shell (plan decision 19). Thin — just an `<Outlet/>`
  * boundary so `/workflows` (list, `workflows.index.tsx`) and
  * `/workflows/runs/$runId` (`workflows.runs.$runId.tsx`) both nest under it
  * without either page needing to double as the other's parent (mirrors

@@ -90,9 +90,20 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string; path?: str
   });
   const artifactsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/artifacts", component: () => null });
   const memoryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/memory", component: () => null });
-  const automationRoutes = ["/workflows", "/workflows/$workflowId", "/workflows/runs/$runId", "/channel"].map(path => createRoute({ getParentRoute: () => rootRoute, path, component: () => null }));
+  const presenceRoutes = [
+    "/presence",
+    "/presence/places/$subject",
+    "/presence/listeners/$id",
+    "/presence/routines",
+    "/presence/activity",
+    "/presence/events/$eventId",
+    "/presence/workflows",
+    "/presence/workflows/$workflowId",
+    "/presence/runs",
+    "/presence/runs/$runId",
+  ].map(path => createRoute({ getParentRoute: () => rootRoute, path, component: () => null }));
   const router = createRouter({
-    routeTree: rootRoute.addChildren([indexRoute, threadsRoute, skillsRoute, artifactsRoute, memoryRoute, ...automationRoutes]),
+    routeTree: rootRoute.addChildren([indexRoute, threadsRoute, skillsRoute, artifactsRoute, memoryRoute, ...presenceRoutes]),
     history: createMemoryHistory({ initialEntries: [opts.path ?? (opts.workspace ? `/?workspace=${opts.workspace}` : "/")] }),
   });
   const queryClient = new QueryClient();
@@ -121,48 +132,61 @@ describe("TopNav", () => {
   });
 
   it.each([
-    "/channel?key=slack%3AC123&workspace=t1",
-    "/workflows/wf-old?workspace=t1",
-    "/workflows/runs/run-old?workspace=t1",
-    "/workflows?run=old&gate=old&workspace=t1",
-  ])("returns to the new workspace's Automation list from %s", async (path) => {
+    ["/presence/places/slack%3AC123?workspace=t1", "/presence"],
+    ["/presence/listeners/sub-old?workspace=t1", "/presence"],
+    ["/presence/events/ev-old?workspace=t1", "/presence/activity"],
+    ["/presence/workflows/wf-old?workspace=t1", "/presence/workflows"],
+    ["/presence/runs/run-old?workspace=t1", "/presence/runs"],
+    ["/presence/workflows?run=old&gate=old&workspace=t1", "/presence/workflows"],
+  ])("returns to the new workspace's Presence list from %s", async (path, list) => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     const { router } = renderNav({path});
     await userEvent.click(await screen.findByRole("button", {name: "Workspace: Platform. Change workspace"}));
     await userEvent.click(screen.getByRole("menuitem", {name: "Personal"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
+    await waitFor(() => expect(router.state.location.pathname).toBe(list));
     expect(router.state.location.search).toEqual({workspace: "user"});
     expect(await screen.findByRole("button", {name: "Workspace: Personal. Change workspace"})).toBeTruthy();
   });
 
-  it.each(["user", "t2"])("opens the selected team's Automation list from %s", async (workspace) => {
+  it.each(["user", "t2"])("opens the selected team's Workflows tab from %s", async (workspace) => {
     const base: TeamSummary = { id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null };
     navTeams = [base, {...base, id:"t2", name:"People"}];
-    const {router} = renderNav({path:`/workflows/wf-old?workspace=${workspace}`});
+    const {router} = renderNav({path:`/presence/workflows/wf-old?workspace=${workspace}`});
     await userEvent.click(await screen.findByRole("button", {name:`Workspace: ${workspace === "user" ? "Personal" : "People"}. Change workspace`}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/workflows"));
     expect(router.state.location.search).toEqual({workspace:"t1"});
     expect(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
+  });
+
+  it("keeps a Presence tab in place when the workspace changes", async () => {
+    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
+    window.sessionStorage.setItem("valet:workspace", "t1");
+    const {router} = renderNav({path:"/presence/activity?status=problems"});
+    await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
+    await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
+    expect(await screen.findByRole("button", {name:"Workspace: Personal. Change workspace"})).toBeTruthy();
+    expect(router.state.location.pathname).toBe("/presence/activity");
+    expect(router.state.location.search).toEqual({status: "problems"});
   });
 
   it("keeps the original workspace when unsaved edits block leaving", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     window.sessionStorage.setItem("valet:workspace", "t1");
-    const {router} = renderNav({path:"/workflows/wf-old", blockNavigation:true});
+    const {router} = renderNav({path:"/presence/workflows/wf-old", blockNavigation:true});
     await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Personal"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
+    expect(router.state.location.pathname).toBe("/presence/workflows/wf-old");
     expect(screen.getByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("t1");
   });
 
   it("keeps the detail open when reselecting the same workspace", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
-    const {router} = renderNav({path:"/workflows/wf-old?workspace=t1"});
+    const {router} = renderNav({path:"/presence/workflows/wf-old?workspace=t1"});
     await userEvent.click(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"}));
     await userEvent.click(screen.getByRole("menuitem", {name:"Platform"}));
-    expect(router.state.location.pathname).toBe("/workflows/wf-old");
+    expect(router.state.location.pathname).toBe("/presence/workflows/wf-old");
   });
 
   it("opens a mobile navigation menu and closes after selecting a destination", async () => {
@@ -198,6 +222,9 @@ describe("TopNav", () => {
     expect(screen.getByRole("link", { name: "Skills" }).getAttribute("href")).toBe("/skills");
     expect(screen.queryByRole("link", { name: "Sessions" })).toBeNull();
     expect(screen.getByRole("link", { name: "Artifacts" }).getAttribute("href")).toBe("/artifacts");
+    expect(screen.getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
+    expect(screen.queryByRole("link", { name: "Events" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Automation" })).toBeNull();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     const labels = within(nav)
       .getAllByRole("link")
@@ -205,8 +232,7 @@ describe("TopNav", () => {
     expect(labels).toEqual([
       "Threads",
       "Artifacts",
-      "Automation",
-      "Events",
+      "Presence",
       "Usage",
       "Skills",
       "Integrations",

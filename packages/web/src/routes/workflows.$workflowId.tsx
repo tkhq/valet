@@ -54,6 +54,7 @@ import { relativeTime } from "~/lib/relative-time";
 import { runCountLabel } from "~/lib/run-count";
 import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { prefillComposerDraft } from "~/stores/composer-drafts";
+import { redirectToPresence } from "./-presence-redirects";
 
 /**
  * `/workflows/$workflowId` — the visual editor page (plan decision 11):
@@ -63,7 +64,9 @@ import { prefillComposerDraft } from "~/stores/composer-drafts";
  * now only links here.
  */
 export const Route = createFileRoute("/workflows/$workflowId")({
-  component: WorkflowEditorRoute,
+  // Redirect-only: the editor is `/presence/workflows/$workflowId` now
+  // (`-presence-redirects.ts`). The page below stays until it moves there.
+  beforeLoad: redirectToPresence("/workflows/$workflowId"),
   // `newTrigger` comes from the new-workflow dialog: the workflow was just
   // created to run on a schedule or an event, so its trigger form opens next.
   // `explainRun` + `explainStep` come from a failed run's "Explain this
@@ -76,7 +79,7 @@ export const Route = createFileRoute("/workflows/$workflowId")({
   }),
 });
 
-function WorkflowEditorRoute() {
+export function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
   const { newTrigger, explainRun, explainStep, explainIteration } = Route.useSearch();
   const explain = explainRun && explainStep ? { runId: explainRun, nodeId: explainStep, iteration: explainIteration } : undefined;

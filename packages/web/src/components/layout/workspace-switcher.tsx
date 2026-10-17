@@ -26,14 +26,30 @@ import { cn } from "~/lib/cn";
  * A badge here would be a second, weaker answer to a question the bell
  * already answers completely.
  *
- * Selecting a workspace keeps list pages in place. Workspace-owned channel,
- * workflow, and run details return to Automation so an old resource is not
- * requested under the new owner. Chat opens the selected workspace's thread list.
+ * Selecting a workspace keeps list pages in place. A Presence detail page
+ * (a place, a listener, an event, a workflow, or a run) returns to its
+ * Presence tab, so an old resource is not requested under the new owner.
+ * Chat opens the selected workspace's thread list.
  *
  * A workspace with no assistant is therefore selectable now. It could not be
  * before, because the only thing selecting it did was open an assistant that
  * did not exist. A team with no assistant still owns skills and workflows.
  */
+/**
+ * The Presence tab to open after a workspace switch, or `undefined` to stay.
+ * A detail page returns to its tab. The Workflows tab reloads too, which
+ * drops its `run` and `gate` params.
+ */
+export function presenceListAfterSwitch(
+  pathname: string,
+): "/presence" | "/presence/activity" | "/presence/workflows" | "/presence/runs" | undefined {
+  if (pathname.startsWith("/presence/places/") || pathname.startsWith("/presence/listeners/")) return "/presence";
+  if (pathname.startsWith("/presence/events/")) return "/presence/activity";
+  if (pathname === "/presence/workflows" || pathname.startsWith("/presence/workflows/")) return "/presence/workflows";
+  if (pathname.startsWith("/presence/runs/")) return "/presence/runs";
+  return undefined;
+}
+
 export interface WorkspaceOption {
   /** `user` for your own, else the team id. Stable across renders. */
   key: string;
@@ -105,9 +121,10 @@ export function WorkspaceSwitcher({
             key={o.key}
             onSelect={() => {
               if (o.key === activeKey) return;
-              if (pathname === "/channel" || pathname === "/workflows" || pathname.startsWith("/workflows/")) {
+              const list = presenceListAfterSwitch(pathname);
+              if (list) {
                 // Drop old detail parameters and make the new workspace authoritative.
-                void navigate({ to: "/workflows", search: { workspace: o.key } });
+                void navigate({ to: list, search: { workspace: o.key } });
                 return;
               }
               if (pathname === "/integrations") {

@@ -6,6 +6,7 @@ import { EventLog, type LogFilter } from "~/components/events/event-log";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
 import { ChannelsPanel } from "~/components/channels/channels-panel";
 import { textParam } from "~/lib/search-params";
+import { redirectToPresence } from "./-presence-redirects";
 
 /** Channels, the Log (events and problems in one list), and subscriptions.
  * Legacy tab URLs (`activity`, `logs`, `problems`, `receipts`) open the Log. */
@@ -32,8 +33,11 @@ export function readEventsSearch(raw: unknown): EventsSearch {
   return { ...(review ? { review } : {}), ...(tab ? { tab } : {}), ...(status ? { status } : {}), ...(q ? { q } : {}) };
 }
 
+/** Redirect-only: `/events` now opens Presence (`-presence-redirects.ts`).
+ * `validateSearch` and `EventsPage` stay until the Places and Activity tabs
+ * replace them. */
 export const Route = createFileRoute("/events/")({
-  component: EventsPage,
+  beforeLoad: redirectToPresence("/events"),
   validateSearch: readEventsSearch,
 });
 

@@ -1,6 +1,7 @@
 import { RunWorkspace } from "~/components/workflows/run-workspace";
 import { textParam } from "~/lib/search-params";
-import { useState, type ReactNode } from "react";
+import { redirectToPresence } from "./-presence-redirects";
+import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail, WorkflowRunProvenance } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail, useWorkflow } from "~/api/workflows";
@@ -35,14 +36,16 @@ import { useNow } from "~/lib/use-now";
  * `run.status === 'settled'`).
  */
 export const Route = createFileRoute("/workflows/runs/$runId")({
-  component: RunDetailPage,
+  // Redirect-only: the run page is `/presence/runs/$runId` now
+  // (`-presence-redirects.ts`). The page below stays until it moves there.
+  beforeLoad: redirectToPresence("/workflows/runs/$runId"),
   validateSearch: (raw: unknown): { view?: "details" | "conversation"; conversation?: string } => ({
     view: textParam(raw, "view") === "details" ? "details" : undefined,
     conversation: textParam(raw, "conversation"),
   }),
 });
 
-function RunDetailPage() {
+export function RunDetailPage() {
   const { runId } = Route.useParams();
   const search = Route.useSearch();
   const { data, isLoading, error } = useRunDetail(runId);

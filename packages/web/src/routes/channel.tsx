@@ -11,6 +11,7 @@ import { AutomationWizard } from "~/components/events/automation-wizard";
 import { TeamSlackSetupModal } from "~/components/events/team-slack-setup";
 import { useListOwner } from "~/lib/use-list-owner";
 import { textParam } from "~/lib/search-params";
+import { redirectToPresence } from "./-presence-redirects";
 import { cn } from "~/lib/cn";
 
 /**
@@ -19,11 +20,13 @@ import { cn } from "~/lib/cn";
  * to both Valet and the provider.
  */
 export const Route = createFileRoute("/channel")({
-  component: ChannelPage,
+  // Redirect-only: one channel is `/presence/places/$subject` now
+  // (`-presence-redirects.ts`). The page below stays until it moves there.
+  beforeLoad: redirectToPresence("/channel"),
   validateSearch: (raw: unknown): { key: string } => ({ key: textParam(raw, "key") ?? "" }),
 });
 
-function ChannelPage() {
+export function ChannelPage() {
   const { key } = Route.useSearch();
   const owner = useListOwner();
   const channel = useWorkspaceChannel(owner, key);

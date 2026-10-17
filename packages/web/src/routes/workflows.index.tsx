@@ -26,12 +26,16 @@ import { WorkspaceClause } from "~/components/workspace-clause";
 import { relativeTime, timeUntil } from "~/lib/relative-time";
 import { formatWhen } from "~/lib/format-when";
 import { useListOwner } from "~/lib/use-list-owner";
+import { redirectToPresence } from "./-presence-redirects";
 
 /** Workflow definitions and schedules; failures link directly to run details. */
 type HubTab = "workflows" | "scheduled";
 
+/** Redirect-only: the list is the Workflows tab of Presence now, and the
+ * Scheduled tab is Routines (`-presence-redirects.ts`). `validateSearch` and
+ * `WorkflowsIndexPage` stay until those tabs replace them. */
 export const Route = createFileRoute("/workflows/")({
-  component: WorkflowsIndexPage,
+  beforeLoad: redirectToPresence("/workflows"),
   validateSearch: (search: Record<string, unknown>): { workspace?: string; tab?: HubTab; run?: string; gate?: string; review?: string } => ({
     workspace: typeof search.workspace === "string" ? search.workspace : undefined,
     tab:

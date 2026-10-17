@@ -5,6 +5,7 @@ import { DeliveryList } from "~/components/events/delivery-list";
 import { RedeliverButton } from "~/components/events/redeliver-button";
 import { Badge, ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
+import { redirectToPresence } from "./-presence-redirects";
 
 /**
  * `/events/$eventId` — one event at its own URL: payload, delivery attempts,
@@ -15,10 +16,12 @@ import { formatWhen } from "~/lib/format-when";
  * route.
  */
 export const Route = createFileRoute("/events/$eventId")({
-  component: EventDetailPage,
+  // Redirect-only: the event page is `/presence/events/$eventId` now
+  // (`-presence-redirects.ts`). The page below stays until it moves there.
+  beforeLoad: redirectToPresence("/events/$eventId"),
 });
 
-function EventDetailPage() {
+export function EventDetailPage() {
   const { eventId } = Route.useParams();
   const { data, isLoading, error } = useEvent(eventId);
 
