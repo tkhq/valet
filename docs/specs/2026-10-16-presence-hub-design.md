@@ -398,18 +398,24 @@ Pass criterion: all steps, in one run, from a clean start.
   background section with its own router. In the api test, M works in its
   own thread `t-inc` and P is pinned to it, so the feeders read names both.
 - **The copy lint reads source, not the build (INV-H2).** The lint parses
-  every non-test file under `components/presence/` and every
-  `routes/presence*.tsx`. It checks string literals, template text, and JSX
+  every non-test file under `components/presence/`, every
+  `routes/presence*.tsx`, and each reused dialog the hub opens:
+  `workflows/trigger-dialog.tsx` and, under `events/`,
+  `edit-subscription-dialog.tsx`, `delivery-preferences.tsx`, `event-match-step.tsx`,
+  `automation-review.tsx`, and `automation-wizard.tsx`. It checks string literals, template text, and JSX
   text. It skips imports, types, object keys, comparisons, `case` labels,
   the values of code properties (`key`, `mode`, `kind`, `type`, `id`, `tab`,
   `status`, `view`, `outcome`), non-copy JSX attributes (`className`, `to`,
-  `href`, and similar), and strings with no space that hold `.`, `_`, `:`,
+  `href`, `idPrefix`, and similar), and strings with no space that hold `.`, `_`, `:`,
   `/`, `*`, `$`, or `-`. A line marked `// copy-lint: allow <word>`, or the
   line after the marker, may use that word.
 - **Copy lint allowances.** The workflow editor
   (`routes/presence.workflows.$workflowId.tsx`) keeps the drawer state value
   `triggers` on two lines. The value never shows; the drawer's title is
-  `Listeners and routines`.
+  `Listeners and routines`. The reused dialogs need no allowance. Their
+  copy says routine for a schedule and listener for an event rule, and
+  says turn on, not enable. The wizard's Runs in field takes the id prefix
+  `automation-outcome`, a code value the lint skips.
 - **A routine page is read-only until it knows the viewer (Part D step 2).**
   The page enables its controls for the owner of a personal routine and for
   a member of the owning team, as the server's trigger access rule does. A

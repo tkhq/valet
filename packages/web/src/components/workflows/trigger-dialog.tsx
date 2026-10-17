@@ -315,7 +315,7 @@ export function TriggerDialog({
         // and the contradictory pair the server refuses outright.
         if (eventKey === SLACK_APP_MENTION && !anyChannel && !hasChannelScopeFilter(filters)) {
           setFormError(
-            'A mention trigger needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
+            'A mention listener needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
           );
           return;
         }
@@ -389,11 +389,13 @@ export function TriggerDialog({
     }
   }
 
-  const title = isEditing ? `Edit ${editing.name}` : schedulesOnly ? "New schedule" : "New trigger";
+  // Presence words (INV-H2): a schedule is a routine, an event rule a listener.
+  const ruleWord = kind === "schedule" ? "routine" : "listener";
+  const title = `${isEditing ? "Edit" : "New"} ${ruleWord}`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={title} description={review ? "Review the configuration before enabling it." : "Set when this automation runs and what it does."} className="max-w-2xl">
+      <DialogContent title={title} description={review ? "Review the configuration before you turn it on." : kind === "schedule" ? "Set when this routine runs and what it does." : "Set what this listener matches and what it does."} className="max-w-2xl">
         <div className="grid gap-4">
           {/* Kind picker — only shown when creating */}
           {!lockedKind && (
@@ -422,7 +424,7 @@ export function TriggerDialog({
               id="trigger-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My trigger"
+              placeholder={kind === "schedule" ? "Routine name" : "Listener name"}
             />
           </div>
 
@@ -630,7 +632,7 @@ export function TriggerDialog({
                   <>
                     <FilterEditor fields={selectedEntry.filters} rows={filterRows} onChange={setFilterRows} />
                     <p className="text-xs text-muted">
-                      A trigger fires only when every filter matches. Add none to match every event of this type.
+                      A listener runs only when every filter matches. Add none to match every event of this type.
                     </p>
                     {/* Mention scoping (TKAI-299): the server requires a
                         channel filter on this event unless the explicit
@@ -647,7 +649,7 @@ export function TriggerDialog({
                         <span>
                           Any channel
                           <span className="block text-xs text-muted">
-                            A mention trigger fires only for your own @-mentions and needs a
+                            A mention listener runs only for your own @-mentions and needs a
                             channel filter. Check this to listen in every channel the app can see
                             instead.
                           </span>
@@ -693,7 +695,7 @@ export function TriggerDialog({
             Cancel
           </Button>
           <Button onClick={() => void submit()} disabled={isPending || missingSetup}>
-            {isPending ? (isEditing ? "Saving…" : "Creating…") : review && editing && !editing.enabled ? "Enable automation" : isEditing ? "Save" : "Create"}
+            {isPending ? (isEditing ? "Saving…" : "Creating…") : review && editing && !editing.enabled ? `Turn on ${ruleWord}` : isEditing ? "Save" : "Create"}
           </Button>
         </DialogFooter>
       </DialogContent>

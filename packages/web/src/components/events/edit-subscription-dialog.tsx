@@ -134,7 +134,7 @@ export function EditSubscriptionDialog({
       return;
     }
     if (assistant && thread?.mode === "subject" && subjectKind === null) {
-      setError("This rule's events have no subject to group by. Pick another thread option.");
+      setError("This listener's events name no place to group threads by. Pick another Runs in option.");
       return;
     }
 
@@ -182,7 +182,7 @@ export function EditSubscriptionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title={`${review ? "Review" : "Edit"} ${sub.name}`}
-        description={review ? (sub.enabled ? "This subscription is already enabled. Review its current configuration." : "Review the saved proposal. It stays paused until you enable it.") : "Change what this automation matches. A save keeps its target."}
+        description={review ? (sub.enabled ? "This listener is already on. Review its current configuration." : "Review the saved proposal. It stays off until you turn it on.") : "Change what this listener matches. A save keeps its target."}
         className="max-w-lg"
       >
         <div className="space-y-4">
@@ -192,7 +192,7 @@ export function EditSubscriptionDialog({
               id="edit-subscription-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Automation name"
+              placeholder="Listener name"
             />
           </div>
 
@@ -215,7 +215,7 @@ export function EditSubscriptionDialog({
             <p className="mt-1 text-sm text-ink">{targetLabel}</p>
             <p className="mt-1 text-xs text-muted">
               This dialog cannot change the target. To use a different target, create a new
-              automation and delete this one.
+              listener and delete this one.
             </p>
             {/* The target stays fixed, but what the assistant reads is a field
                 of this rule, so it is editable here. */}
@@ -277,7 +277,7 @@ export function EditSubscriptionDialog({
                 Cancel
               </Button>
               <Button type="button" onClick={() => save()} disabled={patch.isPending}>
-                {patch.isPending ? "Saving…" : review && !sub.enabled ? "Enable subscription" : "Save"}
+                {patch.isPending ? "Saving…" : review && !sub.enabled ? "Turn on listener" : "Save"}
               </Button>
               {collisions !== null && collisions.report.blocking.length > 0 && (
                 <Button
@@ -286,7 +286,7 @@ export function EditSubscriptionDialog({
                   onClick={() => save(true)}
                   disabled={patch.isPending}
                 >
-                  {review ? "Enable anyway" : "Save anyway"}
+                  {review ? "Turn on anyway" : "Save anyway"}
                 </Button>
               )}
             </>

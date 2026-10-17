@@ -603,7 +603,7 @@ export function AutomationWizard({
               onPromptTemplatesChange={setPromptTemplates}
             />
           )}
-          {step === 3 && (isEventOutcome || isSchedule) && target.kind === "assistant" && runsIn("automation")}
+          {step === 3 && (isEventOutcome || isSchedule) && target.kind === "assistant" && runsIn("automation-outcome")}
 
           {isLastStep && !isSchedule && target.kind === "assistant" && target.assistant === "user" && (
             <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />

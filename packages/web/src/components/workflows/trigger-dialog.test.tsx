@@ -333,3 +333,25 @@ it("rejects an insecure avatar before creating an event trigger", async () => {
   expect(createEventTriggerMutateAsync).not.toHaveBeenCalled();
   expect(screen.getAllByText(/Enter an HTTPS URL/).length).toBeGreaterThan(0);
 });
+
+describe("TriggerDialog Presence copy (INV-H2)", () => {
+  const routine: WorkflowTriggerItem = {
+    kind: "schedule", id: "sch_p", name: "Digest", enabled: false,
+    detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "summarize", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1" },
+  };
+
+  it("names a new routine", () => {
+    render(<TriggerDialog open onOpenChange={() => {}} schedulesOnly />);
+    expect(screen.getByText("New routine")).toBeTruthy();
+    expect(screen.getByText("Set when this routine runs and what it does.")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Routine name")).toBeTruthy();
+  });
+
+  it("names an edited routine and turns a reviewed one on", () => {
+    const { unmount } = render(<TriggerDialog open onOpenChange={() => {}} editing={routine} schedulesOnly />);
+    expect(screen.getByText("Edit routine")).toBeTruthy();
+    unmount();
+    render(<TriggerDialog open onOpenChange={() => {}} editing={routine} schedulesOnly review />);
+    expect(screen.getByRole("button", { name: "Turn on routine" })).toBeTruthy();
+  });
+});

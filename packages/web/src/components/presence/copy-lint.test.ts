@@ -1,6 +1,7 @@
 // INV-H2 (docs/specs/2026-10-16-presence-hub-design.md): Presence UI copy
 // uses only the Terminology table's words. This lint parses every source
-// file under components/presence and every routes/presence*.tsx, collects
+// file under components/presence, every routes/presence*.tsx, and each
+// reused dialog the hub opens (HUB_DIALOGS), collects
 // the text a reader can see (string literals, template text, JSX text), and
 // fails on a banned word. Identifiers, imports, types, comments, and test
 // files are not copy, so the lint skips them. A line that carries
@@ -12,6 +13,16 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const SRC = resolve(__dirname, "../..");
+/** Dialogs outside components/presence that the hub opens. Their copy is
+ * Presence copy too. */
+const HUB_DIALOGS = [
+  "components/workflows/trigger-dialog.tsx",
+  "components/events/edit-subscription-dialog.tsx",
+  "components/events/delivery-preferences.tsx",
+  "components/events/event-match-step.tsx",
+  "components/events/automation-review.tsx",
+  "components/events/automation-wizard.tsx",
+] as const;
 const BANNED = ["subscription", "trigger", "subject", "event waiter", "automation"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
 const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
@@ -20,7 +31,7 @@ const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
 const NON_COPY_ATTRIBUTES = new Set([
   "className", "key", "to", "href", "id", "htmlFor", "name", "type", "value",
   "role", "rel", "target", "mode", "variant", "size", "tone", "side", "align",
-  "src", "method", "autoComplete", "inputMode", "pattern", "form",
+  "src", "method", "autoComplete", "inputMode", "pattern", "form", "idPrefix",
 ]);
 
 interface CopyHit {
@@ -43,6 +54,7 @@ function sourceFiles(): string[] {
   for (const name of readdirSync(join(SRC, "routes"))) {
     if (/^presence.*\.tsx$/.test(name)) files.push(join(SRC, "routes", name));
   }
+  for (const dialog of HUB_DIALOGS) files.push(join(SRC, dialog));
   return files.sort();
 }
 
