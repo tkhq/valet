@@ -13,11 +13,12 @@ import { UNATTENDED_DELIVERY_KEY, type Presence } from "@valet/shared";
  * The workspace owner determines the assistant.
  */
 import { isDeepStrictEqual } from "node:util";
-import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } from "@valet/engine";
+import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent, Thread } from "@valet/engine";
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import { and, eq, sql } from "drizzle-orm";
-import { agentSessions, type AssistantRow } from "../schema/index.js";
+import { agentSessions, assistantExecutions, assistants, type AssistantRow } from "../schema/index.js";
+import { SLACK_CHANNELS_METADATA_KEY } from "../services/thread-access.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
@@ -95,6 +96,10 @@ export interface AssistantDeliveryArgs {
   inbound?: InboundChannelMessage;
   /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
   author?: PromptAuthor;
+  /** The Slack channel this delivery's content came from. The thread records
+   * it, so the channel's privacy gates reads of the thread whatever its key
+   * (`services/thread-access.ts`). */
+  slackChannel?: string;
 }
 
 /** The assistant row of `sessionId` for `orgId` and `owner`, when it is live
@@ -248,6 +253,23 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   return { sessionId: prior.session_id, threadId: prior.thread_id };
 }
 
+/**
+ * Record a Slack channel on the delivery thread and, for a team execution
+ * session, on its governing thread in the assistant's root session. The
+ * team's thread list shows the governing thread, so it needs the same gate.
+ */
+async function recordSlackChannel(deps: AssistantDeliveryDeps, session: Session, thread: Thread, channel: string): Promise<void> {
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+  const [governing] = await deps.db.select({ sessionId: assistants.sessionId, threadId: assistantExecutions.governingThreadId })
+    .from(assistantExecutions).innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, session.id)).limit(1);
+  if (!governing) return;
+  const [row] = await deps.db.select().from(agentSessions).where(eq(agentSessions.id, governing.sessionId)).limit(1);
+  if (!row) return;
+  const root = await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
+  await root.threadById(governing.threadId)?.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
+}
+
 async function deliverToAssistantThreadInner(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
@@ -270,6 +292,9 @@ async function deliverToAssistantThreadInner(
     workspace: data.workspace,
   }, args.actorUserId, destination.title ? { title: destination.title } : undefined);
   if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
+  // Record the content's Slack channel before the content lands, so a
+  // reader outside a private channel never sees it (thread-access.ts).
+  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
   if (destination.kind === "key") {
     // A thread found by key reopens on delivery (spec Part B step 4), and a
     // new one shows its policy title in the thread list.

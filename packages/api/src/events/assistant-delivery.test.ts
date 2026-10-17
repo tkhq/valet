@@ -610,4 +610,27 @@ describe("deliverToAssistantThread — destinations (spec 2026-10-16: delivery t
     const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:pin-delivery'`) as { rows: unknown[] };
     expect(admitted.rows).toHaveLength(0);
   });
+
+  it("records the Slack channel on a team rule thread and its governing thread", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type: "team", id: "team-rules" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Rules", createdAt: 1 });
+    const landed = await deliverToAssistantThread(deps, {
+      ...base, owner, destination: { kind: "key", key: "sub:rule-private", title: "Private rule" },
+      signal: signal("from a private channel"), dispatchId: "event:private-1", slackChannel: "CPRIV",
+    });
+    await deliverToAssistantThread(deps, {
+      ...base, owner, destination: { kind: "key", key: "sub:rule-private", title: "Private rule" },
+      signal: signal("again"), dispatchId: "event:private-2", slackChannel: "CPRIV",
+    });
+    const channels = async (sessionId: string, threadId: string) => {
+      const thread = await engineHost.liveSession(sessionId)?.providers.store.getThread(sessionId, threadId);
+      return thread?.metadata?.slackChannels;
+    };
+    expect(await channels(landed.sessionId, landed.threadId)).toEqual(["CPRIV"]);
+    const [execution] = await testDb.appDb.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, landed.sessionId));
+    const [root] = await testDb.appDb.select().from(assistants).where(eq(assistants.ownerId, owner.id));
+    if (!execution || !root) throw new Error("expected a team execution");
+    expect(await channels(root.sessionId, execution.governingThreadId)).toEqual(["CPRIV"]);
+  });
 });

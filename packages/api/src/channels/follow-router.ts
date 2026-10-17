@@ -196,6 +196,7 @@ async function routeFollowedMessage(
       },
       ...(author ? { author } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
+      slackChannel: f.channel,
       mismatchReason: "followed_target_mismatch",
       ...(inbound ? { inbound } : {}),
     });

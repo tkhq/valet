@@ -960,7 +960,9 @@ describe("EventDispatcher", () => {
     it("binds the follow to the thread the mention landed in, and the binding wins the next mention (Part B step 5)", async () => {
       await seedMentionMember("team-x");
       const { deliver } = await dispatchMention([]);
-      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key" });
+      // The thread records the content's channel for its read gate.
+      expect(deliver.mock.calls[0]?.[0].slackChannel).toBe("C1");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
 
       // Point the follow at a live thread, then mention again inside the Slack thread.

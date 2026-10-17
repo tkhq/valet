@@ -88,6 +88,8 @@ export interface AssistantDeliverFn {
     author?: PromptAuthor;
     /** No person waits on the delivery (see `AssistantDeliveryArgs.unattended`). */
     unattended?: boolean;
+    /** The Slack channel the content came from, which the thread records for its read gate. */
+    slackChannel?: string;
   }): Promise<DeliveredThread>;
 }
 
@@ -506,6 +508,7 @@ export class EventDispatcher {
             // including a comment that falls back to the shared events thread,
             // has no one to answer.
             ...(!origin && !(prComment && commentThread) ? { unattended: true } : {}),
+            ...(slackChannel ? { slackChannel } : {}),
           });
         } catch (err) {
           if (!(err instanceof PinUnavailableError) || destination.kind !== "target") throw err;

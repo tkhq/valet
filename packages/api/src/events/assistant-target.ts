@@ -30,7 +30,7 @@ export function buildAssistantTarget(deps: {
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): AssistantDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, destination, inbound, author, presence, unattended }) =>
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, destination, inbound, author, presence, unattended, slackChannel }) =>
     // Every subscription resolves the singleton runtime of its owner.
     deliverToAssistantThread(deps, {
       orgId,
@@ -44,5 +44,6 @@ export function buildAssistantTarget(deps: {
       ...(inbound ? { inbound } : {}),
       ...(author ? { author } : {}),
       ...(unattended ? { unattended } : {}),
+      ...(slackChannel ? { slackChannel } : {}),
     });
 }

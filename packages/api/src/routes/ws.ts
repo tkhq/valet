@@ -28,7 +28,7 @@ import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
-import { requestViewer, threadVisibility } from "../services/thread-access.js";
+import { requestViewer, threadVisibility, threadRef } from "../services/thread-access.js";
 import { shareWriteCount, threadShareGrant } from "../services/thread-share.js";
 import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent, QueueItem } from "@valet/engine";
@@ -211,11 +211,11 @@ export function registerWsRoutes(
               threadShown = async (threadId) => {
                 const hit = checked.get(threadId);
                 if (hit && Date.now() - hit.at < THREAD_ACCESS_RECHECK_MS) return hit.shown;
-                const key = engineSession.threadById(threadId)?.key
-                  ?? (await providers.engineStore.getThread(sessionId, threadId))?.key;
+                const live = engineSession.threadById(threadId);
+                const thread = live ? threadRef(live) : await providers.engineStore.getThread(sessionId, threadId);
                 // An unresolved thread has no audience yet. Recheck the next frame.
-                if (key === undefined) return false;
-                const shown = visible(key);
+                if (!thread) return false;
+                const shown = visible(thread);
                 checked.set(threadId, { shown, at: Date.now() });
                 return shown;
               };
