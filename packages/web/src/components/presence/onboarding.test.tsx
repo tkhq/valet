@@ -1,0 +1,37 @@
+// @vitest-environment jsdom
+/**
+ * The onboarding empty state (docs/specs/2026-10-16-presence-hub-design.md
+ * Part C step 8): with no place and no routine, Activity names where to start.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a className={className} href={to}>{children}</a>,
+}));
+vi.mock("~/components/workflows/trigger-dialog", () => ({
+  TriggerDialog: ({ schedulesOnly }: { schedulesOnly?: boolean }) => <p>{schedulesOnly ? "New routine dialog" : "Other dialog"}</p>,
+}));
+
+import { Onboarding } from "./onboarding";
+
+afterEach(cleanup);
+
+describe("Onboarding", () => {
+  it("names the state and links each service to Integrations", () => {
+    render(<Onboarding />);
+    expect(screen.getByRole("heading", { level: 3, name: "Valet is not present anywhere yet." })).toBeTruthy();
+    for (const name of ["Connect Slack", "Connect GitHub", "Connect Linear"]) {
+      expect(screen.getByRole("link", { name: new RegExp(`^${name}`) }).getAttribute("href")).toBe("/integrations");
+    }
+  });
+
+  it("opens the routine dialog from or add a routine", () => {
+    render(<Onboarding />);
+    expect(screen.getByText(/^or/).textContent).toBe("or add a routine");
+    expect(screen.queryByText("New routine dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "add a routine" }));
+    expect(screen.getByText("New routine dialog")).toBeTruthy();
+  });
+});

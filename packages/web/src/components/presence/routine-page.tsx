@@ -1,16 +1,17 @@
 /**
- * One routine's page (docs/specs/2026-10-16-presence-hub-design.md Part D
- * step 2): the sentence, fire now, edit, enable or disable, and the run or
- * delivery history. A routine the scheduler turned off for an archived
- * thread shows its problem with the thread picker inline. A pick repins the
- * routine and turns it on again.
+ * One routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
+ * step 2): the sentence as the title, the fact strip (When, Do, Runs in),
+ * edit, fire now, enable or disable, and the run or delivery history. A
+ * routine the scheduler turned off for an archived thread shows its problem
+ * with the thread picker inline. A pick repins the routine and turns it on
+ * again.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { TeamSummary, WorkflowRunSummary } from "@valet/api/wire";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
-import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers } from "~/api/workflows";
+import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
 import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
@@ -18,7 +19,8 @@ import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { PresenceDetailPage } from "./page-shell";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
-import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routines-tab";
+import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routines-pane";
+import { routineDoes, runsInLabel, scheduleInWords, type ThreadTitles, type WorkflowNames } from "./sentences";
 
 /** The run id prefix the scheduler gives a schedule's runs
  * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
@@ -50,9 +52,13 @@ export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
   const triggersQ = useWorkflowTriggers();
   const routine = (triggersQ.data?.triggers ?? []).filter(isRoutine).find((r) => r.id === id);
+  const sentenceFor = useRoutineSentence(routine === undefined ? [] : [routine]);
   const name = routine?.name ?? "Routine";
   return (
-    <PresenceDetailPage crumbs={[{ label: "Routines", to: "/presence/routines" }, { label: name }]} title={name}>
+    <PresenceDetailPage
+      crumbs={[{ label: "Routines", to: "/presence/routines" }, { label: name }]}
+      title={routine === undefined ? name : sentenceFor(routine)}
+    >
       {triggersQ.isPending && <LoadingRow />}
       {triggersQ.isError && (
         <ErrorRow>{errorText(triggersQ.error, "Could not load this routine. Reload the page to try again.")}</ErrorRow>
@@ -65,8 +71,26 @@ export function RoutinePage({ id }: { id: string }) {
   );
 }
 
+/** The fact strip's values (spec Part E step 2). A workflow routine starts
+ * a run, not a thread, so it has no Runs in. */
+export function routineFacts(
+  routine: Routine,
+  workflows: WorkflowNames,
+  threads: ThreadTitles,
+  pinTitle: string | undefined,
+): readonly { term: string; value: string }[] {
+  const facts = [
+    { term: "When", value: scheduleInWords(routine.detail.cron, routine.detail.timezone) },
+    { term: "Do", value: routineDoes(routine, workflows, threads) },
+  ];
+  if (routine.detail.targetKind === "assistant") {
+    facts.push({ term: "Runs in", value: runsInLabel(routine.detail.thread ?? { mode: "own" }, null, "routine", pinTitle) });
+  }
+  return facts;
+}
+
 function RoutineBody({ routine }: { routine: Routine }) {
-  const sentenceFor = useRoutineSentence([routine]);
+  const workflows = useWorkflows();
   const pin = routine.detail.thread?.mode === "existing" ? routine.detail.thread : undefined;
   const pinTitles = usePinnedThreadTitle(pin);
   const pinThreadTitle = pin ? pinTitles[pin.threadId]?.title ?? undefined : undefined;
@@ -97,12 +121,21 @@ function RoutineBody({ routine }: { routine: Routine }) {
   return (
     <div className="space-y-8">
       <section aria-label="Routine" className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="min-w-0 text-base text-ink [overflow-wrap:anywhere]">{sentenceFor(routine)}</p>
+        <div className="flex flex-wrap items-start gap-3">
+          <dl aria-label="Facts" className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
+            {routineFacts(routine, workflows.data?.workflows ?? [], pinTitles, pinThreadTitle).map((fact) => (
+              <div key={fact.term} className="contents">
+                <dt className="text-muted">{fact.term}</dt>
+                <dd className="text-ink [overflow-wrap:anywhere]">{fact.value}</dd>
+              </div>
+            ))}
+          </dl>
           <ProblemBadge problem={routine.detail.disabledReason} />
         </div>
         <p className="text-sm text-muted">{routineWhen(routine)}</p>
         <div className="flex flex-wrap items-center gap-3">
+          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+          <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
           <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <Switch
               checked={routine.enabled}
@@ -112,8 +145,6 @@ function RoutineBody({ routine }: { routine: Routine }) {
             />
             {routine.enabled ? "On" : "Off"}
           </label>
-          <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
-          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
         </div>
         {readOnly && !routine.detail.disabledReason && <p className="text-xs text-muted">Only its owner can change this routine.</p>}
         {message && (

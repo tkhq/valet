@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * The Log merges this workspace's events and the organization's problems.
- * These cases pin the owner it asks for (it waits for the owner), the two
- * chips, and how each kind of row reads.
+ * These cases pin the owner it asks for (it waits for the owner), the
+ * chips (All, Problems, one per service), the receipts disclosure, and how
+ * each kind of row reads.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -94,14 +95,30 @@ describe("EventLog", () => {
     expect(screen.getByText("Failed")).toBeTruthy();
   });
 
-  it("offers raw receipts to admins only, in place of the list", () => {
+  it("keeps only a service's rows on its chip, and still asks for the whole Log", () => {
+    items = [event, problem];
+    renderLog("slack");
+    expect(lastParams?.problems).toBe(false);
+    expect(screen.getByRole("button", { name: "Slack" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("link", { name: "Pr opened in acme/app#7" })).toBeNull();
+    expect(screen.getByText(/The text did not match\./)).toBeTruthy();
+  });
+
+  it("offers receipts to admins only, under a disclosure beside the list", () => {
     renderLog();
-    expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
+    expect(screen.queryByText("Receipts", { selector: "summary" })).toBeNull();
     cleanup();
     role = "admin";
-    renderLog("receipts");
+    items = [event];
+    renderLog();
+    const disclosure = screen.getByText("Receipts", { selector: "summary" }).closest("details")!;
+    expect(screen.queryByText("Receipts list")).toBeNull();
+    disclosure.open = true;
+    fireEvent(disclosure, new Event("toggle"));
     expect(screen.getByText("Receipts list")).toBeTruthy();
-    expect(lastParams?.owner).toBeUndefined();
+    // The list stays, scoped to the workspace.
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" })).toBeTruthy();
+    expect(lastParams?.owner).toEqual({ ownerType: "user", ownerId: "u1" });
   });
 });
 
@@ -109,10 +126,8 @@ it("opts into diagnostics and stops requesting them when switched off", () => {
   role = "admin";
   renderLog();
   expect(lastParams?.diagnostics).toBe(false);
-  expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
   fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
   expect(lastParams?.diagnostics).toBe(true);
-  expect(screen.getByRole("button", { name: "Raw receipts" })).toBeTruthy();
   fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
   expect(lastParams?.diagnostics).toBe(false);
 });

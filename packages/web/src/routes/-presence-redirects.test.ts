@@ -60,18 +60,18 @@ describe("presence redirect table", () => {
       activity: { q: "deploy" },
       logs: { q: "deploy" },
       problems: { status: "problems", q: "deploy" },
-      receipts: { status: "receipts", q: "deploy" },
+      receipts: { q: "deploy" },
     };
     it.each(LEGACY_EVENTS_TABS)("tab=%s", (tab) => {
       expect(target("/events", {}, { tab, q: "deploy" })).toEqual({ to: "/presence/activity", params: {}, search: expected[tab] });
     });
   });
 
-  it("maps tab=receipts&status=problems as the Events page did: the tab wins", () => {
+  it("maps tab=receipts&status=problems as the Events page did: the tab wins, and receipts open the whole Log", () => {
     expect(target("/events", {}, { tab: "receipts", status: "problems" })).toEqual({
       to: "/presence/activity",
       params: {},
-      search: { status: "receipts" },
+      search: {},
     });
   });
 

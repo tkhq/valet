@@ -12,7 +12,7 @@ import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
 import { placeSubjectsForRule } from "./places";
-import { isRoutine } from "./routines-tab";
+import { isRoutine } from "./routines-pane";
 
 /** How far back a dead delivery counts. */
 export const PROBLEM_WINDOW_MS = 24 * 60 * 60 * 1000;

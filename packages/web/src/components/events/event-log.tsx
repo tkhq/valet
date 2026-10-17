@@ -1,6 +1,8 @@
 /** Workspace delivery history, with organization-wide diagnostics available
- * on request. The Activity tab renders it; each stored event reads as an
- * activity sentence (`~/components/presence/activity-row`). */
+ * on request. The Activity pane renders it; each stored event reads as an
+ * activity sentence (`~/components/presence/activity-row`). The chips are
+ * `All`, `Problems`, and one per service (spec 2026-10-16 presence hub,
+ * Part F step 2); receipts sit under a disclosure for admins. */
 import { useState } from "react";
 import type { EventLogItem } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
@@ -13,72 +15,87 @@ import { problemStage, reasonLabel } from "~/lib/event-log-labels";
 import { ActivityRow, LOG_STATUS_META, useWorkflowsByListener } from "~/components/presence/activity-row";
 import { ReceiptsPanel } from "./receipts-panel";
 
-export type LogFilter = "all" | "problems" | "receipts";
+/** A service the Activity chips filter by. */
+export type LogService = "slack" | "github" | "linear";
+
+/** One chip: the whole Log, its problems, or one service's rows. */
+export type LogFilter = "all" | "problems" | LogService;
 
 const FILTERS: readonly { value: LogFilter; label: string }[] = [
   { value: "all", label: "All" },
   { value: "problems", label: "Problems" },
+  { value: "slack", label: "Slack" },
+  { value: "github", label: "GitHub" },
+  { value: "linear", label: "Linear" },
 ];
+
+/** The rows a service chip keeps: those whose event key starts with `<service>.`.
+ * The server has no service filter, so the Log filters the loaded pages. */
+export function itemsForFilter(items: readonly EventLogItem[], filter: LogFilter): EventLogItem[] {
+  if (filter === "all" || filter === "problems") return [...items];
+  return items.filter((item) => item.eventKey?.startsWith(`${filter}.`) ?? false);
+}
 
 export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
   filter: LogFilter;
   onFilterChange: (next: LogFilter) => void;
+  /** The place search; the server matches it against the stored events. */
   query: string;
   onQueryChange: (next: string) => void;
 }) {
   const me = useMe();
   const admin = !me.error && me.data?.orgRole === "admin";
   const owner = useListOwner();
-  const [showDiagnostics, setShowDiagnostics] = useState(filter === "receipts");
-  const receipts = showDiagnostics && filter === "receipts" && admin;
-  const log = useEventLog({ owner: receipts ? undefined : owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}) });
-  const items = log.data?.pages.flatMap((page) => page.items) ?? [];
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [receiptsOpen, setReceiptsOpen] = useState(false);
+  const log = useEventLog({ owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}) });
+  const items = itemsForFilter(log.data?.pages.flatMap((page) => page.items) ?? [], filter);
   const first = log.data?.pages[0];
   const workflowsByListener = useWorkflowsByListener();
 
   return (
     <div className="space-y-4">
-      <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={showDiagnostics} onChange={event => { setShowDiagnostics(event.target.checked); if (!event.target.checked && filter === "receipts") onFilterChange("all"); }} />Show diagnostics</label>
-      <FilterChips
-        label="Show"
-        value={receipts ? "receipts" : filter === "receipts" ? "all" : filter}
-        onChange={onFilterChange}
-        options={admin && showDiagnostics ? [...FILTERS, { value: "receipts", label: "Raw receipts" }] : FILTERS}
+      <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={showDiagnostics} onChange={event => setShowDiagnostics(event.target.checked)} />Show diagnostics</label>
+      <FilterChips label="Show" value={filter} onChange={onFilterChange} options={FILTERS} />
+      <SearchInput
+        value={query}
+        onSettled={onQueryChange}
+        placeholder="Place"
+        aria-label="Place"
+        maxLength={200}
       />
-      {receipts ? <ReceiptsPanel /> : <>
-        <SearchInput
-          value={query}
-          onSettled={onQueryChange}
-          placeholder="Search events and problems"
-          aria-label="Search the log"
-          maxLength={200}
-        />
-        {first && (
-          <p className="text-xs text-muted">
-            {showDiagnostics && first.lastEventAt ? `Last incoming activity ${relativeTime(first.lastEventAt)}. ` : ""}
-            Activity from the last {first.windowDays} days. If you turn something off in Presence, its new deliveries stop. Existing history stays visible.
-            {showDiagnostics && " Diagnostics also include incoming events and problems from the whole organization."}
-          </p>
-        )}
-        {owner === undefined && me.isError && <ErrorRow>Could not load your workspace. Reload the page to try again.</ErrorRow>}
-        {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
-        {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
-        {log.data && items.length === 0 && (
-          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
-        )}
-        {items.length > 0 && (
-          <WorkList>
-            {groupLogItems(items).map(({ item, count }) => item.kind === "event"
-              ? <ActivityRow key={`event:${item.id}`} item={item} workflowsByListener={workflowsByListener} />
-              : <ProblemRow key={`problem:${item.id}`} item={item} count={count} />)}
-          </WorkList>
-        )}
-        {log.hasNextPage && (
-          <Button variant="secondary" size="sm" disabled={log.isFetchingNextPage} onClick={() => void log.fetchNextPage()}>
-            {log.isFetchingNextPage ? "Loading…" : "Load more"}
-          </Button>
-        )}
-      </>}
+      {admin && (
+        <details onToggle={(event) => setReceiptsOpen(event.currentTarget.open)} className="text-sm">
+          <summary className="cursor-pointer text-muted hover:text-ink">Receipts</summary>
+          {/* The receipts list loads only when the reader opens it. */}
+          {receiptsOpen && <div className="mt-3"><ReceiptsPanel /></div>}
+        </details>
+      )}
+      {first && (
+        <p className="text-xs text-muted">
+          {showDiagnostics && first.lastEventAt ? `Last incoming activity ${relativeTime(first.lastEventAt)}. ` : ""}
+          Activity from the last {first.windowDays} days. If you turn something off in Presence, its new deliveries stop. Existing history stays visible.
+          {showDiagnostics && " Diagnostics also include incoming events and problems from the whole organization."}
+        </p>
+      )}
+      {owner === undefined && me.isError && <ErrorRow>Could not load your workspace. Reload the page to try again.</ErrorRow>}
+      {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
+      {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
+      {log.data && items.length === 0 && (
+        <EmptyRow>{query || filter !== "all" ? "Nothing matches. Choose All or clear Place." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
+      )}
+      {items.length > 0 && (
+        <WorkList>
+          {groupLogItems(items).map(({ item, count }) => item.kind === "event"
+            ? <ActivityRow key={`event:${item.id}`} item={item} workflowsByListener={workflowsByListener} />
+            : <ProblemRow key={`problem:${item.id}`} item={item} count={count} />)}
+        </WorkList>
+      )}
+      {log.hasNextPage && (
+        <Button variant="secondary" size="sm" disabled={log.isFetchingNextPage} onClick={() => void log.fetchNextPage()}>
+          {log.isFetchingNextPage ? "Loading…" : "Load more"}
+        </Button>
+      )}
     </div>
   );
 }

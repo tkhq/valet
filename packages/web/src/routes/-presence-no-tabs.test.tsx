@@ -123,7 +123,7 @@ describe("INV-H5: the rail is the only navigation under the top nav", () => {
 
   it("lands /presence on Activity", async () => {
     mountApp("/presence");
-    expect(await screen.findByRole("searchbox", { name: "Search the log" })).toBeTruthy();
+    expect(await screen.findByRole("searchbox", { name: "Place" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Activity" }).getAttribute("aria-current")).toBe("page");
   });
 

@@ -6,7 +6,7 @@ import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { PresenceRow, usePresenceSentence } from "~/components/presence/presence-rows";
 import { ProblemBadge } from "~/components/presence/problem-badge";
-import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routines-tab";
+import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routines-pane";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { WebhookSection } from "./webhook-section";

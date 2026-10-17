@@ -1,10 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { RoutinePage } from "~/components/presence/routine-page";
-import { RoutinesTab } from "~/components/presence/routines-tab";
+import { RoutinesPane } from "~/components/presence/routines-pane";
 
 /** `/presence/routines`: what Valet does at a set time. It replaces the
  * Scheduled tab of `/workflows`. `?routine=<id>` opens one routine's page in
- * the tab. */
+ * the pane. */
 export const Route = createFileRoute("/presence/routines")({
   validateSearch: (search: Record<string, unknown>): { routine?: string } =>
     typeof search.routine === "string" && search.routine.length > 0 ? { routine: search.routine } : {},
@@ -13,5 +13,5 @@ export const Route = createFileRoute("/presence/routines")({
 
 function RoutinesRoute() {
   const { routine } = Route.useSearch();
-  return routine === undefined ? <RoutinesTab /> : <RoutinePage id={routine} />;
+  return routine === undefined ? <RoutinesPane /> : <RoutinePage id={routine} />;
 }

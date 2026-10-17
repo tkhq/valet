@@ -80,7 +80,7 @@ function Frame({ label, className, children }: { label: string; className?: stri
   );
 }
 
-/** The log's filter and search live in its page's URL; here they are local. */
+/** The log's chip and place search live in its page's URL; here they are local. */
 function EventLogSection() {
   const [filter, setFilter] = useState<LogFilter>("all");
   const [query, setQuery] = useState("");

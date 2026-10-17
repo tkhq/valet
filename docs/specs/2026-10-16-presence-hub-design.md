@@ -434,6 +434,13 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
 - **A workflow line has no Runs in fact (Part D step 1).** A workflow
   target starts a run, not a thread, so its fact strip shows When, Do, and
   Appears as.
+- **The service chips filter in the browser (Part F step 2).** The log
+  route has no service filter. A service chip keeps the loaded rows whose
+  event key starts with `<service>.`, so a page can show fewer rows than it
+  loaded. The place search sends `q`, which the server matches.
+- **Receipts leave the chips (Part F step 2).** Admins open receipts under
+  a `Receipts` disclosure beside the list. The old `status=receipts` value
+  and the `/events?tab=receipts` redirect open the whole Log.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, the routine

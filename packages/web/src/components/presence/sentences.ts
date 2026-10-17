@@ -358,7 +358,7 @@ export function cronInWords(cron: string): string {
 }
 
 /** The `<do>` of a routine (spec Part E step 1). */
-function routineDoes(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
+export function routineDoes(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
   if (routine.detail.targetKind === "workflow") {
     return `run ${workflowName(workflows, routine.workflowId) ?? "a workflow"}`;
   }
@@ -376,7 +376,7 @@ function routineDoes(routine: RoutineLike, workflows: WorkflowNames, threads: Th
 }
 
 /** The schedule in words, with the timezone in parentheses when it is not UTC. */
-function scheduleInWords(cron: string, timezone: string | undefined): string {
+export function scheduleInWords(cron: string, timezone: string | undefined): string {
   const words = cronInWords(cron);
   return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? words : `${words} (${timezone})`;
 }

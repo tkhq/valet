@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The Routines tab and a routine's page (docs/specs/2026-10-16-presence-hub-design.md
- * Part D; acceptance H8): each routine as one sentence with its timezone when
- * not UTC, fire now, edit, enable or disable, the history, and the problem
- * badge with the picker inline.
+ * A routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
+ * step 2): the sentence as the title, the fact strip, fire now, edit, enable
+ * or disable, the history, and the problem with the picker inline.
  *
  * The api client is mocked at the transport, so the real query hooks run.
  */
@@ -84,7 +83,6 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
-import { RoutinesTab } from "./routines-tab";
 import { RoutinePage, routineReadOnly } from "./routine-page";
 
 const PIN_TEXT = "Pick another thread for this rule in Presence.";
@@ -142,38 +140,10 @@ beforeEach(() => {
   listThreads.mockResolvedValue({ threads: [] });
 });
 
-describe("RoutinesTab", () => {
-  it("lists routines as sentences, with the timezone when not UTC, and no listeners (H8)", async () => {
-    wrap(<RoutinesTab />);
-    expect(await screen.findByRole("link", { name: "Every day at 9:00, Morning summary: work in its own thread." })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Every weekday at 8:30 (America/Denver), Standup: work in a new thread each time." })).toBeTruthy();
-    expect(await screen.findByRole("link", { name: "Every day at 2:00, Nightly build: run Build." })).toBeTruthy();
-    expect(screen.queryByText(/On push/)).toBeNull();
-    expect(screen.getByRole("link", { name: "Every day at 9:00, Morning summary: work in its own thread." }).getAttribute("href"))
-      .toBe("/presence/routines?routine=S1");
-    expect(listWorkflowTriggers).toHaveBeenCalledWith({ ownerType: "user", ownerId: "u-001" });
-  });
-
-  it("fires a routine now from its row", async () => {
-    wrap(<RoutinesTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "Fire Morning summary now" }));
-    await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
-  });
-
-  it("badges a routine the scheduler turned off for an archived thread", async () => {
-    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { enabled: false, detail: { disabledReason: PIN_TEXT } })] });
-    wrap(<RoutinesTab />);
-    expect(await screen.findByText("Thread archived")).toBeTruthy();
-    // The row says Off once, on its second line.
-    expect(screen.getAllByText("Off")).toHaveLength(1);
-  });
-
-  it("opens the dialog for a new routine", async () => {
-    wrap(<RoutinesTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "New routine" }));
-    expect(screen.getByText("New routine dialog")).toBeTruthy();
-  });
-});
+/** The fact strip as [term, value] pairs. */
+function factsOf(strip: HTMLElement): string[][] {
+  return Array.from(strip.querySelectorAll("dt")).map((dt) => [dt.textContent ?? "", dt.nextElementSibling?.textContent ?? ""]);
+}
 
 describe("RoutinePage", () => {
   it("shows the sentence and offers fire now, edit, and disable", async () => {
@@ -186,6 +156,34 @@ describe("RoutinePage", () => {
     expect(screen.getByText("Editing Morning summary")).toBeTruthy();
     fireEvent.click(screen.getByRole("switch", { name: "Turn off Morning summary" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", { enabled: false }));
+  });
+
+  it("titles the page with the sentence under a Routines breadcrumb", async () => {
+    wrap(<RoutinePage id="S1" />);
+    const title = await screen.findByRole("heading", { level: 2, name: "Every day at 9:00, Morning summary: work in its own thread." });
+    expect(title).toBeTruthy();
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(within(crumbs).getByRole("link", { name: "Routines" }).getAttribute("href")).toBe("/presence/routines");
+    expect(within(crumbs).getByText("Morning summary")).toBeTruthy();
+  });
+
+  it("shows When, Do, and Runs in for an assistant routine, with the timezone when not UTC", async () => {
+    wrap(<RoutinePage id="S2" />);
+    const strip = await screen.findByLabelText("Facts");
+    expect(factsOf(strip)).toEqual([
+      ["When", "Every weekday at 8:30 (America/Denver)"],
+      ["Do", "work in a new thread each time"],
+      ["Runs in", "A new thread each time"],
+    ]);
+  });
+
+  it("shows When and Do, and no Runs in, for a workflow routine", async () => {
+    wrap(<RoutinePage id="S3" />);
+    const strip = await screen.findByLabelText("Facts");
+    await waitFor(() => expect(factsOf(strip)).toEqual([
+      ["When", "Every day at 2:00"],
+      ["Do", "run Build"],
+    ]));
   });
 
   it("names a pinned thread from the archived list", async () => {

@@ -1,24 +1,24 @@
 /**
- * The Routines tab (docs/specs/2026-10-16-presence-hub-design.md Part D): the
- * active workspace's routines, each as one sentence. A row opens the
- * routine's page, fires the routine now, and carries a problem badge when
- * the scheduler turned the routine off.
+ * The Routines pane (docs/specs/2026-10-16-presence-hub-design.md Part E
+ * step 1): the active workspace's routines, each as one sentence with
+ * `Next: <time>` or `Off`, an on/off switch, and Fire now. A row opens the
+ * routine's page and carries a problem badge when the scheduler turned the
+ * routine off.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 import { usePinnedThreadTitles } from "~/api/rule";
-import { useRunScheduleNow, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
-import { Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
-import { retryPhrase } from "~/components/events/delivery-copy";
+import { useRunScheduleNow, useUpdateSchedule, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
+import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { ProblemBadge } from "./problem-badge";
 import { routineSentence } from "./sentences";
 
-/** A schedule row of the triggers list: what the Routines tab lists. */
+/** A schedule row of the triggers list: what the Routines pane lists. */
 export type Routine = Extract<WorkflowTriggerItem, { kind: "schedule" }>;
 
 export function isRoutine(item: WorkflowTriggerItem): item is Routine {
@@ -34,19 +34,20 @@ export function useRoutineSentence(routines: readonly Routine[]): (routine: Rout
   return (routine) => routineSentence(routine, names, pinned);
 }
 
-/** When the routine fires next, or that it is off. */
+/** When the routine fires next (spec Part E step 1: `Next: <time>`), or that it is off. */
 export function routineWhen(routine: Routine, now: number = Date.now()): string {
   if (!routine.enabled) return "Off";
-  const wait = routine.detail.nextFireAt - now;
-  return wait <= 0 ? "Due now" : `Fires next ${retryPhrase(wait)}`;
+  const next = routine.detail.nextFireAt;
+  return next - now <= 0 ? "Due now" : `Next: ${new Date(next).toLocaleString()}`;
 }
 
-export function RoutinesTab() {
+export function RoutinesPane() {
   const owner = useListOwner();
   const triggersQ = useWorkflowTriggers(undefined, owner, { enabled: owner !== undefined });
   const routines = (triggersQ.data?.triggers ?? []).filter(isRoutine);
   const sentence = useRoutineSentence(routines);
   const fire = useRunScheduleNow();
+  const update = useUpdateSchedule();
   const [creating, setCreating] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
 
@@ -54,6 +55,13 @@ export function RoutinesTab() {
     setMessage(null);
     fire.mutate(routine.id, {
       onSuccess: () => setMessage({ text: `Fired ${routine.name}. It runs now.`, error: false }),
+      onError: (err) => setMessage({ text: errorText(err), error: true }),
+    });
+  }
+
+  function setEnabled(routine: Routine, enabled: boolean) {
+    setMessage(null);
+    update.mutate({ id: routine.id, body: { enabled } }, {
       onError: (err) => setMessage({ text: errorText(err), error: true }),
     });
   }
@@ -85,9 +93,17 @@ export function RoutinesTab() {
             badge={<ProblemBadge problem={routine.detail.disabledReason} />}
             detail={routineWhen(routine)}
             actions={(
-              <Button size="sm" variant="ghost" disabled={fire.isPending} onClick={() => fireNow(routine)} aria-label={`Fire ${routine.name} now`}>
-                Fire now
-              </Button>
+              <>
+                <Switch
+                  checked={routine.enabled}
+                  disabled={update.isPending}
+                  onCheckedChange={(enabled) => setEnabled(routine, enabled)}
+                  aria-label={`${routine.enabled ? "Turn off" : "Turn on"} ${routine.name}`}
+                />
+                <Button size="sm" variant="ghost" disabled={fire.isPending} onClick={() => fireNow(routine)} aria-label={`Fire ${routine.name} now`}>
+                  Fire now
+                </Button>
+              </>
             )}
           />
         ))}

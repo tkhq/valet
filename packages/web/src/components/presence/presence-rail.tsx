@@ -26,7 +26,7 @@ import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { SERVICE_NAMES, isMidGrain, isServiceRoot } from "./places";
-import { isRoutine } from "./routines-tab";
+import { isRoutine } from "./routines-pane";
 import { useProblemCount } from "./use-problem-count";
 
 export interface RailPlace {

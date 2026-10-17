@@ -88,11 +88,13 @@ const sameParams = (params: Params): Params => params;
 
 /** The Log's filters as the Events page read them: `tab=problems` and
  * `tab=receipts` set the status and win over `status`; `status` keeps only
- * `problems` or `receipts`; the old `problemsQ` search fills an absent `q`. */
+ * `problems`; the old `problemsQ` search fills an absent `q`. The old
+ * `receipts` value opens the whole Log, because receipts now sit under
+ * their own disclosure in Activity. */
 function activitySearch(search: Search): Search {
   const tab = text(search, "tab");
   const statusValue = tab === "receipts" || tab === "problems" ? tab : text(search, "status");
-  const status = statusValue === "problems" || statusValue === "receipts" ? statusValue : undefined;
+  const status = statusValue === "problems" ? statusValue : undefined;
   const q = text(search, "q") ?? text(search, "problemsQ");
   return {
     ...without(search, "tab", "status", "q", "problemsQ"),
