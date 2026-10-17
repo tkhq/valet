@@ -445,6 +445,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach|workflow. " +
       "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
+      "Saving through an agent does not approve actions or shared accounts. " +
+      "Ask the owner or team admin to open the workflow and review its permissions once before unattended runs. " +
       "Returns { workflowId } — always surface it to the user.",
     riskLevel: "medium",
     execute: async ({ workflow_id, name, definition }, ctx) => {

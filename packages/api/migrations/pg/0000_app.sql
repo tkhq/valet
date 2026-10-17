@@ -2727,3 +2727,13 @@ CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");
+
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "workflow_account_grants" (
+  "org_id" text NOT NULL, "workflow_id" text NOT NULL, "team_id" text NOT NULL,
+  "service" text NOT NULL, "member_id" text NOT NULL, "share_generation" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("org_id", "workflow_id", "team_id", "service", "member_id")
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workflow_account_grants_share" ON "workflow_account_grants" ("team_id", "service", "member_id");

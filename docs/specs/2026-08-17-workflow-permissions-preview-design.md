@@ -136,3 +136,33 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
   after the save (the detail invalidation refetches it).
 - `unknown` actions are excluded from both the badge and the bulk allow; a
   run that reaches one can still gate on its resolved risk level.
+
+
+## Human save authorization (2026-10-16)
+
+A browser save authorizes known direct tool actions for this workflow when the
+person owns it or administers its team. Explicit organization, team, and personal
+restrictions remain authoritative. Agent, CLI, MCP, and API-key saves do not grant
+new permissions. Agent-created workflows need one human permission review.
+
+For team workflows, a browser save also authorizes the saving person's accounts
+already shared with that team for the declared tool services. This includes
+services with dynamic tools and foreach tool bodies. `workflow_account_grants`
+binds consent to the organization, workflow, team, member, service, and current
+share generation. It does not grant team-wide account consent. Another member
+must approve their own account. Human review nodes remain explicit decisions.
+
+Borrowing checks the live run owner, actor, team membership, source account,
+share generation, and saved definition. A run with different steps cannot use
+this consent. Step edits retire all saved account consent. A human edit can
+renew only that person's consent. Agent and non-admin edits also revoke action
+grants, as before. Layout-only edits preserve grants.
+
+Definition saves, snapshots, revocation, and new grants commit together under
+the definition lock. The Review permissions action also authorizes the person's
+shared accounts, including when no action needs a policy grant. Reset saved
+permissions removes both kinds of grant. Existing workflows are not silently
+backfilled, and parked approval gates are not answered during deployment.
+
+The application schema repair adds the grant table and lookup index without
+deleting existing folders, workflows, credentials, or approval history.
