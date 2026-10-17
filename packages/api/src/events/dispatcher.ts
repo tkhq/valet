@@ -404,8 +404,10 @@ export class EventDispatcher {
           paused = changed.length > 0;
         }
         // Recover first: a crash before the skipped write runs this again,
-        // and `appendEventMatch` refuses a digest the waiter already holds,
-        // so a crash duplicates nothing and loses nothing.
+        // and `appendEventMatch` refuses a digest the waiter already holds for
+        // this event, so a crash loses nothing. Across the two halves of a
+        // Slack mention, the waiter can still get two digests with different
+        // dedupe keys. That duplication is accepted (spec Deviations).
         await this.recoverClaimedDigest(delivery.destination, event);
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
@@ -419,8 +421,8 @@ export class EventDispatcher {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
         // A verified mention carries a human actor. Other shared event work
-        // acts as its owner, never as the member who created the rule. The
-        // event waiter's mention rule reuses this gate (`mentionSenderActor`).
+        // acts as its owner, never as the member who created the rule. Claim
+        // resolution reuses this gate (`mentionSenderActor`).
         const actorUserId = await mentionSenderActor(db, sub, event.eventKey, event.payload);
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the

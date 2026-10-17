@@ -1,6 +1,6 @@
 /**
  * The digest a claimed waiter recovers when its claim delivery never lands
- * (spec 2026-10-16: delivery threads and claims, Part C step 5).
+ * (spec 2026-10-16: delivery threads and claims, Part C step 7).
  *
  * Ingest suppresses the digest of the waiter that a claim redirect targets,
  * because the delivery carries the event to that thread. The dispatcher can
