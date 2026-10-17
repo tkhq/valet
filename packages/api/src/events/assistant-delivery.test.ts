@@ -612,6 +612,51 @@ describe("deliverToAssistantThread — destinations (spec 2026-10-16: delivery t
     expect(admitted.rows).toHaveLength(0);
   });
 
+  it("records the Slack channel before the title shows and before the context fetch", async () => {
+    const owner = { type: "team", id: "team-first" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "First", createdAt: 1 });
+    const saves = vi.spyOn(PgSessionStore.prototype, "saveThread");
+    // Every titled thread the fetch could race with must already carry the channel.
+    const titledWithoutChannel = async () => {
+      const result = await testDb.appDb.execute(sql`SELECT id FROM engine_threads
+        WHERE metadata::jsonb ->> 'title' = 'First private' AND NOT COALESCE(metadata::jsonb -> 'slackChannels' ? 'CFIRST', false)`) as { rows: unknown[] };
+      return result.rows.length;
+    };
+    const governingWithoutChannel = async () => {
+      const result = await testDb.appDb.execute(sql`SELECT et.id FROM assistant_executions ae
+        JOIN assistants a ON a.id = ae.assistant_id
+        JOIN engine_threads et ON et.session_id = a.session_id AND et.id = ae.governing_thread_id
+        WHERE a.owner_id = ${owner.id} AND NOT COALESCE(et.metadata::jsonb -> 'slackChannels' ? 'CFIRST', false)`) as { rows: unknown[] };
+      return result.rows.length;
+    };
+    const seen: number[] = [];
+    const fetchThreadContext = vi.fn(async () => {
+      seen.push(await titledWithoutChannel(), await governingWithoutChannel());
+      return "Earlier messages";
+    });
+    try {
+      await deliverToAssistantThread({ db: testDb.appDb, engineHost, fetchThreadContext }, {
+        ...base, owner, destination: { kind: "key", key: "sub:rule-first", title: "First private" },
+        signal: { ...signal("first"), origin: { channelType: "slack", threadKey: "slack:CFIRST:1.1", reply: "auto" as const } },
+        dispatchId: "event:first-1", slackChannel: "CFIRST",
+      });
+      expect(fetchThreadContext).toHaveBeenCalledOnce();
+      expect(seen).toEqual([0, 0]);
+      // The write that creates each thread, the execution thread and its
+      // governing thread, holds both the title and the channel.
+      const firstWrites = new Map<string, Record<string, unknown> | undefined>();
+      for (const [, data] of saves.mock.calls) {
+        if (data.key === "sub:rule-first" && !firstWrites.has(data.id)) firstWrites.set(data.id, data.metadata);
+      }
+      expect(firstWrites.size).toBe(2);
+      for (const metadata of firstWrites.values()) {
+        expect(metadata).toMatchObject({ title: "First private", slackChannels: ["CFIRST"] });
+      }
+    } finally {
+      saves.mockRestore();
+    }
+  });
+
   it("records the Slack channel on a team rule thread and its governing thread", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const owner = { type: "team", id: "team-rules" } as const;

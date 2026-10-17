@@ -97,7 +97,7 @@ export class WorkflowScheduler {
   private async dispatch(
     schedule: typeof workflowSchedules.$inferSelect,
     slotMs: number,
-  ): Promise<"ok" | { error: string }> {
+  ): Promise<"ok" | { error: string; pinUnavailable?: true }> {
     const { db, workflowRunHost } = this.deps;
 
     if (schedule.targetKind === "orchestrator") {
@@ -138,11 +138,10 @@ export class WorkflowScheduler {
         });
       } catch (err) {
         // A pin that cannot receive deliveries never falls back to another
-        // mode (spec Part B step 4). The poll loop disables the schedule and
-        // logs this text; the counter pages a person.
+        // mode (spec Part B step 4). The poll loop disables the schedule,
+        // logs this text, and counts it (`fire`).
         if (!(err instanceof PinUnavailableError)) throw err;
-        recordDeliveryDestination("pin_unavailable");
-        return { error: PIN_UNAVAILABLE_MESSAGE };
+        return { error: PIN_UNAVAILABLE_MESSAGE, pinUnavailable: true };
       }
       recordDeliveryDestination(destinationMetricReason(destination));
       return "ok";
@@ -208,8 +207,13 @@ export class WorkflowScheduler {
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (result !== "ok") {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${result.error}`);
-      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
+      const disabled = await db.update(workflowSchedules).set({ enabled: false, updatedAt: now })
+        .where(and(eq(workflowSchedules.id, schedule.id), eq(workflowSchedules.enabled, true)))
+        .returning({ id: workflowSchedules.id });
+      // The counter pages a person once per dead pin: only the fire that
+      // disables the schedule counts, not a replica that re-fired the slot.
+      if (result.pinUnavailable && disabled.length > 0) recordDeliveryDestination("pin_unavailable");
       return;
     }
     await db
@@ -230,7 +234,8 @@ export class WorkflowScheduler {
     const schedule = await accessibleScheduleRow(db, owner, scheduleId);
     if (!schedule) return "not_found";
     const result = await this.dispatch(schedule, now);
-    if (result !== "ok") return result;
+    // A manual fire changes no state, so a dead pin is not counted here.
+    if (result !== "ok") return { error: result.error };
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, updatedAt: now })

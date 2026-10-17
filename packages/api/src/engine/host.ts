@@ -3926,7 +3926,7 @@ export class EngineHost {
     key: string,
     meta: SessionMeta,
     actorUserId = meta.userId,
-    init?: { title?: string },
+    init?: { title?: string; metadata?: Record<string, unknown> },
   ): Promise<Thread> {
     const existing = await session.threadByKey(key);
     if (existing) return existing;
@@ -3939,7 +3939,7 @@ export class EngineHost {
     if (inflight) return inflight;
     const creation = (async () => {
       const settings = await this.resolveFreshThreadSettings(session.id, meta, actorUserId);
-      return session.createThread(key, init?.title ? { ...settings, title: init.title } : settings);
+      return session.createThread(key, { ...settings, ...init });
     })();
     pending.set(key, creation);
     try {

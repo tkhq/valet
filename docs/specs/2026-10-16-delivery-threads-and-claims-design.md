@@ -319,7 +319,9 @@ event wakeups spec Part A.
    `policy_new`, `policy_subject`, `policy_own`, `policy_existing`,
    `conversation_follow`, `conversation_pull_request`, `claim_redirect`,
    `claim_skip`, `pin_unavailable`. A rising `pin_unavailable` pages a
-   person. No code repairs it. The chart's Grafana rule
+   person. No code repairs it. A schedule counts `pin_unavailable` once, on
+   the fire that disables it. A manual fire and a replica that re-fires the
+   same slot do not count again. The chart's Grafana rule
    `valet-event-delivery-pin-unavailable` (`deploy/chart/valet/alerts/events.yaml`)
    fires on the first increase.
 
@@ -405,7 +407,10 @@ event wakeups spec Part A.
   Without `follow`, each matching message opens its own thread.
 - **Channel privacy follows content.** Every Slack-sourced assistant
   delivery records its channel on the thread it lands in, in engine thread
-  `metadata.slackChannels`, and on a team execution's governing thread. The
+  `metadata.slackChannels`, and on a team execution's governing thread. A
+  new thread gets the channel in the write that creates it, with its title.
+  A thread that exists gets it before the title seed and the transcript
+  fetch. So no title lists before its read gate holds. The
   read gate (`services/thread-access.ts`) collects channels from the key
   (`slack:`, `slack-events:`, and `subject:slack:<team>/<channel>`) and from
   `metadata.slackChannels` of the thread and the threads above it. A reader

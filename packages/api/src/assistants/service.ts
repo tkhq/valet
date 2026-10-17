@@ -182,7 +182,7 @@ export async function ensureAssistantExecution(
   principal: Principal,
   meta: { actorUserId: string; orgId: string },
   conversationKey: string,
-  init?: { title?: string },
+  init?: { title?: string; metadata?: Record<string, unknown> },
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
   if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
   const root = await ensureDefaultAssistantSession(deps, principal, meta);

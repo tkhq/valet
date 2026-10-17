@@ -197,7 +197,7 @@ export async function deliverToAssistantThread(
   } else {
     ({ session } = await ensureAssistantExecution(deps, args.owner, {
       actorUserId: args.actorUserId, orgId: args.orgId,
-    }, destination.key, destination.title ? { title: destination.title } : undefined));
+    }, destination.key, newThreadInit(destination.title, args.slackChannel)));
   }
   const key = `${session.id}:${destination.kind === "key" ? destination.key : `thread:${destination.threadId}`}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
@@ -272,6 +272,19 @@ async function recordSlackChannel(deps: AssistantDeliveryDeps, session: Session,
   await root.threadById(governing.threadId)?.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, channel);
 }
 
+/**
+ * What a thread this delivery creates starts with: its policy title and the
+ * content's Slack channel, in the one write that creates it. A team
+ * execution's governing thread gets the same. So a title never lists before
+ * its read gate holds (thread-access.ts).
+ */
+function newThreadInit(title: string | undefined, slackChannel: string | undefined): { title?: string; metadata?: Record<string, unknown> } {
+  return {
+    ...(title ? { title } : {}),
+    ...(slackChannel ? { metadata: { [SLACK_CHANNELS_METADATA_KEY]: [slackChannel] } } : {}),
+  };
+}
+
 async function deliverToAssistantThreadInner(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
@@ -292,8 +305,12 @@ async function deliverToAssistantThreadInner(
     userId: data.userId,
     orgId: data.orgId,
     workspace: data.workspace,
-  }, args.actorUserId, destination.title ? { title: destination.title } : undefined);
+  }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
   if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
+  // Record the channel on a thread that already existed, and on a team
+  // execution's governing thread, before the title seed and the context
+  // fetch, so a reader outside a private channel never sees the content.
+  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
   if (destination.kind === "key") {
     // A thread found by key reopens on delivery (spec Part B step 4), and a
     // new one shows its policy title in the thread list.
@@ -330,9 +347,6 @@ async function deliverToAssistantThreadInner(
       throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
     }
   }
-  // Record the content's Slack channel before the content lands, so a
-  // reader outside a private channel never sees it (thread-access.ts).
-  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
   const metadata = {
     ...(args.presence ? { presence: args.presence } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
