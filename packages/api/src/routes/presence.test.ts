@@ -190,6 +190,25 @@ it("hides a private channel's place from a viewer outside the channel", async ()
   expect((await places(api, "user")).map((row) => row.subject).sort()).toEqual(["slack:T1", "slack:T1/COPEN"]);
 });
 
+it("resolves a channel-only Slack key to the org's Slack workspace", async () => {
+  api = await boot();
+  // With no Slack workspace connected, a channel-only key names no place.
+  const unplaced = await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("slack:C900")}?scope=user`);
+  expect(unplaced.status).toBe(404);
+  expect(await unplaced.json()).toEqual({ error: "That Slack channel has no workspace in its link. Pick the channel from Places." });
+
+  await connectSlack(api);
+  await rule(api, { id: "r-inc", eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: "C900" }] });
+  const res = await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("slack:C900")}?scope=user`);
+  expect(res.status).toBe(200);
+  const detail = await res.json() as PresencePlaceDetailResponse;
+  expect(detail.place).toMatchObject({ subject: "slack:T1/C900", service: "slack" });
+  expect(detail.listeners.map((l) => l.id)).toEqual(["r-inc"]);
+  // The workspace key itself still opens the workspace row.
+  const top = await (await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("slack:T1")}?scope=user`)).json() as PresencePlaceDetailResponse;
+  expect(top.place.subject).toBe("slack:T1");
+});
+
 it("shows one place with its listeners, threads of its child places, and recent activity", async () => {
   api = await boot();
   await connectSlack(api);

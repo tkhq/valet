@@ -453,7 +453,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
     expect(await threadsLike(api, "subject:%")).toHaveLength(1);
     // The delivery list names the thread (Part E step 2).
     const t1Event = (await (await call(api, "GET", `/api/events/${t1[0]?.eventId}`)).json()) as GetEventResponse;
-    expect(t1Event.deliveries.find((d) => d.id === t1[0]?.id)?.thread).toEqual({ sessionId: pr12.sessionId, threadId: pr12.id });
+    expect(t1Event.deliveries.find((d) => d.id === t1[0]?.id)?.thread).toEqual({ sessionId: pr12.sessionId, threadId: pr12.id, title: "acme/api#12" });
 
     // T2: a check run completes on #12. The same thread holds it.
     await postGithub(api, "check_run", checkRun("test", "success", [12]));

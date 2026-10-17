@@ -124,7 +124,7 @@ it("says a run waits for approval and where to read who can approve it", () => {
   const text = approvalReport("Dashboard", "run-1");
   expect(text).toContain('Workflow "Dashboard" is waiting for approval.');
   expect(text).toContain("pendingGates lists every step that waits");
-  expect(text).toContain("/workflows/runs/run-1");
+  expect(text).toContain("/presence/runs/run-1");
 });
 
 it("lets a team completion inspect its private run as the starting member", async () => {

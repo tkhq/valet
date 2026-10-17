@@ -321,6 +321,8 @@ describe("GET /api/workflows/triggers", () => {
     expect(schedule).toBeDefined();
     expect(event).toBeDefined();
     expect(schedule!.detail).toHaveProperty("cron", VALID_CRON);
+    // The routine page scopes its thread picker to the schedule's owner.
+    expect(schedule!.detail).toMatchObject({ ownerType: "user", ownerId: "local-user" });
     expect(event!.workflowId).toBe(wfId);
   });
 

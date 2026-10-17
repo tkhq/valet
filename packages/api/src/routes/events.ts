@@ -481,12 +481,24 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
     list.push(wire[index]!);
     byEvent.set(row.eventId, list);
   });
+  // A skipped row's detail is one of its deliveries' raw skip text. A claim
+  // names the claiming thread's id, so the detail takes the delivery's
+  // shown text, which withholds a thread this request may not open.
+  const shownDetail = new Map<string, string | null>();
+  deliveryRows.forEach((row, index) => {
+    if (row.lastError !== null) shownDetail.set(`${row.eventId}\n${row.lastError}`, wire[index]!.lastError);
+  });
   return items.map((item) => {
     if (item.kind !== "event") return item;
     const place = places.get(item.id);
-    return { ...item, ...(place !== undefined ? { place } : {}), deliveries: byEvent.get(item.id) ?? [] };
+    const detail = item.detail === null ? null
+      : shownDetail.get(`${item.id}\n${item.detail}`) ?? (CLAIM_DETAIL.test(item.detail) ? CLAIMED_ELSEWHERE : item.detail);
+    return { ...item, detail, ...(place !== undefined ? { place } : {}), deliveries: byEvent.get(item.id) ?? [] };
   });
 }
+
+/** The raw skip text of a claimed delivery, which names the claiming thread's id. */
+const CLAIM_DETAIL = /^Skipped, claimed by thread /;
 
 /** Whether this request may see an event. A Slack event from a private
  * channel shows only to the channel's members (`services/thread-access.ts`),
@@ -508,6 +520,7 @@ async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: 
  */
 async function deliveryThreads(
   c: Context<AppEnv>,
+  readable: ThreadChecker,
   deliveryIds: string[],
 ): Promise<Map<string, EventDeliveryThreadRef>> {
   const found = new Map<string, EventDeliveryThreadRef>();
@@ -526,8 +539,6 @@ async function deliveryThreads(
     ORDER BY q.created_at`) as {
     rows: Array<ThreadAccessRow & { dispatch_id: string }>;
   };
-  // A Log page repeats threads, so each thread is checked once per request.
-  const readable = readableThreads(c);
   for (const row of result.rows) {
     const deliveryId = byDispatchId.get(row.dispatch_id);
     if (deliveryId === undefined || found.has(deliveryId)) continue;
@@ -553,7 +564,9 @@ interface ThreadAccessRow {
  * admits), then `threadsVisibleTo` on the thread's key. It remembers each
  * thread's answer for the life of the checker.
  */
-function readableThreads(c: Context<AppEnv>): (row: ThreadAccessRow) => Promise<EventDeliveryThreadRef | null> {
+type ThreadChecker = (row: ThreadAccessRow) => Promise<EventDeliveryThreadRef | null>;
+
+function readableThreads(c: Context<AppEnv>): ThreadChecker {
   const seen = new Map<string, Promise<EventDeliveryThreadRef | null>>();
   return (row) => {
     const key = `${row.session_id}:${row.thread_id}`;
@@ -582,10 +595,11 @@ const CLAIMED_ELSEWHERE = "Skipped, claimed by another thread.";
  * The thread whose waiter claimed each skipped delivery, by delivery id
  * (spec 2026-10-16: delivery threads and claims, Part E step 2). The
  * delivery's destination stamp names the thread. A thread stays only when
- * this request may open it, by the checks `deliveryThreads` applies.
+ * this request may open it, by the shared `readableThreads` checker.
  */
 async function claimThreads(
   c: Context<AppEnv>,
+  check: ThreadChecker,
   claims: Array<{ deliveryId: string; threadId: string }>,
 ): Promise<Map<string, EventDeliveryThreadRef>> {
   const found = new Map<string, EventDeliveryThreadRef>();
@@ -601,7 +615,6 @@ async function claimThreads(
       AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'`) as {
     rows: ThreadAccessRow[];
   };
-  const check = readableThreads(c);
   const readable = new Map<string, EventDeliveryThreadRef>();
   for (const row of result.rows) {
     const ref = await check(row);
@@ -650,10 +663,13 @@ async function deliveriesToWire(c: Context<AppEnv>, deliveryRows: readonly Deliv
     const threadId = d.status === "skipped" ? claimedThreadId(d.destination) : null;
     return threadId ? [{ deliveryId: d.id, threadId }] : [];
   });
+  // A page repeats threads, and a claiming thread is often a delivery's
+  // thread too, so one checker answers each thread once per request.
+  const readable = readableThreads(c);
   const [threads, runs, claimed] = await Promise.all([
-    deliveryThreads(c, idsFor("assistant")),
+    deliveryThreads(c, readable, idsFor("assistant")),
     deliveryRuns(c, idsFor("workflow")),
-    claimThreads(c, claims),
+    claimThreads(c, readable, claims),
   ]);
   return deliveryRows.map((d) => {
     const thread = threads.get(d.id);
@@ -715,8 +731,9 @@ eventsRouter.get("/events/:id", async (c) => {
     .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
     .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
+  const place = eventPlaceName(c.var.providers.plugins, row);
   const resp: GetEventResponse = {
-    event: { ...rowToEventSummary(row), payload: row.payload },
+    event: { ...rowToEventSummary(row), payload: row.payload, ...(place !== null ? { place } : {}) },
     deliveries: await deliveriesToWire(c, deliveryRows),
   };
   return c.json(resp);
@@ -1039,7 +1056,7 @@ eventsRouter.get("/event-subscriptions/:id/deliveries", async (c) => {
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
     .limit(1);
-  if (subs.length === 0) return c.json({ error: "listener not found" }, 404);
+  if (subs.length === 0) return c.json({ error: "Listener not found. Open Presence and pick a listener." }, 404);
 
   const rows = await db
     .select({

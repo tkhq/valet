@@ -52,10 +52,31 @@ presenceRouter.get("/places", async (c) => {
   return c.json(await listPresencePlaces(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner)));
 });
 
+/** The refusal for a channel-only Slack key the api cannot place in one Slack workspace. */
+export const CHANNEL_KEY_REFUSAL = "That Slack channel has no workspace in its link. Pick the channel from Places.";
+
+/**
+ * The place key to read. An old `/channel?key=slack:<channel>` link and a
+ * thread's channel chip name a Slack channel without its workspace. The org
+ * connects one Slack workspace, so the channel resolves to
+ * `slack:<team>/<channel>`. A key that names the workspace itself stays as
+ * sent. Null when the org has no Slack workspace to resolve against.
+ */
+export async function resolvePlaceKey(subject: string, slackTeamId: () => Promise<string | null>): Promise<string | null> {
+  const channelOnly = /^slack:([^/]+)$/.exec(subject);
+  if (!channelOnly) return subject;
+  const teamId = await slackTeamId();
+  if (!teamId) return null;
+  return channelOnly[1] === teamId ? subject : `slack:${teamId}/${channelOnly[1]}`;
+}
+
 presenceRouter.get("/places/:subject", async (c) => {
   const owner = await scopeOwner(c);
   if (owner instanceof Response) return owner;
-  const detail = await getPresencePlace(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner), c.req.param("subject"));
+  const access = presenceAccess(c, owner);
+  const subject = await resolvePlaceKey(c.req.param("subject"), access.slackTeamId);
+  if (!subject) return c.json({ error: CHANNEL_KEY_REFUSAL }, 404);
+  const detail = await getPresencePlace(c.var.providers, c.var.user.orgId, owner, access, subject);
   if (!detail) return c.json({ error: "Valet is not present in that place in this workspace. Open Places to see where it is." }, 404);
   const body: PresencePlaceDetailResponse = {
     place: detail.place,

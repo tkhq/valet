@@ -59,6 +59,8 @@ const nightly: WorkflowTriggerItem = {
     targetKind: "workflow",
     nextFireAt: 1_924_000_000_000,
     lastFiredAt: null,
+    ownerType: "user",
+    ownerId: "u1",
   },
 };
 

@@ -113,7 +113,7 @@ describe("TriggerDialog", () => {
     updateScheduleMutateAsync.mockClear().mockResolvedValue({});
     const item: WorkflowTriggerItem = {
       kind: "schedule", id: "sch_a", name: "Digest", enabled: true,
-      detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "summarize", nextFireAt: 1, lastFiredAt: null },
+      detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "summarize", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1" },
     };
     const { unmount } = render(<TriggerDialog open onOpenChange={() => {}} editing={item} />);
     fireEvent.click(screen.getByText(/^Save$/));
@@ -158,7 +158,7 @@ describe("TriggerDialog", () => {
     const onOpenChange = vi.fn();
     const shared = { id: "trigger-1", workflowId: "wf_team", name: "Team trigger", enabled: true };
     const item: WorkflowTriggerItem = kind === "schedule"
-      ? { ...shared, kind, detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: 1, lastFiredAt: null } }
+      ? { ...shared, kind, detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1" } }
       : { ...shared, kind, detail: { eventKeys: ["github.pull_request.opened"], filters: [] } };
     render(<TriggerDialog open onOpenChange={onOpenChange} workflowId="wf_team" editing={editing ? item : undefined} />);
     if (!editing && kind === "event") {
@@ -187,6 +187,8 @@ describe("TriggerDialog", () => {
         targetKind: "workflow" as const,
         nextFireAt: Date.now() + 3_600_000,
         lastFiredAt: null,
+        ownerType: "user" as const,
+        ownerId: "u1",
       },
     };
     render(<TriggerDialog open onOpenChange={() => {}} editing={editingSchedule} />);

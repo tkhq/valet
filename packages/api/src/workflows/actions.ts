@@ -1667,7 +1667,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Update a cron schedule by id. Changing cron or timezone recomputes next fire time. " +
       "Setting enabled=false pauses the schedule; re-enabling recomputes next fire time so a stale slot does not fire at once. " +
-      "Target kind (workflow vs orchestrator) cannot change — delete and recreate to switch.",
+      "Target kind (workflow or assistant) cannot change — delete and recreate to switch.",
     // A schedule or event trigger keeps prompting the assistant after the
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.

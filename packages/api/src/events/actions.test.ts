@@ -100,6 +100,22 @@ describe("eventsActionPlugin", () => {
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
   });
 
+  it("answers a repeated proposal stored before the rename with the new target names", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "legacy", name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true });
+    const [stored] = await db.select().from(eventSubscriptions);
+    // Rewrite the row in the names an older api stored.
+    await db.update(eventSubscriptions).set({ target: { kind: "orchestrator", orchestrator: "user", presence: { displayName: "PR helper" } } })
+      .where(eq(eventSubscriptions.id, stored!.id));
+    const repeated = await tool.execute(input, context("member"));
+    expect(repeated).toMatchObject({ success: true, data: { proposal: { id: stored!.id, reviewUrl: `/presence/listeners/${stored!.id}`, config: { target: {
+      kind: "assistant", assistant: "user", appearance: { displayName: "PR helper" },
+    } } } } });
+    expect(repeated.data).not.toHaveProperty("proposal.config.target.presence");
+    expect(repeated.data).not.toHaveProperty("proposal.config.target.orchestrator");
+  });
+
   it("stores one disabled proposal per owner and preserves enabled configuration on retry", async () => {
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const input = { proposal_key: "pulls", name: "Pulls", event_keys: ["github.pull_request.opened"] };

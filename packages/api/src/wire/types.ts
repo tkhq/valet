@@ -2926,6 +2926,10 @@ export interface WorkflowScheduleTriggerDetail {
    * `existing` thread cannot receive deliveries. Absent when it recorded
    * none. Enabling the schedule or changing its pin clears it. */
   disabledReason?: string;
+  /** The workspace the schedule belongs to. For an assistant-prompt
+   * schedule, its thread picker lists this workspace's threads. */
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
 }
 
 export interface WorkflowEventTriggerDetail {
@@ -5279,7 +5283,9 @@ export interface RedeliverEventResponse {
 }
 
 export interface GetEventResponse {
-  event: EventSummaryWire & { payload: unknown };
+  /** `place` names the event's place as the Activity row does
+   * (`EventLogItem.place`). Absent when the event's plugin names no place. */
+  event: EventSummaryWire & { payload: unknown; place?: string };
   deliveries: EventDeliveryWire[];
 }
 

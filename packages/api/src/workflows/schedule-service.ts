@@ -45,6 +45,10 @@ export interface WorkflowScheduleSummary {
   nextFireAt: number;
   /** Why the scheduler disabled this schedule. Absent when it recorded none. */
   disabledReason?: string;
+  /** The workspace the schedule belongs to: for an assistant-prompt
+   * schedule, the workspace whose assistant receives the prompts. */
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
 }
 
 /**
@@ -94,6 +98,8 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     lastFiredAt: row.lastFiredAt,
     nextFireAt: row.nextFireAt,
     ...(row.disabledReason !== null ? { disabledReason: row.disabledReason } : {}),
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
   };
 }
 

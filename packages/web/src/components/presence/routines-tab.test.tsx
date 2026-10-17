@@ -102,6 +102,8 @@ function routine(id: string, over: Partial<Omit<Schedule, "kind" | "detail">> & 
       prompt: "Summarize",
       nextFireAt: Date.now() + 3_600_000,
       lastFiredAt: null,
+      ownerType: "user",
+      ownerId: "u1",
       ...detail,
     },
   };

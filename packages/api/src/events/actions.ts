@@ -166,7 +166,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
   }))({
     id: "events.propose_subscription",
     name: "Propose assistant event subscription",
-    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and an Events review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
+    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and a Presence review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
     riskLevel: "low",
     execute: async (input, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
@@ -262,7 +262,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         [row.name, row.eventKeys, row.filters, storedTarget, row.audience, row.createdBy],
         [values.name, values.eventKeys, values.filters, expected, values.audience, values.createdBy],
       )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
-      return { success: true, data: proposalResult("subscription", row.id, row.enabled, row, written.replaced) };
+      return { success: true, data: proposalResult("subscription", row.id, row.enabled, { ...row, target: storedTarget }, written.replaced) };
     },
   });
   const listProblems = action(

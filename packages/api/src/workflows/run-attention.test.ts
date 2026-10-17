@@ -133,7 +133,7 @@ describe("buildRunSettledAttention", () => {
       urgency: "high",
       title: "Workflow run failed: Customer artifacts",
       body: "call-api: HTTP 500",
-      href: "/workflows/runs/run-1",
+      href: "/presence/runs/run-1",
     });
   });
 
@@ -413,7 +413,7 @@ describe("buildRunThreadArchive", () => {
 describe("workflowApprovalHref", () => {
   it("deep-links to the run and encodes the gate target", () => {
     expect(workflowApprovalHref("run/1", "approve me")).toBe(
-      "/workflows/runs/run%2F1?gate=approve%20me",
+      "/presence/runs/run%2F1?gate=approve%20me",
     );
   });
 });

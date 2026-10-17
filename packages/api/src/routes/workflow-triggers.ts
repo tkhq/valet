@@ -108,6 +108,8 @@ workflowTriggersRouter.get("/triggers", async (c) => {
         nextFireAt: s.nextFireAt,
         lastFiredAt: s.lastFiredAt,
         ...(s.disabledReason !== undefined ? { disabledReason: s.disabledReason } : {}),
+        ownerType: s.ownerType,
+        ownerId: s.ownerId,
       },
     })),
     ...events.map((t): WorkflowTriggerItem => ({

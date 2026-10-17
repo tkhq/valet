@@ -41,6 +41,7 @@ import type {
   ListSubscriptionDeliveriesResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  EventLogResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
@@ -981,6 +982,38 @@ describe("GET /api/events/:id", () => {
       .where(and(eq(sessionThreads.sessionId, thread.sessionId), eq(sessionThreads.id, thread.threadId)));
     const archived = await read();
     expect(archived.find((d) => d.id === "del_claimed")?.claimedBy).toEqual({ ...thread, title: "t-inc", archived: true });
+  });
+
+  it("withholds a hidden claiming thread's title from another member's Log", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    // An org rule shows in every workspace's Log; its delivery was claimed
+    // by the owner's personal thread.
+    await seedSubscriptionRow(a, "sub_org", "local-org", { ownerType: "org", ownerId: "local-org", name: "Org triage" });
+    // The Log looks back 30 days, so this event is recent.
+    await seedEventRow(a, { id: "ev_recent", receivedAt: Date.now() });
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_org_claimed", eventId: "ev_recent", subscriptionId: "sub_org", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+    const patched = await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "secret incident" }),
+    });
+    expect(patched.status).toBe(200);
+    const logFor = async (userId: string) => (await (await fetch(`${a.baseUrl}/api/events/log?ownerType=user&ownerId=${userId}`,
+      { headers: { "x-valet-test-user-id": userId } })).json()) as EventLogResponse;
+
+    const own = (await logFor("local-user")).items.find((item) => item.id === "ev_recent");
+    expect(own?.deliveries?.find((d) => d.id === "del_org_claimed")?.claimedBy).toEqual({ ...thread, title: "secret incident" });
+
+    const other = await logFor("test-member");
+    const row = other.items.find((item) => item.id === "ev_recent");
+    const claimed = row?.deliveries?.find((d) => d.id === "del_org_claimed");
+    expect(claimed).toBeDefined();
+    expect(claimed?.claimedBy).toBeUndefined();
+    expect(claimed?.lastError).toBe("Skipped, claimed by another thread.");
+    expect(JSON.stringify(other)).not.toContain("secret incident");
+    expect(JSON.stringify(other)).not.toContain(thread.threadId);
   });
 
   it("omits the thread and the run for a viewer who may not open them", async () => {

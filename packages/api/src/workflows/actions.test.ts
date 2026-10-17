@@ -361,7 +361,7 @@ describe("DB-backed actions", () => {
     const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_schedule")!;
     const input = { proposal_key: "morning", name: "Morning", prompt: "Check work", cron: "0 9 * * *" };
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/workflows?tab=scheduled&review=") } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/presence/routines?routine=") } } });
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
     await db.update(workflowSchedules).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Morning" } } } });
