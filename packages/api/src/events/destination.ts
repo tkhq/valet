@@ -12,7 +12,7 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 export type Destination =
   | { kind: "target"; sessionId: string; threadId: string; reason: DestinationReason }
   | { kind: "key"; key: string; title: string; reason: DestinationReason; note?: string }
-  | { kind: "skip"; reason: `claim:${string}` };
+  | { kind: "skip"; reason: `claimed by thread ${string}` };
 
 /** Why a destination resolved as it did (spec Part E's counter label). */
 export type DestinationReason =
@@ -117,7 +117,7 @@ export function resolveDestination(input: DestinationInput): Destination {
     if (event?.conversational === true) {
       return { kind: "target", sessionId: claim.sessionId, threadId: claim.threadId, reason: "claim_redirect" };
     }
-    return { kind: "skip", reason: `claim:${claim.threadId}` };
+    return { kind: "skip", reason: `claimed by thread ${claim.threadId}` };
   }
   return resolveByPolicy(input);
 }

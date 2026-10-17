@@ -1,6 +1,6 @@
 # Delivery threads and claims
 
-Date: 2026-10-16. Status: proposed.
+Date: 2026-10-16. Status: implemented (Parts A, B, D, E); Part C pending.
 
 Depends on: `2026-10-15-event-wakeups-design.md` (event waiters, digests,
 Scenario E), `2026-07-20-event-system-design.md` (subscriptions, the
@@ -203,7 +203,7 @@ Destination =
    - else `claim` present and the event is conversational → `target` with
      reason `claim:redirect`.
    - else `claim` present and the event is ambient → `skip` with reason
-     `claim:<threadId>`.
+     `claimed by thread <threadId>`.
    - else the policy decides.
 2. Policy keys and titles:
 
@@ -349,8 +349,11 @@ event wakeups spec Part A.
 - **INV-D7 Workflow and `signal` targets never yield.** Mechanism: the
   resolver runs for assistant targets only. Vector: C12.
 - **INV-D8 Every rule of one owner that groups by a subject shares one
-  thread for it.** Mechanism: the `subject` key carries no rule id. Vector:
-  T1 to T3 with a second rule on `acme/api`.
+  thread for it.** Mechanism: the `subject` key carries no rule id.
+  Vectors: the unit tests `subject: two rules of one owner on one pull
+  request share one key (INV-D8)` in `dispatcher.test.ts` and `subject: two
+  rules on one pull request share one thread (INV-D8)` in
+  `assistant-delivery.test.ts`.
 
 ## Testing
 
@@ -389,6 +392,16 @@ event wakeups spec Part A.
   `isDeliverableTarget`, the dispatcher passes no binding and the policy
   decides. A follow mention then re-binds the Slack thread to the new
   thread.
+- **The follow router does not fall through.** A Slack reply that the
+  follow router routes by a stored thread is refused when that thread is
+  archived or deleted. The router throws its existing text and delivers
+  nothing. Only the dispatcher falls through to the policy.
+- **Part C is pending.** The claim vectors of Scenario C, which INV-D1,
+  INV-D2, INV-D6, and INV-D7 name, and the `conversationalTwin` hook
+  (Part D) arrive with Part C. Until then the only claim source is the
+  incident mention routing waiter (`watching-waiter.ts`). The dispatcher
+  asks it at dispatch for a `slack.app_mention`, and ingest stamps no
+  destination.
 - **Conversational test.** Until Part C lands, an event is conversational
   when it has a binding, when it is a `slack.app_mention`, or when it is a
   Slack direct message (`channel_type: "im"`).

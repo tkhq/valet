@@ -1241,7 +1241,7 @@ describe("EventDispatcher", () => {
       }).pollOnce();
       expect(claimFor).toHaveBeenCalledOnce();
       expect(deliver).not.toHaveBeenCalled();
-      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, claim:thr-w." });
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, claimed by thread thr-w." });
       expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
     });
 
@@ -1294,9 +1294,9 @@ describe("EventDispatcher", () => {
       const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
       recordDeliveryDestination.mockClear();
       await recordSkippedDelivery(tdb.appDb, {
-        deliveryId, subscriptionId, attempts: 0, orgId: ORG, eventId, destination: { kind: "skip", reason: "claim:thr-w" },
+        deliveryId, subscriptionId, attempts: 0, orgId: ORG, eventId, destination: { kind: "skip", reason: "claimed by thread thr-w" },
       });
-      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", attempts: 1, lastError: "Skipped, claim:thr-w." });
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", attempts: 1, lastError: "Skipped, claimed by thread thr-w." });
       expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
       const threads = await tdb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
       expect(threads.rows[0]?.n).toBe(0);
