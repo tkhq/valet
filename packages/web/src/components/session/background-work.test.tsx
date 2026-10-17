@@ -10,10 +10,11 @@ import type { ReactNode } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ListSessionWakeupsResponse } from "@valet/api/wire";
+import type { ListSessionWakeupsResponse, ListThreadFeedersResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "~/api/client";
+import { ApiError, api } from "~/api/client";
 import { qk } from "~/api/queries";
+import { qkThreadFeeders } from "~/api/presence-feeders";
 import { TooltipProvider } from "~/components/primitives";
 import {
   BackgroundWorkSection,
@@ -22,6 +23,7 @@ import {
   ThreadTimerLine,
   backgroundItems,
   eventSectionDetail,
+  feederLinks,
   itemDetail,
   nextEventLabel,
   sectionDetail,
@@ -32,6 +34,24 @@ import {
   timeSince,
   timeUntil,
 } from "./background-work";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({
+    children,
+    to,
+    params,
+    ...rest
+  }: {
+    children: ReactNode;
+    to: string;
+    params?: Record<string, string>;
+    [key: string]: unknown;
+  }) => (
+    <a href={params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -69,6 +89,13 @@ function eventListing(now: number): ListSessionWakeupsResponse {
       },
     ],
     leases: [],
+  };
+}
+
+function feeders(): ListThreadFeedersResponse {
+  return {
+    listeners: [{ id: "r-1", name: "Per pull request" }],
+    routines: [{ id: "s-1", name: "Morning summary" }],
   };
 }
 
@@ -208,6 +235,15 @@ describe("background work helpers", () => {
       clauses: "2 clauses",
       deadline: "deadline in 20h",
     });
+  });
+
+  it("orders feeder links listeners before routines, and is empty with no read", () => {
+    expect(feederLinks(undefined)).toEqual([]);
+    expect(feederLinks({ listeners: [], routines: [] })).toEqual([]);
+    expect(feederLinks(feeders())).toEqual([
+      { kind: "listener", id: "r-1", name: "Per pull request" },
+      { kind: "routine", id: "s-1", name: "Morning summary" },
+    ]);
   });
 
   it("names each thread's oldest event waiter and counts the rest", () => {
@@ -370,6 +406,51 @@ describe("BackgroundWorkSection", () => {
     const section = within(await screen.findByRole("region", { name: "Background work" }));
     expect(section.getByText(/acme\/lean-proofs#42/)).toBeTruthy();
     expect(section.queryByRole("link", { name: "acme/lean-proofs#42" })).toBeNull();
+  });
+
+  describe("Fed by (spec Part G)", () => {
+    it("shows the listeners and routines that feed the thread, as links, under the waiting entry", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
+      const feedersRead = vi.spyOn(api, "getThreadFeeders").mockResolvedValue(feeders());
+      renderSection("th-1");
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      await waitFor(() => expect(feedersRead).toHaveBeenCalledWith("s-1", "th-1"));
+      expect(section.getByText(/Fed by:/)).toBeTruthy();
+      const listener = section.getByRole("link", { name: "Per pull request" });
+      expect(listener.getAttribute("href")).toBe("/presence/listeners/r-1");
+      const routine = section.getByRole("link", { name: "Morning summary" });
+      expect(routine.getAttribute("href")).toBe("/presence/routines?routine=s-1");
+    });
+
+    it("shows nothing extra when the thread has no feeders", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
+      vi.spyOn(api, "getThreadFeeders").mockResolvedValue({ listeners: [], routines: [] });
+      renderSection("th-1");
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      await screen.findByText(/acme\/lean-proofs#42/);
+      expect(section.queryByText(/Fed by:/)).toBeNull();
+    });
+
+    it("shows nothing when the feeders read 404s (the viewer cannot read the thread)", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
+      vi.spyOn(api, "getThreadFeeders").mockRejectedValue(new ApiError(404, "GET /presence/feeders → 404"));
+      renderSection("th-1");
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      await screen.findByText(/acme\/lean-proofs#42/);
+      await waitFor(() => expect(section.queryByText(/Fed by:/)).toBeNull());
+    });
+
+    it("does not read feeders for a thread with no event waiter", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue(listing(Date.now()));
+      const feedersRead = vi.spyOn(api, "getThreadFeeders").mockResolvedValue(feeders());
+      renderSection("th-1");
+      await screen.findByRole("region", { name: "Background work" });
+      expect(feedersRead).not.toHaveBeenCalled();
+    });
+
+    it("seeds the feeders query under the session+thread key", async () => {
+      expect(qkThreadFeeders("s-1", "th-1")).toEqual(["presence", "feeders", "s-1", "th-1"]);
+    });
   });
 });
 

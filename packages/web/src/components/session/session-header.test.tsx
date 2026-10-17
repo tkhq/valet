@@ -7,6 +7,7 @@
  * surfaces the mutation's error text verbatim on failure (e.g. the 409
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
+import type { ReactNode } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
@@ -31,7 +32,12 @@ let headerThreads: Array<{
   createdAt: number;
   model?: string;
   reasoning?: string | null;
+  key?: string;
 }> = [];
+/** The workspace channel list `useWorkspaceChannels` reads, for resolving a
+ * Slack subject thread's channel id to its name (spec Part G). Undefined by
+ * default: the place label then falls back to the raw channel id. */
+let channelsData: { channels: Array<{ key: string; name: string }> } | undefined;
 let sessionRating: "positive" | "negative" | null = null;
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
@@ -94,6 +100,25 @@ vi.mock("~/api/settings", () => ({
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
+  Link: ({
+    children,
+    to,
+    params,
+    ...rest
+  }: {
+    children: ReactNode;
+    to: string;
+    params?: Record<string, string>;
+    [key: string]: unknown;
+  }) => (
+    <a href={params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
+vi.mock("~/api/channels", () => ({
+  useWorkspaceChannels: () => ({ data: channelsData }),
 }));
 
 import { SandboxChip, SessionHeader } from "./session-header";
@@ -184,6 +209,7 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   isWorkspaceRuntime = false;
+  channelsData = undefined;
 });
 
 describe("SessionHeader: background work", () => {
@@ -1018,5 +1044,65 @@ describe("SessionHeader — team assistant", () => {
     renderTeamHeader();
     expect(screen.getByText("New thread")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Rename session/ })).toBeNull();
+  });
+});
+
+/**
+ * A subject thread names its place (spec 2026-10-16-presence-hub-design.md
+ * Part G): the header reads the engine thread key and, for a `subject:`
+ * key, shows the place label under the title with a link to the place page.
+ */
+describe("SessionHeader — subject thread place", () => {
+  it("names a GitHub pull request subject and links to its place", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo#12" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/repo#12" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/repo#12");
+  });
+
+  it("names a GitHub repository subject with no issue number", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "acme/repo" })).toBeTruthy();
+  });
+
+  it("names a Linear issue subject by its id", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:linear:ENG-123" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "ENG-123" })).toBeTruthy();
+  });
+
+  it("names a Linear team subject by its key, not the raw team path", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:linear:team/ENG" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "ENG" })).toBeTruthy();
+    expect(screen.queryByText("team/ENG")).toBeNull();
+  });
+
+  it("names a Slack channel subject with the resolved channel name", () => {
+    channelsData = { channels: [{ key: "slack:C123", name: "incidents" }] };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "#incidents" });
+    expect(link.getAttribute("href")).toBe("/presence/places/slack:T1/C123");
+  });
+
+  it("falls back to the raw channel id when the channel name is not resolved", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C999" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "#C999" })).toBeTruthy();
+  });
+
+  it("shows no place label for a non-subject thread", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "web:abc123" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.queryByText(/^#/)).toBeNull();
+    expect(screen.queryByRole("link", { name: /acme|ENG|incidents/ })).toBeNull();
+  });
+
+  it("shows no place label when the thread carries no key", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1 }];
+    renderHeader(undefined, "th-1");
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

@@ -14,6 +14,7 @@ import type {
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
   ListPresencePlacesResponse,
+  ListThreadFeedersResponse,
   PresencePlaceDetailResponse,
   ThreadChannelActivity,
   WaitingThreadsResponse,
@@ -632,6 +633,10 @@ export const api = {
     request<ListPresencePlacesResponse>("GET", `/presence/places?scope=${encodeURIComponent(scope)}`),
   getPresencePlace: (scope: string, subject: string) =>
     request<PresencePlaceDetailResponse>("GET", `/presence/places/${encodeURIComponent(subject)}?scope=${encodeURIComponent(scope)}`),
+  /** The listeners and routines that feed a thread (spec Part G). 404s when
+   * the viewer cannot read the thread. */
+  getThreadFeeders: (sessionId: string, threadId: string) =>
+    request<ListThreadFeedersResponse>("GET", `/presence/feeders?sessionId=${encodeURIComponent(sessionId)}&threadId=${encodeURIComponent(threadId)}`),
   getThreadChannelActivity: (threadId: string) =>
     request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */

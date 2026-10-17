@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Check,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { ApiError } from "~/api/client";
+import { useWorkspaceChannels } from "~/api/channels";
 import {
   useDeleteSession,
   usePauseSession,
@@ -74,6 +75,42 @@ export function shortenWorkspace(workspace: string): string {
   return lastIsUuidLike
     ? parts[parts.length - 2] ?? parts[parts.length - 1] ?? workspace
     : parts[parts.length - 1] ?? workspace;
+}
+
+/** A subject thread's place: the raw subject (after `subject:`), and the
+ * label the header shows for it. */
+export interface SubjectPlace {
+  subject: string;
+  label: string;
+}
+
+/** Pure: the Slack channel id inside a `slack:<team>/<channel>` subject
+ * (the channel level only — no deeper thread segment). */
+function subjectSlackChannelId(subject: string): string | undefined {
+  if (!subject.startsWith("slack:")) return undefined;
+  const parts = subject.slice("slack:".length).split("/");
+  return parts.length === 2 ? parts[1] : undefined;
+}
+
+/**
+ * Pure: a subject thread's place label (spec Part G): `#<channel>` for a
+ * Slack channel subject, using the resolved channel name when the caller
+ * has one and falling back to the raw channel id; `<owner>/<repo>` or
+ * `<owner>/<repo>#<n>` for a GitHub subject; `<ID>` for a Linear issue
+ * subject; `<KEY>` for a Linear team subject. Undefined for any other key,
+ * including a non-subject thread.
+ */
+export function subjectPlaceLabel(key: string | undefined, channelName?: string): SubjectPlace | undefined {
+  if (!key?.startsWith("subject:")) return undefined;
+  const subject = key.slice("subject:".length);
+  const channelId = subjectSlackChannelId(subject);
+  if (channelId !== undefined) return { subject, label: `#${channelName ?? channelId}` };
+  if (subject.startsWith("github:")) return { subject, label: subject.slice("github:".length) };
+  if (subject.startsWith("linear:")) {
+    const rest = subject.slice("linear:".length);
+    return { subject, label: rest.startsWith("team/") ? rest.slice("team/".length) : rest };
+  }
+  return undefined;
 }
 
 /** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
@@ -333,6 +370,20 @@ export function SessionHeader({
   // to its team.
   const canShare = activeThread !== undefined && owner.type === "user" && owner.id === me.data?.id;
 
+  // A subject thread names its place (spec Part G): the channel, repository,
+  // or Linear issue it was opened for. The Slack case resolves the raw
+  // channel id to a readable name from the same channel list ThreadChannelChip
+  // reads, when the list has it.
+  const channelOwner = owner.type === "user" || owner.type === "team" ? { ownerType: owner.type, ownerId: owner.id } : undefined;
+  const channels = useWorkspaceChannels(channelOwner);
+  const threadKey = activeThread?.key;
+  const subject = threadKey?.startsWith("subject:") ? threadKey.slice("subject:".length) : undefined;
+  const subjectChannelId = subject !== undefined ? subjectSlackChannelId(subject) : undefined;
+  const subjectChannelName = subjectChannelId !== undefined
+    ? channels.data?.channels.find((c) => c.key === `slack:${subjectChannelId}`)?.name
+    : undefined;
+  const place = subjectPlaceLabel(threadKey, subjectChannelName);
+
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
   // slot, so the row does not jump and a failed rename still has somewhere
@@ -412,6 +463,17 @@ export function SessionHeader({
           )}
         </div>
       </Tooltip>
+      {place && (
+        <div className="basis-full min-w-0 -mt-1">
+          <Link
+            to="/presence/places/$subject"
+            params={{ subject: place.subject }}
+            className="text-[11px] text-muted hover:text-ink hover:underline"
+          >
+            {place.label}
+          </Link>
+        </div>
+      )}
       {activeThread?.channel && (
         <ThreadChannelChip
           channel={activeThread.channel}
