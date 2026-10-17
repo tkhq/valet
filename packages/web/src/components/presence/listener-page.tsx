@@ -35,8 +35,9 @@ export const PAUSED_BY_TEAM = "Paused: a team listener covers the same events.";
 export function ListenerPage({ id }: { id: string }) {
   const subsQ = useEventSubscriptions();
   const sub = subsQ.data?.subscriptions.find((s) => s.id === id);
+  const title = sub?.name ?? "Listener";
   return (
-    <PresenceDetailPage back="/presence" backLabel="Places" title={sub?.name ?? "Listener"}>
+    <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title}>
       {subsQ.isPending && <LoadingRow />}
       {subsQ.isError && (
         <ErrorRow>{errorText(subsQ.error, "Could not load this listener. Reload the page to try again.")}</ErrorRow>

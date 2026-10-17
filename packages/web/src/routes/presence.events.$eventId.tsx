@@ -29,7 +29,7 @@ export function PresenceEventPage() {
   const { eventId } = Route.useParams();
   const { data, isLoading, error } = useEvent(eventId);
   return (
-    <PresenceDetailPage back="/presence/activity" backLabel="Activity" title={data?.event.summary || "Event"}>
+    <PresenceDetailPage crumbs={[{ label: "Activity", to: "/presence" }, { label: data?.event.summary || "Event" }]} title={data?.event.summary || "Event"}>
       {isLoading && <LoadingRow label="Loading event…" />}
       {(error != null || (!isLoading && !data)) && (
         <ErrorRow>Could not load this event. Reload the page, or find the event again on the Activity tab.</ErrorRow>

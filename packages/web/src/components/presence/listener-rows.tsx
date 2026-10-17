@@ -49,7 +49,7 @@ export function ListenerBadges({ sub }: { sub: EventSubscriptionWire }) {
 export function ListenerRow({ sub, sentence }: { sub: EventSubscriptionWire; sentence: string }) {
   return (
     <WorkRow
-      title={<Link to="/presence/listeners/$id" params={{ id: sub.id }}>{sentence}</Link>}
+      title={<Link to="/presence/rules/$id" params={{ id: sub.id }}>{sentence}</Link>}
       badge={<ListenerBadges sub={sub} />}
       detail={sub.name}
     />

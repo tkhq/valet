@@ -28,7 +28,7 @@ function ProposalBody({ result }: ToolRendererProps) {
       destination={workflowId ?? "Workspace assistant"} />
     <p className="text-xs text-muted">Open the saved configuration to review its current settings. This preview does not grant permissions.</p>
     {schedule ? <Link className="text-sm text-moss underline" to="/presence/routines" search={{ routine: proposal.id }}>Review routine</Link>
-      : <Link className="text-sm text-moss underline" to="/presence/listeners/$id" params={{ id: proposal.id }}>Review listener</Link>}
+      : <Link className="text-sm text-moss underline" to="/presence/rules/$id" params={{ id: proposal.id }}>Review listener</Link>}
   </div>;
 }
 export const automationProposalRenderer: ToolRenderer = {

@@ -155,7 +155,7 @@ describe("TriggersPanel: listeners and routines", () => {
     const rows = screen.getAllByText("Listens on acme/api for opened pull requests · runs Deploy pipeline");
     expect(rows).toHaveLength(1);
     const link = rows[0]!.closest("a");
-    expect(link?.getAttribute("data-to")).toBe("/presence/listeners/$id");
+    expect(link?.getAttribute("data-to")).toBe("/presence/rules/$id");
     expect(link?.getAttribute("data-params")).toBe(JSON.stringify({ id: "sub_1" }));
   });
 

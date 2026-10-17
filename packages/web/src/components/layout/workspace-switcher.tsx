@@ -27,7 +27,7 @@ import { cn } from "~/lib/cn";
  * already answers completely.
  *
  * Selecting a workspace keeps list pages in place. A Presence detail page
- * (a place, a listener, an event) returns to its Presence tab, and a
+ * (a place, a line of presence, an event) returns to its Presence list, and a
  * workflow or a run returns to its Workflows list, so an old resource is not
  * requested under the new owner. Chat opens the selected workspace's thread
  * list.
@@ -44,7 +44,7 @@ import { cn } from "~/lib/cn";
 export function presenceListAfterSwitch(
   pathname: string,
 ): "/presence" | "/presence/activity" | "/workflows" | "/workflows/runs" | undefined {
-  if (pathname.startsWith("/presence/places/") || pathname.startsWith("/presence/listeners/")) return "/presence";
+  if (pathname.startsWith("/presence/places/") || pathname.startsWith("/presence/rules/")) return "/presence";
   if (pathname.startsWith("/presence/events/")) return "/presence/activity";
   if (pathname === "/workflows" || (pathname.startsWith("/workflows/") && !pathname.startsWith("/workflows/runs"))) return "/workflows";
   if (pathname.startsWith("/workflows/runs/")) return "/workflows/runs";

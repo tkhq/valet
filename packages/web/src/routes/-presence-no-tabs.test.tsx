@@ -1,0 +1,141 @@
+// @vitest-environment jsdom
+/**
+ * INV-H5 (docs/specs/2026-10-16-presence-hub-design.md): no level of
+ * navigation sits under the top nav except the rail. The test renders the
+ * app's real route tree at each Presence route and expects the rail and no
+ * tab list. It also checks that `/presence` lands on Activity (Part A
+ * step 5), and that the revision 1 rule URL redirects.
+ *
+ * The network is a `fetch` stub. It answers the reads the shell and its
+ * panes make with small fixtures, and every other read with an empty 404.
+ */
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
+import { render, screen, waitFor } from "@testing-library/react";
+import type {
+  EventLogResponse,
+  EventSubscriptionWire,
+  ListEventSubscriptionsResponse,
+  ListPresencePlacesResponse,
+  ListWorkflowTriggersResponse,
+  PresencePlaceDetailResponse,
+  PresencePlaceWire,
+} from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const ME = { id: "u-001", email: "u@acme.test", name: "U One", orgId: "acme", orgRole: "admin", role: "admin" };
+
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useMe: () => ({ data: ME, isLoading: false, isFetching: false, error: null, isError: false, isSuccess: true }),
+    useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true }, plugins: [] }, isLoading: false, error: null }),
+    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  };
+});
+
+vi.mock("~/components/layout/notifications-bell", () => ({ NotificationsBell: () => null }));
+vi.mock("~/components/product-announcement", () => ({ ProductAnnouncement: () => null }));
+vi.mock("~/lib/use-attention-ping", () => ({ useAttentionPing: () => {} }));
+vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/components/layout/workspace-assistant")>();
+  return {
+    ...actual,
+    WorkspaceAssistantProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+    WorkspaceAssistantDock: () => null,
+    WorkspaceAssistantButton: () => null,
+    useWorkspaceAssistant: () => ({ open: () => {}, panel: null }),
+  };
+});
+
+import { routeTree } from "../routeTree.gen";
+
+const INCIDENTS: PresencePlaceWire = {
+  subject: "slack:T1/C900", label: "#incidents", service: "slack", parent: "slack:T1", listenerCount: 1, activeThreadCount: 0, lastActivityAt: null,
+};
+const SLACK_ROOT: PresencePlaceWire = {
+  subject: "slack:T1", label: "Slack", service: "slack", parent: null, listenerCount: 0, activeThreadCount: 0, lastActivityAt: null,
+};
+const SUB_1: EventSubscriptionWire = {
+  id: "sub-1", name: "Incident intake", ownerType: "user", ownerId: "u-001", eventKeys: ["slack.app_mention"],
+  filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
+  target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1,
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function answer(url: URL): Response {
+  const path = url.pathname;
+  if (path === "/api/presence/places") return json({ places: [SLACK_ROOT, INCIDENTS] } satisfies ListPresencePlacesResponse);
+  if (path.startsWith("/api/presence/places/")) {
+    const detail: PresencePlaceDetailResponse = {
+      place: INCIDENTS, listeners: [SUB_1], threads: { subject: [], following: [], active: [] }, activity: [],
+    };
+    return json(detail);
+  }
+  if (path === "/api/event-subscriptions") return json({ subscriptions: [SUB_1] } satisfies ListEventSubscriptionsResponse);
+  if (path === "/api/workflows/triggers") return json({ triggers: [] } satisfies ListWorkflowTriggersResponse);
+  if (path === "/api/workflows") return json({ workflows: [] });
+  if (path === "/api/events/log") {
+    return json({ items: [], nextCursor: null, lastEventAt: null, windowDays: 30 } satisfies EventLogResponse);
+  }
+  return json({ error: "not in this test" }, 404);
+}
+
+beforeEach(() => {
+  window.sessionStorage.clear();
+  window.localStorage.clear();
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return answer(new URL(raw, "http://valet.test"));
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+function mountApp(initial: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createRouter({ routeTree, context: { queryClient }, history: createMemoryHistory({ initialEntries: [initial] }) });
+  render(<QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>);
+  return router;
+}
+
+describe("INV-H5: the rail is the only navigation under the top nav", () => {
+  it.each([
+    "/presence",
+    "/presence/activity",
+    "/presence/routines",
+    "/presence/places/slack:T1%2FC900",
+    "/presence/rules/sub-1",
+  ])("%s shows the rail and no tab list", async (path) => {
+    mountApp(path);
+    await screen.findByRole("navigation", { name: "Presence" });
+    await screen.findByRole("heading", { level: 1, name: "Presence" });
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tabpanel")).toBeNull();
+  });
+
+  it("lands /presence on Activity", async () => {
+    mountApp("/presence");
+    expect(await screen.findByRole("searchbox", { name: "Search the log" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Activity" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("opens a place page in the pane with a breadcrumb", async () => {
+    mountApp("/presence/places/slack:T1%2FC900");
+    expect(await screen.findByRole("heading", { level: 1, name: "#incidents" })).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("Presence›#incidents");
+  });
+
+  it("redirects a revision 1 rule URL to its rule page", async () => {
+    const router = mountApp("/presence/listeners/sub-1?workspace=user");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/sub-1"));
+    expect(await screen.findByRole("heading", { level: 1, name: "Incident intake" })).toBeTruthy();
+  });
+});

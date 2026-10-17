@@ -9,6 +9,8 @@ import { redirect } from "@tanstack/react-router";
  * Revision 2 moved Workflows and Runs back out of Presence, to their own
  * `/workflows*` nav entry (spec Part A, Part G). `/presence/workflows*` and
  * `/presence/runs*` are now the legacy side, redirecting to `/workflows*`.
+ * Revision 2 also moved one line of presence from `/presence/listeners/$id`
+ * to `/presence/rules/$id`.
  *
  * A row keeps every search param it does not consume, so `workspace`,
  * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged.
@@ -25,13 +27,14 @@ export type LegacyRoute =
   | "/presence/workflows/$workflowId"
   | "/presence/runs"
   | "/presence/runs/$runId"
+  | "/presence/listeners/$id"
   | "/channel";
 
 /** A route that receives a redirect from a legacy URL. */
 export type PresencePath =
   | "/presence"
   | "/presence/places/$subject"
-  | "/presence/listeners/$id"
+  | "/presence/rules/$id"
   | "/presence/routines"
   | "/presence/activity"
   | "/presence/events/$eventId"
@@ -114,7 +117,7 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     from: "/events",
     when: "a Subscriptions review link",
     matches: (search) => tabIs("subscriptions")(search) && text(search, "review") !== undefined,
-    to: "/presence/listeners/$id",
+    to: "/presence/rules/$id",
     mapParams: (_params, search) => ({ id: text(search, "review") ?? "" }),
     mapSearch: dropTab,
     example: { params: {}, search: { tab: "subscriptions", review: "sub-1" } },
@@ -166,6 +169,14 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     mapParams: sameParams,
     mapSearch: (search) => search,
     example: { params: { runId: "run-1" }, search: {} },
+  },
+  {
+    from: "/presence/listeners/$id",
+    when: "one line of presence",
+    to: "/presence/rules/$id",
+    mapParams: sameParams,
+    mapSearch: (search) => search,
+    example: { params: { id: "sub-1" }, search: {} },
   },
   {
     from: "/channel",

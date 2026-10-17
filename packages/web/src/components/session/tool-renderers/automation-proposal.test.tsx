@@ -22,7 +22,7 @@ describe("automation proposal renderer", () => {
     render(<Body args={{}} toolName="call_tool" status="completed" result={JSON.stringify({ proposal: { kind: "subscription", id: "proposal-1", reviewUrl: "https://evil.test", config: { eventKeys: ["slack.message"], filters: [{ field: "channel", value: "C123" }], target: { follow: true }, audience: "team" } } })} />);
     expect(screen.getByText("Also deliver later replies from the source thread")).toBeTruthy();
     expect(screen.getByText("Team members")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Review listener" }).getAttribute("href")).toBe("/presence/listeners/proposal-1");
+    expect(screen.getByRole("link", { name: "Review listener" }).getAttribute("href")).toBe("/presence/rules/proposal-1");
   });
   it("links a schedule proposal to its routine page", () => {
     const Body = automationProposalRenderer.Body;

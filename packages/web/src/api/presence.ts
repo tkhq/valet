@@ -21,14 +21,16 @@ export function usePresenceScope(): string {
   return useWorkspaceScope().teamId ?? "user";
 }
 
-/** The places the active workspace is present in. */
-export function usePresencePlaces(options: { enabled?: boolean; staleTime?: number } = {}) {
+/** The places the active workspace is present in. The Presence rail
+ * refreshes them every 60 seconds (spec Part B step 7). */
+export function usePresencePlaces(options: { enabled?: boolean; staleTime?: number; refetchInterval?: number } = {}) {
   const scope = usePresenceScope();
   return useQuery<ListPresencePlacesResponse>({
     queryKey: qkPresence.places(scope),
     queryFn: () => api.listPresencePlaces(scope),
     staleTime: options.staleTime ?? 30_000,
     enabled: options.enabled ?? true,
+    ...(options.refetchInterval !== undefined ? { refetchInterval: options.refetchInterval } : {}),
   });
 }
 

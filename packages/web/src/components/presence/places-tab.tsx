@@ -19,6 +19,9 @@ import { ListenButton } from "~/components/events/team-slack-setup";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { errorText } from "~/lib/error-text";
 import { AllListenersTable } from "./all-listeners-table";
+import { SERVICE_NAMES, isServiceRoot } from "./places";
+
+export { SERVICE_NAMES, isServiceRoot };
 
 export type PlacesView = "places" | "listeners";
 
@@ -27,12 +30,6 @@ const VIEWS = [
   { value: "listeners", label: "All listeners" },
 ] as const;
 
-export const SERVICE_NAMES: Readonly<Record<PresencePlaceService, string>> = {
-  slack: "Slack",
-  github: "GitHub",
-  linear: "Linear",
-};
-
 const SERVICES: readonly PresencePlaceService[] = ["slack", "github", "linear"];
 
 const EMPTY_GROUP: Readonly<Record<PresencePlaceService, string>> = {
@@ -40,12 +37,6 @@ const EMPTY_GROUP: Readonly<Record<PresencePlaceService, string>> = {
   github: "Valet is in no GitHub repository in this workspace yet.",
   linear: "Valet is in no Linear team in this workspace yet.",
 };
-
-/** A service-wide row: the Slack workspace (`slack:<team>`), `github:*`, or `linear:*`. */
-export function isServiceRoot(place: Pick<PresencePlaceWire, "subject" | "parent">): boolean {
-  if (place.parent !== null) return false;
-  return place.subject === "github:*" || place.subject === "linear:*" || /^slack:[^/]+$/.test(place.subject);
-}
 
 /** One row of a service group, with its depth under a parent row. */
 export interface PlaceLine {

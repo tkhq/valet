@@ -25,6 +25,7 @@ describe("presence redirect table", () => {
       "/channel",
       "/events",
       "/events/$eventId",
+      "/presence/listeners/$id",
       "/presence/runs",
       "/presence/runs/$runId",
       "/presence/workflows",
@@ -32,24 +33,24 @@ describe("presence redirect table", () => {
     ]);
   });
 
-  it("sends /events with no tab to Places and keeps the workspace", () => {
+  it("sends /events with no tab to Presence and keeps the workspace", () => {
     expect(target("/events", {}, { workspace: "t1" })).toEqual({ to: "/presence", params: {}, search: { workspace: "t1" } });
   });
 
-  it("sends the Channels tab and an unknown tab to Places", () => {
+  it("sends the Channels tab and an unknown tab to Presence", () => {
     expect(target("/events", {}, { tab: "channels" })).toEqual({ to: "/presence", params: {}, search: {} });
     expect(target("/events", {}, { tab: "nonsense", q: "deploy" })).toEqual({ to: "/presence", params: {}, search: { q: "deploy" } });
   });
 
-  it("sends a Subscriptions review link to the listener page and keeps review", () => {
+  it("sends a Subscriptions review link to the rule page and keeps review", () => {
     expect(target("/events", {}, { tab: "subscriptions", review: "sub-1", workspace: "t1" })).toEqual({
-      to: "/presence/listeners/$id",
+      to: "/presence/rules/$id",
       params: { id: "sub-1" },
       search: { review: "sub-1", workspace: "t1" },
     });
   });
 
-  it("sends the Subscriptions tab without a review to Places", () => {
+  it("sends the Subscriptions tab without a review to Presence", () => {
     expect(target("/events", {}, { tab: "subscriptions" })).toEqual({ to: "/presence", params: {}, search: {} });
   });
 
@@ -121,6 +122,14 @@ describe("presence redirect table", () => {
     });
   });
 
+  it("sends a revision 1 listener page to its rule page and keeps its params", () => {
+    expect(target("/presence/listeners/$id", { id: "sub-1" }, { review: "sub-1", workspace: "t1" })).toEqual({
+      to: "/presence/rules/$id",
+      params: { id: "sub-1" },
+      search: { review: "sub-1", workspace: "t1" },
+    });
+  });
+
   it("sends /channel?key= to the place page", () => {
     expect(target("/channel", {}, { key: "slack:C123", workspace: "t1" })).toEqual({
       to: "/presence/places/$subject",
@@ -129,7 +138,7 @@ describe("presence redirect table", () => {
     });
   });
 
-  it("sends /channel without a key to Places", () => {
+  it("sends /channel without a key to Presence", () => {
     expect(target("/channel", {}, {})).toEqual({ to: "/presence", params: {}, search: {} });
     expect(target("/channel", {}, { key: "" })).toEqual({ to: "/presence", params: {}, search: {} });
   });

@@ -18,7 +18,7 @@ import { errorText } from "~/lib/error-text";
 import { PresenceDetailPage } from "./page-shell";
 import { ListenerRow, useListenerSentence } from "./listener-rows";
 import { PlaceThreads } from "./place-threads";
-import { SERVICE_NAMES } from "./places-tab";
+import { SERVICE_NAMES } from "./places";
 import { eventInWords, eventPlace, type ThreadTitles } from "./sentences";
 
 export function PlacePage({ subject }: { subject: string }) {
@@ -31,7 +31,7 @@ export function PlacePage({ subject }: { subject: string }) {
   // place's concrete name.
   const title = place?.label ?? (detail.isError ? "Not available" : "Loading…");
   return (
-    <PresenceDetailPage back="/presence" backLabel="Places" title={title} subtitle={subtitle}>
+    <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
         <ErrorRow>{errorText(detail.error, "Could not load this page. Open Places and select it again.")}</ErrorRow>
@@ -113,7 +113,7 @@ function AppearanceRow({ sub }: { sub: EventSubscriptionWire }) {
           {name}
         </span>
       )}
-      detail={<>Set by <Link to="/presence/listeners/$id" params={{ id: sub.id }} className="hover:underline">{sub.name}</Link></>}
+      detail={<>Set by <Link to="/presence/rules/$id" params={{ id: sub.id }} className="hover:underline">{sub.name}</Link></>}
     />
   );
 }

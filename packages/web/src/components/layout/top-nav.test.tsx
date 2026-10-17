@@ -93,7 +93,7 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string; path?: str
   const presenceRoutes = [
     "/presence",
     "/presence/places/$subject",
-    "/presence/listeners/$id",
+    "/presence/rules/$id",
     "/presence/routines",
     "/presence/activity",
     "/presence/events/$eventId",
@@ -133,7 +133,7 @@ describe("TopNav", () => {
 
   it.each([
     ["/presence/places/slack%3AC123?workspace=t1", "/presence"],
-    ["/presence/listeners/sub-old?workspace=t1", "/presence"],
+    ["/presence/rules/sub-old?workspace=t1", "/presence"],
     ["/presence/events/ev-old?workspace=t1", "/presence/activity"],
     ["/workflows/wf-old?workspace=t1", "/workflows"],
     ["/workflows/runs/run-old?workspace=t1", "/workflows/runs"],

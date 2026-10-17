@@ -10,7 +10,7 @@ import type { ChannelConversation, PresencePlaceDetailResponse, PresencePlaceSer
 import { EmptyRow, WorkRow, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { ProviderLink } from "~/components/channels/channel-parts";
-import { SERVICE_NAMES } from "./places-tab";
+import { SERVICE_NAMES } from "./places";
 
 type PlaceThreadLists = PresencePlaceDetailResponse["threads"];
 

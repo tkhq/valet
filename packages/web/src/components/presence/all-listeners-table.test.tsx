@@ -72,7 +72,7 @@ describe("AllListenersTable", () => {
     expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Listener", "Status"]);
     const rows = within(table).getAllByRole("row").slice(1);
     expect(rows).toHaveLength(2);
-    expect(within(rows[0]!).getByRole("link", { name: "Alerts and deploys" }).getAttribute("href")).toBe("/presence/listeners/broad");
+    expect(within(rows[0]!).getByRole("link", { name: "Alerts and deploys" }).getAttribute("href")).toBe("/presence/rules/broad");
     expect(within(rows[0]!).getByText("Listens in #alerts and #deploys for mentions · replies in a new thread")).toBeTruthy();
     expect(within(rows[0]!).getByText("On")).toBeTruthy();
     expect(within(rows[1]!).getByText("Listens on acme/api for completed checks · runs Incident triage")).toBeTruthy();

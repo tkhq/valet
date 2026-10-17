@@ -1,13 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ListenerPage } from "~/components/presence/listener-page";
+import { redirectToPresence } from "./-presence-redirects";
 
-/** `/presence/listeners/$id`: one listener. It replaces the inline edit and
- * review of the Subscriptions tab of `/events`. */
+/** `/presence/listeners/$id`: the revision 1 URL of one line of presence. It
+ * holds no page and redirects to `/presence/rules/$id` (spec Part A step 4). */
 export const Route = createFileRoute("/presence/listeners/$id")({
-  component: ListenerPageRoute,
+  beforeLoad: redirectToPresence("/presence/listeners/$id"),
 });
-
-function ListenerPageRoute() {
-  const { id } = Route.useParams();
-  return <ListenerPage id={id} />;
-}

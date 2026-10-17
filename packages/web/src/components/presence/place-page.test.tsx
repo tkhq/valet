@@ -225,7 +225,7 @@ describe("PlacePage", () => {
 
     const appears = within(sections[1]!);
     expect(appears.getByText("SRE Bot")).toBeTruthy();
-    expect(appears.getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/listeners/M");
+    expect(appears.getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/rules/M");
 
     expect(within(screen.getByRole("list", { name: "Active now" })).getByRole("link", { name: "t-inc" }).getAttribute("href")).toBe("/threads/t-inc");
     const following = within(screen.getByRole("list", { name: "Following" }));

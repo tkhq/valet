@@ -284,7 +284,7 @@ function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefine
         <Fragment key={`${link.kind}-${link.id}`}>
           {index > 0 && ", "}
           {link.kind === "listener" ? (
-            <Link to="/presence/listeners/$id" params={{ id: link.id }} className="text-moss hover:underline">
+            <Link to="/presence/rules/$id" params={{ id: link.id }} className="text-moss hover:underline">
               {link.name}
             </Link>
           ) : (

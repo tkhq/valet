@@ -1,26 +1,17 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { PlacesTab, type PlacesView } from "~/components/presence/places-tab";
+import { ActivityTab, readActivitySearch, type ActivitySearch } from "~/components/presence/activity-tab";
 
-/** The Places tab's search: `?view=all` shows the All listeners table, so
- * Back and a shared link keep the view. Any other value reads as places. */
-export function readPlacesSearch(raw: unknown): { view?: "all" } {
-  return typeof raw === "object" && raw !== null && "view" in raw && raw.view === "all" ? { view: "all" } : {};
-}
-
-/** `/presence`: the Places tab, the index of the Presence section. It replaces the Channels tab of `/events`. */
+/** `/presence`: the section lands on Activity, never on a place (spec Part A
+ * step 5). `/presence/activity` shows the same pane. */
 export const Route = createFileRoute("/presence/")({
-  validateSearch: readPlacesSearch,
-  component: PlacesTabRoute,
+  validateSearch: readActivitySearch,
+  component: PresenceIndexRoute,
 });
 
-function PlacesTabRoute() {
-  const { view } = Route.useSearch();
+function PresenceIndexRoute() {
+  const search = Route.useSearch();
   const navigate = useNavigate();
-  const current: PlacesView = view === "all" ? "listeners" : "places";
-  return (
-    <PlacesTab
-      view={current}
-      onViewChange={(next) => void navigate({ to: "/presence", search: next === "listeners" ? { view: "all" } : {} })}
-    />
-  );
+  // Writes the filters to the URL, so Back and a shared link restore them.
+  const onSearchChange = (next: ActivitySearch) => void navigate({ to: "/presence", search: next });
+  return <ActivityTab search={search} onSearchChange={onSearchChange} />;
 }

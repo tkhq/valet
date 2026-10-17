@@ -423,7 +423,7 @@ describe("BackgroundWorkSection", () => {
       await waitFor(() => expect(feedersRead).toHaveBeenCalledWith("s-1", "th-1"));
       expect(section.getByText(/Fed by:/)).toBeTruthy();
       const listener = section.getByRole("link", { name: "Per pull request" });
-      expect(listener.getAttribute("href")).toBe("/presence/listeners/r-1");
+      expect(listener.getAttribute("href")).toBe("/presence/rules/r-1");
       const routine = section.getByRole("link", { name: "Morning summary" });
       expect(routine.getAttribute("href")).toBe("/presence/routines?routine=s-1");
     });
@@ -465,7 +465,7 @@ describe("BackgroundWorkSection", () => {
       const section = within(await screen.findByRole("region", { name: "Background work" }));
       expect(feedersRead).toHaveBeenCalledWith("s-1", "sub:r-1");
       expect(section.getByText(/Fed by:/).textContent).toBe("Fed by: Incident intake");
-      expect(section.getByRole("link", { name: "Incident intake" }).getAttribute("href")).toBe("/presence/listeners/r-1");
+      expect(section.getByRole("link", { name: "Incident intake" }).getAttribute("href")).toBe("/presence/rules/r-1");
     });
 
     it("shows the line on its own when the thread has other work but no waiter", async () => {

@@ -40,7 +40,7 @@ export function AllListenersTable() {
           {listeners.map((sub) => (
             <tr key={sub.id} className="border-b border-line last:border-0">
               <td className="px-3 py-2 align-top text-ink">
-                <Link to="/presence/listeners/$id" params={{ id: sub.id }} className="hover:underline">{sub.name}</Link>
+                <Link to="/presence/rules/$id" params={{ id: sub.id }} className="hover:underline">{sub.name}</Link>
               </td>
               <td className="px-3 py-2 align-top text-ink [overflow-wrap:anywhere]">{sentence(sub)}</td>
               <td className="px-3 py-2 align-top">

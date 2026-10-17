@@ -16,6 +16,7 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
+import { PresenceDetailPage } from "./page-shell";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
 import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routines-tab";
 
@@ -49,11 +50,9 @@ export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
   const triggersQ = useWorkflowTriggers();
   const routine = (triggersQ.data?.triggers ?? []).filter(isRoutine).find((r) => r.id === id);
+  const name = routine?.name ?? "Routine";
   return (
-    <div className="space-y-3">
-      <Link to="/presence/routines" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
-        ← Routines
-      </Link>
+    <PresenceDetailPage crumbs={[{ label: "Routines", to: "/presence/routines" }, { label: name }]} title={name}>
       {triggersQ.isPending && <LoadingRow />}
       {triggersQ.isError && (
         <ErrorRow>{errorText(triggersQ.error, "Could not load this routine. Reload the page to try again.")}</ErrorRow>
@@ -62,7 +61,7 @@ export function RoutinePage({ id }: { id: string }) {
         <EmptyRow>This routine does not exist, or you cannot see it. Open Routines and pick a routine.</EmptyRow>
       )}
       {routine !== undefined && <RoutineBody routine={routine} />}
-    </div>
+    </PresenceDetailPage>
   );
 }
 
@@ -95,7 +94,6 @@ function RoutineBody({ routine }: { routine: Routine }) {
   return (
     <div className="space-y-8">
       <section aria-label="Routine" className="space-y-3">
-        <h1 className="break-words font-display text-2xl text-ink">{routine.name}</h1>
         <div className="flex flex-wrap items-center gap-2">
           <p className="min-w-0 text-base text-ink [overflow-wrap:anywhere]">{sentenceFor(routine)}</p>
           <ProblemBadge problem={routine.detail.disabledReason} />
