@@ -109,7 +109,7 @@ describe("eventsActionPlugin", () => {
     await db.update(eventSubscriptions).set({ target: { kind: "orchestrator", orchestrator: "user", presence: { displayName: "PR helper" } } })
       .where(eq(eventSubscriptions.id, stored!.id));
     const repeated = await tool.execute(input, context("member"));
-    expect(repeated).toMatchObject({ success: true, data: { proposal: { id: stored!.id, reviewUrl: `/presence/listeners/${stored!.id}`, config: { target: {
+    expect(repeated).toMatchObject({ success: true, data: { proposal: { id: stored!.id, reviewUrl: `/presence/rules/${stored!.id}`, config: { target: {
       kind: "assistant", assistant: "user", appearance: { displayName: "PR helper" },
     } } } } });
     expect(repeated.data).not.toHaveProperty("proposal.config.target.presence");

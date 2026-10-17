@@ -15,7 +15,7 @@ export function proposalResult(kind: "subscription" | "schedule", id: string, en
       kind, id, enabled, config,
       ...(replaces ? { replaces } : {}),
       reviewUrl: kind === "subscription"
-        ? `/presence/listeners/${encodeURIComponent(id)}`
+        ? `/presence/rules/${encodeURIComponent(id)}`
         : `/presence/routines?routine=${encodeURIComponent(id)}`,
     },
   };
