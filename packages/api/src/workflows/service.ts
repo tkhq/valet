@@ -1,5 +1,5 @@
 import { loadAssistantBySessionId } from "../assistants/service.js";
-import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions, workflowCredentialServices } from "./permissions.js";
+import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions, workflowCredentialServices, type WorkflowPermissionDeps } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
@@ -609,7 +609,7 @@ export async function listWorkflowDefinitions(
 }
 
 export async function getWorkflowDefinition(
-  deps: WorkflowServiceDeps,
+  deps: Pick<WorkflowServiceDeps, "db">,
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
@@ -681,7 +681,7 @@ export async function createWorkflowDefinition(
 }
 
 /** A browser save is the person's authorization for this saved graph only. */
-async function authorizeHumanWorkflowSave(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<void> {
+export async function authorizeHumanWorkflowSave(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<void> {
   if (!owner.humanAccountConsent || owner.agentEditor || owner.principal?.type !== "user") return;
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return;
@@ -1128,36 +1128,9 @@ export async function copyWorkflowDefinition(
     });
   }
 
-  const now = Date.now();
-  const copyId = newWorkflowId("wf");
-  const name = `${row.name} (copy)`;
-  rejectAssistantRouting(row.definition);
-  const definition = row.definition;
-  // Personal, whatever the original's owner was. A team-owned mirror copied
-  // into the team would be a second team workflow every member sees; the
-  // person who wants to change the graph gets it in their own workspace,
-  // and may move it from there.
-  await deps.db.insert(workflowDefinitions).values({
-    id: copyId,
-    orgId: owner.orgId,
-    ownerType: "user",
-    ownerId: owner.userId,
-    name,
-    definition,
-    origin: "local",
-    createdAt: now,
-    updatedAt: now,
-  });
-  await snapshotVersion(deps, copyId, 1, name, definition, now);
-  return {
-    id: copyId,
-    name,
-    definition,
-    createdAt: now,
-    updatedAt: now,
-    ownerType: "user",
-    ownerId: owner.userId,
-  };
+  // A copy is a new personal workflow, with the same human-save authorization
+  // and atomic version snapshot as creation. Source triggers remain separate.
+  return createWorkflowDefinition(deps, owner, { name: `${row.name} (copy)`, definition: row.definition });
 }
 
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";

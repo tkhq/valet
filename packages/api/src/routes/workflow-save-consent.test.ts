@@ -161,3 +161,19 @@ it("lets a member revoke only their own workflow account consent", async () => {
   expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ memberId: "local-user" }]);
   expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/accounts`, { method: "DELETE", headers: { "x-valet-test-user-id": "test-admin" } })).status).toBe(404);
 });
+
+it.each([false, true])("authorizes human workflow copies at creation (team=%s)", async (teamCopy) => {
+  const { p, team, deps, owner, baseUrl } = await setup();
+  const source = await createWorkflowDefinition(deps, { ...owner, agentEditor: true }, { name: "Source draft", definition });
+  const response = await fetch(`${baseUrl}/api/workflows/${source.id}/${teamCopy ? "copy-to-team" : "copy"}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: teamCopy ? JSON.stringify({ teamId: team.id, name: "Copied automation" }) : undefined,
+  });
+  expect(response.status).toBe(201);
+  const copy = await response.json();
+  if (!copy || typeof copy !== "object" || !("id" in copy) || typeof copy.id !== "string") throw new Error("Missing copy ID");
+  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId: copy.id, actionId: "fixture.read" }]);
+  const accounts = await p.db.select().from(workflowAccountGrants);
+  expect(accounts).toHaveLength(teamCopy ? 1 : 0);
+  if (teamCopy) expect(accounts[0]).toMatchObject({ workflowId: copy.id, memberId: "local-user" });
+});
