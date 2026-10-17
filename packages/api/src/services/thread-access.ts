@@ -274,7 +274,22 @@ export function privateThreadOwner(key: string | null | undefined): string | und
 /** A thread to judge: its key alone, or the engine thread with its metadata.
  * Pass the thread when you have it, so its recorded Slack channels count. */
 export type ThreadRef = string | null | undefined | { key: string | null; metadata?: Record<string, unknown> | null };
-export type ThreadVisibility = (thread: ThreadRef) => Promise<boolean>;
+export interface ThreadVisibility {
+  (thread: ThreadRef): Promise<boolean>;
+  /** The sorted Slack channels recorded on the live thread that started this
+   * child session, or "" when unknown. A change means the inherited answer
+   * is stale (`cachedThreadVisibility`). */
+  inheritedSignature?: () => string;
+}
+
+/** How long a child's inherited parent answer stands when the parent thread
+ * is not live in this process, so its recorded channels cannot be compared. */
+const INHERITED_TTL_MS = 5 * 60_000;
+
+/** A thread ref's recorded channels, sorted and joined: equal lists compare equal. */
+function channelSignature(ref: { metadata?: Record<string, unknown> | null } | undefined): string {
+  return ref ? [...recordedSlackChannels(ref.metadata)].sort().join(",") : "";
+}
 
 type ThreadRefObject = Exclude<ThreadRef, string | null | undefined>;
 
@@ -293,7 +308,8 @@ export function cachedThreadVisibility(
   ttlMs: number,
   now: () => number = Date.now,
 ): (threadId: string) => Promise<boolean> {
-  const signature = (ref: ThreadRefObject) => [...recordedSlackChannels(ref.metadata)].sort().join(",");
+  // The thread's own channels and, for a child session, its live parent's.
+  const signature = (ref: ThreadRefObject) => `${channelSignature(ref)}|${visible.inheritedSignature?.() ?? ""}`;
   const checked = new Map<string, { shown: Promise<boolean>; at: number; channels: string }>();
   return async (threadId) => {
     const current = live(threadId);
@@ -302,6 +318,8 @@ export function cachedThreadVisibility(
     const ref = current ?? await stored(threadId);
     if (!ref) return false;
     const shown = visible(ref);
+    // The check resolves the child's parent first, so read the signature after it.
+    await shown.catch(() => false);
     checked.set(threadId, { shown, at: now(), channels: signature(ref) });
     return shown;
   };
@@ -374,17 +392,45 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
  * With the session's id, a child session's threads are judged by the thread
  * that started the child (`governingThreadKeySql`).
  */
-export function threadVisibility(deps: AccessDeps, session: { ownerType: string; id?: string }, viewer: ThreadViewer): ThreadVisibility {
+export function threadVisibility(
+  deps: AccessDeps,
+  session: { ownerType: string; id?: string },
+  viewer: ThreadViewer,
+  opts: {
+    /** The live engine thread for ids, when this process holds it. A child
+     * then rechecks its parent's recorded channels on every call. */
+    liveThread?: (sessionId: string, threadId: string) => ThreadRefObject | undefined;
+    now?: () => number;
+  } = {},
+): ThreadVisibility {
   if (session.ownerType !== "team") return async () => true;
   const canSee = channelVisibility(deps, viewer);
-  let inherited: Promise<{ key: string | null; channels: string[] } | undefined> | undefined;
-  const governing = () => (inherited ??= session.id
-    ? spawningThread(deps.db, session.id).then(async (parent) => parent ? {
+  const now = opts.now ?? Date.now;
+  // The thread that started this child session: undefined until read, null for none.
+  let parentIds: { sessionId: string; threadId: string } | null | undefined;
+  let memo: { at: number; signature: string | undefined; value: { key: string | null; channels: string[] } | undefined } | undefined;
+  const liveParentSignature = (): string | undefined => {
+    if (!parentIds || !parentIds.threadId || !opts.liveThread) return undefined;
+    const live = opts.liveThread(parentIds.sessionId, parentIds.threadId);
+    return live ? channelSignature(live) : undefined;
+  };
+  // A child takes its parent's audience. A delivery can record a new private
+  // channel on the parent at any time, so the inherited answer is recomputed
+  // when the live parent's channels differ from the ones it used, and after
+  // INHERITED_TTL_MS when the parent is not live here.
+  const governing = async () => {
+    const live = liveParentSignature();
+    if (memo && now() - memo.at < INHERITED_TTL_MS && (live === undefined || live === memo.signature)) return memo.value;
+    if (parentIds === undefined) parentIds = session.id ? await spawningThread(deps.db, session.id) : null;
+    const parent = parentIds;
+    const value = parent ? {
       key: await governingThreadKey(deps.db, parent.sessionId, parent.threadId, "parent link"),
       channels: parent.threadId ? await threadSlackChannels(deps.db, parent.sessionId, parent.threadId) : [],
-    } : undefined)
-    : Promise.resolve(undefined));
-  return async (thread) => {
+    } : undefined;
+    memo = { at: now(), signature: liveParentSignature(), value };
+    return value;
+  };
+  const visible: ThreadVisibility = async (thread) => {
     const ownKey = typeof thread === "object" && thread !== null ? thread.key : thread;
     const ownChannels = typeof thread === "object" && thread !== null ? recordedSlackChannels(thread.metadata) : [];
     const parent = await governing();
@@ -399,6 +445,8 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
     }
     return true;
   };
+  visible.inheritedSignature = () => liveParentSignature() ?? "";
+  return visible;
 }
 
 /**

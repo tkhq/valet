@@ -354,3 +354,31 @@ it("stops showing a live thread's frames once a delivery records a private chann
   await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CLIVEPRIV");
   expect(await shown(thread.id)).toBe(false);
 });
+
+it("stops showing a child's frames once its parent thread records a private channel, before the TTL", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CPARENTPRIV: ["UMEMBER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Inherited", creatorUserId: "local-user" });
+  // A team execution is a child of its governing thread in the assistant's root session.
+  const execution = await ensureAssistantExecution(p, { type: "team", id: t.id }, { orgId: "local-org", actorUserId: "local-user" }, "sub:rule-parent");
+  const parentLink = await p.db.execute(sql`SELECT parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${execution.sessionId}`) as {
+    rows: Array<{ parent_session_id: string | null; parent_thread_id: string | null }>;
+  };
+  const parent = parentLink.rows[0];
+  if (!parent?.parent_session_id || !parent.parent_thread_id) throw new Error("expected the execution to link its governing thread");
+  const parentThread = p.engineHost.liveSession(parent.parent_session_id)?.threadById(parent.parent_thread_id);
+  if (!parentThread) throw new Error("expected the governing thread to be live");
+  const child = await execution.session.createThread("sub:rule-parent");
+  const liveThread = (sessionId: string, threadId: string) => {
+    const live = p.engineHost.liveSession(sessionId)?.threadById(threadId);
+    return live ? threadRef(live) : undefined;
+  };
+  const visible = threadVisibility(p, { ownerType: "team", id: execution.sessionId }, { orgId: "local-org", userId: "outsider" }, { liveThread });
+  const shown = cachedThreadVisibility(visible, (id) => id === child.id ? threadRef(child) : undefined, async () => undefined, 60 * 60_000);
+  expect(await shown(child.id)).toBe(true);
+  // A private-channel delivery lands in the parent while the child's socket is open.
+  await parentThread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CPARENTPRIV");
+  expect(await shown(child.id)).toBe(false);
+});
