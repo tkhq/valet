@@ -37,6 +37,7 @@ import type {
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
   EventSubscriptionWire,
+  ListSubscriptionDeliveriesResponse,
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventSubscriptionsResponse,
@@ -664,6 +665,40 @@ describe("GET /api/event-subscriptions problem", () => {
     expect(got.sub_edited).toBeUndefined();
     expect(got.sub_quiet).toBeUndefined();
     expect(Object.keys(got).sort()).toEqual(["sub_edited", "sub_other", "sub_quiet", "sub_recovered", "sub_retrying"]);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part C step 4: the listener page lists the
+// rule's own deliveries.
+describe("GET /api/event-subscriptions/:id/deliveries", () => {
+  it("lists one rule's deliveries newest first, each with its event", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org");
+    await seedSubscriptionRow(a, "sub_other", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000 });
+    await seedEventRow(a, { id: "ev_b", receivedAt: 2_000 });
+    await a.providers.db.insert(eventDeliveries).values([
+      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 1_000, deliveredAt: 1_100, createdAt: 1_000 },
+      { id: "d_b", eventId: "ev_b", subscriptionId: "sub_mine", status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence.", nextAttemptAt: 2_000, createdAt: 2_000 },
+      { id: "d_other", eventId: "ev_a", subscriptionId: "sub_other", status: "delivered", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000 },
+    ]);
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_mine/deliveries`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListSubscriptionDeliveriesResponse;
+    expect(body.deliveries.map((d) => [d.id, d.event.id, d.event.summary])).toEqual([
+      ["d_b", "ev_b", "event ev_b"],
+      ["d_a", "ev_a", "event ev_a"],
+    ]);
+    expect(body.deliveries[0]).toMatchObject({ status: "dead", lastError: "Pick another thread for this rule in Presence.", nextAttemptAt: null });
+  });
+
+  it("404s a rule in another org and 400s a bad limit", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_foreign", "other-org");
+    await seedSubscriptionRow(a, "sub_here", "local-org");
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_foreign/deliveries`)).status).toBe(404);
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_here/deliveries?limit=0`)).status).toBe(400);
   });
 });
 

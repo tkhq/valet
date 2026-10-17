@@ -5252,6 +5252,12 @@ export interface EventDeliveryWire {
   runId?: string;
 }
 
+/** `GET /api/event-subscriptions/:id/deliveries`: one listener's latest
+ * deliveries, newest first, each with the event it carried. */
+export interface ListSubscriptionDeliveriesResponse {
+  deliveries: Array<EventDeliveryWire & { event: EventSummaryWire }>;
+}
+
 /** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
  * whose earlier attempts failed or were given up on. Always writes NEW
  * delivery rows: the workflow dispatcher derives a run id from the delivery

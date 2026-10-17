@@ -49,6 +49,22 @@ describe("event receipts", () => {
     expect((await (await fetch(`${url}?q=secret`)).json() as ListEventReceiptsResponse).receipts).toEqual([]);
     expect((await (await fetch(`${url}?q=excluded`)).json() as ListEventReceiptsResponse).receipts).toHaveLength(3);
   });
+  it("narrows to one listener's receipts and fences the cursor to it", async () => {
+    api = await bootTestApi(); const db = api.providers.db, now = Date.now();
+    const decision = (id: string) => ({ id, ownerType: "user", ownerId: "local-user", target: "assistant", outcome: "matched" });
+    await db.insert(eventReceipts).values([
+      { id: "ra", orgId: "local-org", service: "slack", subscriptions: [decision("sub_a")], createdAt: now, updatedAt: now },
+      { id: "rb", orgId: "local-org", service: "slack", subscriptions: [decision("sub_b")], createdAt: now + 1, updatedAt: now + 1 },
+      { id: "rab", orgId: "local-org", service: "slack", subscriptions: [decision("sub_b"), decision("sub_a")], createdAt: now + 2, updatedAt: now + 2 },
+    ]);
+    const url = `${api.baseUrl}/api/events/receipts`;
+    const first = await (await fetch(`${url}?subscriptionId=sub_a&limit=1`)).json() as ListEventReceiptsResponse;
+    expect(first.receipts.map(r => r.id)).toEqual(["rab"]);
+    const second = await (await fetch(`${url}?subscriptionId=sub_a&cursor=${first.nextCursor}`)).json() as ListEventReceiptsResponse;
+    expect(second.receipts.map(r => r.id)).toEqual(["ra"]);
+    expect((await fetch(`${url}?subscriptionId=sub_b&cursor=${first.nextCursor}`)).status).toBe(400);
+    expect((await fetch(`${url}?subscriptionId=sub_a`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(403);
+  });
   it("removes all stale and excess receipts at most once a minute, without touching other organizations", async () => {
     api = await bootTestApi(); const db = api.providers.db;
     // Each retention pass needs a fresh minute; the clock moves past the interval between passes.

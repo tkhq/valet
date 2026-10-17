@@ -49,6 +49,7 @@ import type {
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventSubscriptionsResponse,
+  ListSubscriptionDeliveriesResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
@@ -530,6 +531,63 @@ async function deliveryRuns(c: Context<AppEnv>, deliveryIds: string[]): Promise<
   return new Map(runs.filter((_, index) => readable[index]));
 }
 
+/** The delivery columns `deliveriesToWire` reads, joined with the rule's
+ * name and target. */
+interface DeliveryRow {
+  id: string;
+  subscriptionId: string;
+  subscriptionName: string;
+  status: EventDeliveryWire["status"];
+  attempts: number;
+  lastError: string | null;
+  deliveredAt: number | null;
+  nextAttemptAt: number;
+  destination: unknown;
+  target: unknown;
+}
+
+/** Delivery rows on the wire, each with the thread, claiming thread, or run
+ * it reached when this request may open it. Shared by the event page and a
+ * listener's delivery list, so the two never drift. */
+async function deliveriesToWire(c: Context<AppEnv>, deliveryRows: readonly DeliveryRow[]): Promise<EventDeliveryWire[]> {
+  // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
+  const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
+    deliveryRows.filter((d) => (readStoredTarget(d.target) as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
+  const claims = deliveryRows.flatMap((d) => {
+    const threadId = d.status === "skipped" ? claimedThreadId(d.destination) : null;
+    return threadId ? [{ deliveryId: d.id, threadId }] : [];
+  });
+  const [threads, runs, claimed] = await Promise.all([
+    deliveryThreads(c, idsFor("assistant")),
+    deliveryRuns(c, idsFor("workflow")),
+    claimThreads(c, claims),
+  ]);
+  return deliveryRows.map((d) => {
+    const thread = threads.get(d.id);
+    const claimedBy = claimed.get(d.id);
+    const runId = runs.get(d.id);
+    return {
+      id: d.id,
+      subscriptionId: d.subscriptionId,
+      subscriptionName: d.subscriptionName,
+      status: d.status,
+      attempts: d.attempts,
+      // A viewer who may not open the claiming thread does not see its id.
+      lastError: claims.some((claim) => claim.deliveryId === d.id) && !claimed.has(d.id) ? CLAIMED_ELSEWHERE : d.lastError,
+      deliveredAt: d.deliveredAt,
+      // `next_attempt_at` keeps its last value after a delivery settles: a
+      // dead row holds the timestamp of the attempt that gave up, and a
+      // delivered row holds its claim lease. Report it only while another
+      // attempt is really coming, or the UI promises a retry that the
+      // dispatcher will never make.
+      nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
+      ...(thread ? { thread } : {}),
+      ...(claimedBy ? { claimedBy } : {}),
+      ...(runId ? { runId } : {}),
+    };
+  });
+}
+
 eventsRouter.get("/events/:id", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -564,44 +622,9 @@ eventsRouter.get("/events/:id", async (c) => {
     .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
     .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
-  // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
-  const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
-    deliveryRows.filter((d) => (readStoredTarget(d.target) as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
-  const claims = deliveryRows.flatMap((d) => {
-    const threadId = d.status === "skipped" ? claimedThreadId(d.destination) : null;
-    return threadId ? [{ deliveryId: d.id, threadId }] : [];
-  });
-  const [threads, runs, claimed] = await Promise.all([
-    deliveryThreads(c, idsFor("assistant")),
-    deliveryRuns(c, idsFor("workflow")),
-    claimThreads(c, claims),
-  ]);
-  const destination = (id: string): Pick<EventDeliveryWire, "thread" | "claimedBy" | "runId"> => {
-    const thread = threads.get(id);
-    const claimedBy = claimed.get(id);
-    const runId = runs.get(id);
-    return { ...(thread ? { thread } : {}), ...(claimedBy ? { claimedBy } : {}), ...(runId ? { runId } : {}) };
-  };
-
   const resp: GetEventResponse = {
     event: { ...rowToEventSummary(row), payload: row.payload },
-    deliveries: deliveryRows.map((d) => ({
-      id: d.id,
-      subscriptionId: d.subscriptionId,
-      subscriptionName: d.subscriptionName,
-      status: d.status,
-      attempts: d.attempts,
-      // A viewer who may not open the claiming thread does not see its id.
-      lastError: claims.some((claim) => claim.deliveryId === d.id) && !claimed.has(d.id) ? CLAIMED_ELSEWHERE : d.lastError,
-      deliveredAt: d.deliveredAt,
-      // `next_attempt_at` keeps its last value after a delivery settles: a
-      // dead row holds the timestamp of the attempt that gave up, and a
-      // delivered row holds its claim lease. Report it only while another
-      // attempt is really coming, or the UI promises a retry that the
-      // dispatcher will never make.
-      nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
-      ...destination(d.id),
-    })),
+    deliveries: await deliveriesToWire(c, deliveryRows),
   };
   return c.json(resp);
 });
@@ -900,6 +923,60 @@ eventsRouter.get("/event-subscriptions", async (c) => {
       const problem = problems.get(row.id);
       return problem ? { ...rowToSubscription(row), problem } : rowToSubscription(row);
     }),
+  };
+  return c.json(resp);
+});
+
+/**
+ * `GET /api/event-subscriptions/:id/deliveries`: one listener's latest
+ * deliveries, newest first, each with its event (spec 2026-10-16: presence
+ * hub, Part C step 4). The rule is org-visible, like the list. An event from
+ * a Slack channel this request may not see is left out, as the event page
+ * hides it.
+ */
+eventsRouter.get("/event-subscriptions/:id/deliveries", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const limit = readLimit(c.req.query("limit"), 25, 100);
+  if (limit === undefined) return c.json({ error: "Send a positive whole number for limit." }, 400);
+
+  const subs = await db
+    .select({ id: eventSubscriptions.id })
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
+    .limit(1);
+  if (subs.length === 0) return c.json({ error: "listener not found" }, 404);
+
+  const rows = await db
+    .select({
+      id: eventDeliveries.id,
+      subscriptionId: eventDeliveries.subscriptionId,
+      subscriptionName: eventSubscriptions.name,
+      status: eventDeliveries.status,
+      attempts: eventDeliveries.attempts,
+      lastError: eventDeliveries.lastError,
+      deliveredAt: eventDeliveries.deliveredAt,
+      nextAttemptAt: eventDeliveries.nextAttemptAt,
+      destination: eventDeliveries.destination,
+      target: eventSubscriptions.target,
+      event: events,
+    })
+    .from(eventDeliveries)
+    .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+    .innerJoin(events, and(eq(events.id, eventDeliveries.eventId), eq(events.orgId, user.orgId)))
+    .where(eq(eventDeliveries.subscriptionId, id))
+    .orderBy(desc(eventDeliveries.createdAt), desc(eventDeliveries.id))
+    .limit(limit);
+  const canSee = channelsVisibleTo(c);
+  const visible: typeof rows = [];
+  for (const row of rows) {
+    const channel = slackEventChannel(row.event);
+    if (channel === undefined || (await canSee(`slack:${channel}`))) visible.push(row);
+  }
+  const wire = await deliveriesToWire(c, visible);
+  const resp: ListSubscriptionDeliveriesResponse = {
+    deliveries: wire.map((d, index) => ({ ...d, event: rowToEventSummary(visible[index]!.event) })),
   };
   return c.json(resp);
 });
