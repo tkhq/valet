@@ -2111,6 +2111,10 @@ export const eventDeliveries = pgTable(
     lastError: text("last_error"),
     deliveredAt: bigint("delivered_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** The Destination resolved at ingest (spec 2026-10-16: delivery threads
+     * and claims, Part C step 6). NULL means resolve at dispatch from the
+     * binding and the policy only (no waiter consult, Part C step 7). */
+    destination: jsonb("destination"),
   },
   (t) => [
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),

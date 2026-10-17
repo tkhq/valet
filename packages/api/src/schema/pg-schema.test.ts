@@ -929,6 +929,7 @@ describe("pg app schema + migrations", () => {
       { table: "security_engagements", column: "config_tools" },
       { table: "security_engagements", column: "authorized_scope" },
       { table: "security_engagements", column: "has_repo_config" },
+      { table: "event_deliveries", column: "destination" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {
