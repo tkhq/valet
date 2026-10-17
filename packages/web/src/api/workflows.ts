@@ -318,6 +318,13 @@ export function useRevokeWorkflowPermissions(id: string) {
   } });
 }
 
+export function useRevokeOwnWorkflowAccounts(id: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: () => api.revokeOwnWorkflowAccounts(id), onSuccess: () => {
+    qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+  } });
+}
+
 export function useStartRun(id: string) {
   const qc = useQueryClient();
   return useMutation<StartWorkflowRunResponse, Error, Record<string, unknown> | void>({

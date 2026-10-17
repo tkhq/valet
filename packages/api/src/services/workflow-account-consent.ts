@@ -12,7 +12,7 @@ export interface WorkflowAccountConsent {
 
 /** A human save authorizes only that person's current accounts for this workflow. */
 export async function saveWorkflowAccountConsent(db: AppQueryable, scope: WorkflowAccountConsent): Promise<void> {
-  const services = [...new Set(scope.services)];
+  const services = [...new Set(scope.services)].filter(service => service !== "github");
   if (services.length === 0) return;
   await db.execute(sql`INSERT INTO workflow_account_grants
     (org_id, workflow_id, team_id, service, member_id, share_generation, created_at)
@@ -30,8 +30,9 @@ export async function saveWorkflowAccountConsent(db: AppQueryable, scope: Workfl
 }
 
 /** Removes saved account consent for this workflow. */
-export async function revokeWorkflowAccountConsent(db: AppQueryable, orgId: string, workflowId: string): Promise<void> {
+export async function revokeWorkflowAccountConsent(db: AppQueryable, orgId: string, workflowId: string, memberId?: string): Promise<void> {
   await db.delete(workflowAccountGrants).where(and(
     eq(workflowAccountGrants.orgId, orgId), eq(workflowAccountGrants.workflowId, workflowId),
+    memberId === undefined ? undefined : eq(workflowAccountGrants.memberId, memberId),
   ));
 }

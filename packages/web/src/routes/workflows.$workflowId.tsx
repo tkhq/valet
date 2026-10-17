@@ -11,6 +11,7 @@ import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
   useRevokeWorkflowPermissions,
+  useRevokeOwnWorkflowAccounts,
   useCopyWorkflow,
   useRunDetail,
   useStartRun,
@@ -188,6 +189,7 @@ function WorkflowEditorPane({
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
   const revokePermissions = useRevokeWorkflowPermissions(workflowId);
+  const revokeAccounts = useRevokeOwnWorkflowAccounts(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
   const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
@@ -415,12 +417,15 @@ function WorkflowEditorPane({
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
-            <p>Saving authorizes the actions you can approve and your shared accounts for this workflow. Other members approve their own accounts.</p>
+            <p>Saving step changes authorizes the actions you can approve and your shared accounts for direct tool steps. Other members approve their own accounts.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
               {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {ownerType === "team" && <Button size="sm" variant="ghost" disabled={revokeAccounts.isPending} onClick={() => revokeAccounts.mutate()}>Remove my account permission</Button>}
               <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
             </div>
+            {revokeAccounts.isSuccess && <p role="status">Your saved workflow account permission was removed. Existing run and team permissions still apply.</p>}
+            {revokeAccounts.error && <p role="alert">{revokeAccounts.error.message}</p>}
             {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
           </>}
         </div>
@@ -475,7 +480,7 @@ function WorkflowEditorPane({
           title="Pre-approve actions"
           description={
             "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
-            "Also allow this workflow to use your accounts already shared with its team. Other members approve their own accounts. " +
+            "Also allow direct tool steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >

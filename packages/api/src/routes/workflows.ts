@@ -72,7 +72,7 @@ import { workflowRunStepCosts } from "../workflows/step-cost.js";
 import { workflowRunModelChanges } from "../workflows/model-drift.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
-import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions, revokeOwnWorkflowAccounts } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -669,6 +669,14 @@ workflowsRouter.get("/:id/permissions", async (c) => {
 workflowsRouter.delete("/:id/permissions/allow", async (c) => {
   const { deps, owner } = serviceCtx(c);
   if (!(await revokeWorkflowPermissions(deps, owner, c.req.param("id")))) return c.json({ error: "Workflow not found or permission management is not allowed." }, 404);
+  return c.json({ ok: true });
+});
+
+workflowsRouter.delete("/:id/permissions/accounts", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeOwnWorkflowAccounts(deps, owner, c.req.param("id")))) {
+    return c.json({ error: "Workflow not found or account consent cannot be changed here. Sign in and open a team workflow you can access." }, 404);
+  }
   return c.json({ ok: true });
 });
 

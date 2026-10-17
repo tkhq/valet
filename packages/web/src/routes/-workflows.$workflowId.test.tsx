@@ -39,6 +39,7 @@ let blocker: BlockerResolver = IDLE_BLOCKER;
 let blockerDisabled: boolean | undefined;
 const updateMutateAsync = vi.fn().mockResolvedValue({});
 const startMutateAsync = vi.fn().mockResolvedValue({ runId: "wfrun_1" });
+const revokeAccountsMutate = vi.fn();
 const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
 /** Per-test permissions payload. Default: nothing gates, so the header
  * badge stays absent everywhere it is not the subject. */
@@ -102,6 +103,7 @@ vi.mock("~/api/workflows", () => ({
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
   useWorkflowPermissions: () => ({ data: permissionsData, isLoading: false, error: null }),
+  useRevokeOwnWorkflowAccounts: () => ({ mutate: revokeAccountsMutate, isPending: false, error: null }),
   useRevokeWorkflowPermissions: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useAllowWorkflowPermissions: () => ({
     mutateAsync: allowMutateAsync,
@@ -502,6 +504,8 @@ describe("WorkflowEditorPage", () => {
 
 describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
   beforeEach(() => {
+    blocker = IDLE_BLOCKER;
+    revokeAccountsMutate.mockClear();
     allowMutateAsync.mockClear();
     allowMutateAsync.mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
     permissionsData = {
@@ -566,7 +570,7 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     permissionsData = { nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     fireEvent.click(screen.getByTestId("workflow-gate-badge"));
-    expect(await screen.findByText(/accounts already shared with its team/)).toBeTruthy();
+    expect(await screen.findByText(/accounts already shared with this team/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save workflow permissions" }));
     await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
   });
@@ -579,6 +583,18 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
       fireEvent.click(screen.getByTestId("workflow-gate-badge"));
       fireEvent.click(await screen.findByRole("button", { name: "Allow my shared accounts" }));
       await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
+    } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
+  });
+
+  it("lets team members withdraw their own workflow account consent", () => {
+    workflowData.ownerType = "team";
+    workflowData.ownerId = "team-1";
+    try {
+      render(<WorkflowEditorPage workflowId="wf_1" />);
+      fireEvent.click(screen.getByText(/^Permissions ·/));
+      fireEvent.click(screen.getByRole("button", { name: "Remove my account permission" }));
+      expect(revokeAccountsMutate).toHaveBeenCalledTimes(1);
+      expect(allowMutateAsync).not.toHaveBeenCalled();
     } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
   });
 

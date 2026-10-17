@@ -827,7 +827,7 @@ async function updateLockedWorkflowDefinition(
       updatedAt: now,
     })
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId)));
-  if (input.definition !== undefined) await authorizeHumanWorkflowSave(deps, owner, id);
+  if (stepsChange) await authorizeHumanWorkflowSave(deps, owner, id);
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
