@@ -128,6 +128,20 @@ export async function followRouteFor(
 }
 
 /**
+ * True when the follow router has passed this Slack message event: the
+ * binding's gap cursor (`lastSeenTs`) is at or after the message's ts. The
+ * router advances the cursor after it delivers a message, and its gap
+ * re-hydration covers a message it passed without a delivery. A null cursor
+ * is false.
+ */
+export function followRouterPassed(follow: FollowedThreadRow, payload: unknown): boolean {
+  const f = slackEventFields(payload);
+  if (!f || follow.lastSeenTs === null) return false;
+  // Numeric compare, as the router does: a Slack ts is `seconds.micros`.
+  return Number.parseFloat(follow.lastSeenTs) >= Number.parseFloat(f.ts);
+}
+
+/**
  * Per-thread routing serialization. Each webhook POST runs its fan-out
  * detached, so two rapid messages on one thread would otherwise both read the
  * same `last_seen_ts` and hydrate overlapping windows — the second delivery

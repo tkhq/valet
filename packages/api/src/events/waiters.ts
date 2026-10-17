@@ -26,6 +26,7 @@ import type { Providers } from "../providers/types.js";
 import { agentSessions } from "../schema/index.js";
 import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
+import { slackBotUserIdOf } from "../services/slack-bot-identity.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
 import { anyMatch, matchClauses, needsPreviousStatus, toDigest } from "./waiter-match.js";
 import { channelOriginResolver } from "./channel-origin.js";
@@ -343,12 +344,10 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
     ...(opts.nudge ? { nudge: opts.nudge } : {}),
     ...(providers.channelHost ? { channelOrigin: channelOriginResolver(providers.channelHost) } : {}),
     now: Date.now,
-    // The Slack connection stores the bot user id in the credential's
-    // metadata (`botUserId`), the same source the Slack inbox reads.
+    // The same resolution the Slack inbox drain gives the follow router
+    // (`slackBotUserIdOf`), so both agree on which posts address the bot.
     async slackBotUserId(orgId) {
-      const credential = await orgSlackCredential(providers, orgId);
-      const botUserId = credential?.metadata?.botUserId;
-      return typeof botUserId === "string" && botUserId ? botUserId : undefined;
+      return slackBotUserIdOf(providers.engineCredentials, orgId, await orgSlackCredential(providers, orgId));
     },
   };
 }

@@ -66,7 +66,7 @@ import { handleFollowedMessage } from "./follow-router.js";
 import { channelMessageNormalizer } from "../events/channel-origin.js";
 import { channelThreadWindowFetcher } from "../events/channel-thread-context.js";
 import { maybeNotifyUnlinkedSlackSender } from "./slack-link-notice.js";
-import { resolveSlackBotIdentity } from "../services/slack-bot-identity.js";
+import { resolveSlackBotIdentity, slackBotUserIdOf } from "../services/slack-bot-identity.js";
 import type { SlackWorkspaceIdentity } from "../services/slack-connect.js";
 
 /** Same rationale as `ChannelHost.maybeLogVerifyFailed`: the Slack events route is
@@ -243,6 +243,31 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
     console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} channel consumer failed`, err);
   }
 
+  // Follow-router: a threaded message on a followed thread routes to the bound
+  // assistant. Its error is contained. It runs before subscription ingestion:
+  // the dispatcher skips a followed reply only after the router's cursor
+  // passed it, and ingestion nudges the dispatcher at once (spec 2026-10-16:
+  // delivery threads and claims, Part C step 4).
+  try {
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "started", detail: "Checking whether a followed Slack thread applies." });
+    await handleFollowedMessage(
+      {
+        db: deps.db,
+        botUserId: deps.botUserId,
+        engineHost: deps.engineHost,
+        normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
+        fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
+        onSenderDenied: notifyUnlinked,
+      },
+      { orgId: deps.orgId, raw },
+    );
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "completed", detail: "Followed-thread check completed. This does not imply a binding existed or a prompt was delivered." });
+  } catch (err) {
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "failed", detail: "Followed-thread processing failed. Check server logs using this receipt reference. Other consumers ran independently." });
+    failed = true;
+    console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} follow-router failed`, err);
+  }
+
   // The trigger definitions re-verify over the same raw bytes so their own
   // extraction stays authoritative. The HMAC is cheap, and each definition
   // rejects event types outside its family, so the first match wins.
@@ -290,28 +315,6 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
     await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Event processing failed during ${eventPhase}. Check server logs using this receipt reference. Exception payloads are not retained.` });
     failed = true;
     console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} event consumer failed`, err);
-  }
-
-  // Follow-router: a threaded message on a followed thread routes to the bound
-  // assistant. Independent of the two consumers above; its error is contained.
-  try {
-    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "started", detail: "Checking whether a followed Slack thread applies." });
-    await handleFollowedMessage(
-      {
-        db: deps.db,
-        botUserId: deps.botUserId,
-        engineHost: deps.engineHost,
-        normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
-        fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
-        onSenderDenied: notifyUnlinked,
-      },
-      { orgId: deps.orgId, raw },
-    );
-    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "completed", detail: "Followed-thread check completed. This does not imply a binding existed or a prompt was delivered." });
-  } catch (err) {
-    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "failed", detail: "Followed-thread processing failed. Check server logs using this receipt reference. Other consumers ran independently." });
-    failed = true;
-    console.error(`[slack-webhook] receipt ${receiptId ?? "unavailable"} follow-router failed`, err);
   }
   if (failed) throw new Error("Slack consumers did not all finish. The durable inbox will retry.");
 }
@@ -397,7 +400,8 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
         db, workspaceId: credentialTeamId, plugins: providers.plugins, transport, channelHost: providers.channelHost, engineHost: providers.engineHost,
         orgId: row.orgId, webhookSecret: payload.webhookSecret, headers, rawBody,
         verifiedReceivedAt: payload.verifiedReceivedAt,
-        botUserId: typeof credential.metadata?.botUserId === "string" ? credential.metadata.botUserId : undefined,
+        // The follow router and the event matchers read one bot user id.
+        botUserId: await slackBotUserIdOf(providers.engineCredentials, row.orgId, credential),
         botId: typeof credential.metadata?.botId === "string" ? credential.metadata.botId : undefined,
         resolveBotIdentity: accessToken ? () => resolveSlackBotIdentity(providers.engineCredentials,
           { orgId: row.orgId, accessToken, teamId: credentialTeamId }) : undefined,

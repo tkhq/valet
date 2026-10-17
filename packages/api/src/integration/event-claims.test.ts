@@ -330,6 +330,20 @@ describe("api integration: claims acceptance scenario", () => {
     expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
     expect(await queuedWith(u, c3bText)).toEqual([expect.objectContaining(tInc)]);
 
+    // C3b without rule P: no rule matches the reply, and the follow router
+    // still delivers it to t-inc. The router owns the reply, so the waiter
+    // appends no digest: one turn.
+    await p.db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "P"));
+    const c3cText = "write path drained";
+    await postSlack(u, slackMessage("C900", "U001", c3cText, x));
+    await poll(() => queuedWith(u, c3cText), (rows) => rows.length > 0, "the routed reply without rule P");
+    await tick(u);
+    await expectNoNewSignal(u, "event.matched", 1, tInc.sessionId, tInc.threadId);
+    expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
+    expect(await queuedWith(u, c3cText)).toEqual([expect.objectContaining(tInc)]);
+    expect(await deliveriesOf(u, "P")).toHaveLength(4);
+    await p.db.update(eventSubscriptions).set({ enabled: true }).where(eq(eventSubscriptions.id, "P"));
+
     // C4: U002 links to no Valet user. The team gate refuses the mention, so
     // M delivers nothing and t-inc receives the post as one digest.
     const c4Text = `<@${BOT_USER}> is the replica healthy?`;

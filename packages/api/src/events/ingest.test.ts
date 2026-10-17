@@ -294,6 +294,16 @@ describe("ingestEvent event waiter matching", () => {
     errors.mockRestore();
   });
 
+  it("records a failed follow route check like any claim failure (INV-D6)", async () => {
+    await subscribeMessages();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await ingest(message("Ev-f5"), waiterDeps(), { ...deliverable, followRoute: async () => { throw new Error("db down"); } });
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-f5"]);
+    expect(await stagesOf()).toContainEqual({ stage: "claim_resolution", outcome: "failed", detail: expect.stringContaining("thread policy") });
+    expect(failed).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
   it("appends every waiter's digest when the delivery insert throws (INV-D6)", async () => {
     await subscribeAppMention();
     await subscribeMessages();

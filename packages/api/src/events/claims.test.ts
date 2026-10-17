@@ -165,6 +165,8 @@ describe("resolveClaims: Scenario C", () => {
     const reply = slackEvent("slack.message", "1.0", { payload: { channel: "C900", user: "U001", text: "on it", ts: "1.7", thread_ts: "1.0" } });
     const d = await resolve(f, { event: reply, matched: [], candidates: [tInc(reply)] });
     expect(d.waiters.get("w-inc") ?? "append").toBe("append");
+    // Ingest records the failure like any other claim failure.
+    expect(d.failedOwners).toBe(1);
   });
 
   it("C4: a mention that the sender gate refuses reaches t-inc as one digest", async () => {

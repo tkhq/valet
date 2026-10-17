@@ -29,7 +29,10 @@ export interface ClaimDecision {
   deliveries: Map<string, Destination>;
   /** The decision per waiter id. A waiter with no entry appends. */
   waiters: Map<string, WaiterDecision>;
-  /** The number of owners whose resolution threw. Their deliveries are unstamped and their waiters append (INV-D6). */
+  /**
+   * The number of owner resolutions and follow route checks that threw.
+   * Their deliveries are unstamped and their waiters append (INV-D6).
+   */
   failedOwners: number;
 }
 
@@ -244,7 +247,10 @@ export async function resolveClaims(deps: ClaimDeps, args: ResolveClaimsArgs): P
   try {
     routedOwner = (await deps.followRoute?.(args.event)) ?? null;
   } catch (error) {
-    // Without the answer the bound thread's waiters append: duplication, never loss (INV-D6).
+    // Without the answer the bound thread's waiters append: duplication,
+    // never loss (INV-D6). It counts as a failed resolution, so ingest
+    // records the receipt stage and the failure counter.
+    decision.failedOwners += 1;
     console.error(`[event-claims] the follow route check failed in org ${args.orgId}`, error);
   }
   if (routedOwner) {
