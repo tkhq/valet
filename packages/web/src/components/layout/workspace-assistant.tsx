@@ -20,6 +20,11 @@ export function useWorkspaceAssistant() {
   return context;
 }
 
+/** Opening Ask Valet runs even while the browser reports offline. A paused
+ * mutation never settles, so the panel showed neither an error nor Retry;
+ * the request now fails at once and the panel offers Retry. */
+export const ENSURE_CONVERSATION_MUTATION = { networkMode: "always" } as const;
+
 /** One durable workspace Thread, reused across app pages. No helper sessions. */
 export function WorkspaceAssistantProvider({ children }: { children: ReactNode }) {
   const scope = useWorkspaceScope();
@@ -28,7 +33,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   const qc = useQueryClient();
   // A mutation, not a direct call: the UI stress gallery's frozen client
   // refuses every mutation, so the gallery never sends this request.
-  const ensureConversation = useMutation({ mutationFn: (key: string) => api.ensureWorkspaceConversation(key) });
+  const ensureConversation = useMutation({ ...ENSURE_CONVERSATION_MUTATION, mutationFn: (key: string) => api.ensureWorkspaceConversation(key) });
   const conversations = useRef(new Map<string, Promise<Conversation>>());
   const [opened, setOpened] = useState<string>();
   const [loaded, setLoaded] = useState<Record<string, Conversation>>({});

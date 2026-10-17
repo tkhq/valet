@@ -107,25 +107,19 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     return this.saveIfUnchanged(owner, service, stored, fresh);
   }
 
-  /**
-   * Saves the refresh result only if the row still holds the tokens it
-   * refreshed. A reconnect can replace the row while the token request is in
-   * flight, and saving then would put the old grant back over the new one.
-   * Returns the row the caller should use. The store has no compare-and-swap,
-   * so a write can still land between this read and the save; the window is
-   * one round trip, not the provider's response time.
-   */
+  /** Keep a reconnect or deletion that commits while the refresh is in flight. */
   private async saveIfUnchanged(
     owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential,
   ): Promise<StoredCredential | null> {
-    const current = await this.inner.get(owner, service);
-    if (!current || current.accessToken !== expected.accessToken || current.refreshToken !== expected.refreshToken) return current;
-    await this.inner.save(owner, service, next);
-    return next;
+    if (await this.inner.compareAndSwap(owner, service, expected, next)) return next;
+    return this.inner.get(owner, service);
   }
 
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void> {
     return this.inner.save(owner, service, credential);
+  }
+  compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    return this.inner.compareAndSwap(owner, service, expected, next);
   }
   delete(owner: CredentialOwner, service: string): Promise<void> {
     return this.inner.delete(owner, service);

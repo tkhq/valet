@@ -17,6 +17,7 @@
  * `@valet/store-postgres` — see their doc comments for the never-re-parse
  * rule).
  */
+import { isDeepStrictEqual } from "node:util";
 import { CREDENTIAL_INVALIDATION_SQL } from "../services/content-sync/invalidation.js";
 import { fromJsonbColumn, jsonbToParam, type PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
@@ -100,6 +101,10 @@ export class PgCredentialStore implements CredentialStore {
     const raw = result.rows[0];
     if (!raw) return null;
     const row = rawToCredentialRow(raw);
+    return this.toCredential(row);
+  }
+
+  private toCredential(row: CredentialRow): StoredCredential {
     return {
       type: row.type,
       accessToken: this.decrypt(row.accessTokenEnc),
@@ -143,6 +148,45 @@ export class PgCredentialStore implements CredentialStore {
         now,
       ],
     );
+  }
+
+  async compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    const result = await this.db.query(
+      `SELECT * FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3`,
+      [owner.type, owner.id, service],
+    );
+    const raw = result.rows[0];
+    if (!raw) return false;
+    const row = rawToCredentialRow(raw);
+    const normalizedExpected: StoredCredential = {
+      type: expected.type, accessToken: expected.accessToken, refreshToken: expected.refreshToken,
+      apiKey: expected.apiKey, expiresAt: expected.expiresAt, scopes: expected.scopes, metadata: expected.metadata,
+    };
+    if (!isDeepStrictEqual(this.toCredential(row), normalizedExpected)) return false;
+    // Compare the persisted ciphertext snapshot, not newly encrypted expected
+    // tokens. Encryption uses random nonces. A concurrent reconnect or delete
+    // makes this UPDATE affect zero rows, even when writes share a timestamp.
+    const written = await this.db.query(`WITH written AS (
+      UPDATE credentials SET type = $4, access_token_enc = $5, refresh_token_enc = $6,
+        api_key_enc = $7, expires_at = $8, scopes = $9, metadata = $10, updated_at = $11
+      WHERE owner_type = $1 AND owner_id = $2 AND service = $3
+        AND type = $12
+        AND access_token_enc IS NOT DISTINCT FROM $13
+        AND refresh_token_enc IS NOT DISTINCT FROM $14
+        AND api_key_enc IS NOT DISTINCT FROM $15
+        AND expires_at IS NOT DISTINCT FROM $16
+        AND scopes IS NOT DISTINCT FROM $17::jsonb
+        AND metadata IS NOT DISTINCT FROM $18::jsonb
+        AND updated_at = $19 AND created_at = $20
+      RETURNING owner_type, owner_id, service
+    ), invalidated AS (${CREDENTIAL_INVALIDATION_SQL} RETURNING source.id)
+    SELECT service FROM written`, [
+      owner.type, owner.id, service, next.type, this.encrypt(next.accessToken), this.encrypt(next.refreshToken),
+      this.encrypt(next.apiKey), next.expiresAt ?? null, jsonbToParam(next.scopes), jsonbToParam(next.metadata), this.clock(),
+      row.type, row.accessTokenEnc, row.refreshTokenEnc, row.apiKeyEnc, row.expiresAt,
+      jsonbToParam(fromJsonbColumn(row.scopes)), jsonbToParam(fromJsonbColumn(row.metadata)), row.updatedAt, row.createdAt,
+    ]);
+    return written.rows.length > 0;
   }
 
   async delete(owner: CredentialOwner, service: string): Promise<void> {

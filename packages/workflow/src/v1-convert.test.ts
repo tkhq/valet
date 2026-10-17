@@ -221,7 +221,7 @@ describe('convertV1Workflows: steps', () => {
           conditions: [{ left: 'trigger.data.target', dataType: 'string', operation: 'equals', right: 'prod' }],
         });
         expect(edges(wf)).toEqual(['trigger->env', 'env->deploy:true', 'env->skip:false', 'deploy->stop', 'skip->stop']);
-        expect(node(wf, 'trigger')).toMatchObject({ dataSchema: { target: { type: 'string' } } });
+        expect(node(wf, 'trigger')).not.toHaveProperty('dataSchema');
         expect(prompt(node(wf, 'skip'))).toBe('Approval required for step skip');
       },
     },
@@ -255,7 +255,7 @@ describe('convertV1Workflows: steps', () => {
       steps: [{ id: 'flag', type: 'conditional', condition: { variable: 'urgent', equals: false } }],
       check: (wf) => {
         expect(node(wf, 'flag')).toMatchObject({ conditions: [{ dataType: 'boolean', operation: 'isFalse' }] });
-        expect(node(wf, 'trigger')).toMatchObject({ dataSchema: { urgent: { type: 'boolean' } } });
+        expect(node(wf, 'trigger')).not.toHaveProperty('dataSchema');
       },
     },
     {
@@ -309,6 +309,7 @@ describe('convertV1Workflows: steps', () => {
         expect(wf.checklist).toEqual([
           expect.stringContaining('in id order ("a-first", "b-second"), not in the order listed. The import keeps the V1 order.'),
           expect.stringContaining('Approval node "a-first" is inside step "c".'),
+          expect.stringContaining('Choose its type after you check the callers.'),
         ]);
       },
     },
@@ -442,6 +443,36 @@ describe('convertV1Workflows: steps', () => {
 });
 
 describe('convertV1Workflows: approvals and limits in a V2 run', () => {
+  it.each([
+    { variable: 'value', equals: 1, cases: [[1, true], [2, false], ['1', false], [true, false], [null, false], [undefined, false], [[], false], [{}, false]] },
+    { variable: 'value', equals: '1', cases: [['1', true], ['2', false], [1, false], [false, false], [null, false], [undefined, false]] },
+    { variable: 'pr.merged', equals: false, cases: [[false, true], [true, false], ['false', false], [0, false], [null, false], [undefined, false]] },
+  ])('admits every V1 input type for $variable equals $equals and keeps the same branch', async ({ variable, equals, cases }) => {
+    // Load the frozen runner without adding its Bun-only types to this package's build.
+    const legacy: {
+      executeWorkflowRun: (id: string, workflow: { steps: { id: string; type: string }[] }, payload: { variables: Record<string, unknown> }) => Promise<{
+        status: string;
+        steps: { stepId: string }[];
+      }>;
+    } = await import(new URL('../../runner/src/workflow-engine.ts', import.meta.url).href);
+    const spawn = (id: string) => ({ id, type: 'tool', tool: 'spawn_session', arguments: { task: `Run ${id}.`, workspace: 'app' } });
+    const steps = [{ id: 'check', type: 'conditional', condition: { variable, equals }, then: [spawn('matched')], else: [spawn('unmatched')] }];
+    const wf = one(steps);
+    for (const [value, matches] of cases) {
+      const data = value === undefined ? {} : { [variable]: value };
+      const v1 = await legacy.executeWorkflowRun('legacy', { steps }, { variables: data });
+      expect(v1.status).toBe('ok');
+      expect(v1.steps.map((step) => step.stepId)).toEqual(['check', matches ? 'matched' : 'unmatched']);
+
+      const admitted = resolveTriggerInput(triggerDataSchema(wf.definition), data);
+      expect(admitted.errors, JSON.stringify(data)).toEqual([]);
+      const v2 = await runInV2(wf, {}, admitted.input);
+      expect(v2.outcome).toBe('completed');
+      expect(v2.status).toMatchObject({ matched: matches ? 'completed' : 'skipped', unmatched: matches ? 'skipped' : 'completed' });
+    }
+    expect(wf.checklist).toContainEqual(expect.stringContaining('A trigger input has one type'));
+  });
+
   it('goes on after a parallel step when an approval inside it is denied, as V1 did', async () => {
     const wf = one(RELEASE);
     const denied = await runInV2(wf, { a_gate: false });
@@ -476,7 +507,7 @@ describe('convertV1Workflows: approvals and limits in a V2 run', () => {
       expect((await runInV2(wf, {}, { count })).status, JSON.stringify(count)).toMatchObject({ none: 'skipped', some: 'completed' });
     }
     expect((await runInV2(wf, {}, { count: 0 })).status).toMatchObject({ none: 'completed', some: 'skipped' });
-    expect(node(wf, 'trigger')).toMatchObject({ dataSchema: { count: { type: 'number' } } });
+    expect(node(wf, 'trigger')).not.toHaveProperty('dataSchema');
   });
 
   it('leaves a variable that V1 compared to a number and to a string off the run form, so V2 takes both', async () => {
@@ -631,6 +662,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
     });
     const wf = out.workflows[0]!;
     expect(wf.checklist).toEqual([
+      expect.stringContaining('Choose its type after you check the callers.'),
       'V1 manual trigger "Prod only" copied request fields into variables (environment from $.target). V2 does not copy them: each condition reads the variable name from the run input, such as trigger.data.environment. Change the callers to send the variable names, or change the conditions to read the request fields.',
     ]);
     // V1 deployed for this request. V2 reads trigger.data.environment and skips the deploy.
@@ -652,6 +684,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
     });
     const wf = out.workflows[0]!;
     expect(wf.checklist).toEqual([
+      expect.stringContaining('Choose its type after you check the callers.'),
       expect.stringContaining('webhook trigger "Issues" (POST issues)'),
       'V1 webhook trigger "Issues" set only mapped variables from the request, and it has no mapping. V1 left "action" unset, so each condition on it took its false branch. A V2 webhook passes the JSON body as trigger.data, so these conditions read trigger.data.action from the request. Decide whether the conditions must read the request, then change the conditions or the caller.',
     ]);
@@ -685,6 +718,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
     });
     const wf = out.workflows[0]!;
     expect(wf.checklist).toEqual([
+      expect.stringContaining('Choose its type after you check the callers.'),
       'V1 started this workflow from webhook trigger "Deploys" (POST deploy). Create a webhook for this workflow in Triggers, then change the caller to the new URL. V2 webhooks take POST with a JSON body. V1 copied request fields into variables of the same name (repo from $.repo). V2 reads them from trigger.data the same way.',
       'V1 webhook trigger "Deploys" copied request fields into variables (environment from $.target). V1 read each path one field at a time. A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as trigger.data.environment. Change the caller to send the variable names, or change the conditions to read the request fields.',
       // A required decision holds the schedule.

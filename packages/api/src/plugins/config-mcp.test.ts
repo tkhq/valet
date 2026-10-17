@@ -85,6 +85,8 @@ describe("configMcpPlugins", () => {
       {},
     );
     expect(plugin.displayName).toBe("Example Cloud");
+    // A borrow approval names the account by the same name.
+    expect(plugin.actions?.[0]?.displayName).toBe("Example Cloud");
     expect(plugin.credentials?.[0]?.connectLabel).toBe("Example Cloud API key");
   });
 

@@ -5716,48 +5716,6 @@ export interface WaitingThreadsResponse {
   threads: WaitingThread[];
 }
 
-export interface WorkspaceBriefingSource {
-  id: string;
-  kind: "thread" | "workflow" | "artifact" | "pull_request" | "review" | "message";
-  title: string;
-  updatedAt: number;
-  sessionId?: string;
-  threadId?: string;
-  runId?: string;
-  token?: string;
-  url?: string;
-  /** The channel conversation this came from, such as a Slack thread link. */
-  originUrl?: string;
-}
-export interface WorkspaceBriefing {
-  id: string;
-  title: string;
-  summary: string;
-  /** The one thing a person should do next, as a short instruction. Absent when nothing is pending. */
-  nextAction?: string;
-  status: "needs_attention" | "in_progress" | "updated";
-  updatedAt: number;
-  latestThread: { sessionId: string; threadId: string; title?: string } | null;
-  /** The channel conversation the work started in, such as a Slack thread. */
-  originUrl?: string;
-  sources: WorkspaceBriefingSource[];
-}
-export interface DismissWorkspaceBriefingResponse {
-  dismissed: true;
-  /** Threads archived with the brief. */
-  archived: number;
-  /** Threads left open because an approval is pending on them. */
-  keptWaiting: number;
-}
-export interface WorkspaceBriefingsResponse {
-  checkedAt?: number | null;
-  refreshing?: boolean;
-  briefings: WorkspaceBriefing[];
-  generatedAt: number | null;
-  coverage: "recent";
-  unavailable?: boolean;
-}
-
 /** A release notice with a stable identity and an internal destination. */
 export interface ProductAnnouncement {
   id: string;

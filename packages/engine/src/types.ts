@@ -923,6 +923,9 @@ export function credentialSecret(credential: StoredCredential | null | undefined
 export interface CredentialStore {
   get(owner: CredentialOwner, service: string): Promise<StoredCredential | null>;
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void>;
+  /** Atomically replace an existing row only when its value still equals expected.
+   * Missing or changed rows return false. This operation must never insert. */
+  compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean>;
   delete(owner: CredentialOwner, service: string): Promise<void>;
   list(owner: CredentialOwner): Promise<{ service: string; scopes?: string[]; connectedAt: string }[]>;
 }

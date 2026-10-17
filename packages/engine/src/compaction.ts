@@ -435,6 +435,8 @@ export interface SelectCutPointOptions {
   entries: readonly SessionEntry[];
   model: Model<any>;
   cfg?: CompactionConfig;
+  /** Context retained outside the tail, such as an active task and fixed model instructions. */
+  reservedTokens?: number;
   /** Override token estimator for tests. Defaults to estimateEntryTokens. */
   tokenize?: (entry: SessionEntry) => number;
 }
@@ -462,7 +464,9 @@ export function selectCutPoint(opts: SelectCutPointOptions): CutPoint {
   }
 
   const usable = usableTokens(model, cfg);
-  const budget = tailBudget(usable, cfg);
+  const budget = opts.reservedTokens
+    ? Math.max(0, Math.min(tailBudget(usable, cfg), usable - opts.reservedTokens))
+    : tailBudget(usable, cfg);
   const allTurns = turns(entries);
   if (allTurns.length === 0) {
     return { cutIndex: entries.length, tailStartId: undefined, fallbackToFloor: false };
@@ -750,8 +754,12 @@ Rules:
 
 /** Reject a partial handoff before it can replace usable context. */
 function validateSummaryStructure(summary: string): void {
-  const required = [...SUMMARY_TEMPLATE.matchAll(/^#{2,3} .+$/gm)].map(match => match[0]);
-  const headings: Array<{ name: string; body: string[] }> = [];
+  const normalize = (level: string, title: string): string =>
+    `${level} ${title.trim().replace(/:$/, "").trim().replace(/\s+/g, " ").toLowerCase()}`;
+  const required = [...SUMMARY_TEMPLATE.matchAll(/^(#{2,3}) (.+)$/gm)].map(match => normalize(match[1], match[2]));
+  const requiredNames = new Set(required);
+  const headings: Array<{ name: string; level: number; body: string[] }> = [];
+  let current: (typeof headings)[number] | undefined;
   let fence: { marker: string; length: number } | undefined;
   for (const line of summary.split(/\r?\n/)) {
     const boundary = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -761,12 +769,21 @@ function validateSummaryStructure(summary: string): void {
       else if (marker === fence.marker && boundary[1].length >= fence.length && !boundary[2].trim()) fence = undefined;
       continue;
     }
-    const heading = !fence && /^ {0,3}(#{2,3})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
-    if (heading) headings.push({ name: `${heading[1]} ${heading[2]}`, body: [] });
-    else headings.at(-1)?.body.push(line);
+    const heading = !fence && /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
+    if (heading) {
+      const name = normalize(heading[1], heading[2]);
+      if (requiredNames.has(name)) {
+        current = { name, level: heading[1].length, body: [] };
+        headings.push(current);
+      } else if (current && heading[1].length <= current.level) {
+        // A separate optional section cannot supply a required section's body.
+        current = undefined;
+      }
+      // Optional subsections can organize content within a required section.
+    } else current?.body.push(line);
   }
   const valid = !fence && headings.length === required.length && headings.every((heading, index) =>
-    heading.name === required[index] && (heading.name === "## Progress" || heading.body.some(line => line.replace(/^\s*[-*+]\s*/, "").trim().length > 0)));
+    heading.name === required[index] && (heading.name === "## progress" || heading.body.some(line => line.replace(/^\s*[-*+]\s*/, "").trim().length > 0)));
   if (!valid) throw new Error(
     "The summarizer returned an incomplete or malformed summary. Keep every required section in order with its content. Run /compact to retry.",
   );
