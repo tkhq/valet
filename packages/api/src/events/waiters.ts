@@ -12,6 +12,7 @@
 import { eq } from "drizzle-orm";
 import {
   recordEventMatchFailed,
+  type ChannelOrigin,
   recordEventWaiterMatch,
   type DeriveContext,
   type EventMatchDigest,
@@ -27,6 +28,7 @@ import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
 import { anyMatch, matchClauses, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { channelOriginResolver } from "./channel-origin.js";
 
 /** The counters the matcher writes (spec Part J). Tests replace them. */
 export interface WaiterMatchMetrics {
@@ -61,6 +63,12 @@ export interface WaiterMatchDeps {
   now(): number;
   /** Slack bot user id for the org, for the plugin's `conversationalTwin` hook. */
   slackBotUserId(orgId: string): Promise<string | undefined>;
+  /**
+   * The channel origin of an event, as the dispatcher resolves it. Claim
+   * resolution reads it for the follow binding and the direct-message test.
+   * Absent → no origin: no follow binding is found at ingest.
+   */
+  channelOrigin?: (service: string, eventKey: string, payload: unknown) => ChannelOrigin | null;
   metrics?: Partial<WaiterMatchMetrics>;
 }
 
@@ -249,6 +257,7 @@ export async function loadSessionOwner(
 
 type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "plugins"> & {
   onePassword?: Providers["onePassword"];
+  channelHost?: Providers["channelHost"];
 };
 
 /**
@@ -332,6 +341,7 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
       return withTimeout(resolver.resolve(ctx, ref), timeoutMs, null);
     },
     ...(opts.nudge ? { nudge: opts.nudge } : {}),
+    ...(providers.channelHost ? { channelOrigin: channelOriginResolver(providers.channelHost) } : {}),
     now: Date.now,
     // The Slack connection stores the bot user id in the credential's
     // metadata (`botUserId`), the same source the Slack inbox reads.

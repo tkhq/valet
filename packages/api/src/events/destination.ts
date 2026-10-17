@@ -10,7 +10,11 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 
 /** Where one assistant delivery lands: a resolved thread, a key to resolve at delivery, or a skip. */
 export type Destination =
-  | { kind: "target"; sessionId: string; threadId: string; reason: DestinationReason }
+  | {
+    kind: "target"; sessionId: string; threadId: string; reason: DestinationReason;
+    /** A once-mode waiter that this claim redirect ends as matched after delivery (Part C step 5). */
+    matchedWaiterId?: string;
+  }
   | { kind: "key"; key: string; title: string; reason: DestinationReason; note?: string }
   | { kind: "skip"; reason: `claimed by thread ${string}` };
 
