@@ -811,6 +811,7 @@ function toScheduleWire(s: WorkflowScheduleSummary, workflowId: string): Workflo
     enabled: s.enabled,
     lastFiredAt: s.lastFiredAt,
     nextFireAt: s.nextFireAt,
+    ...(s.disabledReason !== undefined ? { disabledReason: s.disabledReason } : {}),
   };
 }
 

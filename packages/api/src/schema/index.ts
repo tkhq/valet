@@ -2069,6 +2069,10 @@ export const workflowSchedules = pgTable(
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** Why the scheduler disabled this schedule: the pin text when its
+     * `existing` thread cannot receive deliveries (spec 2026-10-16: presence
+     * hub, Part D). Enabling the schedule or changing its pin clears it. */
+    disabledReason: text("disabled_reason"),
     /** `repo` rows are armed from a mirrored workflow file. The sync updates
      * and deletes only these, so a schedule a person armed on the same
      * workflow is never touched. */
@@ -2124,6 +2128,7 @@ export const eventDeliveries = pgTable(
   (t) => [
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),
     index("event_deliveries_event").on(t.eventId),
+    index("event_deliveries_subscription").on(t.subscriptionId, t.createdAt),
   ],
 );
 

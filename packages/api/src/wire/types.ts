@@ -2711,6 +2711,8 @@ export interface WorkflowScheduleWire {
   enabled: boolean;
   lastFiredAt: number | null;
   nextFireAt: number;
+  /** See `WorkflowScheduleTriggerDetail.disabledReason`. */
+  disabledReason?: string;
 }
 
 export interface ListWorkflowSchedulesResponse {
@@ -2920,6 +2922,10 @@ export interface WorkflowScheduleTriggerDetail {
   input?: unknown;
   nextFireAt: number;
   lastFiredAt: number | null;
+  /** Why the scheduler disabled this schedule: the pin text when its
+   * `existing` thread cannot receive deliveries. Absent when it recorded
+   * none. Enabling the schedule or changing its pin clears it. */
+  disabledReason?: string;
 }
 
 export interface WorkflowEventTriggerDetail {
@@ -3003,6 +3009,8 @@ export interface WorkflowScheduleResponse {
     input?: unknown;
     lastFiredAt: number | null;
     nextFireAt: number;
+    /** See `WorkflowScheduleTriggerDetail.disabledReason`. */
+    disabledReason?: string;
   };
 }
 
@@ -5061,6 +5069,11 @@ export interface EventSubscriptionWire {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+  /** The rule's open problem, read from its deliveries on the list route
+   * only: the pin text when its latest settled delivery since its last
+   * edit dead-lettered because the pinned thread cannot receive deliveries
+   * (spec 2026-10-16: presence hub, Part C step 5). Absent otherwise. */
+  problem?: string;
 }
 
 // ─── Action policies (action-policies plan, Task 4) ─────────────────────────

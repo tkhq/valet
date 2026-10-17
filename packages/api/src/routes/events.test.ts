@@ -607,6 +607,66 @@ describe("GET /api/event-subscriptions", () => {
   });
 });
 
+// Spec 2026-10-16 presence hub, Part C step 5: a rule whose pinned thread no
+// longer accepts deliveries carries a problem, read from its deliveries.
+describe("GET /api/event-subscriptions problem", () => {
+  const PIN_TEXT = "Pick another thread for this rule in Presence.";
+
+  async function seedDelivery(
+    a: TestApi,
+    id: string,
+    subscriptionId: string,
+    over: { status: "dead" | "delivered" | "failed"; lastError?: string; createdAt: number },
+  ): Promise<void> {
+    await a.providers.db.insert(eventDeliveries).values({
+      id, eventId: `ev_${id}`, subscriptionId, status: over.status, attempts: 1,
+      lastError: over.lastError ?? null, nextAttemptAt: over.createdAt, createdAt: over.createdAt,
+    });
+  }
+
+  async function problems(a: TestApi): Promise<Record<string, string | undefined>> {
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    return Object.fromEntries(body.subscriptions.map((s) => [s.id, s.problem]));
+  }
+
+  it("sets the problem when the latest delivery dead-lettered on the pin", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    await seedSubscriptionRow(a, "sub_pin", "local-org");
+    await seedDelivery(a, "d_old_ok", "sub_pin", { status: "delivered", createdAt: later });
+    await seedDelivery(a, "d_pin", "sub_pin", { status: "dead", lastError: PIN_TEXT, createdAt: later + 1 });
+    expect((await problems(a)).sub_pin).toBe(PIN_TEXT);
+  });
+
+  it("leaves the problem absent for other dead-letters, a later delivery, and an edit after it", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    await seedSubscriptionRow(a, "sub_other", "local-org");
+    await seedDelivery(a, "d_boom", "sub_other", { status: "dead", lastError: "boom", createdAt: later });
+    await seedSubscriptionRow(a, "sub_recovered", "local-org");
+    await seedDelivery(a, "d_pin_then", "sub_recovered", { status: "dead", lastError: PIN_TEXT, createdAt: later });
+    await seedDelivery(a, "d_ok_now", "sub_recovered", { status: "delivered", createdAt: later + 1 });
+    // A pending retry after the dead-letter is not a settled answer yet.
+    await seedSubscriptionRow(a, "sub_retrying", "local-org");
+    await seedDelivery(a, "d_pin_r", "sub_retrying", { status: "dead", lastError: PIN_TEXT, createdAt: later });
+    await seedDelivery(a, "d_retry", "sub_retrying", { status: "failed", lastError: "boom", createdAt: later + 1 });
+    // A dead-letter older than the rule's last edit predates the fix.
+    await seedSubscriptionRow(a, "sub_edited", "local-org");
+    await seedDelivery(a, "d_pin_old", "sub_edited", { status: "dead", lastError: PIN_TEXT, createdAt: 1_000 });
+    await seedSubscriptionRow(a, "sub_quiet", "local-org");
+
+    const got = await problems(a);
+    expect(got.sub_other).toBeUndefined();
+    expect(got.sub_recovered).toBeUndefined();
+    expect(got.sub_retrying).toBe(PIN_TEXT);
+    expect(got.sub_edited).toBeUndefined();
+    expect(got.sub_quiet).toBeUndefined();
+    expect(Object.keys(got).sort()).toEqual(["sub_edited", "sub_other", "sub_quiet", "sub_recovered", "sub_retrying"]);
+  });
+});
+
 describe("PATCH /api/event-subscriptions/:id", () => {
   it("updates name/enabled/filters and re-validates what's provided", async () => {
     const a = await boot();

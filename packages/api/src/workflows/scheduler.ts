@@ -221,7 +221,9 @@ export class WorkflowScheduler {
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (result !== "ok") {
       console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
-      const disabled = await db.update(workflowSchedules).set({ enabled: false, updatedAt: now })
+      // A dead pin records its reason, so the routine page can name the fix.
+      const disabled = await db.update(workflowSchedules)
+        .set({ enabled: false, updatedAt: now, ...(result.pinUnavailable ? { disabledReason: result.error } : {}) })
         .where(and(eq(workflowSchedules.id, schedule.id), eq(workflowSchedules.enabled, true)))
         .returning({ id: workflowSchedules.id });
       // The counter pages a person once per dead pin: only the fire that

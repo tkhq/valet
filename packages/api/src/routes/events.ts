@@ -14,10 +14,11 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
-import { and, desc, eq, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, ne, or, sql, type SQL } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
+import { PIN_UNAVAILABLE_MESSAGE } from "../events/assistant-delivery.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { claimedThreadId } from "../events/destination.js";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
@@ -114,6 +115,35 @@ export function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): 
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+/**
+ * Each listed rule's open problem, in one query (spec 2026-10-16: presence
+ * hub, Part C step 5). The source is the rule's latest settled delivery
+ * (`delivered` or `dead`) created since the rule's last edit. A rule has a
+ * problem when that delivery dead-lettered on its pin. A later delivery that
+ * landed, or an edit such as a new pin, answers it.
+ */
+async function subscriptionProblems(db: AppDb, conditions: (SQL | undefined)[]): Promise<Map<string, string>> {
+  const latest = await db
+    .selectDistinctOn([eventDeliveries.subscriptionId], {
+      subscriptionId: eventDeliveries.subscriptionId,
+      status: eventDeliveries.status,
+      lastError: eventDeliveries.lastError,
+    })
+    .from(eventDeliveries)
+    .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+    .where(and(
+      ...conditions,
+      inArray(eventDeliveries.status, ["delivered", "dead"]),
+      gte(eventDeliveries.createdAt, eventSubscriptions.updatedAt),
+    ))
+    .orderBy(eventDeliveries.subscriptionId, desc(eventDeliveries.createdAt), desc(eventDeliveries.id));
+  const problems = new Map<string, string>();
+  for (const d of latest) {
+    if (d.status === "dead" && d.lastError === PIN_UNAVAILABLE_MESSAGE) problems.set(d.subscriptionId, d.lastError);
+  }
+  return problems;
 }
 
 /** `refs`/`actor` jsonb shapes are owned by the ingest writer
@@ -863,8 +893,14 @@ eventsRouter.get("/event-subscriptions", async (c) => {
     .from(eventSubscriptions)
     .where(and(...conditions))
     .orderBy(desc(eventSubscriptions.createdAt));
+  const problems = await subscriptionProblems(db, conditions);
 
-  const resp: ListEventSubscriptionsResponse = { subscriptions: rows.map(rowToSubscription) };
+  const resp: ListEventSubscriptionsResponse = {
+    subscriptions: rows.map((row) => {
+      const problem = problems.get(row.id);
+      return problem ? { ...rowToSubscription(row), problem } : rowToSubscription(row);
+    }),
+  };
   return c.json(resp);
 });
 

@@ -1131,3 +1131,31 @@ describe("Part H rename of the schedule target kind", () => {
     expect((await patched.json() as WorkflowScheduleResponse).schedule.targetKind).toBe("assistant");
   });
 });
+
+// Spec 2026-10-16 presence hub, Part D: a schedule the scheduler disabled for
+// a dead pin carries the reason, so the routine page can show its problem.
+describe("schedule disabledReason", () => {
+  const PIN_TEXT = "Pick another thread for this rule in Presence.";
+
+  it("lists the reason in the trigger detail and clears it on enable", async () => {
+    const a = await boot();
+    await seedScheduleRow(a, "sched_dead_pin", "local-org", { owner: { type: "user", id: "local-user" } });
+    await seedScheduleRow(a, "sched_fine", "local-org", { owner: { type: "user", id: "local-user" } });
+    await a.providers.db.update(workflowSchedules).set({ enabled: false, disabledReason: PIN_TEXT })
+      .where(eq(workflowSchedules.id, "sched_dead_pin"));
+
+    const listed = (await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json()) as ListWorkflowTriggersResponse;
+    const dead = listed.triggers.find((t) => t.id === "sched_dead_pin");
+    const fine = listed.triggers.find((t) => t.id === "sched_fine");
+    expect(dead?.kind === "schedule" ? dead.detail.disabledReason : "missing").toBe(PIN_TEXT);
+    expect(fine?.kind === "schedule" ? fine.detail.disabledReason : "missing").toBeUndefined();
+
+    const patched = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_dead_pin`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }),
+    });
+    expect(patched.status).toBe(200);
+    const body = await patched.json() as WorkflowScheduleResponse;
+    expect(body.schedule.enabled).toBe(true);
+    expect(body.schedule.disabledReason).toBeUndefined();
+  });
+});

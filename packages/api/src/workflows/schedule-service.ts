@@ -43,6 +43,8 @@ export interface WorkflowScheduleSummary {
   input?: unknown;
   lastFiredAt: number | null;
   nextFireAt: number;
+  /** Why the scheduler disabled this schedule. Absent when it recorded none. */
+  disabledReason?: string;
 }
 
 /**
@@ -91,6 +93,7 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     input: row.input ?? undefined,
     lastFiredAt: row.lastFiredAt,
     nextFireAt: row.nextFireAt,
+    ...(row.disabledReason !== null ? { disabledReason: row.disabledReason } : {}),
   };
 }
 
@@ -425,6 +428,8 @@ export async function updateWorkflowSchedule(
       input: patch.input !== undefined ? patch.input : row.input,
       threadPolicy: patch.thread === undefined ? row.threadPolicy
         : patch.thread === null ? null : readThreadPolicy(patch.thread),
+      // Enabling the schedule or changing its pin answers the recorded reason.
+      disabledReason: patch.enabled === true || patch.thread !== undefined ? null : row.disabledReason,
       nextFireAt: nextAt,
       updatedAt: now,
     })

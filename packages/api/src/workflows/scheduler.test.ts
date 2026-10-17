@@ -185,6 +185,7 @@ describe("WorkflowScheduler thread policy", () => {
     expect(destinations).toEqual([{ kind: "target", sessionId: "sess-1", threadId: "thr-1", reason: "policy_existing" }]);
     const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-pin"));
     expect(row?.enabled).toBe(false);
+    expect(row?.disabledReason).toBe(PIN_UNAVAILABLE_MESSAGE);
     expect(PIN_UNAVAILABLE_MESSAGE).toBe("Pick another thread for this rule in Presence.");
   });
 

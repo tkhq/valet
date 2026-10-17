@@ -275,4 +275,11 @@ Pass criterion: all steps, in one run, from a clean start.
 
 ## Deviations
 
-None yet.
+- **Problem state source (Part C step 5, Part D).** The list route reads a
+  listener's problem from its deliveries. `problem` is set when the latest
+  settled delivery (`delivered` or `dead`) since the rule's last edit
+  dead-lettered with the pin text. A later delivery that lands, or any edit,
+  clears it. A routine's problem is `disabledReason`, a column the scheduler
+  sets when a dead pin disables the schedule. Enabling the schedule or
+  changing its pin clears it. The index `event_deliveries_subscription`
+  serves the problem query.

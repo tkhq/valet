@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { teams, teamMembers, workflowDefinitions } from "../schema/index.js";
+import { teams, teamMembers, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 import {
   createWorkflowSchedule,
   updateWorkflowSchedule,
@@ -110,6 +111,46 @@ describe("updateWorkflowSchedule", () => {
     expect(updated.ok).toBe(true);
     if (!updated.ok) return;
     expect(updated.schedule.nextFireAt).toBeGreaterThan(later);
+  });
+
+  // The scheduler stamps `disabled_reason` when it disables a schedule for a
+  // dead pin (spec 2026-10-16: presence hub, Part D). The person's fix, a new
+  // pin or a re-enable, clears it.
+  describe("disabledReason", () => {
+    const PIN_TEXT = "Pick another thread for this rule in Presence.";
+    async function disabledByPin(): Promise<string> {
+      const created = await createWorkflowSchedule(armDeps(), OWNER, { prompt: "p", name: "pin", cron: "0 9 * * *" }, NOW);
+      if (!created.ok) throw new Error(created.error);
+      await db.update(workflowSchedules).set({ enabled: false, disabledReason: PIN_TEXT })
+        .where(eq(workflowSchedules.id, created.schedule.scheduleId));
+      return created.schedule.scheduleId;
+    }
+
+    it("exposes the reason on a schedule the scheduler disabled", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "renamed" }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBe(PIN_TEXT);
+      expect(updated.schedule.enabled).toBe(false);
+    });
+
+    it("clears the reason when the schedule is enabled", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { enabled: true }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
+
+    it("clears the reason when the pin changes", async () => {
+      const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "new" } }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
   });
 
   it("rejects an invalid cron with a corrective error and 400", async () => {
