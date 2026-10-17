@@ -48,9 +48,9 @@ export const CLAIM_FAILURE_STAGE = {
  * The other half of a Slack mention, from the plugin that owns `service`
  * (spec 2026-10-16: delivery threads and claims, Part C step 8), or null.
  */
-async function conversationalTwinOf(
+export async function conversationalTwinOf(
   plugins: ValetPlugin[],
-  waiters: WaiterMatchDeps,
+  waiters: Pick<WaiterMatchDeps, "slackBotUserId">,
   orgId: string,
   service: string,
   event: NormalizedEvent,

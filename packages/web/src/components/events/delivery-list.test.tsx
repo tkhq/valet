@@ -45,8 +45,8 @@ describe("DeliveryList", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 
-  it("shows the dead-letter text of a stamped target that could not take the delivery", () => {
-    const text = "The original conversation was archived or deleted. Restore it before retrying delivery.";
+  it("shows the dead-letter text of a pin that cannot take the delivery", () => {
+    const text = "Pick another thread for this rule in Presence.";
     const dead: EventDeliveryWire = { ...base, id: "d4", status: "dead", lastError: text };
     render(<DeliveryList deliveries={[dead]} now={1_723_200_000_000} />);
     expect(screen.getByText(text)).toBeTruthy();

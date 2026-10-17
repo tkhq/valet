@@ -173,10 +173,12 @@ async function resolveOwner(
   } else if (args.conversational(binding)) {
     const target = redirectTarget(claims, args.event);
     waiters.set(target.waiter.id, "suppress");
-    const once = target.waiter.eventMatch?.once === true;
+    // The stamp names the waiter, so the dispatcher can give it the digest
+    // back when the delivery is skipped later, and can end a once-mode waiter
+    // after the delivery lands (Part C step 5).
     destination = {
       kind: "target", sessionId: target.waiter.sessionId, threadId: target.waiter.threadId, reason: "claim_redirect",
-      ...(once ? { matchedWaiterId: target.waiter.id } : {}),
+      matchedWaiterId: target.waiter.id,
     };
   } else {
     if (mentionComing) {

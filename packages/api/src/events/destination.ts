@@ -12,7 +12,8 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 export type Destination =
   | {
     kind: "target"; sessionId: string; threadId: string; reason: DestinationReason;
-    /** A once-mode waiter that this claim redirect ends as matched after delivery (Part C step 5). */
+    /** The waiter that this claim redirect targets. A once-mode waiter ends
+     * as matched after delivery (Part C step 5). */
     matchedWaiterId?: string;
   }
   | { kind: "key"; key: string; title: string; reason: DestinationReason; note?: string }

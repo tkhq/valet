@@ -9,10 +9,13 @@ import type { Destination, DestinationReason } from "../events/destination.js";
 
 /**
  * The counter's reason label: a resolver reason, a claim skip, a dead pin,
- * or `claim_recovered`: a claimed waiter got its digest back because the
- * dispatcher skipped the claim delivery for a reason decided after ingest.
+ * `claim_recovered`: a claimed waiter got its digest back because the
+ * dispatcher skipped the claim delivery for a reason decided after ingest,
+ * or `claim_fallback`: a stamped thread could no longer take the delivery
+ * at dispatch, so it landed by the binding or the rule's policy.
  */
-export type DeliveryDestinationMetricReason = DestinationReason | "claim_skip" | "pin_unavailable" | "claim_recovered";
+export type DeliveryDestinationMetricReason =
+  | DestinationReason | "claim_skip" | "pin_unavailable" | "claim_recovered" | "claim_fallback";
 
 /** A sink for one delivery's destination reason: the counter, or a test's recorder. */
 export type DestinationRecorder = (reason: DeliveryDestinationMetricReason) => void;

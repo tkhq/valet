@@ -10,20 +10,13 @@
  */
 import type { EventMatchDigest, NormalizedEvent } from "@valet/engine";
 import { slackEventChannel } from "../services/thread-access.js";
+import { conversationalTwinOf } from "./ingest.js";
 import { anyMatch, matchClauses, toDigest } from "./waiter-match.js";
 import type { WaiterMatchDeps } from "./waiters.js";
 
-/** The other half of a Slack mention, from the plugin that owns `service`, or null. */
-async function twinOf(deps: WaiterMatchDeps, orgId: string, service: string, event: NormalizedEvent): Promise<NormalizedEvent | null> {
-  const plugin = deps.plugins.find((p) => p.conversationalTwin && (p.triggers ?? []).some((t) => t.service === service));
-  if (!plugin?.conversationalTwin) return null;
-  const botUserId = service === "slack" ? await deps.slackBotUserId(orgId) : undefined;
-  return plugin.conversationalTwin(event, botUserId ? { botUserId } : {});
-}
-
 /**
  * Appends the event's digest to the waiter that a skipped claim delivery
- * named (`matchedWaiterId`), then nudges the WakeWatcher. The waiter's own
+ * named (`matchedWaiterId`), in once or stream mode, then nudges the WakeWatcher. The waiter's own
  * clauses pick the digest: the event, or its conversational twin when only
  * the twin matches (a mention claimed by a `slack.message` waiter).
  * Returns true when the waiter got a new digest. A waiter that ended, moved
@@ -43,7 +36,7 @@ export async function appendClaimedWaiterDigest(
     if (!channel || !(await deps.slackStillVisible({ sessionId: waiter.sessionId, ...owner }, channel))) return false;
   }
   const derived = deps.plugins.flatMap((plugin) => plugin.derivedEvents ?? []);
-  const twin = await twinOf(deps, args.orgId, args.service, args.event);
+  const twin = await conversationalTwinOf(deps.plugins, deps, args.orgId, args.service, args.event);
   for (const candidate of twin ? [args.event, twin] : [args.event]) {
     const result = matchClauses(spec, candidate, derived);
     if (!anyMatch(result)) continue;

@@ -802,39 +802,35 @@ describe("EventDispatcher", () => {
       expect((await getDelivery(deliveryId)).status).toBe("dead");
     });
 
-    it("a stamped redirect whose thread became unavailable dead-letters with the target text (Review Focus 5)", async () => {
+    it("a stamped redirect whose thread was archived after ingest lands in the rule's own thread (Review Focus 5, INV-D6)", async () => {
       await seedMentionMember("team-x");
       await seedSession("sess-inc", "team", "team-x", "thr-inc");
       // The agent archives the claim thread after ingest stamped it.
       await tdb.appDb.insert(sessionThreads).values({ id: "thr-inc", sessionId: "sess-inc", createdAt: 1, archivedAt: Date.now() });
-      const seeded = await seedDelivery({
-        target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+      const { deliveryId, eventId, subscriptionId } = await seedDelivery({
+        target: { kind: "orchestrator", follow: true, thread: { mode: "own" } }, ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
-        destination: redirect,
+        destination: { ...redirect, matchedWaiterId: "w-once" },
       });
-      const { deliveryId, eventId } = seeded;
       await tdb.appDb.insert(eventReceipts).values({
         id: "rcpt-claim", orgId: ORG, service: "slack", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      const endMatchedWaiter = vi.fn(async () => true);
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
-        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }),
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }), endMatchedWaiter,
       }).pollOnce();
-      expect(deliver).not.toHaveBeenCalled();
-      const threads = await tdb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
-      expect(threads.rows[0]?.n).toBe(2);
-      expect(await getDelivery(deliveryId)).toMatchObject({
-        status: "dead", attempts: 1, lastError: "The original conversation was archived or deleted. Restore it before retrying delivery.",
-      });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0]![0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
       const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.eventId, eventId));
-      expect(receipt?.stages).toEqual([expect.objectContaining({
-        stage: "destination", outcome: "target_unavailable",
-        detail: expect.stringContaining("claim_redirect session sess-inc, thread thr-inc cannot receive deliveries."),
-      })]);
-      expect(recordDestination).not.toHaveBeenCalled();
-      expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
+      expect(receipt?.stages).toEqual([expect.objectContaining({ stage: "destination", outcome: "claim_fallback" })]);
+      expect(recordDestination.mock.calls).toEqual([["claim_fallback"]]);
+      // The fallback is not the claimed waiter's match, so it does not end it.
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
     });
 
     it("a stamped pull request binding still builds the inbound comment after the own-write and settle checks (C9)", async () => {

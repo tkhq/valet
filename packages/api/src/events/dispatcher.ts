@@ -51,7 +51,6 @@ import { resolvePath } from "./match.js";
 import {
   PinUnavailableError,
   PIN_UNAVAILABLE_MESSAGE,
-  TARGET_UNAVAILABLE_MESSAGE,
   isDeliverableTarget,
   type DeliveredThread,
   type DeliveryDestination,
@@ -494,7 +493,17 @@ export class EventDispatcher {
         // (spec 2026-10-16: delivery threads, Part C step 6). A retry reads
         // the same stamp.
         const stamp = readDestinationStamp(delivery.destination);
-        const destination = stamp ?? await this.unstampedDestination(sub, target, delivery.id, event, origin);
+        // A named repair for the window between ingest and dispatch (CLAUDE.md,
+        // "Invariants: alert, don't auto-repair", rule 3). A stamped binding or
+        // claim thread can be archived or deleted after ingest. The claimed
+        // waiter already suppressed its digest, so a dead-letter would lose the
+        // event (INV-D6). The delivery lands by the binding or the rule's
+        // policy instead, and the counter's `claim_fallback` reason records
+        // it. A pin is the person's explicit choice and keeps its dead-letter
+        // (`PinUnavailableError`).
+        const fallback = stamp?.kind === "target" && stamp.reason !== "policy_existing"
+          && !(await isDeliverableTarget({ db }, event.orgId, owner, stamp));
+        const destination = stamp && !fallback ? stamp : await this.unstampedDestination(sub, target, delivery.id, event, origin);
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : parsedComment && destination.kind === "target" && destination.reason === "conversation_pull_request"
@@ -503,19 +512,6 @@ export class EventDispatcher {
         if (destination.kind === "skip") {
           await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination },
             (reason) => this.recordDestination(reason));
-          return;
-        }
-        // A binding or claim thread can be archived or deleted between ingest
-        // and dispatch. The stamped target never falls back to another
-        // thread: the delivery dead-letters and creates no thread (INV-D3).
-        // A pin keeps its own check and text (`PinUnavailableError`).
-        if (stamp?.kind === "target" && stamp.reason !== "policy_existing"
-          && !(await isDeliverableTarget({ db }, event.orgId, owner, stamp))) {
-          await db.update(eventDeliveries).set({ status: "dead", lastError: TARGET_UNAVAILABLE_MESSAGE, attempts: delivery.attempts + 1 })
-            .where(eq(eventDeliveries.id, deliveryId));
-          await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
-            { kind: "target_unavailable", sessionId: stamp.sessionId, threadId: stamp.threadId, reason: stamp.reason }),
-          destinationStageMarker(delivery.id));
           return;
         }
         const author = teamMention
@@ -567,9 +563,10 @@ export class EventDispatcher {
         // admitted, then crashed before recording, on an event with no
         // receipt, is counted once at most and may be missed.
         const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
-          destinationReceiptStage(receiptIds, destination), destinationStageMarker(delivery.id));
+          destinationReceiptStage(receiptIds, fallback ? { ...destination, reason: "claim_fallback" } : destination),
+          destinationStageMarker(delivery.id));
         if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {
-          this.recordDestination(destinationMetricReason(destination));
+          this.recordDestination(fallback ? "claim_fallback" : destinationMetricReason(destination));
         }
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The

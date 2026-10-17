@@ -125,7 +125,7 @@ describe("resolveClaims: Scenario C", () => {
     const atMention = await resolve(fakes(), {
       event: mention, twin: message, matched: [M], candidates: withTwinCandidates([], [tInc(message)]),
     });
-    expect(atMention.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect" });
+    expect(atMention.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect", matchedWaiterId: "w-inc" });
     expect(atMention.waiters.get("w-inc")).toBe("suppress");
 
     const atMessage = await resolve(fakes({ covered: (o) => o.id === "sre" }), {
@@ -173,7 +173,7 @@ describe("resolveClaims: Scenario C", () => {
     const d = await resolve(f, {
       event: mention, twin: message, matched: [M, sub("M-platform", PLATFORM)], candidates: withTwinCandidates([], [tInc(message)]),
     });
-    expect(d.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect" });
+    expect(d.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect", matchedWaiterId: "w-inc" });
     expect(d.deliveries.has("M-platform")).toBe(false);
     // Platform has no candidate, so it needs no binding lookup.
     expect(f.bindingLookups).toEqual([SRE]);
@@ -277,7 +277,7 @@ describe("resolveClaims: Review Focus", () => {
     const mentionFirst = [await atMention(), await atMessage()];
     const messageFirst = [await atMessage(), await atMention()].reverse();
     for (const [m, msg] of [mentionFirst, messageFirst]) {
-      expect(m?.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect" });
+      expect(m?.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect", matchedWaiterId: "w-inc" });
       // The message matched no rule of sre, and the mention twin still suppresses the digest.
       expect(msg?.waiters.get("w-inc")).toBe("suppress");
       expect(msg?.deliveries.size).toBe(0);
@@ -292,7 +292,7 @@ describe("resolveClaims: Review Focus", () => {
     const atMention = await resolve(fakes(), {
       event: mention, twin: message, matched: [M], candidates: withTwinCandidates([], [thread(message), channel(message)]),
     });
-    expect(atMention.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-thr", threadId: "t-thr", reason: "claim_redirect" });
+    expect(atMention.deliveries.get("M")).toEqual({ kind: "target", sessionId: "s-thr", threadId: "t-thr", reason: "claim_redirect", matchedWaiterId: "w-thread" });
     expect(atMention.waiters.get("w-thread")).toBe("suppress");
     expect(atMention.waiters.get("w-inc")).toBe("append");
 
@@ -301,6 +301,14 @@ describe("resolveClaims: Review Focus", () => {
     });
     expect(atMessage.waiters.get("w-thread")).toBe("suppress");
     expect(atMessage.waiters.get("w-inc")).toBe("append");
+  });
+
+  it("names a stream-mode redirect target on the stamp too, for digest recovery", async () => {
+    const { message, mention } = twins();
+    const stream = tInc(message);
+    expect(stream.waiter.eventMatch?.once).not.toBe(true);
+    const d = await resolve(fakes(), { event: mention, twin: message, matched: [M], candidates: withTwinCandidates([], [stream]) });
+    expect(d.deliveries.get("M")).toMatchObject({ reason: "claim_redirect", matchedWaiterId: "w-inc" });
   });
 
   it("3: a once-mode redirect target is named on the stamp; an ambient skip names no waiter to end", async () => {
@@ -392,7 +400,7 @@ describe("resolveClaims: fix round 1", () => {
   it("gives one turn when two rules of one owner redirect to one thread", async () => {
     const { message, mention } = twins();
     const d = await resolve(fakes(), { event: mention, twin: message, matched: [sub("M-b", SRE), sub("M-a", SRE)], candidates: withTwinCandidates([], [tInc(message)]) });
-    expect(d.deliveries.get("M-a")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect" });
+    expect(d.deliveries.get("M-a")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "claim_redirect", matchedWaiterId: "w-inc" });
     expect(d.deliveries.get("M-b")).toEqual({ kind: "skip", reason: "claimed by thread t-inc" });
   });
 });
