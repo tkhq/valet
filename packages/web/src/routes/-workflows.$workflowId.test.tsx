@@ -44,6 +44,8 @@ const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"]
 /** Per-test permissions payload. Default: nothing gates, so the header
  * badge stays absent everywhere it is not the subject. */
 let permissionsData: {
+  definitionToken: string;
+  accountConsent?: { teamId: string; teamName: string; services: string[] };
   nodes: Array<{
     nodeId: string;
     service: string;
@@ -54,7 +56,7 @@ let permissionsData: {
     provenance?: string;
     sharedAccount?: true;
   }>;
-} = { nodes: [] };
+} = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
@@ -190,7 +192,7 @@ describe("WorkflowEditorPage", () => {
     blocker = IDLE_BLOCKER;
     blockerDisabled = undefined;
     allowMutateAsync.mockClear();
-    permissionsData = { nodes: [] };
+    permissionsData = { definitionToken: "review-a", nodes: [] };
     delete (workflowData as { origin?: string }).origin;
     delete (workflowData as { upstream?: unknown }).upstream;
   });
@@ -509,6 +511,7 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     allowMutateAsync.mockClear();
     allowMutateAsync.mockResolvedValue({ allowed: ["widgets.deploy"], blocked: [] });
     permissionsData = {
+      definitionToken: "review-a",
       nodes: [
         {
           nodeId: "ship",
@@ -546,6 +549,7 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
   it("offers workflow-scoped review for team workflows", () => {
     workflowData.ownerType = "team";
     workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
     try {
       render(<WorkflowEditorPage workflowId="wf_1" />);
       expect(screen.getByTestId("workflow-gate-badge")).toBeTruthy();
@@ -561,34 +565,36 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
   });
 
   it("hides the badge when nothing gates", () => {
-    permissionsData = { nodes: [] };
+    permissionsData = { definitionToken: "review-a", nodes: [] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.queryByTestId("workflow-gate-badge")).toBeNull();
   });
 
   it("offers account consent when the tool action itself is already allowed", async () => {
-    permissionsData = { nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] }, nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     fireEvent.click(screen.getByTestId("workflow-gate-badge"));
     expect(await screen.findByText(/accounts already shared with this team/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save workflow permissions" }));
-    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-a" }));
   });
 
   it("can review shared accounts separately from action grants", async () => {
     workflowData.ownerType = "team";
     workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
     try {
       render(<WorkflowEditorPage workflowId="wf_1" />);
       fireEvent.click(screen.getByTestId("workflow-gate-badge"));
       fireEvent.click(await screen.findByRole("button", { name: "Allow my shared accounts" }));
-      await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith([]));
+      await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-a" }));
     } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
   });
 
   it("lets team members withdraw their own workflow account consent", () => {
     workflowData.ownerType = "team";
     workflowData.ownerId = "team-1";
+    permissionsData = { ...permissionsData, accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"] } };
     try {
       render(<WorkflowEditorPage workflowId="wf_1" />);
       fireEvent.click(screen.getByText(/^Permissions ·/));
@@ -607,9 +613,35 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     expect(within(list).queryByText("widgets.list")).toBeNull();
 
     fireEvent.click(screen.getByTestId("preapprove-confirm"));
-    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith(["widgets.deploy"]));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["widgets.deploy"], definitionToken: "review-a" }));
     await waitFor(() => expect(screen.queryByTestId("preapprove-actions")).toBeNull());
     expect(screen.queryByTestId("preapprove-blocked")).toBeNull();
+  });
+
+  it("shows the complete current team account scope even when the editor graph is older", async () => {
+    permissionsData = { ...permissionsData, definitionToken: "review-b",
+      accountConsent: { teamId: "team-new", teamName: "Current team", services: ["widgets", "new-mail-account"] },
+      nodes: [...permissionsData.nodes, { nodeId: "mail", service: "mail", action: "list", actionId: "mail.list", mode: "allow" }] };
+    const view = render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText("Accounts shared with Current team")).toBeTruthy();
+    expect(screen.getByTestId("preapprove-account-services").textContent).toContain("new-mail-account");
+    permissionsData = { ...permissionsData, definitionToken: "review-c",
+      accountConsent: { teamId: "team-later", teamName: "Later team", services: ["unreviewed-service"] } };
+    view.rerender(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByTestId("preapprove-account-services").textContent).not.toContain("unreviewed-service");
+    fireEvent.click(screen.getByRole("button", { name: "Allow my shared accounts" }));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: [], definitionToken: "review-b" }));
+  });
+
+  it("submits the definition the dialog reviewed even after a permissions refresh", async () => {
+    const view = render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    await screen.findByTestId("preapprove-actions");
+    permissionsData = { ...permissionsData, definitionToken: "review-b", nodes: [] };
+    view.rerender(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByTestId("preapprove-confirm"));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["widgets.deploy"], definitionToken: "review-a" }));
   });
 
   it("surfaces org-blocked actions after a pre-approval attempt", async () => {

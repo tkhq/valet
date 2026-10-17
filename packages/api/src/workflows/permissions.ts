@@ -1,11 +1,11 @@
 /** Permission preview and durable grants scoped to one workflow and its owner.
  * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
+import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
-import { sameWorkflowSteps } from "./definition-version.js";
-import { credentials, workflowActionGrants } from "../schema/index.js";
+import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
@@ -17,6 +17,7 @@ import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
   AllowWorkflowPermissionsResponse,
+  GetWorkflowPermissionsResponse,
   WorkflowNodePermissionWire,
   WorkflowDefinitionSummary,
 } from "../wire/types.js";
@@ -82,6 +83,12 @@ export function workflowCredentialServices(deps: WorkflowPermissionDeps, definit
     deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))].filter(service => service !== "github");
 }
 
+/** Identifies the reviewed definition, owner, and credential services. */
+export function workflowPermissionDefinitionToken(orgId: string, summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId" | "definition">, credentialServices: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify({ orgId, workflowId: summary.id,
+    ownerType: summary.ownerType, ownerId: summary.ownerId, definition: summary.definition, credentialServices: [...credentialServices].sort() })).digest("hex");
+}
+
 /** Predicts the policy resolution of every tool node for the stored owner.
  * Returns null when the workflow does not exist for this owner (the caller
  * 404s). Actions absent from the static plugin catalog (dynamic MCP
@@ -92,10 +99,19 @@ export async function analyzeWorkflowPermissions(
   deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
-): Promise<WorkflowNodePermissionWire[] | null> {
+): Promise<GetWorkflowPermissionsResponse | null> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
-  return analyzeDefinitionPermissions(deps, owner, summary);
+  const services = workflowCredentialServices(deps, summary.definition);
+  const result: GetWorkflowPermissionsResponse = { definitionToken: workflowPermissionDefinitionToken(owner.orgId, summary, services),
+    nodes: await analyzeDefinitionPermissions(deps, owner, summary) };
+  if (summary.ownerType === "team") {
+    const [team] = await deps.db.select({ name: teams.name }).from(teams)
+      .where(and(eq(teams.id, summary.ownerId), eq(teams.orgId, owner.orgId))).limit(1);
+    if (team) result.accountConsent = { teamId: summary.ownerId, teamName: team.name,
+      services };
+  }
+  return result;
 }
 
 /** The paths, as segments, of the parameters that are templates a run fills in. */
@@ -220,8 +236,8 @@ export async function analyzeDefinitionPermissions(
 export type AllowWorkflowPermissionsOutcome =
   /** `definition` is the one the grants were read from, so a write can check
    * the steps have not changed since. */
-  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown }
-  | { ok: false; badRequest: string }
+  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown; definitionToken: string; credentialServices: string[] }
+  | { ok: false; badRequest: string; stale?: true }
   | null;
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
@@ -233,6 +249,7 @@ export async function prepareWorkflowPermissions(
 ): Promise<AllowWorkflowPermissionsOutcome> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
+  const credentialServices = workflowCredentialServices(deps, summary.definition);
   const ownAccountsOnly = actionIds?.length === 0 && summary.ownerType === "team"
     && owner.humanAccountConsent === true && !owner.agentEditor && owner.principal?.type === "user";
   if (!ownAccountsOnly && !(await canGrantWorkflowPermissions(deps, owner, summary))) {
@@ -282,7 +299,7 @@ export async function prepareWorkflowPermissions(
     });
     allowed.push(actionId);
   }
-  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition };
+  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition, definitionToken: workflowPermissionDefinitionToken(owner.orgId, summary, credentialServices), credentialServices };
 }
 
 /** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
@@ -319,27 +336,25 @@ export async function persistWorkflowPermissions(db: AppQueryable, grants: (type
   if (grants.length) await db.insert(workflowActionGrants).values(grants).onConflictDoNothing();
 }
 
-export async function allowWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
-  const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, actionIds);
-  if (!prepared?.ok) return prepared;
-  // Lock the definition and compare the steps again, as an approval for the
-  // whole workflow does: an edit that committed after the read above must not
-  // keep grants for steps nobody reviewed. A later edit waits on this lock,
-  // and revokes grants in the same transaction.
-  const current = await deps.db.transaction(async (tx) => {
-    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`) as {
-      rows: Array<{ definition: unknown }>;
-    };
-    if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, prepared.definition)) return false;
+export async function allowWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined, definitionToken: string): Promise<AllowWorkflowPermissionsOutcome> {
+  return deps.db.transaction(async tx => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const scopedDeps = { ...deps, db: tx };
+    const summary = await getWorkflowDefinition(scopedDeps, owner, workflowId);
+    if (!summary) return null;
+    const stale: AllowWorkflowPermissionsOutcome = { ok: false, stale: true,
+      badRequest: "This workflow changed after you reviewed it. Refresh the review, then allow its permissions." };
+    if (workflowPermissionDefinitionToken(owner.orgId, summary, workflowCredentialServices(scopedDeps, summary.definition)) !== definitionToken) return stale;
+    const prepared = await prepareWorkflowPermissions(scopedDeps, owner, workflowId, actionIds);
+    if (!prepared?.ok) return prepared;
+    if (prepared.definitionToken !== definitionToken) return stale;
     await persistWorkflowPermissions(tx, prepared.grants);
-    if (owner.humanAccountConsent && !owner.agentEditor && owner.principal?.type === "user") {
-      const summary = await getWorkflowDefinition({ ...deps, db: tx }, owner, workflowId);
-      if (summary?.ownerType === "team") await saveWorkflowAccountConsent(tx, {
+    if (owner.humanAccountConsent && !owner.agentEditor && owner.principal?.type === "user" && summary.ownerType === "team") {
+      await saveWorkflowAccountConsent(tx, {
         orgId: owner.orgId, workflowId, teamId: summary.ownerId, userId: owner.userId,
-        services: workflowCredentialServices(deps, prepared.definition),
+        services: prepared.credentialServices,
       });
     }
-    return true;
+    return prepared;
   });
-  return current ? prepared : { ok: false, badRequest: "This workflow's steps changed while you allowed them. Review the steps again, then allow them." };
 }

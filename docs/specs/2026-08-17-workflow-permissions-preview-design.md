@@ -168,3 +168,5 @@ backfilled, and parked approval gates are not answered during deployment.
 
 The application schema repair adds the grant table and lookup index without
 deleting existing folders, workflows, credentials, or approval history.
+
+Permission review returns a definition token for the exact stored graph, ownership, and credential-service scope shown. The dialog displays the named team and complete direct-tool service scope, including allowed and dynamic actions, and keeps that scope and token while open. Confirmation checks it under the definition lock before saving action or account grants. Missing tokens fail closed; changed definitions return a conflict and require a fresh review.

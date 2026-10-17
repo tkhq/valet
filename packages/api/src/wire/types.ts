@@ -2280,10 +2280,16 @@ export interface WorkflowNodePermissionWire {
 }
 
 export interface GetWorkflowPermissionsResponse {
+  /** Identity of the definition and ownership displayed by this review. */
+  definitionToken: string;
+  /** Complete direct-tool account scope shown alongside the reviewed graph. */
+  accountConsent?: { teamId: string; teamName: string; services: string[] };
   nodes: WorkflowNodePermissionWire[];
 }
 
 export interface AllowWorkflowPermissionsRequest {
+  /** Token returned by the permission review. Stale reviews grant nothing. */
+  definitionToken: string;
   /** Qualified actionIds to pre-approve. Each must be one of the workflow's
    * gating actions (mode `require_approval`). Omit to pre-approve all of
    * them. The server re-derives the gating set from the stored definition —

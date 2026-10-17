@@ -9,6 +9,19 @@ import { canBorrowCredential } from "../services/credential-borrow.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { createWorkflowDefinition, updateWorkflowDefinition, type WorkflowServiceDeps } from "../workflows/service.js";
 
+
+async function reviewedApproval(url: string, init: RequestInit = {}): Promise<Response> {
+  const preview = await fetch(url.slice(0, -"/allow".length), { headers: init.headers });
+  const reviewed: unknown = await preview.json();
+  const definitionToken = reviewed && typeof reviewed === "object" && "definitionToken" in reviewed && typeof reviewed.definitionToken === "string"
+    ? reviewed.definitionToken : "0".repeat(64);
+  const requested: unknown = typeof init.body === "string" ? JSON.parse(init.body) : {};
+  if (!requested || typeof requested !== "object" || Array.isArray(requested)) throw new Error("Expected an approval object.");
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  return fetch(url, { ...init, method: "POST", headers, body: JSON.stringify({ ...requested, definitionToken }) });
+}
+
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
 const definition = {
@@ -23,8 +36,8 @@ const plugin: ValetPlugin = { name: "fixture", version: "1", actions: [{ service
   execute: async () => ({ success: true, data: {} }),
 }]}] };
 
-async function setup() {
-  api = await bootTestApi({ plugins: [plugin] });
+async function setup(extraPlugins: ValetPlugin[] = []) {
+  api = await bootTestApi({ plugins: [plugin, ...extraPlugins] });
   const p = api.providers;
   const team = await createTeam(p.db, { orgId: "local-org", name: "Workflow accounts", creatorUserId: "local-user" });
   await p.db.insert(credentials).values({ ownerType: "user", ownerId: "local-user", service: "fixture_account", type: "api_key", apiKeyEnc: "fixture", createdAt: 1, updatedAt: 1 });
@@ -53,7 +66,7 @@ it("reuses a creator's saved account consent across scheduled runs only for that
   expect(reset.status).toBe(200);
   expect(await canBorrowCredential(p.db, { ...scope, sessionId: "wf:schedule-two" })).toBe(false);
   // Reviewing the saved graph can authorize accounts even with no selected action grants.
-  const review = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionIds: [] }) });
+  const review = await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actionIds: [] }) });
   expect(review.status).toBe(200);
   expect(await canBorrowCredential(p.db, { ...scope, sessionId: "wf:schedule-two" })).toBe(true);
   await revokeShare(p.db, { teamId: team.id, service: "fixture_account", userId: "local-user" });
@@ -70,8 +83,10 @@ it("does not grant permissions to agent saves and retires consent after an agent
   const created = await createWorkflowDefinition(deps, agent, { name: "Agent draft", definition, teamId: team.id });
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
-  const { allowWorkflowPermissions, revokeOwnWorkflowAccounts } = await import("../workflows/permissions.js");
-  expect((await allowWorkflowPermissions(deps, owner, created.id, undefined))?.ok).toBe(true);
+  const { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeOwnWorkflowAccounts } = await import("../workflows/permissions.js");
+  const review = await analyzeWorkflowPermissions(deps, owner, created.id);
+  if (!review) throw new Error("Expected a visible workflow review.");
+  expect((await allowWorkflowPermissions(deps, owner, created.id, undefined, review.definitionToken))?.ok).toBe(true);
   expect(await revokeOwnWorkflowAccounts(deps, agent, created.id)).toBe(false);
   expect(await revokeOwnWorkflowAccounts(deps, { ...owner, humanAccountConsent: false }, created.id)).toBe(false);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(1);
@@ -98,12 +113,12 @@ it("lets a team member review only their own accounts without granting tool acti
   // The saving member is not an admin, but can still authorize their own share.
   await p.db.update(credentials).set({ ownerId: "test-member" }).where(eq(credentials.service, "fixture_account"));
   await shareCredential(p.db, { teamId: team.id, userId: "test-member", service: "fixture_account", createdAt: 2 });
-  const review = await fetch(`${baseUrl}/api/workflows/${workflow.id}/permissions/allow`, { method: "POST",
+  const review = await reviewedApproval(`${baseUrl}/api/workflows/${workflow.id}/permissions/allow`, { method: "POST",
     headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" }, body: JSON.stringify({ actionIds: [] }) });
   expect(review.status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ memberId: "test-member", workflowId: workflow.id }]);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
-  const escalate = await fetch(`${baseUrl}/api/workflows/${workflow.id}/permissions/allow`, { method: "POST",
+  const escalate = await reviewedApproval(`${baseUrl}/api/workflows/${workflow.id}/permissions/allow`, { method: "POST",
     headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" }, body: JSON.stringify({ actionIds: ["fixture.read"] }) });
   expect(escalate.status).toBe(400);
 });
@@ -137,7 +152,7 @@ it("does not restore revoked permissions on layout-only or unchanged human saves
   await updateWorkflowDefinition(deps, owner, saved.id, { definition: changed });
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
-  const reviewed = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST" });
+  const reviewed = await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST" });
   expect(reviewed.status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(1);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(1);
@@ -150,7 +165,7 @@ it("lets a member revoke only their own workflow account consent", async () => {
   await shareCredential(p.db, { teamId: team.id, service: "fixture_account", userId: "test-member", createdAt: 2 });
   const saved = await createWorkflowDefinition(deps, owner, { name: "Revocable accounts", definition, teamId: team.id });
   const headers = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
-  expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers, body: JSON.stringify({ actionIds: [] }) })).status).toBe(200);
+  expect((await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers, body: JSON.stringify({ actionIds: [] }) })).status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(2);
   expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/accounts`, { method: "DELETE", headers })).status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ memberId: "local-user" }]);
@@ -176,4 +191,74 @@ it.each([false, true])("authorizes human workflow copies at creation (team=%s)",
   const accounts = await p.db.select().from(workflowAccountGrants);
   expect(accounts).toHaveLength(teamCopy ? 1 : 0);
   if (teamCopy) expect(accounts[0]).toMatchObject({ workflowId: copy.id, memberId: "local-user" });
+});
+
+
+it("rejects a stale permissions review before authorizing newly added shared accounts or actions", async () => {
+  const lowRiskPlugin: ValetPlugin = { name: "new-account", version: "1", actions: [{ service: "new-account", actions: [{
+    id: "read", name: "Read", description: "Read the new account", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true, data: {} }),
+  }] }] };
+  const { p, team, deps, owner, baseUrl } = await setup([lowRiskPlugin]);
+  const saved = await createWorkflowDefinition(deps, { ...owner, agentEditor: true }, { name: "Stale account review", definition, teamId: team.id });
+  const review = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions`);
+  const reviewed: unknown = await review.json();
+  const definitionToken = reviewed && typeof reviewed === "object" && "definitionToken" in reviewed ? reviewed.definitionToken : undefined;
+  expect(definitionToken).toEqual(expect.any(String));
+  await p.db.insert(credentials).values({ ownerType: "user", ownerId: "local-user", service: "new-account", type: "api_key", apiKeyEnc: "fixture", createdAt: 1, updatedAt: 1 });
+  await shareCredential(p.db, { teamId: team.id, userId: "local-user", service: "new-account", createdAt: 1 });
+  const changed = { ...definition, nodes: [...definition.nodes, { id: "new-account", type: "tool", service: "new-account", action: "read", params: {} }],
+    edges: [...definition.edges, { from: "start", to: "new-account" }] };
+  await updateWorkflowDefinition(deps, { ...owner, agentEditor: true }, saved.id, { definition: changed });
+  for (const actionIds of [[], ["fixture.read"]]) {
+    const approval = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actionIds, definitionToken }) });
+    expect(approval.status).toBe(409);
+  }
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+});
+
+it("previews the named team's full account scope including allowed and dynamic tool services", async () => {
+  const lowRiskPlugin: ValetPlugin = { name: "allowed-tool", version: "1", actions: [{ service: "allowed-tool", credentialService: "allowed-account", actions: [{
+    id: "read", name: "Read", description: "Read the allowed account", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true, data: {} }),
+  }] }] };
+  const { p, team, deps, owner, baseUrl } = await setup([lowRiskPlugin]);
+  const complete = { ...definition, nodes: [...definition.nodes,
+    { id: "allowed", type: "tool", service: "allowed-tool", action: "read", params: {} },
+    { id: "dynamic", type: "tool", service: "dynamic-account", action: "discovered_read", params: {} },
+    { id: "git", type: "tool", service: "github", action: "discovered_read", params: {} },
+  ], edges: [...definition.edges, { from: "start", to: "allowed" }, { from: "start", to: "dynamic" }, { from: "start", to: "git" }] };
+  const saved = await createWorkflowDefinition(deps, { ...owner, agentEditor: true }, { name: "Complete consent review", definition: complete, teamId: team.id });
+  const response = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions`);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    definitionToken: expect.any(String),
+    accountConsent: { teamId: team.id, teamName: team.name, services: ["fixture_account", "allowed-account", "dynamic-account"] },
+    nodes: expect.arrayContaining([
+      expect.objectContaining({ nodeId: "read", mode: "require_approval" }),
+      expect.objectContaining({ nodeId: "allowed", mode: "allow" }),
+      expect.objectContaining({ nodeId: "dynamic", mode: "unknown" }),
+    ]),
+  });
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+});
+
+it("rejects account approval if the declared credential service mapping changed after review", async () => {
+  const { p, team, deps, owner, baseUrl } = await setup();
+  const saved = await createWorkflowDefinition(deps, { ...owner, agentEditor: true }, { name: "Changed service mapping", definition, teamId: team.id });
+  const review: unknown = await (await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions`)).json();
+  if (!review || typeof review !== "object" || !("definitionToken" in review)) throw new Error("Missing reviewed definition token.");
+  await p.db.insert(credentials).values({ ownerType: "user", ownerId: "local-user", service: "changed-account", type: "api_key", apiKeyEnc: "fixture", createdAt: 1, updatedAt: 1 });
+  await shareCredential(p.db, { teamId: team.id, userId: "local-user", service: "changed-account", createdAt: 1 });
+  const original = p.actionPluginByService.get("fixture");
+  if (!original) throw new Error("Missing fixture action plugin.");
+  p.actionPluginByService.set("fixture", { ...original, actionPlugin: { ...original.actionPlugin, credentialService: "changed-account" } });
+  const approval = await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actionIds: [], definitionToken: review.definitionToken }) });
+  expect(approval.status).toBe(409);
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
 });
