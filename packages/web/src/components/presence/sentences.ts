@@ -8,6 +8,7 @@
  */
 import type { Appearance, AssistantThreadPolicy } from "@valet/shared";
 import type {
+  EventDeliveryThreadRef,
   EventDeliveryWire,
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
@@ -359,9 +360,31 @@ export interface ActivityNames {
   threads?: ThreadTitles;
   /** The workflow a workflow delivery started. */
   workflowName?: string;
+  /** Workflow names by listener id, for a row whose deliveries reach several workflows. */
+  workflowsByListener?: Readonly<Record<string, string>>;
   /** The place, when the caller knows a better name than the event's refs give. */
   place?: string;
 }
+
+/** A thread an outcome names, with the words a reader sees for it. */
+export interface ActivityThread {
+  ref: EventDeliveryThreadRef;
+  label: string;
+}
+
+/**
+ * One delivery's outcome in an activity row. With `thread`, the outcome
+ * reads `<words> <thread label>`, and a renderer can link the label.
+ * `runId` names the workflow run the outcome started.
+ */
+export interface ActivityOutcome {
+  words: string;
+  thread?: ActivityThread;
+  runId?: string;
+}
+
+/** The server's skip text for a claim whose thread this viewer may not open. */
+const CLAIMED_ELSEWHERE = /^skipped, claimed by (another )?thread\b/i;
 
 /** A status line as the tail of a sentence: first letter lower case, no final period. */
 function asTail(line: string): string {
@@ -374,22 +397,53 @@ function skipReason(delivery: EventDeliveryWire): string {
   return asTail(line.length > 0 ? line : "delivery preferences");
 }
 
-function deliveryOutcome(event: ActivityEvent, delivery: EventDeliveryWire, names: ActivityNames): string {
+function activityThread(ref: EventDeliveryThreadRef, threads: ThreadTitles): ActivityThread {
+  const title = hasText(ref.title) ? ref.title : threadTitle(threads, ref.threadId);
+  return { ref, label: title ?? "a thread" };
+}
+
+function deliveryOutcome(event: ActivityEvent, delivery: EventDeliveryWire, names: ActivityNames): ActivityOutcome {
   const threads = names.threads ?? {};
-  const title = (ref: { threadId: string }): string => threadTitle(threads, ref.threadId) ?? "a thread";
-  if (delivery.claimedBy) return `claimed by ${title(delivery.claimedBy)}`;
-  if (delivery.status === "skipped") return `skipped: ${skipReason(delivery)}`;
-  if (delivery.runId !== undefined) return `started ${names.workflowName ?? "a workflow"} run`;
+  const workflow = names.workflowName ?? names.workflowsByListener?.[delivery.subscriptionId];
+  if (delivery.claimedBy) return { words: "claimed by", thread: activityThread(delivery.claimedBy, threads) };
+  if (delivery.status === "skipped") {
+    // A claim by a thread this viewer may not open never shows the thread's id.
+    if (delivery.lastError && CLAIMED_ELSEWHERE.test(delivery.lastError)) return { words: "claimed by another thread" };
+    return { words: `skipped: ${skipReason(delivery)}` };
+  }
+  if (delivery.runId !== undefined) return { words: `started ${workflow ?? "a workflow"} run`, runId: delivery.runId };
   if (delivery.status === "delivered") {
     if (delivery.thread) {
       const conversational = event.eventKey !== null && isConversational([event.eventKey]);
-      return `${conversational ? "replied in" : "delivered to"} ${title(delivery.thread)}`;
+      return { words: conversational ? "replied in" : "delivered to", thread: activityThread(delivery.thread, threads) };
     }
-    if (names.workflowName !== undefined) return `started ${names.workflowName} run`;
-    return "delivered";
+    if (workflow !== undefined) return { words: `started ${workflow} run` };
+    return { words: "delivered" };
   }
   // Pending, failed, or dead: say what the delivery list says.
-  return asTail(deliveryStatusLine(delivery, Date.now()));
+  return { words: asTail(deliveryStatusLine(delivery, Date.now())) };
+}
+
+/** The lead of an activity row: `<event in words>[ in <place>]`. */
+export function activityLead(event: ActivityEvent, names: ActivityNames = {}): string {
+  const place = names.place ?? eventPlace(event.refs);
+  return `${eventInWords(event.eventKey)}${place === null ? "" : ` in ${place}`}`;
+}
+
+/** Each delivery's outcome, in order. No delivery reads `no listener`. */
+export function activityOutcomes(
+  event: ActivityEvent,
+  delivery: EventDeliveryWire | readonly EventDeliveryWire[] | null,
+  names: ActivityNames = {},
+): ActivityOutcome[] {
+  const deliveries: readonly EventDeliveryWire[] = delivery === null ? [] : Array.isArray(delivery) ? delivery : [delivery];
+  if (deliveries.length === 0) return [{ words: "no listener" }];
+  return deliveries.map((d) => deliveryOutcome(event, d, names));
+}
+
+/** One outcome as text. */
+export function outcomeText(outcome: ActivityOutcome): string {
+  return outcome.thread ? `${outcome.words} ${outcome.thread.label}` : outcome.words;
 }
 
 /**
@@ -403,9 +457,5 @@ export function activitySentence(
   delivery: EventDeliveryWire | readonly EventDeliveryWire[] | null,
   names: ActivityNames = {},
 ): string {
-  const deliveries: readonly EventDeliveryWire[] = delivery === null ? [] : Array.isArray(delivery) ? delivery : [delivery];
-  const place = names.place ?? eventPlace(event.refs);
-  const lead = `${eventInWords(event.eventKey)}${place === null ? "" : ` in ${place}`}`;
-  const outcome = deliveries.length === 0 ? "no listener" : deliveries.map((d) => deliveryOutcome(event, d, names)).join(", ");
-  return `${lead} → ${outcome}`;
+  return `${activityLead(event, names)} → ${activityOutcomes(event, delivery, names).map(outcomeText).join(", ")}`;
 }

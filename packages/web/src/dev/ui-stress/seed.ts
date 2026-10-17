@@ -13,6 +13,7 @@ import type {
   ListCredentialsResponse,
   ListDecisionsResponse,
   ListEventSubscriptionsResponse,
+  ListWorkflowsResponse,
   ListNotificationDecisionsResponse,
   ListNotificationsResponse,
   ListPluginsResponse,
@@ -126,6 +127,9 @@ function seedEvents(client: QueryClient): void {
     });
   }
   client.setQueryData<ListEventSubscriptionsResponse>(qkEvents.subscriptions(), stressEventSubscriptions);
+  // The Activity rows name the workflow a delivery started from the workspace's listeners.
+  client.setQueryData<ListEventSubscriptionsResponse>(qkEvents.subscriptions(owner), stressEventSubscriptions);
+  client.setQueryData<ListWorkflowsResponse>(qkWorkflows.list(), { workflows: [] });
 }
 
 /** The thread sidebar, all 200 threads loaded in four pages. */

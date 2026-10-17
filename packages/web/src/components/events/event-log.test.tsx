@@ -24,12 +24,17 @@ vi.mock("~/api/events", () => ({
       isPending: held, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
     };
   },
+  useEventSubscriptions: () => ({ data: { subscriptions: [] } }),
+  useEventReceipts: () => ({ data: undefined, isPending: true, error: null, refetch: vi.fn() }),
 }));
+vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: [] } }) }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgRole: role }, error: null, isError: false }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
-vi.mock("./receipts-panel", () => ({ ReceiptsPanel: () => <p>Receipts list</p> }));
+vi.mock("./receipts-panel", () => ({ ReceiptsPanel: () => <p>Receipts list</p>, EventReceiptStages: () => null }));
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
+  Link: ({ children, to, params }: { children: ReactNode; to: string; params?: Record<string, string> }) => (
+    <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a>
+  ),
 }));
 
 import { EventLog, type LogFilter } from "./event-log";
@@ -49,7 +54,8 @@ function renderLog(filter: LogFilter = "all") {
 
 const event: EventLogItem = {
   kind: "event", id: "ev_1", at: Date.now(), status: "failed", service: "github", eventKey: "github.pr.opened",
-  summary: "PR #7 opened", actor: "octocat", reason: null, detail: null, deliveryCount: 2,
+  summary: "PR #7 opened", actor: "octocat", reason: null, detail: null, deliveryCount: 2, place: "acme/app#7",
+  deliveries: [{ id: "d1", subscriptionId: "sub_1", status: "dead", attempts: 4, lastError: "boom", deliveredAt: null }],
 };
 const problem: EventLogItem = {
   kind: "problem", id: "drop_1", at: Date.now() - 1000, status: "filtered", service: "slack", eventKey: "slack.message",
@@ -78,13 +84,14 @@ describe("EventLog", () => {
     expect(onFilterChange).toHaveBeenCalledWith("all");
   });
 
-  it("lists events and problems in one list, each with its status", () => {
+  it("lists events as activity sentences and problems in one list, each with its status", () => {
     items = [event, problem];
     renderLog();
-    expect(screen.getByRole("link", { name: "PR #7 opened" }).getAttribute("href")).toBe("/events/$eventId");
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" }).getAttribute("href")).toBe("/presence/events/ev_1");
+    expect(screen.getByText(/gave up after 4 attempts/)).toBeTruthy();
+    expect(screen.getByText(/PR #7 opened · octocat/)).toBeTruthy();
     expect(screen.getByText(/The text did not match\./)).toBeTruthy();
     expect(screen.getByText("Failed")).toBeTruthy();
-    expect(screen.getByText(/2 deliveries/)).toBeTruthy();
   });
 
   it("offers raw receipts to admins only, in place of the list", () => {

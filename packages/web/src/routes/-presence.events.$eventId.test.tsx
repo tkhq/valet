@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /**
- * `/events/$eventId` — one event at its own URL. Covers the page body
- * (header, deliveries, payload) and the Redeliver control, which confirms
- * before it runs because a redelivery can start real agent runs.
+ * `/presence/events/$eventId`: one event at its own URL. Covers the page
+ * body (the activity sentence, deliveries, receipt stages, payload) and the
+ * Redeliver control, which confirms before it runs because a redelivery can
+ * start real agent runs.
  *
  * `EventDetailBody` is exported so this suite renders it without router
- * context, the same split `RunDetailBody` uses. `~/api/events` is mocked the
- * way `-events.test.tsx` mocks it.
+ * context, the same split `RunDetailBody` uses.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -69,28 +69,42 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+const receiptsQuery = vi.fn();
 vi.mock("~/api/events", () => ({
   useEvent: () => ({ data: detailData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: subscriptionsData, isLoading: false, error: null }),
   useRedeliverEvent: () => ({ mutate: redeliverMutate, isPending: false, error: null }),
+  useEventReceipts: (...args: unknown[]) => {
+    receiptsQuery(...args);
+    return {
+      data: { receipts: [{ id: "rc_1", service: "github", externalId: null, eventKey: "github.pr.opened", eventId: "evt_1", metadata: {},
+        stages: [{ stage: "persistence", outcome: "stored", detail: "Event stored", at: 1000 }], subscriptions: [], createdAt: 1000, updatedAt: 1000 }],
+        nextCursor: null, lastReceiptAt: 1000, retentionDays: 7 },
+      isPending: false, error: null, refetch: vi.fn(),
+    };
+  },
 }));
+vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: [] } }) }));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgId: "org-1", orgRole: "admin" }, error: null }) }));
+vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => ({ ownerType: "user", ownerId: "u1" }) }));
 
-import { EventDetailBody } from "./events.$eventId";
+import { EventDetailBody } from "./presence.events.$eventId";
 
 beforeEach(() => {
   redeliverMutate.mockReset();
 });
 
 describe("EventDetailBody", () => {
-  it("renders the event header, its refs, and the payload", () => {
+  it("leads with the activity sentence, then the event's key, refs, and payload", () => {
     render(<EventDetailBody data={detailData} />);
-    expect(screen.getByText("PR #7 opened: fix login")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app" }).getAttribute("href")).toBe("/presence/events/evt_1");
+    expect(screen.getByText(/→ retries in 8 minutes, after 2 attempts/)).toBeTruthy();
     expect(screen.getByText("github.pr.opened")).toBeTruthy();
     expect(screen.getByText("repo: acme/app")).toBeTruthy();
     expect(screen.getByText(/"action": "opened"/)).toBeTruthy();
   });
 
-  it("names the subscription and when the delivery retries", () => {
+  it("names the listener and when the delivery retries", () => {
     render(<EventDetailBody data={detailData} />);
     expect(screen.getByText("PR alerts")).toBeTruthy();
     expect(screen.getByText(/Retries in 8 minutes/)).toBeTruthy();
@@ -113,15 +127,16 @@ describe("EventDetailBody", () => {
     );
     expect(screen.getByRole("link", { name: "Delivered to thread" }).getAttribute("href")).toBe("/threads/th_1");
     expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
-    // The failing delivery reached nothing, so it links nowhere.
-    expect(screen.getAllByRole("link")).toHaveLength(2);
+    // The sentence links the same thread and run.
+    expect(screen.getByRole("link", { name: "a thread" }).getAttribute("href")).toBe("/threads/th_1");
+    expect(screen.getByRole("link", { name: "started a workflow run" }).getAttribute("href")).toBe("/presence/runs/wfrun_evt_d3");
   });
 
-  it("confirms before redelivering, naming the subscriptions and the runs", async () => {
+  it("confirms before redelivering, naming the listeners and the runs", async () => {
     render(<EventDetailBody data={detailData} />);
     fireEvent.click(screen.getByRole("button", { name: "Redeliver" }));
 
-    expect(await screen.findByText(/matches up to 1 enabled subscription/)).toBeTruthy();
+    expect(await screen.findByText(/matches up to 1 enabled listener/)).toBeTruthy();
     expect(screen.getByText(/can start up to 1 run/)).toBeTruthy();
     // One delivery is still on the dispatcher's list, so the press can run
     // the same work twice — the dialog has to say so.
@@ -145,7 +160,7 @@ describe("EventDetailBody", () => {
     );
   });
 
-  it("says nothing was queued, and what to do, when no subscription matches", async () => {
+  it("says nothing was queued, and what to do, when no listener matches", async () => {
     redeliverMutate.mockImplementation((_input: undefined, opts: { onSuccess: (r: { created: number }) => void }) => {
       opts.onSuccess({ created: 0 });
     });
@@ -156,6 +171,19 @@ describe("EventDetailBody", () => {
     fireEvent.click(dialogButtons[dialogButtons.length - 1]);
 
     expect(screen.getByRole("status").textContent).toContain("Nothing was queued");
-    expect(screen.getByRole("status").textContent).toContain("Subscriptions tab");
+    expect(screen.getByRole("status").textContent).toContain("Turn on or edit a listener in Presence");
+  });
+
+  it("keeps the receipt stages under a disclosure and loads them when it opens", () => {
+    receiptsQuery.mockClear();
+    render(<EventDetailBody data={detailData} />);
+    const disclosure = screen.getByText("Receipt stages").closest("details")!;
+    expect(disclosure.open).toBe(false);
+    expect(receiptsQuery).toHaveBeenLastCalledWith("org-1", { q: "evt_1", limit: 5 }, false);
+    expect(screen.queryByText("Event stored")).toBeNull();
+    disclosure.open = true;
+    fireEvent(disclosure, new Event("toggle"));
+    expect(receiptsQuery).toHaveBeenLastCalledWith("org-1", { q: "evt_1", limit: 5 }, true);
+    expect(screen.getByText("Event stored")).toBeTruthy();
   });
 });

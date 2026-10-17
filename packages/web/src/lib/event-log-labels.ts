@@ -1,9 +1,9 @@
 /** Labels for the problem reasons ingest, the webhook routes, and the
  * channel host record, and the stage each one happens in. An unknown reason
- * falls back to its raw string rather than hiding. Used by the Events Log. */
+ * falls back to its raw string rather than hiding. Used by the Activity tab. */
 const REASON_LABEL: Record<string, string> = {
   slack_classifier_rejected: "Classification rejected",
-  no_subscription_match: "No subscription",
+  no_subscription_match: "No listener",
   filter_excluded: "Filtered out",
   bad_signature: "Bad signature",
   foreign_workspace: "Wrong workspace",
@@ -30,8 +30,8 @@ const REASON_LABEL: Record<string, string> = {
 
 export function problemStage(reason: string): string {
   if (reason === "slack_classifier_rejected" || reason === "slack_interaction_unmatched") return "Classification";
-  if (reason === "filter_excluded") return "Subscription filter";
-  if (reason === "no_subscription_match") return "Subscription match";
+  if (reason === "filter_excluded") return "Listener filter";
+  if (reason === "no_subscription_match") return "Listener match";
   if (reason.startsWith("workflow_")) return "Workflow routing";
   if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Receipt and verification";
   return "Delivery and authorization";

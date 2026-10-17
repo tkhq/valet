@@ -16,19 +16,19 @@ const METADATA_LABELS: Record<string, string> = {
   messageTs: "Message timestamp", threadTs: "Thread timestamp", retryNum: "Retry number",
   retryReason: "Retry reason", botIdentityAvailable: "Bot identity available",
   botUserIdentityAvailable: "Bot user identity available", payloadBytes: "Payload size (bytes)",
-  configuredTriggerCount: "Configured triggers",
+  configuredTriggerCount: "Configured listeners",
 };
 const LABELS: Record<string, string> = {
   // Receipts written before the rename record the old `orchestrator` kind.
   assistant: "Assistant", orchestrator: "Assistant", workflow: "Workflow",
-  subscription_match: "Subscription matching", persistence: "Event storage", dispatch: "Delivery queue",
+  subscription_match: "Listener matching", persistence: "Event storage", dispatch: "Delivery queue",
   channel: "Channel processing", workspace: "Workspace check", ingestion: "Event ingestion",
   follow: "Follow-up check", fan_out: "Delivery preparation", completed: "Check completed",
-  not_applicable: "Not applicable", filtered: "Excluded by subscription filters", no_subscription: "No matching subscription",
+  not_applicable: "Not applicable", filtered: "Excluded by listener filters", no_subscription: "No matching listener",
   started: "Started", stored: "Event stored", enqueued: "Delivery queued",
   receipt: "Receipt", received: "Received", verification: "Verification", verified: "Verified",
   classification: "Classification", classified: "Classified", ingest: "Event ingestion",
-  subscription: "Subscription matching", subscriptions: "Subscription matching", routing: "Routing",
+  subscription: "Listener matching", subscriptions: "Listener matching", routing: "Routing",
   accepted: "Accepted", rejected: "Rejected", ignored: "Ignored", matched: "Matched",
   no_match: "No match", unmatched: "No match", filter_excluded: "Excluded by filters",
   authorization_denied: "Authorization denied", key_mismatch: "Event key did not match", disabled: "Disabled", duplicate: "Duplicate", error: "Error", failed: "Failed",
@@ -78,8 +78,42 @@ export function ReceiptsPanel() {
   </div>;
 }
 
+/** A receipt's stages in the order they happened. A stage without a time sorts at the receipt's creation. */
+function orderedStages(receipt: Receipt) {
+  return receipt.stages.map((stage, index) => ({ ...stage, index })).sort((a, b) => (a.at ?? receipt.createdAt) - (b.at ?? receipt.createdAt) || a.index - b.index);
+}
+
+/** One receipt's processing timeline: each stage, its outcome, its time, and its detail. */
+export function ReceiptStages({ receipt }: { receipt: Receipt }) {
+  const stages = orderedStages(receipt);
+  return <section aria-label="Processing timeline">
+    <h3 className="text-sm font-medium">Processing timeline</h3>
+    {stages.length === 0 ? <p className="text-xs text-muted">No stages recorded.</p> : <ol className="mt-2 space-y-3 border-l border-line pl-3">{stages.map(stage => <li key={stage.index} className="text-sm"><span className="font-medium">{label(stage.stage)}: {label(stage.outcome)}</span>{stage.at !== undefined && <div><Timestamp value={stage.at} /></div>}<p className="text-muted">{stage.detail}</p></li>)}</ol>}
+  </section>;
+}
+
+/**
+ * The receipt stages of one stored event, for the Activity disclosure. Only
+ * organization administrators read receipts, so the request waits for
+ * `open` and for the admin check.
+ */
+export function EventReceiptStages({ eventId, open }: { eventId: string; open: boolean }) {
+  const me = useMe();
+  const allowed = !me.error && me.data?.orgRole === "admin";
+  const receiptsQ = useEventReceipts(me.data?.orgId, { q: eventId, limit: 5 }, allowed && open);
+  if (!open) return null;
+  if (me.error) return <ErrorRow>Could not check access. Reload this page to try again.</ErrorRow>;
+  if (!me.data) return <LoadingRow label="Checking access…" />;
+  if (!allowed) return <p className="text-xs text-muted">Receipt stages are available to organization administrators.</p>;
+  if (receiptsQ.isPending) return <LoadingRow label="Loading receipt stages…" />;
+  if (receiptsQ.error) return <ErrorRow>Could not load the receipt stages. <button className="underline" onClick={() => void receiptsQ.refetch()}>Retry</button></ErrorRow>;
+  const receipts = receiptsQ.data.receipts.filter(receipt => receipt.eventId === eventId);
+  if (receipts.length === 0) return <p className="text-xs text-muted">No receipt recorded for this event. Receipts stay for up to 7 days.</p>;
+  return <div className="space-y-3">{receipts.map(receipt => <ReceiptStages key={receipt.id} receipt={receipt} />)}</div>;
+}
+
 function ReceiptRow({ receipt }: { receipt: Receipt }) {
-  const stages = receipt.stages.map((stage, index) => ({ ...stage, index })).sort((a, b) => (a.at ?? receipt.createdAt) - (b.at ?? receipt.createdAt) || a.index - b.index);
+  const stages = orderedStages(receipt);
   // A later follow-up check must not hide rejection, filtering, or dispatch failures.
   const latest = stages.find(stage => stage.outcome === "failed")
     ?? stages.find(stage => ["classification", "workspace"].includes(stage.stage) && stage.outcome === "rejected")
@@ -99,19 +133,16 @@ function ReceiptRow({ receipt }: { receipt: Receipt }) {
         <span className="mt-1 block break-all text-xs text-muted">Reference: {receipt.id}{receipt.externalId ? ` · Provider ID: ${receipt.externalId}` : ""}</span>
       </summary>
       <div className="mt-3 space-y-4 break-words sm:pl-3">
-        {receipt.eventId && <Link to="/events/$eventId" params={{ eventId: receipt.eventId }} className="text-sm text-moss underline">View delivery attempts</Link>}
+        {receipt.eventId && <Link to="/presence/events/$eventId" params={{ eventId: receipt.eventId }} className="text-sm text-moss underline">View delivery attempts</Link>}
         <section aria-label="Receipt metadata">
           <h3 className="text-sm font-medium">Delivery metadata</h3>
           <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[max-content_1fr]">
             {Object.entries(receipt.metadata).filter(([key]) => key in METADATA_LABELS).map(([key, value]) => <div className="contents" key={key}><dt className="text-muted">{METADATA_LABELS[key]}</dt><dd className="break-all">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value)}</dd></div>)}
           </dl>
         </section>
-        <section aria-label="Processing timeline">
-          <h3 className="text-sm font-medium">Processing timeline</h3>
-          {stages.length === 0 ? <p className="text-xs text-muted">No stages recorded.</p> : <ol className="mt-2 space-y-3 border-l border-line pl-3">{stages.map(stage => <li key={stage.index} className="text-sm"><span className="font-medium">{label(stage.stage)}: {label(stage.outcome)}</span>{stage.at !== undefined && <div><Timestamp value={stage.at} /></div>}<p className="text-muted">{stage.detail}</p></li>)}</ol>}
-        </section>
-        <section aria-label="Subscription decisions">
-          <h3 className="text-sm font-medium">Subscription decisions</h3>
+        <ReceiptStages receipt={receipt} />
+        <section aria-label="Listener decisions">
+          <h3 className="text-sm font-medium">Listener decisions</h3>
           {receipt.subscriptions.length === 0 ? <p className="text-xs text-muted">No decisions recorded.</p> : <ul className="mt-2 space-y-2">{receipt.subscriptions.map(subscription => <li key={subscription.id} className="text-sm"><p className="font-medium">{subscription.name || subscription.id}: {label(subscription.outcome)}</p>{subscription.failedFilters?.length ? <p className="text-xs text-muted">Filters that did not match: {subscription.failedFilters.map(filter => `${filter.field} (${filter.op})`).join(", ")}</p> : null}<p className="break-all text-xs text-muted">{label(subscription.ownerType)} {subscription.ownerId} · Target: {label(subscription.target)}{subscription.targetId ? ` (${subscription.targetId})` : ""} · {subscription.id}</p></li>)}</ul>}
         </section>
       </div>

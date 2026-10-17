@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import type { ReactNode } from "react";
 import type { ListEventReceiptsResponse } from "@valet/api/wire";
 import { beforeEach, expect, it, vi } from "vitest";
-import { ReceiptsPanel } from "./receipts-panel";
+import { EventReceiptStages, ReceiptsPanel } from "./receipts-panel";
 let role = "admin";
 let pending = false;
 let error: Error | null = null;
@@ -12,7 +12,7 @@ const query = vi.fn();
 const retry = vi.fn();
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { orgRole: role, orgId: "org-1" } }) }));
 vi.mock("~/api/events", () => ({ useEventReceipts: (...args: unknown[]) => { query(...args); return { data, isPending: pending, isFetching: pending, error, refetch: retry }; } }));
-vi.mock("@tanstack/react-router", () => ({ Link: ({ children, params }: { children: ReactNode; params?: { eventId: string } }) => <a href={params ? `/events/${params.eventId}` : "/events?tab=problems"}>{children}</a> }));
+vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params }: { children: ReactNode; to: string; params?: { eventId: string } }) => <a href={params ? to.replace("$eventId", params.eventId) : to}>{children}</a> }));
 const fixture: ListEventReceiptsResponse = {
   receipts: [{ id: "receipt-1", service: "slack", externalId: "Ev123", eventKey: "slack.message", eventId: "event-1",
     metadata: { channelId: "C123", botIdentityAvailable: false, payloadBytes: 80 },
@@ -31,7 +31,7 @@ it("shows readable receipt details, ordered stages, decisions, and matched-event
   expect(within(details).getByText("C123")).toBeTruthy();
   expect(within(details).getByText("No")).toBeTruthy();
   expect(within(details).getByText("Team alerts: Excluded by filters")).toBeTruthy();
-  expect(within(details).getByRole("link").getAttribute("href")).toBe("/events/event-1");
+  expect(within(details).getByRole("link").getAttribute("href")).toBe("/presence/events/event-1");
   const stages = within(within(details).getByRole("region", { name: "Processing timeline" })).getAllByRole("listitem");
   expect(stages[0]?.textContent).toContain("Webhook recorded");
   expect(stages[1]?.textContent).toContain("Message classified");
@@ -81,7 +81,7 @@ it("keeps filtering or failure visible when a later follow-up check completed", 
     { stage: "follow", outcome: "completed", detail: "Follow-up check finished", at: 3000 },
   ], subscriptions: [{ ...fixture.receipts[0]!.subscriptions[0]!, failedFilters: [{ field: "channel", op: "eq" }] }] } ] };
   const view = render(<ReceiptsPanel />);
-  expect(screen.getByText("Excluded by subscription filters")).toBeTruthy();
+  expect(screen.getByText("Excluded by listener filters")).toBeTruthy();
   expect(screen.getByText(/Filters that did not match: channel/)).toBeTruthy();
   data = { ...data, receipts: [{ ...data.receipts[0]!, stages: [...data.receipts[0]!.stages, { stage: "dispatch", outcome: "failed", detail: "Delivery queue failed", at: 2500 }] }] };
   view.rerender(<ReceiptsPanel />);
@@ -94,4 +94,23 @@ it("shows unfinished processing without declaring failure", () => {
   expect(screen.getByText("Started · no completion recorded")).toBeTruthy();
   fireEvent.click(screen.getByText("About this log"));
   expect(screen.getByText(/Check Rejected and Failed in the Log/)).toBeTruthy();
+});
+
+it("shows one event's receipt stages to an admin once the disclosure opens", () => {
+  const { rerender } = render(<EventReceiptStages eventId="event-1" open={false} />);
+  expect(query).toHaveBeenLastCalledWith("org-1", { q: "event-1", limit: 5 }, false);
+  expect(screen.queryByRole("region", { name: "Processing timeline" })).toBeNull();
+  rerender(<EventReceiptStages eventId="event-1" open />);
+  expect(query).toHaveBeenLastCalledWith("org-1", { q: "event-1", limit: 5 }, true);
+  const stages = within(screen.getByRole("region", { name: "Processing timeline" })).getAllByRole("listitem");
+  expect(stages.map((stage) => stage.textContent)).toEqual([expect.stringContaining("Webhook recorded"), expect.stringContaining("Message classified")]);
+});
+
+it("keeps another event's receipt out, and tells a member who reads receipts", () => {
+  render(<EventReceiptStages eventId="event-2" open />);
+  expect(screen.getByText(/No receipt recorded for this event/)).toBeTruthy();
+  role = "member";
+  render(<EventReceiptStages eventId="event-1" open />);
+  expect(query).toHaveBeenLastCalledWith("org-1", { q: "event-1", limit: 5 }, false);
+  expect(screen.getByText("Receipt stages are available to organization administrators.")).toBeTruthy();
 });

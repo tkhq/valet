@@ -94,11 +94,11 @@ export function redeliverConfirmDescription(matchCount: number, scheduledCount: 
   const lines: string[] =
     matchCount === 0
       ? [
-          "No enabled subscription matches this event key.",
-          "Redelivery creates nothing until you enable or edit one on the Subscriptions tab.",
+          "No enabled listener matches this event.",
+          "Redelivery creates nothing until you turn on or edit a listener in Presence.",
         ]
       : [
-          `This event matches up to ${matchCount} enabled ${plural(matchCount, "subscription", "subscriptions")}.`,
+          `This event matches up to ${matchCount} enabled ${plural(matchCount, "listener", "listeners")}.`,
           `Each match creates one delivery, so this can start up to ${matchCount} ${plural(matchCount, "run", "runs")}.`,
         ];
   if (scheduledCount > 0) {
@@ -114,7 +114,7 @@ export function redeliverConfirmDescription(matchCount: number, scheduledCount: 
  * outcome, not a silent success. */
 export function redeliverResultText(created: number): string {
   if (created === 0) {
-    return "Nothing was queued. No enabled subscription matches this event. Enable or edit one on the Subscriptions tab, then redeliver.";
+    return "Nothing was queued. No enabled listener matches this event. Turn on or edit a listener in Presence, then redeliver.";
   }
   return `Queued ${created} ${plural(created, "delivery", "deliveries")}. The result appears in this list.`;
 }

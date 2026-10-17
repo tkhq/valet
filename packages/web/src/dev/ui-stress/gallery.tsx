@@ -19,7 +19,7 @@ import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
 import { cn } from "~/lib/cn";
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
-import { EventDetailBody } from "~/routes/events.$eventId";
+import { EventDetailBody } from "~/routes/presence.events.$eventId";
 import { IntegrationsPage } from "~/routes/integrations";
 import { UsagePage } from "~/routes/usage";
 import { RunDetailBody } from "~/routes/workflows.runs.$runId";
