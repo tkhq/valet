@@ -11,7 +11,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ListSessionWakeupsResponse, ListThreadFeedersResponse } from "@valet/api/wire";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, api } from "~/api/client";
 import { qk } from "~/api/queries";
 import { qkThreadFeeders } from "~/api/presence-feeders";
@@ -40,17 +40,19 @@ vi.mock("@tanstack/react-router", () => ({
     children,
     to,
     params,
+    search,
     ...rest
   }: {
     children: ReactNode;
     to: string;
     params?: Record<string, string>;
+    search?: Record<string, string>;
     [key: string]: unknown;
-  }) => (
-    <a href={params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to} {...rest}>
-      {children}
-    </a>
-  ),
+  }) => {
+    const path = params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to;
+    const query = search ? `?${new URLSearchParams(search).toString()}` : "";
+    return <a href={`${path}${query}`} {...rest}>{children}</a>;
+  },
 }));
 
 const MINUTE = 60_000;
@@ -352,6 +354,10 @@ describe("BackgroundWorkSection", () => {
     const { wrapper } = wrap();
     return render(<BackgroundWorkSection sessionId="s-1" threadId={threadId} canCancel={canCancel} />, { wrapper });
   }
+  // Every thread reads its feeders; a test that does not name them gets none.
+  beforeEach(() => {
+    vi.spyOn(api, "getThreadFeeders").mockResolvedValue({ listeners: [], routines: [] });
+  });
 
   it("lists only this thread's work, with state and time", async () => {
     vi.spyOn(api, "listSessionWakeups").mockResolvedValue(listing(Date.now()));
@@ -452,12 +458,33 @@ describe("BackgroundWorkSection", () => {
       await waitFor(() => expect(section.queryByText(/Fed by:/)).toBeNull());
     });
 
-    it("does not read feeders for a thread with no event waiter", async () => {
+    it("shows the line on a rule's own thread that holds no waiter", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue({ wakeups: [], leases: [] });
+      const feedersRead = vi.spyOn(api, "getThreadFeeders").mockResolvedValue({ listeners: [{ id: "r-1", name: "Incident intake" }], routines: [] });
+      renderSection("sub:r-1");
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      expect(feedersRead).toHaveBeenCalledWith("s-1", "sub:r-1");
+      expect(section.getByText(/Fed by:/).textContent).toBe("Fed by: Incident intake");
+      expect(section.getByRole("link", { name: "Incident intake" }).getAttribute("href")).toBe("/presence/listeners/r-1");
+    });
+
+    it("shows the line on its own when the thread has other work but no waiter", async () => {
       vi.spyOn(api, "listSessionWakeups").mockResolvedValue(listing(Date.now()));
-      const feedersRead = vi.spyOn(api, "getThreadFeeders").mockResolvedValue(feeders());
+      vi.spyOn(api, "getThreadFeeders").mockResolvedValue(feeders());
       renderSection("th-1");
-      await screen.findByRole("region", { name: "Background work" });
-      expect(feedersRead).not.toHaveBeenCalled();
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      expect(await section.findByText(/Fed by:/)).toBeTruthy();
+      expect(section.getAllByText(/Fed by:/)).toHaveLength(1);
+      expect(section.getByText("full proof build")).toBeTruthy();
+    });
+
+    it("shows nothing for a thread with neither a waiter nor a feeder", async () => {
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue({ wakeups: [], leases: [] });
+      const feedersRead = vi.spyOn(api, "getThreadFeeders").mockResolvedValue({ listeners: [], routines: [] });
+      renderSection("th-1");
+      await waitFor(() => expect(feedersRead).toHaveBeenCalledWith("s-1", "th-1"));
+      expect(screen.queryByRole("region", { name: "Background work" })).toBeNull();
+      expect(screen.queryByText(/Fed by:/)).toBeNull();
     });
 
     it("seeds the feeders query under the session+thread key", async () => {

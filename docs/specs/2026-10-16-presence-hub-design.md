@@ -324,6 +324,20 @@ Pass criterion: all steps, in one run, from a clean start.
   route would run for every child URL and send each child to the parent's
   target. The Runs tab is the route file `presence.runs.index.tsx` under a
   `presence.runs.tsx` layout, so `/presence/runs/$runId` nests beside it.
+- **The Runs tab is new (Part A step 2).** The old `/workflows` page had
+  only the Workflows and Scheduled tabs; a run list lived on each
+  workflow's page. Part A step 2 requires a Runs tab, so
+  `presence.runs.index.tsx` lists every run in the workspace, newest
+  first, over the existing `GET /api/workflows/runs`. No api route was
+  added for it.
+- **Every thread reads its feeders (Part G step 1).** A rule's `own`
+  thread, an `existing` pin, and a place's thread usually hold no event
+  waiter. So the background section reads `GET /api/presence/feeders` for
+  every thread it shows, cached for 30 seconds. The `Fed by` line sits
+  under the first event waiter when the thread holds one. Otherwise it is
+  its own line after the list. The section shows when it has work or a
+  `Fed by` line, and hides when it has neither. A routine link opens
+  `/presence/routines?routine=<id>`.
 - **The `/workflows?tab=runs` row has no live source.** No link in the app
   or the api builds that URL today. The row stays so that an old bookmark
   or a later link lands on the Runs tab.

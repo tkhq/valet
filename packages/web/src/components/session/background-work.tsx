@@ -272,12 +272,6 @@ export function feederLinks(feeders: ListThreadFeedersResponse | undefined): Fee
   ];
 }
 
-/** The routines tab has no per-routine page yet, so a routine feeder links
- * to the tab filtered to it by id (spec Part G). */
-function routineHref(id: string): string {
-  return `/presence/routines?routine=${encodeURIComponent(id)}`;
-}
-
 /** The "Fed by" line: the listeners and routines that deliver into this
  * thread, each linking to its own page. Renders nothing for an empty list. */
 function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefined }) {
@@ -294,9 +288,10 @@ function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefine
               {link.name}
             </Link>
           ) : (
-            <a href={routineHref(link.id)} className="text-moss hover:underline">
+            // A routine's page is the Routines tab's `routine` search param (spec Part D step 2).
+            <Link to="/presence/routines" search={{ routine: link.id }} className="text-moss hover:underline">
               {link.name}
-            </a>
+            </Link>
           )}
         </Fragment>
       ))}
@@ -531,11 +526,11 @@ export function BackgroundWorkStatusLine({
 /**
  * The thread context card's "Background work" section: every active item
  * of this thread, with its state, its time, and a Cancel when the person
- * may stop it. The first event waiter also names what feeds the thread:
- * the listeners and routines that deliver into it (spec Part G), as a
- * "Fed by" line under its entry. The line names the thread's feeders, so
- * it shows once per thread, however many event waiters the thread holds.
- * Renders nothing while the thread has no background work.
+ * may stop it. The section also names what feeds the thread: the listeners
+ * and routines that deliver into it (spec Part G), as one "Fed by" line.
+ * The line sits under the first event waiter when the thread holds one,
+ * else on its own after the list. Renders nothing while the thread has no
+ * background work and no feeders.
  */
 export function BackgroundWorkSection({
   sessionId,
@@ -551,15 +546,16 @@ export function BackgroundWorkSection({
   const now = useNow(own.length > 0);
   const { ask, dialog } = useBackgroundWorkCancel(sessionId);
   // The feeders read names what delivers into this thread (spec Part G): a
-  // rule's own thread, an existing pin, or a subject thread. It only matters
-  // next to the event waiter it explains, so it stays disabled otherwise.
-  const feeders = useThreadFeeders(sessionId, threadId, { enabled: own.some((item) => item.kind === "event") });
+  // rule's own thread, an existing pin, or a place's thread. Those threads
+  // usually hold no waiter, so every thread reads it (one small read, cached).
+  const feeders = useThreadFeeders(sessionId, threadId, { enabled: sessionId.length > 0 });
+  const fedBy = feederLinks(feeders.data).length > 0;
   const feedById = own.find((item) => item.kind === "event")?.id;
-  if (own.length === 0) return <>{dialog}</>;
+  if (own.length === 0 && !fedBy) return <>{dialog}</>;
   return (
     <section aria-label="Background work" className="border-t border-line py-3">
       <h2 className="mb-2 font-medium text-muted">Background work</h2>
-      <ul>
+      {own.length > 0 && <ul>
         {own.map((item) => {
           const event = item.kind === "event" ? eventSectionDetail(item, now) : null;
           return (
@@ -591,7 +587,8 @@ export function BackgroundWorkSection({
             </li>
           );
         })}
-      </ul>
+      </ul>}
+      {feedById === undefined && <FeedByLine feeders={feeders.data} />}
       {dialog}
     </section>
   );
