@@ -55,7 +55,7 @@ import {
   type DeliveredThread,
   type DeliveryDestination,
 } from "./assistant-delivery.js";
-import { readDestinationStamp, resolveDestination, summaryTitle, type Destination } from "./destination.js";
+import { readDestinationStamp, resolveDestination, summaryTitle, suppressedWaiters, type Destination } from "./destination.js";
 import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
 import {
   destinationMetricReason,
@@ -369,10 +369,13 @@ export class EventDispatcher {
             .returning({ id: eventSubscriptions.id });
           paused = changed.length > 0;
         }
+        // Recover first: a crash before the skipped write runs this again,
+        // and `appendEventMatch` refuses a digest the waiter already holds,
+        // so a crash duplicates nothing and loses nothing.
+        await this.recoverClaimedDigest(delivery.destination, event);
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
           : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
-        await this.recoverClaimedDigest(delivery.destination, event);
         return;
       }
 
@@ -591,7 +594,9 @@ export class EventDispatcher {
             });
           }
         }
-        if (destination.kind === "target" && destination.matchedWaiterId !== undefined) {
+        // Only a claim redirect is a waiter's match. A binding delivery never
+        // ends the waiters it suppressed.
+        if (destination.kind === "target" && destination.reason === "claim_redirect" && destination.matchedWaiterId !== undefined) {
           await this.endMatchedWaiter(destination.matchedWaiterId, landed);
         }
       } else if (target.kind === "signal") {
@@ -661,7 +666,8 @@ export class EventDispatcher {
   /**
    * A named repair for the window between ingest and dispatch (CLAUDE.md,
    * "Invariants: alert, don't auto-repair", rule 3). Ingest suppressed the
-   * digest of the waiter that a claim redirect names, and a team rule or a
+   * digest of the waiters that the stamp names (a claim redirect's target,
+   * or the waiters in a binding's thread), and a team rule or a
    * disabled rule now skips the delivery. That race is expected in normal
    * operation: a rule can change at any moment. Without the repair the
    * waiter would never see the event. The counter's `claim_recovered`
@@ -670,14 +676,14 @@ export class EventDispatcher {
   private async recoverClaimedDigest(stamp: unknown, event: typeof events.$inferSelect): Promise<void> {
     const destination = readDestinationStamp(stamp);
     const recover = this.deps.recoverClaimedDigest;
-    if (!recover || destination?.kind !== "target" || destination.matchedWaiterId === undefined) return;
-    try {
-      const appended = await recover({
-        waiterId: destination.matchedWaiterId, orgId: event.orgId, service: event.service, event: normalizedEventFromRow(event),
-      });
-      if (appended) this.recordDestination("claim_recovered");
-    } catch (err) {
-      console.error(`event dispatch: recovering waiter ${destination.matchedWaiterId}'s digest failed; the waiter misses this event:`, err);
+    if (!recover || !destination) return;
+    for (const waiterId of suppressedWaiters(destination)) {
+      try {
+        const appended = await recover({ waiterId, orgId: event.orgId, service: event.service, event: normalizedEventFromRow(event) });
+        if (appended) this.recordDestination("claim_recovered");
+      } catch (err) {
+        console.error(`event dispatch: recovering waiter ${waiterId}'s digest failed; the waiter misses this event:`, err);
+      }
     }
   }
 

@@ -857,7 +857,9 @@ describe("GET /api/events/:id", () => {
     expect(body.deliveries.find((d) => d.id === "del_assist")?.claimedBy).toBeUndefined();
 
     const other = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: { "x-valet-test-user-id": "test-member" } })).json()) as GetEventResponse;
-    expect(other.deliveries.find((d) => d.id === "del_claimed")?.claimedBy).toBeUndefined();
+    const hidden = other.deliveries.find((d) => d.id === "del_claimed");
+    expect(hidden?.claimedBy).toBeUndefined();
+    expect(hidden?.lastError).toBe("Skipped, claimed by another thread.");
   });
 
   it("omits the thread and the run for a viewer who may not open them", async () => {

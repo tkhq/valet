@@ -447,6 +447,9 @@ async function deliveryThreads(
   return found;
 }
 
+/** The skip text for a viewer who may not open the thread that claimed the delivery. */
+const CLAIMED_ELSEWHERE = "Skipped, claimed by another thread.";
+
 /**
  * The thread whose waiter claimed each skipped delivery, by delivery id
  * (spec 2026-10-16: delivery threads and claims, Part E step 2). The
@@ -555,7 +558,8 @@ eventsRouter.get("/events/:id", async (c) => {
       subscriptionName: d.subscriptionName,
       status: d.status,
       attempts: d.attempts,
-      lastError: d.lastError,
+      // A viewer who may not open the claiming thread does not see its id.
+      lastError: claims.some((claim) => claim.deliveryId === d.id) && !claimed.has(d.id) ? CLAIMED_ELSEWHERE : d.lastError,
       deliveredAt: d.deliveredAt,
       // `next_attempt_at` keeps its last value after a delivery settles: a
       // dead row holds the timestamp of the attempt that gave up, and a
