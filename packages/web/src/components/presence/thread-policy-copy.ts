@@ -42,7 +42,7 @@ export function subjectKindForKeys(keys: readonly string[]): SubjectKind | null 
 
 /** The option copy for the subject mode. */
 export function subjectOptionLabel(subjectKind: SubjectKind | null): string {
-  return `One thread per ${subjectKind ?? "subject"}`;
+  return `One thread per ${subjectKind ?? "place"}`;
 }
 
 /** The rule's own thread, named for its kind. */

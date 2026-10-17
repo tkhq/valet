@@ -182,6 +182,7 @@ function WorkflowEditorPane({
   // Right-side drawer: runs list / version history / listeners and routines. Header
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
+  // copy-lint: allow trigger
   const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(newTrigger ? "triggers" : null);
   // The assistant is the editor's right-hand column, not one of the overlay
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
@@ -347,6 +348,7 @@ function WorkflowEditorPane({
           <Button
             size="sm"
             variant={drawer === "triggers" ? "secondary" : "ghost"}
+            // copy-lint: allow trigger
             onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
             Listeners and routines
