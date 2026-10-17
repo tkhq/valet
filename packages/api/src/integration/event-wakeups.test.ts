@@ -986,8 +986,10 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const mentionThreads = rowsOf(await p.db.execute(sql`SELECT id FROM engine_threads WHERE key = ${`slack:C900:${mentionTs}`}`));
     expect(mentionThreads).toHaveLength(0);
 
-    // M2: the routed mention binds no follow (INV-M2).
-    expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: mentionTs })).toBeNull();
+    // C2: the claim redirect binds the mention's Slack thread to t-inc
+    // (spec 2026-10-16: delivery threads and claims, Part C).
+    expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: mentionTs }))
+      .toMatchObject({ sessionId: tInc.sessionId, threadId: tInc.threadId });
 
     // M4: the agent's reply to the mention posts in the mention's Slack thread.
     const reply = await poll(
