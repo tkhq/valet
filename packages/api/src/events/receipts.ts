@@ -83,11 +83,31 @@ export function destinationReceiptStage(
   }
 }
 
-/** Append a stage to the receipt of a stored event, when that event has one. */
-export async function appendReceiptStageForEvent(db: AppDb, orgId: string, eventId: string, stage: { stage: string; outcome: string; detail: string }): Promise<void> {
+/**
+ * Append a stage to the receipt of a stored event, when that event has one.
+ * With `onceFor`, a stage of the same name whose detail already contains
+ * that text is not appended again, so a retried delivery records once.
+ * Returns what happened, so a caller can count only a first record.
+ */
+export async function appendReceiptStageForEvent(
+  db: AppDb, orgId: string, eventId: string,
+  stage: { stage: string; outcome: string; detail: string },
+  onceFor?: string,
+): Promise<"appended" | "exists" | "no_receipt"> {
   try {
-    const rows = await db.select({ id: eventReceipts.id }).from(eventReceipts)
+    const [row] = await db.select({ id: eventReceipts.id, stages: eventReceipts.stages }).from(eventReceipts)
       .where(and(eq(eventReceipts.orgId, orgId), eq(eventReceipts.eventId, eventId))).limit(1);
-    await appendReceiptStage(db, rows[0]?.id, stage);
-  } catch { console.warn("[event-receipts] write unavailable"); }
+    if (!row) return "no_receipt";
+    if (onceFor !== undefined && sanitizeReceiptStages(row.stages).some((s) => s.stage === stage.stage && s.detail.includes(onceFor))) return "exists";
+    await appendReceiptStage(db, row.id, stage);
+    return "appended";
+  } catch {
+    console.warn("[event-receipts] write unavailable");
+    return "no_receipt";
+  }
+}
+
+/** The text that names one delivery in its `destination` stage, for `onceFor`. */
+export function destinationStageMarker(deliveryId: string): string {
+  return `delivery ${deliveryId}:`;
 }

@@ -155,9 +155,9 @@ start.
    JSON. The schedule stores it in a new nullable `thread_policy` jsonb
    column on `workflow_schedules`, edited in place in `0000_app.sql`, with
    a matching `SCHEMA_REPAIRS` entry.
-3. An absent policy MUST read as `new` when the target sets `follow: true`,
+3. An absent policy MUST read as `new` for a delivery with a channel origin,
    else `own`. No backfill runs. `readThreadPolicy` stays shape-only; the
-   dispatcher applies this default.
+   dispatcher applies this default per delivery (`deliveryThreadPolicy`).
 4. `subject` MUST be refused for a schedule, and for an event subscription
    whose keys name no natural subject (Part D). The refusal MUST say
    `This rule's events have no subject to group by. Pick another thread
@@ -388,6 +388,11 @@ event wakeups spec Part A.
 - **Receipt lookup.** The `destination` stage is appended to the receipt
   whose `event_id` matches the delivery's event. `event_receipts` gains the
   index `event_receipts_event` on `(org_id, event_id)`.
+- **Explicit `own` or `existing` on a channel rule.** A rule that matches
+  channel messages and sets `own` or `existing` puts several Slack
+  conversations in one thread that can reply to each of them. This is the
+  owner's choice. The default (Part A step 3) gives each conversation its
+  own thread.
 - **Channel privacy follows content.** Every Slack-sourced assistant
   delivery records its channel on the thread it lands in, in engine thread
   `metadata.slackChannels`, and on a team execution's governing thread. The
