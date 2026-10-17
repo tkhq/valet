@@ -406,6 +406,23 @@ event wakeups spec Part A.
   needs access to every private channel among them. Thread lists, thread
   routes, `thread_read`, attention routing, and the shared team views
   (briefings, outcomes) apply the same rule.
+- **`slackEventsThreadKey` stays.** The dispatcher no longer uses it as a
+  destination (Part B step 6). The workflow attention audience keys still
+  use it, so the function stays for them.
+- **Audience changes on an open child socket.** A socket rechecks a child
+  thread's inherited channel audience on each frame when the parent thread
+  is live in the same api process. A change on a grandparent thread, or on
+  a parent thread that another api process holds, reaches the open child
+  socket within the 5-minute recheck window, not at once.
+- **Display default in the web.** The web shows a rule's default policy at
+  the rule level: `new` when the rule follows Slack threads or its event
+  keys carry Slack conversations, else `own`.
+  The dispatcher decides per delivery (Part A step 3), so the shown default
+  is an approximation for a rule that mixes channel and other events.
+- **No `existing` option for org-owned rules in the web.** The thread
+  picker lists the threads of a personal or team workspace. The runtime API
+  has no org workspace key yet, so the web offers no `existing` option for
+  an org-owned rule. The REST API still validates an `existing` pin for it.
 - **Counter name.** The OpenTelemetry instrument is
   `valet_event_delivery_destination`. The Prometheus exporter adds the
   `_total` suffix.
