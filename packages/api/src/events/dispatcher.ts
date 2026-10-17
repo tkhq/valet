@@ -376,6 +376,8 @@ export class EventDispatcher {
       .where(eq(eventSubscriptions.id, delivery.subscriptionId))
       .limit(1);
     if (!event || !sub) {
+      // A deleted rule delivers nothing: give the suppressed waiters the event back.
+      if (event) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
         .set({ status: "dead", lastError: "event or subscription vanished" })
@@ -423,6 +425,8 @@ export class EventDispatcher {
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the
           // same split the drop log makes in `team-slack-gate.ts`.
+          // The delivery dies, so the waiters it suppressed get the event back.
+          await this.recoverClaimedDigest(delivery.destination, event);
           const lastError = teamMention && audience === "organization"
             ? "Team mention denied. Check the sender's Slack identity link and organization membership."
             : "Team mention denied. Check the sender's Slack identity link and team membership.";
@@ -663,6 +667,9 @@ export class EventDispatcher {
     } catch (err) {
       const attempts = delivery.attempts + 1;
       const backoff = BACKOFF_MS[attempts - 1];
+      // The last attempt failed, so the waiters this delivery suppressed get
+      // the event back before the row goes dead.
+      if (backoff === undefined) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
         .set({
@@ -765,12 +772,15 @@ export class EventDispatcher {
 
   /**
    * A named repair for the window between ingest and dispatch (CLAUDE.md,
-   * "Invariants: alert, don't auto-repair", rule 3). Ingest suppressed the
-   * digest of the waiters that the stamp names (a claim redirect's target,
-   * or the waiters in a binding's thread), and a team rule or a
-   * disabled rule now skips the delivery. That race is expected in normal
-   * operation: a rule can change at any moment. Without the repair the
-   * waiter would never see the event. The counter's `claim_recovered`
+   * "Invariants: alert, don't auto-repair", rule 3). It runs on every
+   * terminal path that delivers nothing: a skip decided after ingest, a
+   * deleted rule, a sender gate denial, and the last failed attempt.
+   * Ingest suppressed the digest of the waiters that the stamp names (a
+   * claim redirect's target, or the waiters in a binding's thread), and the
+   * delivery now ends without reaching them. That is expected in normal
+   * operation: a rule or a membership can change at any moment, and a
+   * delivery can fail. Without the repair the waiter would never see the
+   * event (INV-D6). The counter's `claim_recovered`
    * reason records each repair.
    */
   private async recoverClaimedDigest(stamp: unknown, event: typeof events.$inferSelect): Promise<void> {
