@@ -842,6 +842,24 @@ describe("GET /api/events/:id", () => {
     expect(byId.get("del_wf_dead")?.runId).toBeUndefined();
   });
 
+  it("links a claimed delivery to the thread that claimed it, for a viewer who may open it (Part E step 2)", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    await a.providers.db.insert(eventDeliveries).values({
+      id: "del_claimed", eventId: "ev_dest", subscriptionId: "sub_assist", status: "skipped", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000,
+      lastError: `Skipped, claimed by thread ${thread.threadId}.`, destination: { kind: "skip", reason: `claimed by thread ${thread.threadId}` },
+    });
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse;
+    const claimed = body.deliveries.find((d) => d.id === "del_claimed");
+    expect(claimed?.claimedBy).toEqual(thread);
+    expect(claimed?.thread).toBeUndefined();
+    expect(body.deliveries.find((d) => d.id === "del_assist")?.claimedBy).toBeUndefined();
+
+    const other = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: { "x-valet-test-user-id": "test-member" } })).json()) as GetEventResponse;
+    expect(other.deliveries.find((d) => d.id === "del_claimed")?.claimedBy).toBeUndefined();
+  });
+
   it("omits the thread and the run for a viewer who may not open them", async () => {
     const a = await boot();
     await seedDestinations(a);
