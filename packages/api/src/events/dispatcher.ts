@@ -34,10 +34,11 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
 import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
-import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, threadForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
+import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -184,11 +185,6 @@ export function eventDeliveryRunId(deliveryId: string): string {
 export function deliveryThreadPolicy(target: { thread?: unknown }, delivery: { channelOrigin: boolean }): AssistantThreadPolicy {
   if (target.thread === undefined || target.thread === null) return delivery.channelOrigin ? { mode: "new" } : { mode: "own" };
   return readThreadPolicy(target.thread);
-}
-
-/** A Slack direct message: a conversational event (spec Terminology). */
-function isDirectMessage(payload: unknown): boolean {
-  return typeof payload === "object" && payload !== null && "channel_type" in payload && payload.channel_type === "im";
 }
 
 /** The stored event row as the plugin contract's `NormalizedEvent`, for `naturalSubject`. */
@@ -455,10 +451,6 @@ export class EventDispatcher {
         // A pull request comment continues in the thread that opened the
         // pull request, when that thread is in this owner's runtime.
         const parsedComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
-        const commentThread = parsedComment && sub.ownerType !== "org"
-          ? await threadForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, parsedComment.pullRequestUrl)
-          : null;
-        const commentThreadKey = commentThread?.key ?? null;
         // Valet posts with a person's GitHub token, so its own comment arrives
         // as that person. A comment it recorded as sent is its own: it never
         // wakes an assistant.
@@ -477,38 +469,33 @@ export class EventDispatcher {
           await db.update(eventDeliveries).set({ nextAttemptAt: settledAt }).where(eq(eventDeliveries.id, deliveryId));
           return;
         }
-        const prComment = parsedComment;
-        const prThreadKey = prComment ? commentThreadKey : null;
-        const inbound = origin
-          ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
-          : prThreadKey && prComment ? prComment.message : undefined;
         const owner = { type: sub.ownerType, id: sub.ownerId };
         // Destination precedence (spec 2026-10-16: delivery threads, Part B
         // step 1): a conversation binding, then a claim, then the policy.
-        const follow = await this.followBinding(event, origin, owner);
-        const binding = follow?.kind === "target"
-          ? { sessionId: follow.sessionId, threadId: follow.threadId, via: "follow" as const }
-          : prComment && commentThread
-            ? { sessionId: commentThread.sessionId, threadId: commentThread.threadId, via: "pull_request" as const }
-            : null;
+        const bindingEvent = { key: event.eventKey, payload: event.payload };
+        const found = await conversationBinding(db, event.orgId, owner, bindingEvent, origin);
+        const binding = found && found.via !== "legacy_follow" ? found : null;
+        const inbound = origin
+          ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
+          : parsedComment && binding?.via === "pull_request" ? parsedComment.message : undefined;
         // A mention in a channel that this owner already watches goes to the
         // watching thread (spec 2026-10-15: incident mention routing, Part A).
         // The sender gate above has already run (Part C). This is today's
         // only claim source.
-        const claim = binding || follow ? null : this.deps.claimFor
+        const claim = found ? null : this.deps.claimFor
           ? await this.deps.claimFor({ event, origin, owner })
           : await this.watchingTarget(event, origin, slackChannel, owner);
-        const destination: Destination = follow?.kind === "legacy"
+        const destination: Destination = found?.via === "legacy_follow"
           // A follow bound before follows stored their thread keeps the
           // Slack thread key it has always used.
-          ? { kind: "key", key: follow.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
+          ? { kind: "key", key: found.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
           : resolveDestination({
             rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
             event: {
               deliveryId: delivery.id,
               summary: event.summary,
               naturalSubject: this.naturalSubject(event),
-              conversational: binding !== null || event.eventKey === "slack.app_mention" || (origin !== null && isDirectMessage(event.payload)),
+              conversational: isConversationalEvent(bindingEvent, origin, binding),
             },
             binding,
             claim,
@@ -635,30 +622,6 @@ export class EventDispatcher {
         })
         .where(eq(eventDeliveries.id, deliveryId));
     }
-  }
-
-  /**
-   * The follow binding of this owner for a channel event's Slack thread
-   * (spec 2026-10-16: delivery threads, Part B step 1). `target` names the
-   * thread the binding mention landed in. `legacy` is a follow bound before
-   * follows stored their thread: it keeps the Slack thread key. A bound
-   * thread that can no longer receive deliveries is no binding: the policy
-   * decides, and a follow mention re-binds the Slack thread where it lands.
-   */
-  private async followBinding(
-    event: typeof events.$inferSelect,
-    origin: ChannelOrigin | null,
-    owner: { type: "user" | "team" | "org"; id: string },
-  ): Promise<{ kind: "target"; sessionId: string; threadId: string } | { kind: "legacy"; key: string } | null> {
-    if (!origin) return null;
-    const [, channelId, threadTs] = origin.threadKey.split(":");
-    if (!channelId || !threadTs) return null;
-    const db = this.deps.db;
-    const bound = await findFollowedThread(db, { orgId: event.orgId, channelType: origin.channelType, channelId, threadTs });
-    if (!bound || bound.ownerType !== owner.type || bound.ownerId !== owner.id) return null;
-    if (bound.sessionId === null || bound.threadId === null) return { kind: "legacy", key: origin.threadKey };
-    const target = { sessionId: bound.sessionId, threadId: bound.threadId };
-    return await isDeliverableTarget({ db }, event.orgId, owner, target) ? { kind: "target", ...target } : null;
   }
 
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */
