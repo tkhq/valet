@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary). Status: revision 1 implemented; revision 2 in progress.
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary). Status: implemented (revision 2).
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -77,12 +77,12 @@ pin.
 | P3 | Select `acme/api`. | The pane header reads `acme/api` with `GitHub`. Under **Valet here**, R1 reads `When a pull request review or a check completes on acme/api, work in one thread per pull request.` and R4 reads `When a check completes on acme/api, work in the Platform CI thread.` with an inline problem line `Platform CI is archived. Pick another thread:` and a picker. **Threads** lists `One thread per pull request: acme/api#12, acme/api#13`. |
 | P4 | Switch to the `sre` workspace and select `#incidents`. | The pane lists M and P as sentences, **Appears as** `Ops Bot`, **Threads** with `Active now: t-inc` and `Following: 1 Slack thread`, and **Recent activity** with the C2 mention. |
 | P5 | Click **Listen for…** on `#incidents`. | The wizard opens fixed on `#incidents`. The When step offers only Slack choices. The preview line reads `When someone mentions Valet in #incidents, reply in a new thread.` Create stores a rule with policy `{ mode: "new" }`. |
-| P6 | Select `Routines`, click **New routine**, set weekdays at 9:00 and a prompt. | The preview reads `Weekdays at 9:00, <prompt>.` The row appears under Routines with `Next: <date> 9:00` and **Fire now**. |
+| P6 | Select `Routines`, click **New routine**, set weekdays at 9:00, a prompt, and a name. | The preview reads `Every weekday at 9:00, <name>: work in its own thread.` The row appears under Routines with `Next: <date and time>` and **Fire now**. |
 | P7 | Open R4 from its row. | The pane shows a breadcrumb `acme/api › CI failures`, the sentence as the title, a fact strip (When, Do, Runs in, Appears as) with **Edit**, the problem line with the picker, then deliveries as sentences. |
 | P8 | Pick a new thread in the picker. | The problem line disappears, the sentence ends with the new thread's title, and the rail's problem count on `Activity` drops to 0. |
-| P9 | Select `Activity`, choose the `Problems` chip. | The dead-lettered delivery appears as `Check completed on acme/api#14 → Platform CI is archived`. With the chip off, the C2 mention appears as `Mention in #incidents → replied in t-inc`. |
+| P9 | Select `Activity`, choose the `Problems` chip. | The dead-lettered delivery appears as `Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver`. With the chip off, the C2 mention appears as `Mention in #incidents → replied in t-inc`. |
 | P10 | Open `/workflows`. | The Workflows page shows the workflow list and a Runs view at its own URL. The editor's panel lists this workflow's presence lines and routines as sentences, and its **Add** opens the wizard fixed on the workflow. |
-| P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names `acme/api`. |
+| P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names its place, `acme/api#12`. |
 | P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, the last two to `/workflows`. No URL returns a 404. |
 
 Pass criterion: all steps, in one run, from a clean start.
@@ -417,7 +417,9 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
   renders the route tree with a memory history against wire-typed fixtures;
   an api integration test covers places, feeders, `problem`, and
   `disabledReason`. The thread card step renders the background section on
-  its own router, because the thread page needs a live session socket.
+  its own router, because the thread page needs a live session socket. For
+  the same reason, P11 checks the thread header's place label through the
+  pure `subjectPlaceLabel`.
 - **The copy lint reads source files (INV-H2).** It scans string
   literals and JSX text and skips identifiers, imports, types, comments,
   test files, and the `idPrefix` attribute.
@@ -432,8 +434,8 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
   `One thread per issue` on a Linear team. On a Slack channel it reads
   `Threads for <channel>`.
 - **A workflow line has no Runs in fact (Part D step 1).** A workflow
-  target starts a run, not a thread, so its fact strip shows When, Do, and
-  Appears as.
+  target starts a run and no thread, so its fact strip shows When, Do,
+  and Appears as.
 - **The service chips filter in the browser (Part F step 2).** The log
   route has no service filter. A service chip keeps the loaded rows whose
   event key starts with `<service>.`, so a page can show fewer rows than it
@@ -441,6 +443,60 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
 - **Receipts leave the chips (Part F step 2).** Admins open receipts under
   a `Receipts` disclosure beside the list. The old `status=receipts` value
   and the `/events?tab=receipts` redirect open the whole Log.
+
+Revision 2 deviations:
+
+- **The routine preview uses the Part E sentence (acceptance P6).** The
+  wizard has one sentence renderer for every list. A routine's preview
+  reads `Every weekday at 9:00, <name>: work in its own thread.` The
+  earlier P6 text was `Weekdays at 9:00, <prompt>.` Before the reader
+  types a name, the preview reads `this routine`. The P6 row shows the
+  corrected text.
+- **Do offers `Follow a Slack thread` (Part H step 4).** For Slack, the Do
+  step lists `Reply`, `Follow a Slack thread`, `Work on it`, and `Run a
+  workflow`. The follow choice keeps the revision 1 outcome that listens
+  to one Slack thread from a pasted message link.
+- **The preview names the service until an event is picked (Part H step
+  1).** Before the reader picks an event, the preview reads `When
+  something happens on acme/api, <do>.` or `When something happens on
+  GitHub, <do>.` A preselected Slack place starts on the mention, so its
+  preview names the mention at once.
+- **A mention rule's creator filter is not a sender (Part C step 2).** The
+  api adds an unlabeled `user` filter with the creator's Slack id to a
+  personal or org mention rule (`packages/api/src/events/mention-scope.ts`).
+  That filter is the rule's scope, so the sentence shows no `from
+  <sender>` for it. A labeled `user` filter still reads as a sender.
+- **The Routines pane switch is not gated (Part E step 1).** The pane does
+  not check `routineReadOnly` before it enables the switch. If the viewer
+  may not change the routine, the server refuses, and the pane shows the
+  refusal, which names the fix. The routine page still reads its
+  read-only state first.
+- **The Activity count follows the switcher (Part F step 4).** The rail
+  counts the problems of the active workspace only: its lines, its
+  routines, and its Activity rows. The count changes when the reader
+  switches workspace.
+- **A group with no service-wide row shows a plain header (Part B step
+  2).** The places list has a service-wide row only when a line there
+  names no single place. Without that row, the group header is plain
+  text, because no service page exists to open.
+- **The breadcrumb separator is decoration (Part D step 1).** The `›`
+  between crumbs is a hidden list item with padding. The breadcrumb's text
+  is `acme/api›CI failures`, and each crumb is its own link or the
+  current page.
+- **A dead delivery reads its status line (acceptance P9).** Part F step 1
+  reads a dead delivery as its status line, so the P9 row reads `gave up
+  after 3 attempts. To send it again, press Redeliver`. The lead follows
+  the Part F grammar: `Completed check in acme/api#14`. The P9 row shows
+  the corrected text.
+- **A pull request thread names its own place (acceptance P11).** The
+  header names the server's place key, and that key keeps the pull
+  request number (`github:acme/api#12`). The header of `acme/api#12` reads
+  `acme/api#12` and links to that page. The rail does not list it. The
+  P11 row shows the corrected text.
+- **The thread card keeps `Event waiter` (INV-H2).** The background
+  section of the thread context card names an event wakeup `Event waiter`.
+  The card is outside Presence, so the copy lint does not read it. A
+  later copy pass replaces the word with `active`.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, the routine
