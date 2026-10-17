@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility } from "./thread-access.js";
+import { cachedThreadVisibility, runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -335,4 +335,22 @@ it("gates a Slack subject thread by its channel and leaves a thread without Slac
   };
   expect(await shared("subject:slack:T001/CSUBJPUB")).toBe(true);
   expect(await shared("subject:slack:T001/CSUBJPRIV")).toBe(false);
+});
+
+it("stops showing a live thread's frames once a delivery records a private channel on it", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CLIVEPRIV: ["UMEMBER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Live stream", creatorUserId: "local-user" });
+  const execution = await ensureAssistantExecution(p, { type: "team", id: t.id }, { orgId: "local-org", actorUserId: "local-user" }, "sub:rule-live");
+  const thread = await execution.session.createThread("sub:rule-live");
+  const visible = threadVisibility(p, { ownerType: "team", id: execution.sessionId }, { orgId: "local-org", userId: "outsider" });
+  // The socket's frame check, with a TTL far longer than the test.
+  const shown = cachedThreadVisibility(visible, (id) => id === thread.id ? threadRef(thread) : undefined,
+    async () => undefined, 60 * 60_000);
+  expect(await shown(thread.id)).toBe(true);
+  // A private-channel delivery lands in the thread while the socket is open.
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CLIVEPRIV");
+  expect(await shown(thread.id)).toBe(false);
 });

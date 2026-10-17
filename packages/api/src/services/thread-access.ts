@@ -230,15 +230,28 @@ export function isOutsideThreadKey(key: string | null | undefined): boolean {
   return OUTSIDE_THREAD_KEY.test(key ?? "");
 }
 
-/** Whether a conversation people outside the team read may reach `targetKey`,
- * work the whole team may see (`targetShared`): its own conversation, or a
- * public Slack channel from a Slack conversation. `threadReadAccess` applies
- * the same rule with a live privacy check. */
-export function outsideReaderMayReach(readerKey: string, targetKey: string | null, targetShared: boolean): boolean {
-  const readerChannel = slackConversation(readerKey)?.channelId;
-  const targetChannel = slackConversation(targetKey)?.channelId;
-  if (targetChannel && targetChannel === readerChannel) return true;
-  if (!readerChannel || !targetChannel) return readerKey === targetKey;
+/** Whether a reader has readers outside the team: a Slack, Telegram, or
+ * GitHub key, or recorded Slack content (`metadata.slackChannels`). */
+export function isOutsideReader(key: string | null | undefined, recordedChannels: readonly string[]): boolean {
+  return isOutsideThreadKey(key) || recordedChannels.length > 0;
+}
+
+/** Whether a conversation people outside the team read may reach a target
+ * thread, work the whole team may see when `targetShared`: its own
+ * conversation, a target whose Slack channels it already holds, or public
+ * Slack channels from a Slack conversation. Each side's channels come from
+ * its key and its recorded channels. `threadReadAccess` applies the same
+ * rule with a live privacy check. */
+export function outsideReaderMayReach(
+  reader: { key: string | null; channels: readonly string[] },
+  target: { key: string | null; channels: readonly string[] },
+  targetShared: boolean,
+): boolean {
+  const readerChannels = gatingChannels(reader.key, reader.channels);
+  const targetChannels = gatingChannels(target.key, target.channels);
+  const foreign = targetChannels.filter((channel) => !readerChannels.includes(channel));
+  if (targetChannels.length > 0 && foreign.length === 0) return true;
+  if (readerChannels.length === 0 || targetChannels.length === 0) return reader.key === target.key;
   return targetShared;
 }
 
@@ -263,8 +276,39 @@ export function privateThreadOwner(key: string | null | undefined): string | und
 export type ThreadRef = string | null | undefined | { key: string | null; metadata?: Record<string, unknown> | null };
 export type ThreadVisibility = (thread: ThreadRef) => Promise<boolean>;
 
+type ThreadRefObject = Exclude<ThreadRef, string | null | undefined>;
+
+/**
+ * A per-connection thread visibility check that caches each answer for
+ * `ttlMs`. A delivery can record a new Slack channel on a live thread and so
+ * shrink its audience (`events/assistant-delivery.ts`). Each call compares
+ * the live thread's recorded channels with the ones the cached answer used,
+ * and a difference discards the answer at once. `stored` is read only on a
+ * miss; an unresolved thread is not shown and not cached.
+ */
+export function cachedThreadVisibility(
+  visible: ThreadVisibility,
+  live: (threadId: string) => ThreadRefObject | undefined,
+  stored: (threadId: string) => Promise<ThreadRefObject | null | undefined>,
+  ttlMs: number,
+  now: () => number = Date.now,
+): (threadId: string) => Promise<boolean> {
+  const signature = (ref: ThreadRefObject) => [...recordedSlackChannels(ref.metadata)].sort().join(",");
+  const checked = new Map<string, { shown: Promise<boolean>; at: number; channels: string }>();
+  return async (threadId) => {
+    const current = live(threadId);
+    const hit = checked.get(threadId);
+    if (hit && now() - hit.at < ttlMs && (!current || signature(current) === hit.channels)) return hit.shown;
+    const ref = current ?? await stored(threadId);
+    if (!ref) return false;
+    const shown = visible(ref);
+    checked.set(threadId, { shown, at: now(), channels: signature(ref) });
+    return shown;
+  };
+}
+
 /** The `ThreadRef` of a live engine thread or a stored one. */
-export function threadRef(thread: Thread | ThreadData): ThreadRef {
+export function threadRef(thread: Thread | ThreadData): ThreadRefObject {
   return thread instanceof Thread ? thread.toThreadData() : thread;
 }
 
@@ -427,7 +471,7 @@ export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
     const foreign = targetChannels.filter((channel) => !readerChannels.includes(channel));
     if (targetChannels.length > 0 && foreign.length === 0) return true;
     // A thread with Slack content has readers outside the team, as a Slack key does.
-    if (isOutsideThreadKey(reader.key) || readerChannels.length > 0) {
+    if (isOutsideReader(reader.key, readerChannels)) {
       if (readerChannels.length === 0 || targetChannels.length === 0) return reader.key === target.key;
     } else if (foreign.length === 0) {
       return true;

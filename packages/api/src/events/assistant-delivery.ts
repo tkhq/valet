@@ -292,9 +292,6 @@ async function deliverToAssistantThreadInner(
     workspace: data.workspace,
   }, args.actorUserId, destination.title ? { title: destination.title } : undefined);
   if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
-  // Record the content's Slack channel before the content lands, so a
-  // reader outside a private channel never sees it (thread-access.ts).
-  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
   if (destination.kind === "key") {
     // A thread found by key reopens on delivery (spec Part B step 4), and a
     // new one shows its policy title in the thread list.
@@ -331,6 +328,9 @@ async function deliverToAssistantThreadInner(
       throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
     }
   }
+  // Record the content's Slack channel before the content lands, so a
+  // reader outside a private channel never sees it (thread-access.ts).
+  if (args.slackChannel) await recordSlackChannel(deps, session, thread, args.slackChannel);
   const metadata = {
     ...(args.presence ? { presence: args.presence } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
