@@ -32,7 +32,7 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { EventDispatcher, recordSkippedDelivery, subscriptionThreadPolicy, type AssistantDeliverFn } from "./dispatcher.js";
+import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, subscriptionThreadPolicy, type AssistantDeliverFn } from "./dispatcher.js";
 import { PinUnavailableError } from "./assistant-delivery.js";
 
 const recordDeliveryDestination = vi.hoisted(() => vi.fn());
@@ -1230,6 +1230,66 @@ describe("EventDispatcher", () => {
       expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
     });
 
+    it("a claim on an ambient event skips the delivery and never calls the seam (M4)", async () => {
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      const claimFor = vi.fn(async () => ({ sessionId: "sess-w", threadId: "thr-w", waiterId: "w-1" }));
+      recordDeliveryDestination.mockClear();
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToAssistant: deliver, plugins: [githubPlugin], claimFor,
+      }).pollOnce();
+      expect(claimFor).toHaveBeenCalledOnce();
+      expect(deliver).not.toHaveBeenCalled();
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "Skipped, claim:thr-w." });
+      expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
+    });
+
+    it("defaults an absent policy per delivery: new with a channel origin, own without one", async () => {
+      // A mention rule that does not follow still opens a thread per Slack conversation.
+      const mention = await seedDelivery({
+        target: { kind: "orchestrator" }, service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
+      });
+      // A follow rule's event with no channel origin keeps the rule's thread.
+      const reaction = await seedDelivery({
+        target: { kind: "orchestrator", follow: true }, service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
+        payload: { type: "reaction_added", item: { channel: "C1", ts: "1.2" }, user: "U9", reaction: "eyes" },
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver,
+        resolveChannelOrigin: (_service, eventKey) => eventKey === "slack.app_mention" ? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" } : null,
+      }).pollOnce();
+      const byDispatch = new Map(deliver.mock.calls.map(([args]) => [args.dispatchId, args.destination]));
+      expect(byDispatch.get(`event:${mention.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${mention.subscriptionId}:${mention.deliveryId}`, reason: "policy_new" });
+      expect(byDispatch.get(`event:${reaction.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${reaction.subscriptionId}`, reason: "policy_own" });
+    });
+
+    it("records the destination stage and the counter once when a retry recovers an admitted dispatch (M6)", async () => {
+      const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      await tdb.appDb.insert(eventReceipts).values({
+        id: "rcpt-retry", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
+      });
+      recordDeliveryDestination.mockClear();
+      await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
+      // The status write was lost: the delivery runs again and recovers its admission.
+      await tdb.appDb.update(eventDeliveries).set({ status: "pending", nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+      await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => ({ ...LANDED, recovered: true }))).pollOnce();
+      const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.id, "rcpt-retry"));
+      expect(receipt?.stages).toHaveLength(1);
+      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+    });
+
+    it("does not count a recovered retry again when the event has no receipt", async () => {
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      recordDeliveryDestination.mockClear();
+      await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
+      await tdb.appDb.update(eventDeliveries).set({ status: "pending", nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+      await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => ({ ...LANDED, recovered: true }))).pollOnce();
+      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+    });
+
     it("a skip marks the delivery skipped and creates no thread (INV-D3)", async () => {
       const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
       recordDeliveryDestination.mockClear();
@@ -1338,6 +1398,17 @@ describe("EventDispatcher — team-owned subscriptions", () => {
     expect(args.actorUserId).toBe("author-user");
   });
 
+});
+
+describe("deliveryThreadPolicy", () => {
+  it("defaults a delivery with a channel origin to its own thread per conversation, else the rule's thread", () => {
+    expect(deliveryThreadPolicy({}, { channelOrigin: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({ thread: null }, { channelOrigin: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({}, { channelOrigin: false })).toEqual({ mode: "own" });
+    // A stored policy wins over the default.
+    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: true })).toEqual({ mode: "own" });
+    expect(deliveryThreadPolicy({ thread: { mode: "new" } }, { channelOrigin: false })).toEqual({ mode: "new" });
+  });
 });
 
 describe("subscriptionThreadPolicy", () => {

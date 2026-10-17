@@ -195,7 +195,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     const args = { orgId: ORG, owner: OWNER, actorUserId: USER,
       destination: { kind: "target" as const, sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
       dispatchId: "event:pr-cutover", mismatchReason: "test" };
-    await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id });
+    await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id, recovered: true });
     await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("different content");
     expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
     await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("original event owner differs");
@@ -465,7 +465,8 @@ describe("deliverToAssistantThread — destinations (spec 2026-10-16: delivery t
     const args = { ...base, destination: { kind: "key" as const, key: "sub:rule-ci:delivery-2", title: "CI failed on main" }, signal: signal("CI failed"), dispatchId: "event:delivery-2" };
     const first = await deliverToAssistantThread(deps, args);
     const retry = await deliverToAssistantThread(deps, args);
-    expect(retry).toEqual(first);
+    // The retry finds the admitted dispatch and submits nothing new.
+    expect(retry).toEqual({ ...first, recovered: true });
     expect(await threadsWithKey("sub:rule-ci:delivery-2")).toHaveLength(1);
     const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:delivery-2'`) as { rows: unknown[] };
     expect(admitted.rows).toHaveLength(1);

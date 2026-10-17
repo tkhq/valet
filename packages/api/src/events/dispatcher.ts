@@ -51,7 +51,7 @@ import { loadSessionOwner } from "./waiters.js";
 import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
 import { isDeliverableTarget, PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
 import { resolveDestination, summaryTitle, type Destination } from "./destination.js";
-import { appendReceiptStageForEvent, destinationReceiptStage } from "./receipts.js";
+import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
 import { destinationMetricReason, recordDeliveryDestination } from "../observability/delivery-metrics.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
@@ -126,9 +126,20 @@ export interface EventDispatcherDeps {
    * The engine store, for incident mention routing
    * (`watching-waiter.ts`): a `slack.app_mention` in a channel that a stream
    * event waiter of the same owner watches goes to that waiter's thread.
-   * Absent → every mention keeps the thread keyed by its own Slack post.
+   * Absent → no waiter claims a mention, and the rule's thread policy decides.
    */
   engineStore?: Pick<SessionStore, "findEventWaiters">;
+  /**
+   * The claim source (spec 2026-10-16: delivery threads, Part C): a waiter
+   * thread of the owner that takes this delivery. Absent → the incident
+   * mention routing waiter (`watching-waiter.ts`), the only claim source
+   * until Part C lands.
+   */
+  claimFor?: (args: {
+    event: typeof events.$inferSelect;
+    origin: ChannelOrigin | null;
+    owner: { type: "user" | "team" | "org"; id: string };
+  }) => Promise<{ sessionId: string; threadId: string; waiterId: string } | null>;
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -154,14 +165,25 @@ export function eventDeliveryRunId(deliveryId: string): string {
 }
 
 /**
- * A subscription's effective thread policy (spec 2026-10-16: delivery
- * threads, Part A step 3). An absent policy reads as `new` when the target
- * follows its conversations, so each Slack thread keeps its own assistant
- * thread, and as `own` otherwise. `readThreadPolicy` stays shape-only.
+ * One delivery's effective thread policy (spec 2026-10-16: delivery
+ * threads, Part A step 3). An absent policy reads as `new` for a delivery
+ * with a channel origin, so each Slack conversation keeps its own assistant
+ * thread, and as `own` otherwise. A stored policy always wins.
+ * `readThreadPolicy` stays shape-only.
+ */
+export function deliveryThreadPolicy(target: { thread?: unknown }, delivery: { channelOrigin: boolean }): AssistantThreadPolicy {
+  if (target.thread === undefined || target.thread === null) return delivery.channelOrigin ? { mode: "new" } : { mode: "own" };
+  return readThreadPolicy(target.thread);
+}
+
+/**
+ * A rule's thread policy for a caller with no delivery in hand, such as a
+ * settings view. The absent default depends on each delivery
+ * (`deliveryThreadPolicy`); this answers for the rule's usual delivery: `new`
+ * for a rule that follows Slack conversations, else `own`.
  */
 export function subscriptionThreadPolicy(target: { thread?: unknown; follow?: boolean }): AssistantThreadPolicy {
-  if (target.thread === undefined || target.thread === null) return target.follow === true ? { mode: "new" } : { mode: "own" };
-  return readThreadPolicy(target.thread);
+  return deliveryThreadPolicy(target, { channelOrigin: target.follow === true });
 }
 
 /** A Slack direct message: a conversational event (spec Terminology). */
@@ -203,16 +225,18 @@ export async function recordSkippedDelivery(db: AppDb, args: {
 }): Promise<void> {
   await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${args.destination.reason}.`, attempts: args.attempts + 1 })
     .where(eq(eventDeliveries.id, args.deliveryId));
-  recordDeliveryDestination("claim_skip");
-  await appendReceiptStageForEvent(db, args.orgId, args.eventId,
-    destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination));
+  const recorded = await appendReceiptStageForEvent(db, args.orgId, args.eventId,
+    destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination),
+    destinationStageMarker(args.deliveryId));
+  if (recorded !== "exists") recordDeliveryDestination("claim_skip");
 }
 
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
-   * A). Read through `readThreadPolicy`; absent reads as `own`. */
+   * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
+   * delivery with a channel origin, else `own`. */
   thread?: unknown;
   workflowId?: string;
   presence?: Presence;
@@ -375,8 +399,8 @@ export class EventDispatcher {
         // text, not the machine summary or raw `<@U…>` markup and ids.
         // A non-channel event keeps the compact JSON excerpt it always had.
         const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
-        // A Slack event from a channel with no thread to reply into stays
-        // with that channel's audience, not the shared events thread.
+        // The Slack channel the event came from. The delivery thread records
+        // it, so the channel's privacy gates reads of that thread.
         const slackChannel = slackEventChannel(event);
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
@@ -467,13 +491,15 @@ export class EventDispatcher {
         // watching thread (spec 2026-10-15: incident mention routing, Part A).
         // The sender gate above has already run (Part C). This is today's
         // only claim source.
-        const claim = binding || follow ? null : await this.watchingTarget(event, origin, slackChannel, owner);
+        const claim = binding || follow ? null : this.deps.claimFor
+          ? await this.deps.claimFor({ event, origin, owner })
+          : await this.watchingTarget(event, origin, slackChannel, owner);
         const destination: Destination = follow?.kind === "legacy"
           // A follow bound before follows stored their thread keeps the
           // Slack thread key it has always used.
           ? { kind: "key", key: follow.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
           : resolveDestination({
-            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: subscriptionThreadPolicy(target) },
+            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
             event: {
               deliveryId: delivery.id,
               summary: event.summary,
@@ -521,13 +547,19 @@ export class EventDispatcher {
           // counter pages a person; no code repairs the rule.
           await db.update(eventDeliveries).set({ status: "dead", lastError: PIN_UNAVAILABLE_MESSAGE, attempts: delivery.attempts + 1 })
             .where(eq(eventDeliveries.id, deliveryId));
-          recordDeliveryDestination("pin_unavailable");
-          await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
-            { kind: "pin_unavailable", sessionId: destination.sessionId, threadId: destination.threadId }));
+          const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
+            { kind: "pin_unavailable", sessionId: destination.sessionId, threadId: destination.threadId }), destinationStageMarker(delivery.id));
+          if (recorded !== "exists") recordDeliveryDestination("pin_unavailable");
           return;
         }
-        recordDeliveryDestination(destinationMetricReason(destination));
-        await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds, destination));
+        // A retry that recovers an admitted dispatch records nothing new: the
+        // receipt already holds the stage, or, with no receipt, the first
+        // attempt already counted it.
+        const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
+          destinationReceiptStage(receiptIds, destination), destinationStageMarker(delivery.id));
+        if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {
+          recordDeliveryDestination(destinationMetricReason(destination));
+        }
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
         // threadKey is `{channelType}:{channelId}:{threadTs}`.

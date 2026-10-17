@@ -70,10 +70,12 @@ export class PinUnavailableError extends Error {
   }
 }
 
-/** The thread a delivery landed in. */
+/** The thread a delivery landed in. `recovered` marks a retry that found
+ * the delivery already admitted and submitted nothing new. */
 export interface DeliveredThread {
   sessionId: string;
   threadId: string;
+  recovered?: true;
 }
 
 export interface AssistantDeliveryArgs {
@@ -244,7 +246,7 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   if (args.inbound) await recordChannelMessage(deps.db, {
     ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
   });
-  return { sessionId: prior.session_id, threadId: prior.thread_id };
+  return { sessionId: prior.session_id, threadId: prior.thread_id, recovered: true };
 }
 
 /**
