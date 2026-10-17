@@ -1476,7 +1476,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "denied-unattended":
       return {
-        text: `denied: ${toolId} needs approval, and no one can approve during an unattended workflow run. Do not retry it. Say in the result that this step needs approval, so the workflow's owner can allow it before the next run.`,
+        text: `denied: ${toolId} needs approval, and no one can approve during an unattended workflow run. Do not retry it. Say in the result that this step needs approval. To run it unattended, the workflow's owner can move it to a tool step, which saving the workflow approves, or a team admin can allow it by policy. For a teammate's shared account, connect a team account on the team's Integrations page.`,
       };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse

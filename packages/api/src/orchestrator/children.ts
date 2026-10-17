@@ -1,4 +1,4 @@
-import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
+import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
 /**
  * Child spawning + durable settlement watching (Phase 4 decisions 10/11/21).
  *
@@ -389,7 +389,7 @@ export function nextReplyRoute(
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean },
   queue: boolean,
 ): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
   return {
@@ -398,7 +398,8 @@ export function childSendPromptOptions(
     // the spawner.
     author: { id: ctx.actorUserId, name: "Valet" },
     queueMode: queue ? "followup" : "steer",
-    metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin), ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}) },
+    metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin), ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}),
+      ...(ctx.unattendedWorkflow ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}) },
   };
 }
 
@@ -418,6 +419,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       actorUserId: string;
       owner: Principal;
       origin?: ChannelOrigin;
+      unattendedWorkflow?: boolean;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -564,7 +566,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
-      metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
+      // A child of an unattended workflow task refuses decisions too.
+      metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
+        ...(ctx.unattendedWorkflow ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}) },
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
@@ -1502,7 +1506,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
   const send = async (
     req: { childSessionId: string; message: string; queue?: boolean },
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; toolScope?: ToolScope },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; toolScope?: ToolScope; unattendedWorkflow?: boolean },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()

@@ -151,7 +151,7 @@ function formatPluginOutcome(
     case "denied-unattended":
       return {
         ok: false,
-        output: "This action needs approval, and no one can approve during an unattended workflow run. Allow it on the workflow before the next run.",
+        output: "This action needs approval, and no one can approve during an unattended workflow run. Move it to a tool step, which saving the workflow approves, or ask a team admin to allow it by policy.",
       };
     case "denied-approval":
       return {

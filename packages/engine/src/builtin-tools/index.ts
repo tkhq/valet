@@ -584,6 +584,7 @@ export const childSendTool = defineTool({
         ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}),
         // The host keeps automatic channel replies only for a channel turn.
         ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+        ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
       },
     );
     if (result === null) {
@@ -753,8 +754,8 @@ export const askApprovalTool = defineTool({
       return {
         text:
           `denied: ${args.title}. No one can approve during an unattended workflow run. ` +
-          "Do not do this action or ask again. Say in the result that it needs approval, " +
-          "so the workflow's owner can allow it before the next run.",
+          "Do not do this action or ask again. Say in the result what it needs, " +
+          "so the workflow's owner can change the workflow.",
       };
     }
     return {
@@ -936,6 +937,7 @@ export const taskTool = defineTool({
       // The spawning submission's channel origin rides to the watcher, so
       // the child.settled signal can inherit it (see ChildWatcher).
       ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+      ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
     });
     return {
       text: [
