@@ -365,7 +365,30 @@ event wakeups spec Part A.
 
 ## Deviations
 
-None yet.
+- **Follows store their thread (Part B step 5).** A `followed_threads` row
+  had no thread id, so the follow router could only route by the Slack
+  thread key. The row gains nullable `session_id` and `thread_id`, written
+  with the thread the binding mention landed in. The follow router and the
+  dispatcher's binding read them. A row bound before the columns has nulls.
+  For that row, both keep the Slack thread key (`slack:{channel}:{threadTs}`),
+  and the dispatcher records reason `conversation_follow` with a `key`
+  destination.
+- **A dead follow binding is no binding.** If the bound thread fails
+  `isDeliverableTarget`, the dispatcher passes no binding and the policy
+  decides. A follow mention then re-binds the Slack thread to the new
+  thread.
+- **Conversational test.** Until Part C lands, an event is conversational
+  when it has a binding, when it is a `slack.app_mention`, or when it is a
+  Slack direct message (`channel_type: "im"`).
+- **Schedule pin.** A schedule whose `existing` pin cannot receive a
+  delivery is disabled with `Pick another thread for this rule in
+  Presence.`, the scheduler's existing handling for a broken schedule.
+- **Receipt lookup.** The `destination` stage is appended to the receipt
+  whose `event_id` matches the delivery's event. `event_receipts` gains the
+  index `event_receipts_event` on `(org_id, event_id)`.
+- **Counter name.** The OpenTelemetry instrument is
+  `valet_event_delivery_destination`. The Prometheus exporter adds the
+  `_total` suffix.
 
 ## Errata to other specs
 

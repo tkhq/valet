@@ -376,7 +376,7 @@ describe("EventDispatcher", () => {
     expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
   });
 
-  it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
+  it("delivers an assistant-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
     const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, ownerType: "org" });
 
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
