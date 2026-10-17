@@ -234,8 +234,11 @@ Pass criterion: all steps, in one run, from a clean start.
    page keeps payload and redeliver.
 3. A claim by a thread the viewer cannot open reads `claimed by another
    thread`; an archived thread renders a disabled link.
-4. The rail's Activity count is the number of problems in the last day:
-   dead deliveries, lines with a problem, routines with a `disabledReason`.
+4. The rail's Activity count is the number of distinct faults: lines with
+   a problem, routines with a `disabledReason`, and lines with a dead
+   delivery in the last day. A dead delivery counts once per line, and
+   only when its line does not count for its own problem and was not
+   edited after the delivery.
 
 ## Part G: Workflows
 
@@ -517,6 +520,13 @@ Revision 2 deviations:
   summary carries the channel id (`app mentioned in C900 by U1`). So `View
   all` on a Slack channel sends the channel id from its key
   (`slack:<team>/<channel>`). Every other place sends its label.
+- **The Activity count counts each fault once (Part F step 4).** A dead
+  delivery names its line by `subscriptionId`. The count adds that line
+  only when the line has no `problem` and its `updatedAt` is before the
+  delivery. So a line's problem and the dead delivery that caused it count
+  as 1, and a pick that fixes the line drops the count to 0 at once. The
+  revision 2 text added the two and kept the dead delivery in the count
+  for a day.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
- * The rail's Activity count (spec Part F step 4): lines of presence with a
- * problem, routines the scheduler turned off, and Activity rows with a dead
- * delivery in the last day. The query hooks are mocked; the sum is the test.
+ * The rail's Activity count (spec Part F step 4): distinct faults. Lines of
+ * presence with a problem, routines the scheduler turned off, and lines with
+ * a dead delivery in the last day that do not already count and were not
+ * edited after it. The query hooks are mocked; the count is the test.
  */
 import { renderHook } from "@testing-library/react";
 import type {
@@ -33,8 +34,8 @@ function routine(id: string, disabledReason?: string): WorkflowTriggerItem {
   };
 }
 
-function delivery(status: EventDeliveryWire["status"]): EventDeliveryWire {
-  return { id: `d-${status}`, subscriptionId: "R1", status, attempts: 1, lastError: null, deliveredAt: null };
+function delivery(status: EventDeliveryWire["status"], subscriptionId = "R1"): EventDeliveryWire {
+  return { id: `d-${status}-${subscriptionId}`, subscriptionId, status, attempts: 1, lastError: null, deliveredAt: null };
 }
 
 function logItem(id: string, at: number, deliveries: EventDeliveryWire[]): EventLogItem {
@@ -79,10 +80,11 @@ vi.mock("~/api/presence", () => ({ usePresencePlaces: () => ({ data: { places: P
 import { problemCount, useProblemCount } from "./use-problem-count";
 
 describe("useProblemCount", () => {
-  it("sums lines with a problem, routines turned off, and dead deliveries in the last day", () => {
+  it("sums lines with a problem and routines turned off, and counts R1's dead delivery once", () => {
     const { result } = renderHook(() => useProblemCount());
-    // R1 and R3, S2, and ev-dead. ev-old-dead is older than a day; ev-failed has no dead delivery.
-    expect(result.current.count).toBe(4);
+    // R1 and R3, and S2. ev-dead is R1's fault, which R1's problem already
+    // counts; ev-old-dead is older than a day; ev-failed has no dead delivery.
+    expect(result.current.count).toBe(3);
     expect([...result.current.problemPlaces]).toEqual(["slack:T1/C900"]);
     expect(logCalls.at(-1)?.problems).toBe(true);
   });
@@ -99,5 +101,27 @@ describe("problemCount", () => {
   it("does not count an empty problem or an empty disabledReason", () => {
     const result = problemCount({ rules: [rule("R4", { problem: "" })], triggers: [routine("S3", "")], log: [], places: PLACES, now: NOW });
     expect(result.count).toBe(0);
+  });
+
+  it("counts one fault once: a line's problem and the dead delivery that caused it", () => {
+    const broken = rule("R4", { problem: "Pick another thread.", updatedAt: 1 });
+    const log = [logItem("ev-1", NOW - 60_000, [delivery("dead", "R4")]), logItem("ev-2", NOW - 30_000, [delivery("dead", "R4")])];
+    expect(problemCount({ rules: [broken], triggers: [], log, places: PLACES, now: NOW }).count).toBe(1);
+  });
+
+  it("drops to zero when a pick fixes the line after its dead delivery", () => {
+    const fixed = rule("R4", { updatedAt: NOW });
+    const log = [logItem("ev-1", NOW - 60_000, [delivery("dead", "R4")])];
+    expect(problemCount({ rules: [fixed], triggers: [], log, places: PLACES, now: NOW }).count).toBe(0);
+  });
+
+  it("counts a dead delivery once per line when the line has no problem and no later edit", () => {
+    const quiet = rule("R5", { updatedAt: 1 });
+    const log = [
+      logItem("ev-1", NOW - 60_000, [delivery("dead", "R5")]),
+      logItem("ev-2", NOW - 30_000, [delivery("dead", "R5"), delivery("dead", "R-other")]),
+    ];
+    // R5 once, and R-other, a line this workspace does not list, once.
+    expect(problemCount({ rules: [quiet], triggers: [], log, places: PLACES, now: NOW }).count).toBe(2);
   });
 });
