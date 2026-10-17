@@ -116,7 +116,7 @@ function runView(deps: McpToolDeps, detail: GetWorkflowRunResponse): RunView {
           ...(g.riskLevel ? { risk_level: g.riskLevel } : {}),
         })) }
       : {}),
-    url: `${deps.origin}/presence/runs/${encodeURIComponent(r.runId)}`,
+    url: `${deps.origin}/workflows/runs/${encodeURIComponent(r.runId)}`,
   };
 }
 
@@ -461,7 +461,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
           kind: item.gate.kind,
           ...(item.gate.summary ?? item.gate.prompt ? { summary: item.gate.summary ?? item.gate.prompt } : {}),
           ...(item.gate.service && item.gate.action ? { action: `${item.gate.service}.${item.gate.action}` } : {}),
-          url: `${deps.origin}/presence/runs/${encodeURIComponent(item.runId)}`,
+          url: `${deps.origin}/workflows/runs/${encodeURIComponent(item.runId)}`,
         })),
         ...(decisions.nextCursor ? { more: "More thread decisions exist. Open the Valet inbox to see all of them." } : {}),
       };

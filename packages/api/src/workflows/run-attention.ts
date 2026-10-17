@@ -35,7 +35,7 @@ import { workflowRunThreadKey } from "./engine-deps.js";
 import { selectWork } from "../engine/wakeups-admin.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
-  return `/presence/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
+  return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
 }
 
 /** Routes an account gate to its lender and other gates to the run's audience. */
@@ -112,7 +112,7 @@ export function buildRunSettledAttention(deps: RunSettledAttentionDeps): OnRunSe
           ...(slackChannel ? { audienceKey: slackEventsThreadKey(slackChannel) } : {}),
           title: `Workflow run failed: ${name}`,
           body: failedNodeSummary(checkpoints),
-          href: `/presence/runs/${info.runId}`,
+          href: `/workflows/runs/${info.runId}`,
           // A run reclaimed while `terminalizing` re-runs settle
           // finalization, so this handler can fire twice for one run. The
           // deterministic key makes the second insert a no-op.
@@ -276,12 +276,12 @@ export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalP
 /** What a run waiting for approval tells the thread that started it. */
 export function approvalReport(name: string, runId: string): string {
   return `Workflow "${name}" is waiting for approval. Call get_run: pendingGates lists every step that waits, ` +
-    `and names the teammate who must approve a step on their shared account. Run ${runId} (/presence/runs/${runId}).`;
+    `and names the teammate who must approve a step on their shared account. Run ${runId} (/workflows/runs/${runId}).`;
 }
 
 /** What a settled run tells the thread that started it. */
 export function runReport(name: string, runId: string, outcome: string, checkpoints: NodeCheckpoint[]): string {
-  const link = `Run ${runId} (/presence/runs/${runId}).`;
+  const link = `Run ${runId} (/workflows/runs/${runId}).`;
   if (outcome === "failed") return `Workflow "${name}" failed. ${failedNodeSummary(checkpoints)} ${link}`;
   if (outcome === "cancelled") return `Workflow "${name}" was cancelled. ${link}`;
   const stop = [...checkpoints].reverse().find((cp) => cp.status === "completed" && isStopResult(cp.result));
