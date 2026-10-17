@@ -178,16 +178,6 @@ export function deliveryThreadPolicy(target: { thread?: unknown }, delivery: { c
   return readThreadPolicy(target.thread);
 }
 
-/**
- * A rule's thread policy for a caller with no delivery in hand, such as a
- * settings view. The absent default depends on each delivery
- * (`deliveryThreadPolicy`); this answers for the rule's usual delivery: `new`
- * for a rule that follows Slack conversations, else `own`.
- */
-export function subscriptionThreadPolicy(target: { thread?: unknown; follow?: boolean }): AssistantThreadPolicy {
-  return deliveryThreadPolicy(target, { channelOrigin: target.follow === true });
-}
-
 /** A Slack direct message: a conversational event (spec Terminology). */
 function isDirectMessage(payload: unknown): boolean {
   return typeof payload === "object" && payload !== null && "channel_type" in payload && payload.channel_type === "im";
