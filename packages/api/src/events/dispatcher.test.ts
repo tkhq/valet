@@ -954,6 +954,49 @@ describe("EventDispatcher", () => {
       expect(appended.size).toBe(1);
     });
 
+    it("a binding stamp skipped as team-covered gives its suppressed waiter the digest once, before the skipped write", async () => {
+      const db = tdb.appDb;
+      const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-stream"] };
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp });
+      await db.insert(teams).values({ id: "coverage-team", orgId: ORG, name: "Coverage", createdAt: Date.now() });
+      await db.insert(eventSubscriptions).values({
+        id: "coverage-rule", orgId: ORG, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
+        eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+        enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const statusAtRecover: string[] = [];
+      const recover = vi.fn(async () => {
+        statusAtRecover.push((await getDelivery(deliveryId)).status);
+        return true;
+      });
+      const endMatchedWaiter = vi.fn(async () => true);
+      const dispatcher = new EventDispatcher({
+        db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
+        plugins: [githubPlugin], recordDestination, recoverClaimedDigest: recover, endMatchedWaiter,
+      });
+      await dispatcher.pollOnce();
+      // The recovery runs while the row is still pending, so a crash before
+      // the skipped write retries the recovery instead of losing it.
+      expect(statusAtRecover).toEqual(["pending"]);
+      expect(recover).toHaveBeenCalledOnce();
+      expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-stream" })]);
+      expect((await getDelivery(deliveryId)).status).toBe("skipped");
+      expect(recordDestination.mock.calls).toEqual([["claim_recovered"]]);
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+    });
+
+    it("a binding delivery never ends a waiter it suppressed", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const endMatchedWaiter = vi.fn(async () => true);
+      const { deliveryId } = await dispatchMention({
+        destination: { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-once"] },
+        deliver: async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }), endMatchedWaiter,
+      });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+    });
+
     it("a skip for a reason decided after ingest recovers nothing without a matched waiter", async () => {
       const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, destination: redirect });
       await tdb.appDb.update(eventSubscriptions).set({ enabled: false });

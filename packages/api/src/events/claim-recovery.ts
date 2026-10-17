@@ -15,9 +15,9 @@ import { anyMatch, matchClauses, toDigest } from "./waiter-match.js";
 import type { WaiterMatchDeps } from "./waiters.js";
 
 /**
- * Appends the event's digest to the waiter that a skipped claim delivery
- * named (`matchedWaiterId`), in once or stream mode, then nudges the WakeWatcher. The waiter's own
- * clauses pick the digest: the event, or its conversational twin when only
+ * Appends the event's digest to a waiter that a skipped claim delivery
+ * named (`matchedWaiterId` or `suppressedWaiterIds`), in once or stream
+ * mode, then nudges the WakeWatcher. The waiter's own clauses pick the digest: the event, or its conversational twin when only
  * the twin matches (a mention claimed by a `slack.message` waiter).
  * Returns true when the waiter got a new digest. A waiter that ended, moved
  * to another org, or can no longer read the Slack channel gets none.

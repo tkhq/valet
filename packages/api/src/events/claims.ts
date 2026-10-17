@@ -174,10 +174,14 @@ async function resolveOwner(
   if (binding) {
     // The binding wins (Part B step 1). A candidate in its thread appends no
     // digest (Part C step 4).
-    for (const c of claims) if (sameThread(c, binding)) waiters.set(c.waiter.id, "suppress");
+    const suppressed = claims.filter((c) => sameThread(c, binding)).map((c) => c.waiter.id);
+    for (const id of suppressed) waiters.set(id, "suppress");
+    // The stamp names them, so the dispatcher can give them the digest back
+    // when it skips the delivery after ingest.
     destination = {
       kind: "target", sessionId: binding.sessionId, threadId: binding.threadId,
       reason: binding.via === "follow" ? "conversation_follow" : "conversation_pull_request",
+      ...(suppressed.length > 0 ? { suppressedWaiterIds: suppressed } : {}),
     };
   } else if (args.conversational(binding)) {
     const target = redirectTarget(claims, args.event);

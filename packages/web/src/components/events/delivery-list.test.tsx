@@ -38,10 +38,11 @@ describe("DeliveryList", () => {
     expect(screen.queryByText("Skipped, claimed by thread th_inc.")).toBeNull();
   });
 
-  it("shows the skip text when the viewer may not open the claiming thread", () => {
+  it("names no thread when the viewer may not open the claiming thread", () => {
     const claimed: EventDeliveryWire = { ...base, id: "d3", status: "skipped", lastError: "Skipped, claimed by thread th_inc." };
     render(<DeliveryList deliveries={[claimed]} now={1_723_200_000_000} />);
-    expect(screen.getByText("Skipped, claimed by thread th_inc.")).toBeTruthy();
+    expect(screen.getByText("Skipped, claimed by another thread.")).toBeTruthy();
+    expect(screen.queryByText(/th_inc/)).toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
   });
 

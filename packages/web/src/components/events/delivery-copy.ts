@@ -35,7 +35,12 @@ export function retryPhrase(ms: number): string {
  * dead delivery names Redeliver, because that is the only way back.
  */
 export function deliveryStatusLine(delivery: EventDeliveryWire, now: number): string {
-  if (delivery.status === "skipped") return delivery.lastError ?? "Skipped by delivery preferences";
+  if (delivery.status === "skipped") {
+    // A row without `claimedBy` comes from a viewer who may not open the
+    // claiming thread. An older server still sends that thread's id.
+    if (!delivery.claimedBy && delivery.lastError?.startsWith("Skipped, claimed by thread ")) return "Skipped, claimed by another thread.";
+    return delivery.lastError ?? "Skipped by delivery preferences";
+  }
   const attempts = `${delivery.attempts} ${plural(delivery.attempts, "attempt", "attempts")}`;
   switch (delivery.status) {
     case "delivered":

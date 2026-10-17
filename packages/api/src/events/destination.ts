@@ -15,6 +15,9 @@ export type Destination =
     /** The waiter that this claim redirect targets. A once-mode waiter ends
      * as matched after delivery (Part C step 5). */
     matchedWaiterId?: string;
+    /** The waiters in a binding's thread whose digests ingest suppressed
+     * (Part C step 4). A binding delivery never ends them. */
+    suppressedWaiterIds?: string[];
   }
   | { kind: "key"; key: string; title: string; reason: DestinationReason; note?: string }
   | { kind: "skip"; reason: `claimed by thread ${string}` };
@@ -170,9 +173,12 @@ export function readDestinationStamp(value: unknown): Destination | null {
   if (value.kind === "target") {
     if (!("sessionId" in value) || typeof value.sessionId !== "string" || !("threadId" in value) || typeof value.threadId !== "string") return null;
     const matched = "matchedWaiterId" in value && typeof value.matchedWaiterId === "string" ? value.matchedWaiterId : undefined;
+    const suppressed = "suppressedWaiterIds" in value && Array.isArray(value.suppressedWaiterIds)
+      ? value.suppressedWaiterIds.filter((id): id is string => typeof id === "string") : [];
     return {
       kind: "target", sessionId: value.sessionId, threadId: value.threadId, reason: value.reason,
       ...(matched !== undefined ? { matchedWaiterId: matched } : {}),
+      ...(suppressed.length > 0 ? { suppressedWaiterIds: suppressed } : {}),
     };
   }
   if (value.kind === "key") {
@@ -181,6 +187,19 @@ export function readDestinationStamp(value: unknown): Destination | null {
     return { kind: "key", key: value.key, title: value.title, reason: value.reason, ...(note !== undefined ? { note } : {}) };
   }
   return null;
+}
+
+/**
+ * The waiters whose digests ingest suppressed for this stamp: a claim
+ * redirect's target, or the waiters in a binding's thread. The dispatcher
+ * gives them the digest back when it skips the delivery after ingest.
+ */
+export function suppressedWaiters(destination: Destination): string[] {
+  if (destination.kind !== "target") return [];
+  return [
+    ...(destination.matchedWaiterId !== undefined ? [destination.matchedWaiterId] : []),
+    ...(destination.suppressedWaiterIds ?? []),
+  ];
 }
 
 /** The thread that claimed a skipped delivery, from its stamp, or null. */

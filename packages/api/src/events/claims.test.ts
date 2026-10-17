@@ -140,7 +140,7 @@ describe("resolveClaims: Scenario C", () => {
     f.bindings.set("team:sre", { sessionId: "s-inc", threadId: "t-inc", via: "follow" });
     const reply = slackEvent("slack.message", "1.0", { payload: { channel: "C900", user: "U003", text: "on it", ts: "1.5", thread_ts: "1.0" } });
     const d = await resolve(f, { event: reply, matched: [P], candidates: [tInc(reply)] });
-    expect(d.deliveries.get("P")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "conversation_follow" });
+    expect(d.deliveries.get("P")).toEqual({ kind: "target", sessionId: "s-inc", threadId: "t-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] });
     expect(d.waiters.get("w-inc")).toBe("suppress");
   });
 
@@ -207,7 +207,7 @@ describe("resolveClaims: Scenario C", () => {
     f.bindings.set("user:u-001", { sessionId: "s-pr", threadId: "t-pr", via: "pull_request" });
     const comment = prEvent("github.issue_comment.created", PR14);
     const d = await resolve(f, { event: comment, matched: [sub("R5", U001)], candidates: [tPr(comment, "w-pr14", PR14)] });
-    expect(d.deliveries.get("R5")).toEqual({ kind: "target", sessionId: "s-pr", threadId: "t-pr", reason: "conversation_pull_request" });
+    expect(d.deliveries.get("R5")).toEqual({ kind: "target", sessionId: "s-pr", threadId: "t-pr", reason: "conversation_pull_request", suppressedWaiterIds: ["w-pr14"] });
     expect(d.waiters.get("w-pr14")).toBe("suppress");
   });
 
