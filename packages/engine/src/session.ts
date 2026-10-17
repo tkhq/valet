@@ -216,6 +216,10 @@ export interface ThreadInitialSettings {
   reasoning?: ReasoningLevel | null;
   /** A display title for the new thread, stored as `metadata.title`. */
   title?: string;
+  /** Host facts the new thread starts with, merged into its metadata in the
+   * same write that creates it. A host uses it for a fact that must hold
+   * before anyone can list the thread, such as where its content came from. */
+  metadata?: Record<string, unknown>;
 }
 
 export class Session {
@@ -837,7 +841,7 @@ export class Session {
         initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
       // Stamped with `createdAt` and never rewritten: a later timezone change
       // must not alter this thread's prompt (TKAI-584).
-      metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
+      metadata: { ...initial?.metadata, [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
         ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}),
         ...(initial?.title ? { title: initial.title } : {}) },
       createdAt: Date.now(),
