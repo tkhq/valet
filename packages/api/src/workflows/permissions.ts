@@ -22,6 +22,9 @@ import type {
 } from "../wire/types.js";
 import { getWorkflowDefinition, revokeWorkflowGrants, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
 
+/** Permission operations need the app database and action catalog, not a running engine. */
+export type WorkflowPermissionDeps = Pick<WorkflowServiceDeps, "db" | "actionPluginByService">;
+
 /** A tool node's identity, narrowed from the stored definition JSON. The
  * definition was validated at save time, but tool-node rows can predate the
  * catalog or be inserted by imports, so this narrows instead of casting. */
@@ -74,7 +77,7 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
 }
 
 /** Credential services referenced by direct and foreach tool steps, including dynamic tools. */
-export function workflowCredentialServices(deps: WorkflowServiceDeps, definition: unknown): string[] {
+export function workflowCredentialServices(deps: WorkflowPermissionDeps, definition: unknown): string[] {
   return [...new Set(toolNodeRefs(definition).map((ref) =>
     deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))].filter(service => service !== "github");
 }
@@ -86,7 +89,7 @@ export function workflowCredentialServices(deps: WorkflowServiceDeps, definition
  * until discovery runs, and discovery touches credentials, which a read
  * endpoint must not do. */
 export async function analyzeWorkflowPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
 ): Promise<WorkflowNodePermissionWire[] | null> {
@@ -129,7 +132,7 @@ function dependsOnTemplates(
 }
 
 export async function analyzeDefinitionPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   summary: WorkflowDefinitionSummary,
 ): Promise<WorkflowNodePermissionWire[]> {
@@ -223,7 +226,7 @@ export type AllowWorkflowPermissionsOutcome =
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
 export async function prepareWorkflowPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
   actionIds: string[] | undefined,
@@ -283,13 +286,13 @@ export async function prepareWorkflowPermissions(
 }
 
 /** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
-export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
+export async function canGrantWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
   if (owner.principal?.type === "team") return false;
   return summary.ownerType === "user" ? summary.ownerId === owner.userId
     : summary.ownerType === "team" && await canAdministerTeam(deps.db, summary.ownerId, owner.userId);
 }
 
-export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+export async function revokeWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
   return deps.db.transaction(async (tx) => {
     await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
     const scopedDeps = { ...deps, db: tx };
@@ -301,7 +304,7 @@ export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner
 }
 
 /** A member can withdraw their own account consent without resetting teammates or action permissions. */
-export async function revokeOwnWorkflowAccounts(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+export async function revokeOwnWorkflowAccounts(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
   if (!owner.humanAccountConsent || owner.agentEditor || owner.principal?.type !== "user") return false;
   return deps.db.transaction(async tx => {
     await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
@@ -316,7 +319,7 @@ export async function persistWorkflowPermissions(db: AppQueryable, grants: (type
   if (grants.length) await db.insert(workflowActionGrants).values(grants).onConflictDoNothing();
 }
 
-export async function allowWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
+export async function allowWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
   const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, actionIds);
   if (!prepared?.ok) return prepared;
   // Lock the definition and compare the steps again, as an approval for the

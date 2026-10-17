@@ -140,7 +140,7 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
 
 ## Human save authorization (2026-10-16)
 
-A browser save authorizes known direct tool actions for this workflow when the
+Human creation, personal copies, team copies, and template installation share the same transactional authorization helper. A browser save of step changes authorizes known direct tool actions for this workflow when the
 person owns it or administers its team. Layout-only and unchanged saves do not restore grants. Explicit organization, team, and personal
 restrictions remain authoritative. Agent, CLI, MCP, and API-key saves do not grant
 new permissions. Agent-created workflows need one human permission review.
