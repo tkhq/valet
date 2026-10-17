@@ -1,6 +1,6 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -13,7 +13,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
-import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
+import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
@@ -33,6 +33,7 @@ import {
   latestGateForResume,
   persistTerminalGate,
   shouldShortCircuit,
+  UNATTENDED_WORKFLOW_DECISION,
   type GateContext,
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
@@ -4485,7 +4486,7 @@ export class Thread {
   }
 
   private async continueAfterCompaction(): Promise<void> {
-    const prompt = this.session.options.purpose === "workflow" ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
+    const prompt = this.isUnattendedWorkflowTask() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
     const item = this.runningItem;
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
@@ -5322,6 +5323,25 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
+  /** Persists a refused approval as a resolved gate row for its submission. It
+   * is never pending, so no inbox, waiter, or attention wiring sees it. */
+  private async recordUnattendedRefusal(req: DecisionGateRequest, gateCtx: GateContext, resolution: DecisionResolution): Promise<void> {
+    const store = this.session.providers.store;
+    const prior = await store.listDecisionGatesForQueueItem(this.session.id, this.id, gateCtx.queueItemId);
+    const ordinal = prior.filter((gate) => gate.resumeKey === gateCtx.resumeKey)
+      .reduce((max, gate) => Math.max(max, gate.ordinal + 1), 0);
+    const { expiresAt: _expiresAt, ...gate } = fromRequest(req, { ...gateCtx, ordinal });
+    await store.saveDecisionGate(this.session.id, this.id, { ...gate, status: "resolved", resolution });
+  }
+
+  /** A workflow step's own session, a workflow task handed to an assistant thread,
+   * or any turn on a run's own thread that a person did not type. Nobody answers
+   * its decisions, so `requestDecision` refuses them before a gate opens. */
+  private isUnattendedWorkflowTask(): boolean {
+    return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
+  }
+
   private buildTools(includeRestricted = false): AgentTool[] {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
@@ -5391,6 +5411,7 @@ export class Thread {
         session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
       ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+      ...(this.isUnattendedWorkflowTask() ? { unattendedWorkflow: true } : {}),
       orgId: session.options.orgId,
       sessionId: session.id,
       threadId: this.id,
@@ -5459,6 +5480,19 @@ export class Thread {
           // defensively so a replay is self-describing even if the stored
           // record predates this field.
           return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
+        }
+        // Nobody watches an unattended workflow task, so a new gate would wait
+        // until it expires. Refuse it here, after replay, so a gate opened
+        // before this rule still resolves. The author grants approvals when
+        // the workflow is saved.
+        if (this.isUnattendedWorkflowTask()) {
+          const refusal: DecisionResolution = { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
+          // A refused approval means an action did not run. Record it as an
+          // already-resolved gate, never pending, so the workflow can fail the
+          // step after a restart too (`workflows/engine-deps.ts#awaitResult`).
+          // A refused tool discovery only hides that service's tools.
+          if (req.type === "approval" && !isToolDiscoveryApproval(req.context)) await this.recordUnattendedRefusal(req, gateCtx, refusal);
+          return refusal;
         }
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the

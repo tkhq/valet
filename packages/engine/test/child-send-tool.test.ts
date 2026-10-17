@@ -6,7 +6,7 @@
  * task-tool.test.ts) and a fake sender in `ctx.config.childSender`.
  */
 import { describe, it, expect, vi } from "vitest";
-import { childSendTool } from "../src/builtin-tools/index.js";
+import { childSendTool, taskTool } from "../src/builtin-tools/index.js";
 import type {
   Credential,
   CredentialProvider,
@@ -183,5 +183,25 @@ describe("child_send tool: newcomer turn", () => {
     );
     expect(result.text).toContain("[child_unavailable]");
     expect(sender).not.toHaveBeenCalled();
+  });
+});
+
+describe("delegation from an unattended workflow task", () => {
+  it("passes the unattended flag to a spawned child and to a steering message", async () => {
+    const spawned: unknown[] = [];
+    const sent: unknown[] = [];
+    const config = {
+      childSpawner: async (_req: unknown, ctx: unknown) => { spawned.push(ctx); return { childSessionId: "child_1", queueItemId: "q1" }; },
+      childSender: async (_req: unknown, ctx: unknown) => { sent.push(ctx); return { queueItemId: "q2" }; },
+    };
+    for (const unattendedWorkflow of [true, undefined]) {
+      const ctx = makeCtx({ config, ...(unattendedWorkflow ? { unattendedWorkflow } : {}) });
+      await taskTool.execute({ prompt: "check the release" }, ctx);
+      await childSendTool.execute({ child_session_id: "child_1", message: "also check gitops" }, ctx);
+    }
+    expect(spawned).toMatchObject([{ unattendedWorkflow: true }, {}]);
+    expect(sent).toMatchObject([{ unattendedWorkflow: true }, {}]);
+    expect(spawned[1]).not.toHaveProperty("unattendedWorkflow");
+    expect(sent[1]).not.toHaveProperty("unattendedWorkflow");
   });
 });

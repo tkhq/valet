@@ -6,6 +6,7 @@
  * so the admitted `child.settled` signal stays observable in the queue.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -263,6 +264,21 @@ describe("buildChildSpawner", () => {
     expect(watchRow?.queueItemId).toBe(result.queueItemId);
     expect(watchRow?.parentSessionId).toBe("parent-spawn");
     expect(watchRow?.parentThreadId).toBe(parentThread.id);
+  });
+
+  it("marks a child spawned or steered by an unattended workflow task unattended too", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-unattended", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const parentThread = parent.thread("signal:workflow:wfrun_child");
+    const ctx = { parentSessionId: "parent-unattended", parentThreadId: parentThread.id, actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" } };
+    const unattended = await spawner({ prompt: "check the release" }, { ...ctx, unattendedWorkflow: true });
+    expect((await api.providers.engineStore.getQueueItem(unattended.childSessionId, unattended.queueItemId))?.metadata?.[UNATTENDED_WORKFLOW_KEY]).toBe(true);
+    const attended = await spawner({ prompt: "check the release" }, ctx);
+    expect((await api.providers.engineStore.getQueueItem(attended.childSessionId, attended.queueItemId))?.metadata?.[UNATTENDED_WORKFLOW_KEY]).toBeUndefined();
+    expect(childSendPromptOptions({ ...ctx, unattendedWorkflow: true }, false).metadata[UNATTENDED_WORKFLOW_KEY]).toBe(true);
+    expect(childSendPromptOptions(ctx, false).metadata[UNATTENDED_WORKFLOW_KEY]).toBeUndefined();
   });
 
   it("keeps Problems metadata redacted in a child spawned from a channel turn", async () => {
