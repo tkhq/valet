@@ -1,7 +1,7 @@
 /**
  * Query hooks for the Presence hub (docs/specs/2026-10-16-presence-hub-design.md
  * Part B): the places a workspace is present in and one place's page. A
- * pinned thread's title is `usePinnedThreadTitles` in `./listener`.
+ * pinned thread's title is `usePinnedThreadTitles` in `./rule`.
  */
 import { skipToken, useQuery } from "@tanstack/react-query";
 import type { ListPresencePlacesResponse, PresencePlaceDetailResponse, PresencePlaceWire } from "@valet/api/wire";
