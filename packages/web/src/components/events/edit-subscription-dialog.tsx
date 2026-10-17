@@ -1,7 +1,7 @@
-import { type AssistantThreadPolicy, type Presence, validatePresence } from "@valet/shared";
+import { type AssistantThreadPolicy, type Appearance, validateAppearance } from "@valet/shared";
 import { PICK_A_THREAD_ERROR, RunsInField } from "~/components/presence/runs-in-field";
 import { displayThreadPolicy, subjectKindForKeys } from "~/components/presence/thread-policy-copy";
-import { PresenceSettings } from "~/components/presence-settings";
+import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { AutomationReview } from "./automation-review";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
@@ -76,10 +76,10 @@ export function EditSubscriptionDialog({
   const services = catalogQ.data?.services ?? [];
 
   const [deliveryPreferences, setDeliveryPreferences] = useState<DeliveryPreferencesValue>({
-    deliveryPolicy: sub.target.kind === "orchestrator" ? sub.target.deliveryPolicy ?? "always" : "always",
-    pauseOnOverlap: sub.target.kind === "orchestrator" ? sub.target.pauseOnOverlap ?? true : true,
+    deliveryPolicy: sub.target.kind === "assistant" ? sub.target.deliveryPolicy ?? "always" : "always",
+    pauseOnOverlap: sub.target.kind === "assistant" ? sub.target.pauseOnOverlap ?? true : true,
   });
-  const [presence, setPresence] = useState<Presence>(sub.target.presence ?? {});
+  const [appearance, setAppearance] = useState<Appearance>(sub.target.appearance ?? {});
   const [name, setName] = useState(sub.name);
   const { keys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
     services, sub.eventKeys, () => fromWireFilters(sub.filters),
@@ -88,13 +88,13 @@ export function EditSubscriptionDialog({
   // Seeded from the stored target at mount, which is open time (see the
   // header comment). Only an assistant target renders a template.
   const [prompts, setPrompts] = useState<PromptFieldsValue>(() =>
-    promptFieldsFrom(sub.target.kind === "orchestrator" ? sub.target : {}),
+    promptFieldsFrom(sub.target.kind === "assistant" ? sub.target : {}),
   );
   // Seeded at mount (open time) with the policy the row runs with today, so
   // a rule with no stored policy shows its effective default. Null while
   // "An existing thread…" is chosen and no thread is picked yet.
   const [thread, setThread] = useState<AssistantThreadPolicy | null>(() =>
-    sub.target.kind === "orchestrator" ? displayThreadPolicy(sub.target, sub.eventKeys) : { mode: "own" },
+    sub.target.kind === "assistant" ? displayThreadPolicy(sub.target, sub.eventKeys) : { mode: "own" },
   );
   const subjectKind = subjectKindForKeys([...keys]);
   // The picker lists the rule owner's assistant threads. The org assistant
@@ -110,8 +110,8 @@ export function EditSubscriptionDialog({
 
   function save(allowCollision = false) {
     setError(null);
-    const presenceError = validatePresence(presence);
-    if (presenceError) { setError(presenceError); return; }
+    const appearanceError = validateAppearance(appearance);
+    if (appearanceError) { setError(appearanceError); return; }
     if (name.trim().length === 0) {
       setError("Enter a name.");
       return;
@@ -128,7 +128,7 @@ export function EditSubscriptionDialog({
       return;
     }
     const { filters } = match;
-    const assistant = sub.target.kind === "orchestrator";
+    const assistant = sub.target.kind === "assistant";
     if (assistant && thread === null) {
       setError(PICK_A_THREAD_ERROR);
       return;
@@ -144,9 +144,9 @@ export function EditSubscriptionDialog({
       filters,
       anyChannel,
       prompts,
-      presence,
+      appearance,
       ...(assistant && thread !== null ? { thread } : {}),
-      ...(sub.ownerType === "user" && sub.target.kind === "orchestrator" ? { deliveryPreferences } : {}),
+      ...(sub.ownerType === "user" && sub.target.kind === "assistant" ? { deliveryPreferences } : {}),
     });
     if (review && !sub.enabled) body = { ...body, enabled: true };
     if (body === null) {
@@ -219,7 +219,7 @@ export function EditSubscriptionDialog({
             </p>
             {/* The target stays fixed, but what the assistant reads is a field
                 of this rule, so it is editable here. */}
-            {sub.target.kind === "orchestrator" && (
+            {sub.target.kind === "assistant" && (
               <PromptFields
                 idPrefix="edit-subscription"
                 value={prompts}
@@ -229,7 +229,7 @@ export function EditSubscriptionDialog({
             )}
           </div>
 
-          {sub.target.kind === "orchestrator" && (
+          {sub.target.kind === "assistant" && (
             <RunsInField
               idPrefix="edit-subscription"
               value={thread}
@@ -242,12 +242,12 @@ export function EditSubscriptionDialog({
             />
           )}
 
-          {sub.ownerType === "user" && sub.target.kind === "orchestrator" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
+          {sub.ownerType === "user" && sub.target.kind === "assistant" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
 
-          <PresenceSettings value={presence} onChange={setPresence} subscription disabled={patch.isPending} />
+          <AppearanceSettings value={appearance} onChange={setAppearance} subscription disabled={patch.isPending} />
 
-          <AutomationReview follow={sub.target.kind === "orchestrator" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
-            result={sub.target.kind === "orchestrator" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}
+          <AutomationReview follow={sub.target.kind === "assistant" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
+            result={sub.target.kind === "assistant" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}
             destination={targetLabel} replaces={review && !sub.enabled ? replacesNote : undefined} />
           {collisions !== null && (
             <CollisionNotice

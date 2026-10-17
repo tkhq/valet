@@ -27,7 +27,7 @@ function subscription(over: Partial<EventSubscriptionWire> = {}): EventSubscript
     ownerId: "u1",
     eventKeys: ["github.pr.opened"],
     filters: [],
-    target: { kind: "orchestrator" as const },
+    target: { kind: "assistant" as const },
     enabled: true,
     createdBy: "u1",
     createdAt: 1,
@@ -184,7 +184,7 @@ describe("SubscriptionsPanel", () => {
   it("names the subscription a proposal replaces in its review", () => {
     subscriptionsData = { subscriptions: [
       subscription({ id: "sub_live", name: "Replies v1" }),
-      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_live" } }),
     ] };
     render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
     expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1. Enabling this subscription turns that one off.");
@@ -192,7 +192,7 @@ describe("SubscriptionsPanel", () => {
 
   it("says a removed replaced subscription was removed, instead of promising to turn it off", () => {
     subscriptionsData = { subscriptions: [
-      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" } }),
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_gone" } }),
     ] };
     render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
     expect(screen.getByText("Replaces").nextElementSibling?.textContent)
@@ -202,7 +202,7 @@ describe("SubscriptionsPanel", () => {
   it("does not promise to turn off a version that is already off", () => {
     subscriptionsData = { subscriptions: [
       subscription({ id: "sub_live", name: "Replies v1", enabled: false }),
-      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_live" } }),
     ] };
     render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
     expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1, which is already off.");
@@ -258,7 +258,7 @@ describe("SubscriptionsPanel", () => {
           ownerId: "t_eng",
           eventKeys: ["slack.app_mention"],
           filters: [{ field: "channel", op: "eq", value: "C1", label: "#eng" }],
-          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+          target: { kind: "assistant", assistant: "team", teamId: "t_eng" },
           audience: "organization",
         }),
         subscription({
@@ -268,7 +268,7 @@ describe("SubscriptionsPanel", () => {
           ownerId: "t_eng",
           eventKeys: ["slack.app_mention"],
           filters: [{ field: "channel", op: "eq", value: "C2", label: "#ops" }],
-          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+          target: { kind: "assistant", assistant: "team", teamId: "t_eng" },
         }),
       ],
     };
@@ -394,7 +394,7 @@ describe("SubscriptionsPanel", () => {
         subscription({
           ownerType: "team",
           ownerId: "t_eng",
-          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+          target: { kind: "assistant", assistant: "team", teamId: "t_eng" },
         }),
       ],
     };
@@ -425,7 +425,7 @@ describe("SubscriptionsPanel", () => {
         subscription({
           ownerType: "org",
           ownerId: "org_1",
-          target: { kind: "orchestrator", orchestrator: "org" },
+          target: { kind: "assistant", assistant: "org" },
         }),
       ],
     };

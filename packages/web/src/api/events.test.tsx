@@ -36,7 +36,7 @@ const ORG_SUBSCRIPTIONS: ListEventSubscriptionsResponse = {
       ownerId: "someone",
       eventKeys: ["github.push"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "someone",
       createdAt: 1,

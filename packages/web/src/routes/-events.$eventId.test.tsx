@@ -49,7 +49,7 @@ const subscriptionsData = {
       ownerId: "u1",
       eventKeys: ["github.pr.*"],
       filters: [],
-      target: { kind: "orchestrator" as const },
+      target: { kind: "assistant" as const },
       enabled: true,
       createdBy: "u1",
       createdAt: 1,

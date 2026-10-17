@@ -106,12 +106,12 @@ Use `image_index` to select among multiple photos, or `message_id` to select a r
 Alternatively, use a public HTTPS image URL. Do not invent an image URL.
 For example, use `sender_name: "Hestia · People"` and the user-provided image URL.
 These fields affect that message only. They do not change the bot account, credentials, or DM conversation.
-If omitted, message fields inherit from the subscription presence, then workflow presence, then workspace name or bot identity.
+If omitted, message fields inherit from the subscription appearance, then workflow presence, then workspace name or bot identity.
 Slack requires `chat:write.customize`. If Slack rejects customization, Valet retries with the bot identity to deliver the message.
 
 For a workflow, set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
 Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
-An event subscription may set `target.presence` (or pass `presence` to `propose_subscription`) to override individual fields for that subscription.
+An event subscription may set `target.appearance` (or pass `presence` to `propose_subscription`) to override individual fields for that subscription.
 These defaults apply to tool steps, agent tool calls, automatic replies, and approval cards.
 Use explicit `sender_name` / `sender_avatar_url` only when one message should differ from those defaults.
 File uploads and Slack's DM header/sidebar retain the underlying bot identity.

@@ -698,7 +698,7 @@ describe('positionNewNodes', () => {
 });
 
 
-it('includes Presence in the signature used for server refresh and conflict detection', () => {
+it('includes the appearance in the signature used for server refresh and conflict detection', () => {
   const definition = baseDefinition();
   expect(graphSignature({ ...definition, presence: { displayName: 'Bot' } })).not.toBe(graphSignature(definition));
   expect(graphSignature({ ...definition, presence: { displayName: 'Bot', avatarUrl: 'https://example.com/a.png' } }))

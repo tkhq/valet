@@ -161,7 +161,7 @@ describe("AutomationWizard", () => {
       { field: "channel", op: "eq", value: "C123ABC" },
       { field: "thread_ts", op: "eq", value: "1750000000.123456" },
     ]);
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "own" } });
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "own" } });
   });
 
   /** Adds a channel through the reply step's free-text fallback (the mocked
@@ -188,7 +188,7 @@ describe("AutomationWizard", () => {
     expect(createSubscription.mock.calls[0][0]).toMatchObject({
       eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C123" }],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "t_platform", follow: true },
+      target: { kind: "assistant", assistant: "team", teamId: "t_platform", follow: true },
     });
   });
 
@@ -266,7 +266,7 @@ describe("AutomationWizard", () => {
     expect(body.eventKeys).toEqual(["slack.app_mention"]);
     expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C123", label: "C123" }]);
     expect(body.anyChannel).toBeUndefined();
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "team", teamId: "t_platform", follow: true, thread: { mode: "new" } });
+    expect(body.target).toEqual({ kind: "assistant", assistant: "team", teamId: "t_platform", follow: true, thread: { mode: "new" } });
   });
 
   it("reply step offers the team target with member-only copy", () => {
@@ -297,7 +297,7 @@ describe("AutomationWizard", () => {
     expect(screen.getByText(/Mentions by other people do not fire it/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Personal" } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
-    expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: true, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
+    expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "assistant", assistant: "user", follow: true, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
   });
 
   it("a team reply rule keeps the selected assistant through review and create", () => {
@@ -308,7 +308,7 @@ describe("AutomationWizard", () => {
     clickNext();
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Team ops" } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
-    expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "orchestrator", orchestrator: "team", teamId: "t_platform", follow: true, thread: { mode: "new" } });
+    expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "assistant", assistant: "team", teamId: "t_platform", follow: true, thread: { mode: "new" } });
   });
 
   it("reply step keeps the org assistant reachable in a team workspace", () => {
@@ -322,7 +322,7 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Org replies" } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "org", follow: true, thread: { mode: "new" } });
+    expect(body.target).toEqual({ kind: "assistant", assistant: "org", follow: true, thread: { mode: "new" } });
   });
 
   it("reply outcome posts several channels as one in filter", () => {
@@ -362,7 +362,7 @@ describe("AutomationWizard", () => {
     expect(body.filters).toEqual([]);
     expect(body.anyChannel).toBe(true);
     // Personal workspace, so the default target is the user's assistant.
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
   });
 
   it("blocks Next on the reply step until a channel is picked or Any channel is set", () => {
@@ -398,7 +398,7 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "PR ping" } });
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
-    expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "subject" } });
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "subject" } });
   });
 
   it("workflow outcome posts a subscription with a workflow target", () => {
@@ -450,8 +450,8 @@ describe("AutomationWizard", () => {
     expect(body.filters).toEqual([{ field: "branch", op: "eq", value: "main" }]);
     expect(body.target).toEqual({
       thread: { mode: "own" },
-      kind: "orchestrator",
-      orchestrator: "team",
+      kind: "assistant",
+      assistant: "team",
       teamId: "t_platform",
     });
   });
@@ -528,8 +528,8 @@ describe("AutomationWizard", () => {
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({
       thread: { mode: "new" },
-      kind: "orchestrator",
-      orchestrator: "user",
+      kind: "assistant",
+      assistant: "user",
       deliveryPolicy: "always",
       pauseOnOverlap: true,
       follow: true,
@@ -562,8 +562,8 @@ describe("AutomationWizard", () => {
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({
       thread: { mode: "subject" },
-      kind: "orchestrator",
-      orchestrator: "user",
+      kind: "assistant",
+      assistant: "user",
       deliveryPolicy: "always",
       pauseOnOverlap: true,
       follow: false,
@@ -585,7 +585,7 @@ describe("AutomationWizard", () => {
     expect(screen.queryByLabelText(/Event message/)).toBeNull();
   });
 
-  it("schedule outcome posts a schedule with a cron and an orchestrator prompt", () => {
+  it("schedule outcome posts a schedule with a cron and an assistant prompt", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
     // Step 1 — What: on a schedule.
@@ -597,7 +597,7 @@ describe("AutomationWizard", () => {
     clickNext();
 
     // Step 3 — Then: default is your assistant. A prompt appears for a
-    // scheduled orchestrator run.
+    // scheduled assistant run.
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Daily digest" } });
     clickNext();
 
@@ -611,7 +611,7 @@ describe("AutomationWizard", () => {
     expect(body.name).toBe("Morning digest");
     expect(body.cron).toBe("0 9 * * 1-5");
     expect(body.timezone).toEqual(expect.any(String));
-    expect(body.target).toEqual({ kind: "orchestrator", prompt: "Daily digest" });
+    expect(body.target).toEqual({ kind: "assistant", prompt: "Daily digest" });
   });
 
   it("blocks Next until the advanced Match step has an event", () => {
@@ -636,7 +636,7 @@ describe("AutomationWizard", () => {
         ownerId: "u1",
         eventKeys: ["slack.app_mention"],
         filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
-        target: { kind: "orchestrator" },
+        target: { kind: "assistant" },
         enabled: true,
         createdBy: "u1",
         createdAt: 1,
@@ -743,7 +743,7 @@ describe("AutomationWizard", () => {
       fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Replies" } });
       fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
-      expect(body.target).toMatchObject({ kind: "orchestrator", thread: { mode: "new" } });
+      expect(body.target).toMatchObject({ kind: "assistant", thread: { mode: "new" } });
     });
 
     it("a notification with a subject defaults to one thread per subject", () => {
@@ -800,7 +800,7 @@ describe("AutomationWizard", () => {
       fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
       const body = createSchedule.mock.calls[0][0] as CreateWorkflowScheduleRequest;
       expect(body.thread).toEqual({ mode: "own" });
-      expect(body.target).toEqual({ kind: "orchestrator", prompt: "Daily digest" });
+      expect(body.target).toEqual({ kind: "assistant", prompt: "Daily digest" });
     });
 
     it("blocks Next while an existing thread is chosen but not picked", () => {

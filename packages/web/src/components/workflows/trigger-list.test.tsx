@@ -32,7 +32,7 @@ const triggersData: { triggers: WorkflowTriggerItem[] } = {
       detail: {
         cron: "0 9 * * *",
         timezone: "UTC",
-        targetKind: "orchestrator",
+        targetKind: "assistant",
         prompt: "digest",
         nextFireAt: Date.now() + 60_000,
         lastFiredAt: null,

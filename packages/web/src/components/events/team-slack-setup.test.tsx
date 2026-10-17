@@ -56,7 +56,7 @@ function mentionRule(id: string, ownerId: string, channel: string, enabled = tru
   return {
     id, name: `${ownerId} replies`, enabled, ownerType: "team", ownerId, createdBy: "u", createdAt: 1, updatedAt: 1,
     eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: channel, label: channel === "C1" ? "#general" : "#design" }],
-    target: { kind: "orchestrator", orchestrator: "team", teamId: ownerId },
+    target: { kind: "assistant", assistant: "team", teamId: ownerId },
   };
 }
 vi.mock("~/api/events", async (importOriginal) => ({
@@ -138,7 +138,7 @@ describe("team homepage Slack setup", () => {
     expect(createMutate).toHaveBeenCalledWith(expect.objectContaining({
       eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C3", label: "#launch" }],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "a", follow: true },
+      target: { kind: "assistant", assistant: "team", teamId: "a", follow: true },
     }), expect.anything());
   });
   it("keeps the full reply setup behind Advanced setup", () => {

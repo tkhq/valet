@@ -12,7 +12,7 @@ vi.mock("./event-match-step", () => ({ EventMatchStep: () => <div>Event match</d
 const sub: EventSubscriptionWire = {
   id: "proposal-1", name: "Follow launch", ownerType: "user", ownerId: "u1",
   eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C123" }, { field: "thread_ts", op: "eq", value: "1790650000.123456" }],
-  target: { kind: "orchestrator", orchestrator: "user", follow: true }, enabled: false,
+  target: { kind: "assistant", assistant: "user", follow: true }, enabled: false,
   createdBy: "u1", createdAt: 1, updatedAt: 1,
 };
 beforeEach(() => patch.mockReset());

@@ -80,7 +80,7 @@ describe("TriggerDialog", () => {
         name: "digest",
         cron: "0 9 * * *",
         timezone: expect.any(String),
-        target: { kind: "orchestrator", prompt: "summarize" },
+        target: { kind: "assistant", prompt: "summarize" },
         thread: { mode: "own" },
       }),
     );
@@ -113,7 +113,7 @@ describe("TriggerDialog", () => {
     updateScheduleMutateAsync.mockClear().mockResolvedValue({});
     const item: WorkflowTriggerItem = {
       kind: "schedule", id: "sch_a", name: "Digest", enabled: true,
-      detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "orchestrator", prompt: "summarize", nextFireAt: 1, lastFiredAt: null },
+      detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "summarize", nextFireAt: 1, lastFiredAt: null },
     };
     const { unmount } = render(<TriggerDialog open onOpenChange={() => {}} editing={item} />);
     fireEvent.click(screen.getByText(/^Save$/));
@@ -308,7 +308,7 @@ it("distinguishes Linear triggers from actions and blocks an unconfigured Linear
 });
 
 
-it("includes Presence when creating an event trigger from a workflow", async () => {
+it("includes the appearance when creating an event trigger from a workflow", async () => {
   createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
   render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" initialKind="event" />);
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR bot" } });
@@ -318,7 +318,7 @@ it("includes Presence when creating an event trigger from a workflow", async () 
   fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(createEventTriggerMutateAsync).toHaveBeenCalledWith({
     workflowId: "wf_1", name: "PR bot", eventKeys: ["github.pull_request.opened"], filters: [],
-    presence: { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" },
+    appearance: { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" },
   }));
 });
 

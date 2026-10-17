@@ -1,8 +1,8 @@
-import { type AssistantThreadPolicy, type Presence, validatePresence } from "@valet/shared";
+import { type AssistantThreadPolicy, type Appearance, validateAppearance } from "@valet/shared";
 import { PICK_A_THREAD_ERROR, RunsInField } from "~/components/presence/runs-in-field";
 import { runsInLabel, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
 import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
-import { PresenceSettings } from "~/components/presence-settings";
+import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { AutomationReview } from "~/components/events/automation-review";
 /**
  * TriggerDialog — create or edit a schedule or event trigger.
@@ -11,8 +11,8 @@ import { AutomationReview } from "~/components/events/automation-review";
  * `editing.kind` (immutable server-side).
  *
  * Schedule fields: name, cron, timezone (default: local), target radio
- * (workflow | orchestrator), workflow select (hidden when `workflowId` prop
- * set), prompt textarea (orchestrator target), input JSON textarea (workflow
+ * (workflow | assistant), workflow select (hidden when `workflowId` prop
+ * set), prompt textarea (assistant target), input JSON textarea (workflow
  * target), and **Runs in** for an assistant schedule: a new thread each time,
  * the routine's own thread, or an existing thread. A schedule has no
  * subject, so the subject option never shows.
@@ -60,7 +60,7 @@ import {
 } from "~/lib/slack-mention";
 
 export type TriggerKind = "schedule" | "event";
-type TargetKind = "workflow" | "orchestrator";
+type TargetKind = "workflow" | "assistant";
 
 function defaultTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -111,7 +111,7 @@ export function TriggerDialog({
   const threadWorkspace = isEditing ? scope.key : PERSONAL;
 
   // ── event fields ───────────────────────────────────────────────────────
-  const [presence, setPresence] = useState<Presence>({});
+  const [appearance, setAppearance] = useState<Appearance>({});
   const [eventKey, setEventKey] = useState("");
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
   // Explicit opt-out of the channel requirement on a `slack.app_mention`
@@ -177,7 +177,7 @@ export function TriggerDialog({
       setInputJson("");
       setInputJsonError(null);
       setEventKey("");
-      setPresence({});
+      setAppearance({});
       setFilterRows([]);
       setAnyChannel(false);
       setFormError(null);
@@ -219,7 +219,7 @@ export function TriggerDialog({
       return;
     }
 
-    if (kind === "schedule" && targetKind === "orchestrator" && thread === null) {
+    if (kind === "schedule" && targetKind === "assistant" && thread === null) {
       setFormError(PICK_A_THREAD_ERROR);
       return;
     }
@@ -263,10 +263,10 @@ export function TriggerDialog({
           if (name !== orig.name) body.name = name;
           if (cron !== orig.detail.cron) body.cron = cron;
           if (timezone !== orig.detail.timezone) body.timezone = timezone;
-          if (orig.detail.targetKind === "orchestrator" && prompt !== (orig.detail.prompt ?? "")) {
+          if (orig.detail.targetKind === "assistant" && prompt !== (orig.detail.prompt ?? "")) {
             body.prompt = prompt;
           }
-          if (orig.detail.targetKind === "orchestrator" && thread !== null &&
+          if (orig.detail.targetKind === "assistant" && thread !== null &&
             !sameThreadPolicy(thread, orig.detail.thread ?? { mode: "own" })) {
             body.thread = thread;
           }
@@ -281,10 +281,10 @@ export function TriggerDialog({
           await updateSchedule.mutateAsync({ id: orig.id, body });
         } else {
           const base = { name, cron, timezone };
-          if (targetKind === "orchestrator") {
+          if (targetKind === "assistant") {
             await createSchedule.mutateAsync({
               ...base,
-              target: { kind: "orchestrator", prompt },
+              target: { kind: "assistant", prompt },
               ...(thread !== null ? { thread } : {}),
             });
           } else {
@@ -300,8 +300,8 @@ export function TriggerDialog({
       } else {
         // Event trigger.
         if (!isEditing) {
-          const presenceError = validatePresence(presence);
-          if (presenceError) { setFormError(presenceError); return; }
+          const appearanceError = validateAppearance(appearance);
+          if (appearanceError) { setFormError(appearanceError); return; }
         }
         const incomplete = incompleteFilterRow(filterRows);
         if (incomplete) {
@@ -373,7 +373,7 @@ export function TriggerDialog({
           const wfId = workflowId ?? selectedWorkflowId;
           await createEvent.mutateAsync({
             workflowId: wfId,
-            ...(Object.keys(presence).length > 0 ? { presence } : {}),
+            ...(Object.keys(appearance).length > 0 ? { appearance } : {}),
             name,
             eventKeys: [eventKey],
             filters,
@@ -467,16 +467,16 @@ export function TriggerDialog({
                       Workflow
                     </label>
                     <label
-                      htmlFor="target-orchestrator"
+                      htmlFor="target-assistant"
                       className="flex min-h-11 items-center gap-1.5 text-sm sm:min-h-0"
                     >
                       <input
-                        id="target-orchestrator"
+                        id="target-assistant"
                         type="radio"
                         name="trigger-target"
-                        value="orchestrator"
-                        checked={targetKind === "orchestrator"}
-                        onChange={() => setTargetKind("orchestrator")}
+                        value="assistant"
+                        checked={targetKind === "assistant"}
+                        onChange={() => setTargetKind("assistant")}
                         aria-label="assistant"
                       />
                       Assistant
@@ -506,12 +506,12 @@ export function TriggerDialog({
                 </div>
               )}
 
-              {/* Prompt textarea — orchestrator target */}
-              {(targetKind === "orchestrator" ||
+              {/* Prompt textarea — assistant target */}
+              {(targetKind === "assistant" ||
                 (isEditing &&
                   // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
                   (editing as Extract<WorkflowTriggerItem, { kind: "schedule" }>).detail
-                    .targetKind === "orchestrator")) && (
+                    .targetKind === "assistant")) && (
                 <div className="grid gap-1">
                   <Label htmlFor="trigger-prompt">Prompt</Label>
                   <Textarea
@@ -524,7 +524,7 @@ export function TriggerDialog({
                 </div>
               )}
 
-              {targetKind === "orchestrator" && (
+              {targetKind === "assistant" && (
                 <RunsInField
                   idPrefix="trigger"
                   value={thread}
@@ -661,13 +661,13 @@ export function TriggerDialog({
             </>
           )}
 
-          {kind === "event" && !isEditing && <PresenceSettings value={presence} onChange={setPresence} subscription disabled={isPending} />}
+          {kind === "event" && !isEditing && <AppearanceSettings value={appearance} onChange={setAppearance} subscription disabled={isPending} />}
 
           {/* Form validation error */}
           <AutomationReview workflowId={targetKind === "workflow" ? selectedWorkflowId || workflowId : undefined} when={kind === "schedule" ? `${cron} (${timezone})` : eventKey}
             scope={kind === "schedule" ? "This workspace" : filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
-            result={targetKind === "orchestrator" ? prompt : "Run the workflow with its configured steps and inputs"}
-            destination={targetKind === "orchestrator" ? `Workspace assistant. Runs in: ${thread !== null ? runsInLabel(thread, null, "routine") : "an existing thread"}` : workflows.find(w => w.id === selectedWorkflowId)?.name || selectedWorkflowId || workflowId}
+            result={targetKind === "assistant" ? prompt : "Run the workflow with its configured steps and inputs"}
+            destination={targetKind === "assistant" ? `Workspace assistant. Runs in: ${thread !== null ? runsInLabel(thread, null, "routine") : "an existing thread"}` : workflows.find(w => w.id === selectedWorkflowId)?.name || selectedWorkflowId || workflowId}
           />
           {formError && (
             <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">

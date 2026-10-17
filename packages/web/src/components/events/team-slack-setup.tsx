@@ -220,7 +220,7 @@ export function TeamSlackChannelPicker({
       name: `Slack replies for ${team.name}`,
       eventKeys: [SLACK_APP_MENTION],
       filters,
-      target: { kind: "orchestrator", orchestrator: "team", teamId: team.id, follow: true },
+      target: { kind: "assistant", assistant: "team", teamId: team.id, follow: true },
       audience: "organization",
     }, done);
   }

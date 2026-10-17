@@ -38,7 +38,7 @@ function subscription(over: Partial<EventSubscriptionWire>): EventSubscriptionWi
     ownerId: "u1",
     eventKeys: ["github.pull_request.opened"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "u1",
     createdAt: 1,

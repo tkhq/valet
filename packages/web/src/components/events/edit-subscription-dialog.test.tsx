@@ -28,7 +28,7 @@ vi.mock("~/components/presence/thread-picker", () => ({
 const sub: EventSubscriptionWire = {
   id: "sub-1", name: "Replies", ownerType: "user", ownerId: "u1",
   eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "in", value: ["C1", "C2"], labels: ["#one", "#two"] }],
-  target: { kind: "orchestrator", orchestrator: "user", follow: true }, enabled: true,
+  target: { kind: "assistant", assistant: "user", follow: true }, enabled: true,
   createdBy: "u1", createdAt: 1, updatedAt: 1,
 };
 const save = () => fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -121,12 +121,12 @@ describe("EditSubscriptionDialog match form", () => {
 });
 
 
-it("loads a workflow Presence override and clears it without rewriting the match", () => {
-  edit({ ...sub, target: { kind: "workflow", workflowId: "wf_1", presence: { displayName: "Release bot" } } });
+it("loads a workflow appearance override and clears it without rewriting the match", () => {
+  edit({ ...sub, target: { kind: "workflow", workflowId: "wf_1", appearance: { displayName: "Release bot" } } });
   expect(screen.getByLabelText<HTMLInputElement>("Display name").value).toBe("Release bot");
   fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "" } });
   save();
-  expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { presence: null } });
+  expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { appearance: null } });
 });
 
 it("rejects an insecure avatar URL before sending a subscription edit", () => {
@@ -168,7 +168,7 @@ describe("EditSubscriptionDialog Runs in", () => {
   });
 
   it("reads a Slack message rule with no stored policy as a new thread, and an own pick as shared", () => {
-    edit({ ...sub, eventKeys: ["slack.message"], target: { kind: "orchestrator", orchestrator: "user" } });
+    edit({ ...sub, eventKeys: ["slack.message"], target: { kind: "assistant", assistant: "user" } });
     expect(screen.getByRole<HTMLInputElement>("radio", { name: "A new thread each time" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("radio", { name: "This listener's thread" }));
     expect(screen.getByText("Messages from several Slack conversations will share this thread.")).toBeTruthy();

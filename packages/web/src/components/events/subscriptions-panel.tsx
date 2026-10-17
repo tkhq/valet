@@ -79,7 +79,7 @@ export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
  */
 export function mentionAudienceLabel(sub: EventSubscriptionWire): string | null {
   const teamAssistant =
-    sub.ownerType === "team" && sub.target.kind === "orchestrator" && sub.target.orchestrator === "team";
+    sub.ownerType === "team" && sub.target.kind === "assistant" && sub.target.assistant === "team";
   if (!teamAssistant || !selectsSlackMention(sub.eventKeys)) return null;
   return sub.audience === "organization" ? "org members" : "team only";
 }
@@ -92,8 +92,8 @@ function describeTarget(
   if (target.kind === "workflow") {
     return `Run workflow: ${workflowNames.get(target.workflowId) ?? target.workflowId}`;
   }
-  if (target.orchestrator === "org") return "Notify the org assistant";
-  if (target.orchestrator === "team") {
+  if (target.assistant === "org") return "Notify the org assistant";
+  if (target.assistant === "team") {
     const name = target.teamId !== undefined ? teamNames.get(target.teamId) : undefined;
     return name !== undefined ? `Notify ${name}'s assistant` : "Notify the team's assistant";
   }
@@ -106,7 +106,7 @@ function describeTarget(
  * removed: the server refuses that enable, and the note says so. A version
  * that is already off is not turned off again. */
 function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscriptionWire[]): string | undefined {
-  const id = sub.target.kind === "orchestrator" ? sub.target.replaces : undefined;
+  const id = sub.target.kind === "assistant" ? sub.target.replaces : undefined;
   if (id === undefined) return undefined;
   const replaced = subscriptions.find((s) => s.id === id);
   if (!replaced) return "A subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
@@ -116,7 +116,7 @@ function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscri
 
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
- * a workflow run or an orchestrator prompt. List with enable/disable,
+ * a workflow run or an assistant prompt. List with enable/disable,
  * edit (`EditSubscriptionDialog`), and delete; create via
  * `AutomationWizard`.
  *
@@ -291,7 +291,7 @@ function SubscriptionRow({
           ))}
           <span className="text-xs text-muted">
             → {describeTarget(sub.target, workflowNames, teamNames)}
-            {!sub.enabled && sub.target.kind === "orchestrator" && sub.target.overlapPausedAt && <span role="status" className="mt-2 block text-warning-600">Paused because a team subscription matched an event. Review delivery preferences, then turn this subscription back on.</span>}
+            {!sub.enabled && sub.target.kind === "assistant" && sub.target.overlapPausedAt && <span role="status" className="mt-2 block text-warning-600">Paused because a team subscription matched an event. Review delivery preferences, then turn this subscription back on.</span>}
           </span>
           {channelScope && <span className="text-xs text-muted">· {channelScope}</span>}
           {audienceScope && <span className="text-xs text-muted">· {audienceScope}</span>}

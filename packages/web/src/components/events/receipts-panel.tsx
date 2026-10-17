@@ -19,7 +19,8 @@ const METADATA_LABELS: Record<string, string> = {
   configuredTriggerCount: "Configured triggers",
 };
 const LABELS: Record<string, string> = {
-  orchestrator: "Workspace runtime", workflow: "Workflow",
+  // Receipts written before the rename record the old `orchestrator` kind.
+  assistant: "Assistant", orchestrator: "Assistant", workflow: "Workflow",
   subscription_match: "Subscription matching", persistence: "Event storage", dispatch: "Delivery queue",
   channel: "Channel processing", workspace: "Workspace check", ingestion: "Event ingestion",
   follow: "Follow-up check", fan_out: "Delivery preparation", completed: "Check completed",

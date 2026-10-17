@@ -100,7 +100,7 @@ export const stressEventSubscriptions: ListEventSubscriptionsResponse = {
     ownerId: memberId(0),
     eventKeys: [`pull_request.${unbroken("review_requested_", 60)}`],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: i % 2 === 0,
     createdBy: memberId(0),
     createdAt: NOW - i * MINUTE,

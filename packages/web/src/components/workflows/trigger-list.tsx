@@ -17,8 +17,8 @@ import { timeUntil } from "~/lib/relative-time";
 
 function triggerSummary(t: WorkflowTriggerItem): string {
   if (t.kind === "schedule") {
-    const next = t.enabled ? ` · next ${timeUntil(t.detail.nextFireAt)}` : "";
-    const target = t.detail.targetKind === "orchestrator" ? " · assistant" : "";
+    const next = t.enabled ? ` · next ${relativeTime(t.detail.nextFireAt)}` : "";
+    const target = t.detail.targetKind === "assistant" ? " · assistant" : "";
     return `${t.detail.cron} (${t.detail.timezone})${target}${next}`;
   }
   return t.detail.eventKeys.join(", ");
