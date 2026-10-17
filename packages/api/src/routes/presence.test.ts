@@ -3,8 +3,10 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import type { EventMatchSpec, Wakeup } from "@valet/engine";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { linkIdentity } from "../channels/identity-links.js";
 import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowSchedules } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
@@ -148,7 +150,7 @@ it("lists the parent of a lone child place, with no counts and the child's activ
   expect(map.get("github:acme/api#12")).toMatchObject({ parent: "github:acme/api", label: "acme/api#12" });
   const child = map.get("github:acme/api#12")!;
   expect(map.get("github:acme/api")).toEqual({
-    subject: "github:acme/api", label: "acme/api", scopeLabel: "Across acme/api", service: "github", parent: null,
+    subject: "github:acme/api", label: "acme/api", service: "github", parent: null,
     listenerCount: 0, activeThreadCount: 0, lastActivityAt: child.lastActivityAt,
   });
   expect(child.lastActivityAt).not.toBeNull();
@@ -172,6 +174,11 @@ it("scopes a team workspace to the team's rules and sessions", async () => {
   const rows = await places(api, team.id);
   expect(rows.map((row) => row.subject).sort()).toEqual(["slack:T1", "slack:T1/C777", "slack:T1/C778"]);
   expect((await fetch(`${api.baseUrl}/api/presence/places?scope=no-such-team`)).status).toBe(404);
+  // A team that exists, but that the viewer is not on, reads as missing.
+  const theirs = await createTeam(api.providers.db, { orgId: ORG, name: "Elsewhere", creatorUserId: "other-user" });
+  const refused = await fetch(`${api.baseUrl}/api/presence/places?scope=${encodeURIComponent(theirs.id)}`);
+  expect(refused.status).toBe(404);
+  expect(await refused.json()).toEqual({ error: "Workspace not found. Select an accessible workspace." });
   expect((await fetch(`${api.baseUrl}/api/presence/places`)).status).toBe(400);
 });
 
@@ -233,12 +240,17 @@ it("lists what feeds a thread: own, existing, and subject listeners, and own and
   await rule(api, { id: "r-pin", name: "Pinned listener", eventKeys: ["github.push"], target: { kind: "assistant", thread: { mode: "existing", sessionId, threadId: pinned.id } } });
   await rule(api, { id: "r-subject", name: "Per pull request", eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/api" }], target: { kind: "assistant", thread: { mode: "subject" } } });
   await rule(api, { id: "r-elsewhere", name: "Other repo", eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/web" }], target: { kind: "assistant", thread: { mode: "subject" } } });
+  await rule(api, { id: "r-off", name: "Off listener", eventKeys: ["github.push"], target: { kind: "assistant", thread: { mode: "existing", sessionId, threadId: pinned.id } } });
+  await api.providers.db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "r-off"));
+  // An org rule delivers into the org's assistant, never into this workspace's subject thread.
+  await rule(api, { id: "r-org", ownerType: "org", ownerId: ORG, name: "Org per pull request", eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/api" }], target: { kind: "assistant", thread: { mode: "subject" } } });
   await rule(api, { id: "r-new", name: "New each time", eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/api" }], target: { kind: "assistant", thread: { mode: "new" } } });
 
   const schedule = { orgId: ORG, ownerType: "user" as const, ownerId: USER, targetKind: "assistant" as const, prompt: "Summarize", cron: "0 9 * * *", nextFireAt: Date.now() + DAY, createdBy: USER, createdAt: 1, updatedAt: 1 };
   await api.providers.db.insert(workflowSchedules).values([
     { ...schedule, id: "s-own", name: "Morning summary", threadPolicy: null },
     { ...schedule, id: "s-pin", name: "Pinned routine", threadPolicy: { mode: "existing", sessionId, threadId: pinned.id } },
+    { ...schedule, id: "s-off", name: "Off routine", enabled: false, threadPolicy: { mode: "existing", sessionId, threadId: pinned.id } },
   ]);
 
   const feeders = async (threadId: string) => {
@@ -265,4 +277,92 @@ it("refuses the feeders of a thread the viewer cannot read", async () => {
   expect((await res.json() as { error: string }).error).toBe("This thread belongs to another owner. Open a thread in your workspace.");
   const unknown = await fetch(`${api.baseUrl}/api/presence/feeders?sessionId=no-such-session&threadId=t`);
   expect(unknown.status).toBe(404);
+});
+
+/** A personal workspace with a broad Slack listener, a private channel
+ * `CSECRET` that the viewer is not in, and a public channel `COPEN`. The
+ * private channel has an event, a subject thread, a follow binding, and a
+ * running waiter; `CPRIV2` is private and known only from an event. */
+async function seedPrivateChannel(a: TestApi) {
+  await connectSlack(a, { CSECRET: ["USOMEONE"], CPRIV2: ["USOMEONE"] });
+  const { session, sessionId } = await ensureDefaultAssistantSession(a.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(a, { id: "r-all", name: "Everywhere", eventKeys: ["slack.app_mention"] });
+  const subjectThread = await session.createThread("subject:slack:T1/CSECRET");
+  const followThread = await session.createThread("web:follow");
+  const waiting = await session.createThread("web:waiting");
+  await a.providers.db.insert(followedThreads).values({
+    id: "f-secret", orgId: ORG, channelType: "slack", channelId: "CSECRET", threadTs: "1700.9", ownerType: "user", ownerId: USER,
+    createdBy: USER, createdAt: 5, lastActivityAt: 5_000, sessionId, threadId: followThread.id,
+  });
+  await a.providers.engineStore.createWakeup(waiter({ id: "w-secret", sessionId, threadId: waiting.id, subjects: ["slack:T1/CSECRET"] }));
+  const now = Date.now();
+  const slackEvent = (id: string, channel: string) => event(a, {
+    id, service: "slack", key: "slack.app_mention", subjects: ["slack:T1", `slack:T1/${channel}`], at: now - 1000, ruleId: "r-all", refs: { channel },
+  });
+  await slackEvent("e-secret", "CSECRET");
+  await slackEvent("e-priv2", "CPRIV2");
+  await slackEvent("e-open", "COPEN");
+  return { subjectThread, followThread, waiting };
+}
+
+const detailOf = (a: TestApi, subject: string) => fetch(`${a.baseUrl}/api/presence/places/${encodeURIComponent(subject)}?scope=user`);
+
+it("answers a private channel's place page with the same 404 as an absent place", async () => {
+  api = await boot();
+  await seedPrivateChannel(api);
+  const hidden = await detailOf(api, "slack:T1/CSECRET");
+  const absent = await detailOf(api, "slack:T1/CNOWHERE");
+  expect(hidden.status).toBe(404);
+  expect(absent.status).toBe(404);
+  expect(await hidden.json()).toEqual(await absent.json());
+  // A member sees the same page.
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "USOMEONE", userId: USER });
+  expect((await detailOf(api, "slack:T1/CSECRET")).status).toBe(200);
+});
+
+it("leaves a private channel's event, subject thread, follow, and waiter out of the Slack parent page", async () => {
+  api = await boot();
+  const seeded = await seedPrivateChannel(api);
+  const res = await detailOf(api, "slack:T1");
+  expect(res.status).toBe(200);
+  const detail = await res.json() as PresencePlaceDetailResponse;
+  expect(detail.listeners.map((l) => l.id)).toEqual(["r-all"]);
+  expect(detail.activity.map((e) => e.id)).toEqual(["e-open"]);
+  expect(detail.threads.subject.map((t) => t.threadId)).not.toContain(seeded.subjectThread.id);
+  expect(detail.threads.following.map((t) => t.threadId)).not.toContain(seeded.followThread.id);
+  expect(detail.threads.active.map((t) => t.threadId)).not.toContain(seeded.waiting.id);
+  expect(detail.threads).toEqual({ subject: [], following: [], active: [] });
+});
+
+it("hides a private place that only an event names", async () => {
+  api = await boot();
+  await seedPrivateChannel(api);
+  const subjects = (await places(api, "user")).map((row) => row.subject);
+  expect(subjects).toContain("slack:T1/COPEN");
+  expect(subjects).not.toContain("slack:T1/CPRIV2");
+  expect(subjects).not.toContain("slack:T1/CSECRET");
+});
+
+it("lists a follow's channel only when its bound thread is visible, and keeps a legacy follow", async () => {
+  api = await boot();
+  await connectSlack(api, { CPRIVX: ["USOMEONE"] });
+  const team = await createTeam(api.providers.db, { orgId: ORG, name: "SRE", creatorUserId: USER });
+  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: USER, orgId: ORG });
+  const hidden = await session.createThread("slack:CPRIVX:1700.1");
+  const follow = { orgId: ORG, channelType: "slack", ownerType: "team" as const, ownerId: team.id, createdBy: USER, createdAt: 5, lastActivityAt: 5_000 };
+  await api.providers.db.insert(followedThreads).values([
+    // Bound to a thread this viewer may not see.
+    { ...follow, id: "f-hidden", channelId: "CPUB", threadTs: "1700.1", sessionId, threadId: hidden.id },
+    // Bound to a thread outside this workspace's sessions.
+    { ...follow, id: "f-elsewhere", channelId: "CPUB2", threadTs: "1700.2", sessionId: "another-session", threadId: "t-other" },
+    // Bound before the thread columns.
+    { ...follow, id: "f-legacy", channelId: "COLD", threadTs: "1700.3", sessionId: null, threadId: null },
+  ]);
+  const map = bySubject(await places(api, team.id));
+  expect(map.has("slack:T1/CPUB")).toBe(false);
+  expect(map.has("slack:T1/CPUB2")).toBe(false);
+  expect(map.get("slack:T1/COLD")).toMatchObject({ lastActivityAt: 5_000, listenerCount: 0 });
+  // The synthesized Slack parent has no listeners, so it carries no reach.
+  expect(map.get("slack:T1")).toMatchObject({ label: "Slack", listenerCount: 0 });
+  expect(map.get("slack:T1")?.scopeLabel).toBeUndefined();
 });

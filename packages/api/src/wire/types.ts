@@ -1107,8 +1107,8 @@ export interface PresencePlaceWire {
   subject: string;
   /** The concrete name: `#incidents`, `acme/api`, `acme/api#12`, `ENG`, `ENG-42`, `Slack`, `GitHub`, `Linear`. */
   label: string;
-  /** Set only on a parent row: the reach of the listeners that list there, such
-   * as `Across acme/api`, `Across ENG`, or `Everywhere in Slack`. */
+  /** Set only on a parent row with listeners: the reach of the listeners that
+   * list there, such as `Across acme/api`, `Across ENG`, or `Everywhere in Slack`. */
   scopeLabel?: string;
   service: PresencePlaceService;
   /** The parent place's subject, or null for a top-level row. Every parent a row names is also a row. */

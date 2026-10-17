@@ -338,11 +338,15 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   const follows = await db.select().from(followedThreads).where(and(eq(followedThreads.orgId, orgId), eq(followedThreads.channelType, "slack"),
     eq(followedThreads.ownerType, owner.type), eq(followedThreads.ownerId, owner.id)));
   for (const follow of follows) {
+    // A follow bound before the thread columns names no Valet thread, and
+    // still marks its channel. A bound follow counts only when this request
+    // may see its thread in this workspace's sessions.
+    const bound = follow.sessionId !== null && follow.threadId !== null;
+    const thread = follow.sessionId && follow.threadId ? threads.get(follow.sessionId)?.get(follow.threadId) : undefined;
+    if (bound && !thread) continue;
     const state = placeFor(`slack:${slackTeam}/${follow.channelId}`);
     if (!state) continue;
     touch(state, follow.lastActivityAt);
-    // A follow bound before the thread columns names no Valet thread.
-    const thread = follow.sessionId && follow.threadId ? threads.get(follow.sessionId)?.get(follow.threadId) : undefined;
     if (follow.sessionId && thread) {
       state.following.push({
         ...conversation(follow.sessionId, thread, "Slack thread", slackMessageUrl(follow.channelId, follow.threadTs)),
@@ -397,7 +401,9 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   for (const [id, name] of resolved) channelNames.set(id, name);
   for (const state of places.values()) {
     state.wire.label = placeLabel(state.wire.subject, channelNames);
-    const scopeLabel = placeScopeLabel(state.wire.subject);
+    // The reach describes listeners that list here, so a row with none (such
+    // as a parent only its children name) carries no reach.
+    const scopeLabel = state.listeners.length > 0 ? placeScopeLabel(state.wire.subject) : undefined;
     if (scopeLabel !== undefined) state.wire.scopeLabel = scopeLabel;
     state.wire.listenerCount = state.listeners.length;
     state.wire.activeThreadCount = state.active.size;
@@ -473,8 +479,10 @@ function byName(a: ThreadFeederWire, b: ThreadFeederWire): number {
  * The listeners and routines that deliver into one thread of `owner`'s
  * assistant (spec Part G step 1): a rule whose own thread it is (`sub:<id>`,
  * `schedule:<id>`), a rule pinned to it, and a listener with the `subject`
- * policy whose place covers the thread's subject. The caller checks that the
- * viewer may read the thread.
+ * policy whose place covers the thread's subject. Only enabled rules of
+ * `owner` count: a rule delivers into its own owner's assistant, so an org
+ * rule feeds only an org thread. The caller checks that the viewer may read
+ * the thread.
  */
 export async function listThreadFeeders(
   db: Providers["db"], orgId: string, owner: Principal, thread: { sessionId: string; threadId: string; key: string | null },
@@ -485,7 +493,8 @@ export async function listThreadFeeders(
   const slackTeam = subject ? slackTeamOf(subject) ?? "?" : "?";
 
   const listeners: ThreadFeederWire[] = [];
-  const rules = await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, orgId), ownedBy(owner)));
+  const rules = await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, orgId),
+    eq(eventSubscriptions.ownerType, owner.type), eq(eventSubscriptions.ownerId, owner.id), eq(eventSubscriptions.enabled, true)));
   for (const rule of rules) {
     const target = readStoredTarget(rule.target);
     if (!isRecord(target) || !isAssistantKind(target.kind)) continue;
@@ -499,7 +508,7 @@ export async function listThreadFeeders(
 
   const routines: ThreadFeederWire[] = [];
   const schedules = await db.select().from(workflowSchedules).where(and(eq(workflowSchedules.orgId, orgId),
-    eq(workflowSchedules.ownerType, owner.type), eq(workflowSchedules.ownerId, owner.id)));
+    eq(workflowSchedules.ownerType, owner.type), eq(workflowSchedules.ownerId, owner.id), eq(workflowSchedules.enabled, true)));
   for (const schedule of schedules) {
     if (readScheduleTargetKind(schedule.targetKind) !== "assistant") continue;
     const policy = storedPolicy(schedule.threadPolicy);
