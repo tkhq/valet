@@ -11,8 +11,8 @@ import { Plus } from "lucide-react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
+import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
-import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { ProblemBadge } from "./problem-badge";
@@ -113,7 +113,7 @@ export function RoutinesPane() {
           {message.text}
         </p>
       )}
-      {creating && <TriggerDialog open onOpenChange={setCreating} schedulesOnly />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
     </div>
   );
 }

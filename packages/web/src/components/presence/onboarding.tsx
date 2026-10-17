@@ -9,8 +9,8 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
+import { AutomationWizard } from "~/components/events/automation-wizard";
 import { cardClass } from "~/components/primitives";
-import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { cn } from "~/lib/cn";
 import { useListOwner } from "~/lib/use-list-owner";
 import { isRoutine } from "./routines-pane";
@@ -51,7 +51,7 @@ export function Onboarding() {
           add a routine
         </button>
       </p>
-      {creating && <TriggerDialog open onOpenChange={setCreating} schedulesOnly />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
     </section>
   );
 }

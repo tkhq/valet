@@ -20,7 +20,7 @@ import { useWorkflowTriggers } from "~/api/workflows";
 import {
   Badge, Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, Input,
 } from "~/components/primitives";
-import { TriggerDialog } from "~/components/workflows/trigger-dialog";
+import { AutomationWizard } from "~/components/events/automation-wizard";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
@@ -225,7 +225,7 @@ export function PresenceRail() {
           );
         })}
       </div>
-      {creating && <TriggerDialog open onOpenChange={setCreating} schedulesOnly />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
     </nav>
   );
 }

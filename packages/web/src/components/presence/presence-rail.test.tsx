@@ -47,8 +47,8 @@ vi.mock("~/api/workflows", () => ({
   useWorkflowTriggers: () => ({ isSuccess: true, data: { triggers: [ROUTINE, { ...ROUTINE, id: "S2" }] } }),
 }));
 vi.mock("./use-problem-count", () => ({ useProblemCount: () => problems }));
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ schedulesOnly }: { schedulesOnly?: boolean }) => <p>{schedulesOnly ? "Routine dialog" : "Other dialog"}</p>,
+vi.mock("~/components/events/automation-wizard", () => ({
+  AutomationWizard: ({ startOn }: { startOn?: string }) => <p>{startOn === "routine" ? "Routine dialog" : "Other dialog"}</p>,
 }));
 
 import { PresenceRail, RAIL_FILTER_THRESHOLD, railGroups } from "./presence-rail";

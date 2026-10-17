@@ -10,8 +10,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to, className }: { children: ReactNode; to: string; className?: string }) => <a className={className} href={to}>{children}</a>,
 }));
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ schedulesOnly }: { schedulesOnly?: boolean }) => <p>{schedulesOnly ? "New routine dialog" : "Other dialog"}</p>,
+vi.mock("~/components/events/automation-wizard", () => ({
+  AutomationWizard: ({ startOn }: { startOn?: string }) => <p>{startOn === "routine" ? "New routine dialog" : "Other dialog"}</p>,
 }));
 
 import { Onboarding } from "./onboarding";

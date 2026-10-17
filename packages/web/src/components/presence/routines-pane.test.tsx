@@ -68,8 +68,8 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
 }));
 
 /** The dialog is its own suite's; here it records what it opened on. */
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ editing }: { editing?: WorkflowTriggerItem }) => <p>{editing ? `Editing ${editing.name}` : "New routine dialog"}</p>,
+vi.mock("~/components/events/automation-wizard", () => ({
+  AutomationWizard: ({ startOn }: { startOn?: string }) => <p>{startOn === "routine" ? "New routine dialog" : "Other dialog"}</p>,
 }));
 
 import { RoutinesPane } from "./routines-pane";

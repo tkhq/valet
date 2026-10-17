@@ -49,8 +49,8 @@ vi.mock("~/api/workflows", () => ({
 vi.mock("~/api/presence", () => ({
   usePresencePlaces: () => (places === undefined ? { isSuccess: false, data: undefined } : { isSuccess: true, data: { places } }),
 }));
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ schedulesOnly }: { schedulesOnly?: boolean }) => <p>{schedulesOnly ? "New routine dialog" : "Other dialog"}</p>,
+vi.mock("~/components/events/automation-wizard", () => ({
+  AutomationWizard: ({ startOn }: { startOn?: string }) => <p>{startOn === "routine" ? "New routine dialog" : "Other dialog"}</p>,
 }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgId: "org-1", orgRole: role }, error: null, isError: false }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => ({ ownerType: "user", ownerId: "u1" }) }));
