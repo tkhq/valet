@@ -1,7 +1,7 @@
 // INV-H2 (docs/specs/2026-10-16-presence-hub-design.md): Presence UI copy
 // uses only the Terminology table's words. This lint parses every source
 // file under components/presence, every routes/presence*.tsx, and each
-// reused dialog the hub opens (HUB_DIALOGS), collects
+// reused dialog or page the hub opens or links (HUB_DIALOGS), collects
 // the text a reader can see (string literals, template text, JSX text), and
 // fails on a banned word. Identifiers, imports, types, comments, and test
 // files are not copy, so the lint skips them. A line that carries
@@ -17,13 +17,20 @@ const SRC = resolve(__dirname, "../..");
  * Presence copy too. */
 const HUB_DIALOGS = [
   "components/workflows/trigger-dialog.tsx",
+  "components/workflows/triggers-drawer.tsx",
   "components/events/edit-subscription-dialog.tsx",
   "components/events/delivery-preferences.tsx",
   "components/events/event-match-step.tsx",
   "components/events/automation-review.tsx",
   "components/events/automation-wizard.tsx",
+  "components/events/delivery-list.tsx",
+  "components/events/delivery-copy.ts",
+  "components/events/event-log.tsx",
+  "components/events/receipts-panel.tsx",
+  "components/events/team-slack-setup.tsx",
+  "routes/workflows.index.tsx",
 ] as const;
-const BANNED = ["subscription", "trigger", "subject", "event waiter", "automation"] as const;
+const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
 const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
 

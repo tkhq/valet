@@ -81,7 +81,7 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
-import { ListenerPage } from "./listener-page";
+import { RulePage } from "./rule-page";
 
 const PIN_TEXT = "Pick another thread for this rule in Presence.";
 
@@ -109,7 +109,7 @@ const EVENT = {
 
 function renderPage(id = "R4") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={qc}><ListenerPage id={id} /></QueryClientProvider>);
+  return render(<QueryClientProvider client={qc}><RulePage id={id} /></QueryClientProvider>);
 }
 
 beforeEach(() => {
@@ -127,11 +127,11 @@ beforeEach(() => {
   patchEventSubscription.mockImplementation(async (id, body) => ({ ...listener({}), id, ...(body.enabled !== undefined ? { enabled: body.enabled } : {}) }));
 });
 
-describe("ListenerPage", () => {
+describe("RulePage", () => {
   it("reads the sentence with the pinned thread's title, from the archived list when the open list misses it", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    expect(await screen.findByText("Listens on acme/api for completed checks · works in the thread Platform CI")).toBeTruthy();
+    expect(await screen.findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
@@ -142,7 +142,7 @@ describe("ListenerPage", () => {
     });
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    expect(await screen.findByText("Listens on acme/api for completed checks · works in the thread Platform CI")).toBeTruthy();
+    expect(await screen.findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledTimes(1);
   });
 
@@ -179,7 +179,7 @@ describe("ListenerPage", () => {
     renderPage("M");
     const appears = await screen.findByRole("region", { name: "Appears as" });
     expect(within(appears).getByText("SRE Bot")).toBeTruthy();
-    expect(screen.getByText("Listens on acme/api for completed checks · works in a new thread each time · as SRE Bot")).toBeTruthy();
+    expect(screen.getByText("When a check completes on acme/api, work in a new thread each time, as SRE Bot.")).toBeTruthy();
   });
 
   it("names Valet in Appears as when the listener sets no appearance", async () => {
@@ -223,9 +223,9 @@ describe("ListenerPage", () => {
     });
     renderPage();
     const receipts = await screen.findByRole("region", { name: "Receipts" });
-    expect(await within(receipts).findByText("Completed check · excluded by this listener's filters")).toBeTruthy();
+    expect(await within(receipts).findByText("Completed check · excluded by its filters")).toBeTruthy();
     // The last stage reads in words, not as its identifier.
-    expect(within(receipts).getByText(/Listener matching: Excluded by filters/)).toBeTruthy();
+    expect(within(receipts).getByText(/Presence matching: Excluded by filters/)).toBeTruthy();
     expect(within(receipts).queryByText(/filter_excluded/)).toBeNull();
     expect(listEventReceipts).toHaveBeenCalledWith({ subscriptionId: "R4", limit: 10 });
   });
@@ -244,7 +244,7 @@ describe("ListenerPage", () => {
     renderPage();
     expect(await screen.findByText("Thread archived")).toBeTruthy();
     const problem = screen.getByRole("region", { name: "Problem" });
-    expect(within(problem).getByText("This listener's thread is archived. Pick another thread.")).toBeTruthy();
+    expect(await within(problem).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", {
       thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" },
@@ -270,12 +270,12 @@ describe("ListenerPage", () => {
       subscriptions: [listener({ enabled: false, target: { kind: "assistant", thread: { mode: "new" }, overlapPausedAt: 5 } })],
     });
     renderPage();
-    expect(await screen.findByText("Paused: a team listener covers the same events.")).toBeTruthy();
+    expect(await screen.findByText("Paused: the team already listens for this.")).toBeTruthy();
   });
 
   it("names the fix when the listener is not in the list", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [] });
     renderPage("gone");
-    expect(await screen.findByText("This listener does not exist, or you cannot see it. Open Places and pick a listener.")).toBeTruthy();
+    expect(await screen.findByText("This page does not exist, or you cannot see it. Pick a place from the rail.")).toBeTruthy();
   });
 });

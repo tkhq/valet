@@ -22,16 +22,16 @@ describe("saved automation review", () => {
     expect(patch).not.toHaveBeenCalled();
     expect(screen.getByText("Scope")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Follow release" } });
-    fireEvent.click(screen.getByRole("button", { name: "Turn on listener" }));
+    fireEvent.click(screen.getByRole("button", { name: "Turn on Follow launch" }));
     expect(patch.mock.calls[0][0]).toMatchObject({ id: "proposal-1", body: { name: "Follow release", enabled: true } });
   });
   it("speaks the Presence words", () => {
     const { unmount } = render(<EditSubscriptionDialog open review sub={{ ...sub, enabled: true }} targetLabel="Personal assistant" onOpenChange={() => {}} />);
-    expect(screen.getByText("This listener is already on. Review its current configuration.")).toBeTruthy();
+    expect(screen.getByText("Follow launch is already on. Review its current configuration.")).toBeTruthy();
     unmount();
     render(<EditSubscriptionDialog open sub={sub} targetLabel="Personal assistant" onOpenChange={() => {}} />);
-    expect(screen.getByText("Change what this listener matches. A save keeps its target.")).toBeTruthy();
-    expect(screen.getByPlaceholderText("Listener name")).toBeTruthy();
+    expect(screen.getByText("Change what this matches. A save keeps its target.")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Name")).toBeTruthy();
   });
   it("cancel leaves the proposal disabled", () => {
     const close = vi.fn();

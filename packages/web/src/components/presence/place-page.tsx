@@ -16,7 +16,7 @@ import {
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { errorText } from "~/lib/error-text";
 import { PresenceDetailPage } from "./page-shell";
-import { ListenerRow, useListenerSentence } from "./listener-rows";
+import { PresenceRow, usePresenceSentence } from "./presence-rows";
 import { PlaceThreads } from "./place-threads";
 import { SERVICE_NAMES } from "./places";
 import { eventInWords, eventPlace, type ThreadTitles } from "./sentences";
@@ -34,7 +34,7 @@ export function PlacePage({ subject }: { subject: string }) {
     <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
-        <ErrorRow>{errorText(detail.error, "Could not load this page. Open Places and select it again.")}</ErrorRow>
+        <ErrorRow>{errorText(detail.error, "Could not load this place. Pick it from the rail again.")}</ErrorRow>
       )}
       {detail.data && <PlaceBody data={detail.data} />}
     </PresenceDetailPage>
@@ -53,22 +53,22 @@ function knownThreadTitles(threads: PresencePlaceDetailResponse["threads"]): Thr
 export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
   const { place, listeners, threads, activity } = data;
   const [adding, setAdding] = useState(false);
-  const sentence = useListenerSentence(listeners, knownThreadTitles(threads));
+  const sentence = usePresenceSentence(listeners, knownThreadTitles(threads));
   const appearances = listeners.filter(hasAppearance);
   return (
     <div className="space-y-8">
       <WorkSection
-        title="Listeners"
+        title="Valet here"
         count={listeners.length}
         actions={(
-          <Button size="sm" variant="secondary" onClick={() => setAdding(true)} aria-label={`Add a listener in ${place.label}`}>
+          <Button size="sm" variant="secondary" onClick={() => setAdding(true)} aria-label={`Listen for… in ${place.label}`}>
             <Plus aria-hidden className="h-3.5 w-3.5" />
-            Add
+            Listen for…
           </Button>
         )}
       >
-        {listeners.length === 0 && <EmptyRow className="px-4 py-3">No listener here yet. Select Add to create one.</EmptyRow>}
-        {listeners.map((sub) => <ListenerRow key={sub.id} sub={sub} sentence={sentence(sub)} />)}
+        {listeners.length === 0 && <EmptyRow className="px-4 py-3">Nothing is set up here yet. Select Listen for… to add something.</EmptyRow>}
+        {listeners.map((sub) => <PresenceRow key={sub.id} sub={sub} sentence={sentence(sub)} />)}
       </WorkSection>
       {adding && (
         <AutomationWizard

@@ -16,19 +16,19 @@ const METADATA_LABELS: Record<string, string> = {
   messageTs: "Message timestamp", threadTs: "Thread timestamp", retryNum: "Retry number",
   retryReason: "Retry reason", botIdentityAvailable: "Bot identity available",
   botUserIdentityAvailable: "Bot user identity available", payloadBytes: "Payload size (bytes)",
-  configuredTriggerCount: "Configured listeners",
+  configuredTriggerCount: "Configured in Presence",
 };
 const LABELS: Record<string, string> = {
   // Receipts written before the rename record the old `orchestrator` kind.
   assistant: "Assistant", orchestrator: "Assistant", workflow: "Workflow",
-  subscription_match: "Listener matching", persistence: "Event storage", dispatch: "Delivery queue",
+  subscription_match: "Presence matching", persistence: "Event storage", dispatch: "Delivery queue",
   channel: "Channel processing", workspace: "Workspace check", ingestion: "Event ingestion",
   follow: "Follow-up check", fan_out: "Delivery preparation", completed: "Check completed",
-  not_applicable: "Not applicable", filtered: "Excluded by listener filters", no_subscription: "No matching listener",
+  not_applicable: "Not applicable", filtered: "Excluded by filters", no_subscription: "Nothing in Presence matched",
   started: "Started", stored: "Event stored", enqueued: "Delivery queued",
   receipt: "Receipt", received: "Received", verification: "Verification", verified: "Verified",
   classification: "Classification", classified: "Classified", ingest: "Event ingestion",
-  subscription: "Listener matching", subscriptions: "Listener matching", routing: "Routing",
+  subscription: "Presence matching", subscriptions: "Presence matching", routing: "Routing",
   accepted: "Accepted", rejected: "Rejected", ignored: "Ignored", matched: "Matched",
   no_match: "No match", unmatched: "No match", filter_excluded: "Excluded by filters",
   authorization_denied: "Authorization denied", key_mismatch: "Event key did not match", disabled: "Disabled", duplicate: "Duplicate", error: "Error", failed: "Failed",
@@ -145,8 +145,8 @@ function ReceiptRow({ receipt }: { receipt: Receipt }) {
           </dl>
         </section>
         <ReceiptStages receipt={receipt} />
-        <section aria-label="Listener decisions">
-          <h3 className="text-sm font-medium">Listener decisions</h3>
+        <section aria-label="Presence decisions">
+          <h3 className="text-sm font-medium">Presence decisions</h3>
           {receipt.subscriptions.length === 0 ? <p className="text-xs text-muted">No decisions recorded.</p> : <ul className="mt-2 space-y-2">{receipt.subscriptions.map(subscription => <li key={subscription.id} className="text-sm"><p className="font-medium">{subscription.name || subscription.id}: {label(subscription.outcome)}</p>{subscription.failedFilters?.length ? <p className="text-xs text-muted">Filters that did not match: {subscription.failedFilters.map(filter => `${filter.field} (${filter.op})`).join(", ")}</p> : null}<p className="break-all text-xs text-muted">{label(subscription.ownerType)} {subscription.ownerId} · Target: {label(subscription.target)}{subscription.targetId ? ` (${subscription.targetId})` : ""} · {subscription.id}</p></li>)}</ul>}
         </section>
       </div>

@@ -4,7 +4,7 @@ import { Plus } from "lucide-react";
 import { useEventSubscriptions } from "~/api/events";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { ListenerRow, useListenerSentence } from "~/components/presence/listener-rows";
+import { PresenceRow, usePresenceSentence } from "~/components/presence/presence-rows";
 import { ProblemBadge } from "~/components/presence/problem-badge";
 import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routines-tab";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
@@ -31,11 +31,11 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
   const listeners = (subscriptionsQ.data?.subscriptions ?? []).filter(
     (sub) => sub.target.kind === "workflow" && sub.target.workflowId === workflowId,
   );
-  const listenerSentence = useListenerSentence(listeners);
+  const presenceSentence = usePresenceSentence(listeners);
   const routineSentence = useRoutineSentence(routines);
   // The flow the open wizard starts on, or null while it is closed.
-  const [adding, setAdding] = useState<"listener" | "routine" | null>(
-    startNew === "schedule" ? "routine" : startNew === "event" ? "listener" : null,
+  const [adding, setAdding] = useState<"event" | "routine" | null>(
+    startNew === "schedule" ? "routine" : startNew === "event" ? "event" : null,
   );
 
   const pending = triggersQ.isPending || subscriptionsQ.isPending;
@@ -46,9 +46,9 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
     <div className="space-y-6 px-4 py-3">
       <WebhookSection workflowId={workflowId} />
       <WorkSection
-        title="Listeners and routines"
+        title="What starts it"
         actions={(
-          <Button size="sm" variant="secondary" onClick={() => setAdding("listener")}>
+          <Button size="sm" variant="secondary" onClick={() => setAdding("event")}>
             <Plus aria-hidden className="h-3.5 w-3.5" />
             Add
           </Button>
@@ -63,7 +63,7 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
             Nothing starts this workflow yet. Select Add to run it when something happens or at a set time.
           </EmptyRow>
         )}
-        {listeners.map((sub) => <ListenerRow key={sub.id} sub={sub} sentence={listenerSentence(sub)} />)}
+        {listeners.map((sub) => <PresenceRow key={sub.id} sub={sub} sentence={presenceSentence(sub)} />)}
         {routines.map((routine) => (
           <WorkRow
             key={routine.id}

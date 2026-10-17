@@ -1,27 +1,32 @@
 /**
- * The problem state of a listener or a routine
+ * The problem state of a line of presence or a routine
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 5, Part D): a badge
  * for every list, and the page text with the thread picker inline.
  *
  * Today the one problem is a pinned thread that no longer accepts deliveries.
- * The api reports it as the pin text: a listener's `problem`, a routine's
+ * The api reports it as the pin text: a line's `problem`, a routine's
  * `disabledReason`.
  */
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { Badge } from "~/components/primitives";
 import { ThreadPicker } from "./thread-picker";
 
-/** The dead-letter text the api stores when a pin cannot take a delivery. */
+/** The dead-letter text the api stores when a pin cannot take a delivery.
+ * The web compares against it and never shows it. */
+// copy-lint: allow rule
 export const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
 
-export const LISTENER_PIN_PROBLEM = "This listener's thread is archived. Pick another thread.";
-export const ROUTINE_PIN_PROBLEM = "This routine's thread is archived. Pick another thread.";
+/** The problem line for an archived pin. Without a title it names `The pinned thread`. */
+export function pinProblemText(threadTitle?: string): string {
+  const title = threadTitle !== undefined && threadTitle.trim().length > 0 ? threadTitle : "The pinned thread";
+  return `${title} is archived. Pick another thread:`;
+}
 
 /** The badge a list row shows for a rule with a problem. Nothing otherwise. */
 export function ProblemBadge({ problem }: { problem: string | null | undefined }) {
   if (problem === undefined || problem === null || problem.length === 0) return null;
   return (
-    <Badge variant="danger" title={problem}>
+    <Badge variant="danger" title={problem === PIN_UNAVAILABLE ? pinProblemText() : problem}>
       {problem === PIN_UNAVAILABLE ? "Thread archived" : "Problem"}
     </Badge>
   );
@@ -34,7 +39,7 @@ export function ProblemBadge({ problem }: { problem: string | null | undefined }
  */
 export function ThreadProblem({
   problem,
-  ruleKind,
+  threadTitle,
   workspace,
   onPick,
   pending = false,
@@ -42,7 +47,8 @@ export function ThreadProblem({
   readOnly = false,
 }: {
   problem: string;
-  ruleKind: "listener" | "routine";
+  /** The archived pin's title, when the caller knows it. */
+  threadTitle?: string;
   /** The viewer may not change the rule: no picker, and the text names who can. */
   readOnly?: boolean;
   /** The workspace key whose threads the picker lists. Absent hides the picker. */
@@ -52,11 +58,11 @@ export function ThreadProblem({
   error?: string | null;
 }) {
   const pin = problem === PIN_UNAVAILABLE;
-  const text = pin ? (ruleKind === "listener" ? LISTENER_PIN_PROBLEM : ROUTINE_PIN_PROBLEM) : problem;
+  const text = pin ? pinProblemText(threadTitle) : problem;
   return (
     <section aria-label="Problem" className="space-y-2 rounded-md border border-danger-500 bg-danger-wash p-3">
       <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">{text}</p>
-      {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this {ruleKind}.</p>}
+      {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this.</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (
         <p className="text-xs text-muted">Select Edit, then choose another option under Runs in.</p>

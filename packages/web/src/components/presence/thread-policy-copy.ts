@@ -9,10 +9,10 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 /** The grouping unit a rule's events name, in UI words. */
 export type SubjectKind = "channel" | "pull request" | "issue" | "repository";
 
-/** Which rule the policy belongs to: an event listener or a schedule. */
-export type RuleKind = "listener" | "routine";
+/** What the policy belongs to: a line of presence (an event subscription) or a routine (a schedule). */
+export type RuleKind = "presence" | "routine";
 
-/** The automation wizard's outcomes, as far as the default policy cares. */
+/** The wizard's outcomes, as far as the default policy cares. */
 export type WizardOutcome = "reply" | "workflow" | "notify" | "advanced" | "schedule" | "thread";
 
 const GITHUB_PULL_REQUEST = /(^|[._])(pr|pull|pull_request|review|check|check_run|check_suite|status)([._]|$)/;
@@ -45,9 +45,9 @@ export function subjectOptionLabel(subjectKind: SubjectKind | null): string {
   return `One thread per ${subjectKind ?? "place"}`;
 }
 
-/** The rule's own thread, named for its kind. */
+/** The rule's own thread. A line of presence has no category noun, so it reads `Its own thread`. */
 export function ownOptionLabel(ruleKind: RuleKind): string {
-  return ruleKind === "listener" ? "This listener's thread" : "This routine's thread";
+  return ruleKind === "presence" ? "Its own thread" : "This routine's thread";
 }
 
 /**

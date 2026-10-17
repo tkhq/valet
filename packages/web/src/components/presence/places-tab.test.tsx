@@ -79,16 +79,16 @@ describe("PlacesTab", () => {
 
     const slack = within(screen.getByRole("region", { name: "Slack" }));
     expect(slack.getByRole("link", { name: "#incidents" }).getAttribute("href")).toBe("/presence/places/slack:T1/C900");
-    expect(row("#incidents")).toContain("2 listeners · 1 active thread");
+    expect(row("#incidents")).toContain("2 lines · 1 active thread");
     expect(slack.getByText("Active")).toBeTruthy();
     // The Slack workspace row has nothing of its own, so the group heading stands for it.
     expect(slack.queryByRole("link", { name: "Slack" })).toBeNull();
 
     const github = within(screen.getByRole("region", { name: "GitHub" }));
     expect(github.getByRole("link", { name: "acme/api" })).toBeTruthy();
-    expect(row("acme/api")).toContain("Across acme/api · 2 listeners · No active thread");
-    expect(row("acme/api#12")).toContain("No listeners · No active thread");
-    expect(row("acme/api#13")).toContain("No listeners · 2 active threads");
+    expect(row("acme/api")).toContain("Across acme/api · 2 lines · No active thread");
+    expect(row("acme/api#12")).toContain("No lines · No active thread");
+    expect(row("acme/api#13")).toContain("No lines · 2 active threads");
 
     expect(within(screen.getByRole("region", { name: "Linear" })).getByText("Valet is in no Linear team in this workspace yet.")).toBeTruthy();
   });
@@ -113,9 +113,9 @@ describe("PlacesTab", () => {
     renderTab();
     await screen.findByRole("link", { name: "Slack" });
     expect(screen.getAllByText(/Everywhere in Slack/)).toHaveLength(1);
-    expect(row("Slack")).toContain("Everywhere in Slack · 1 listener");
-    expect(row("#alerts")).toContain("No listeners");
-    expect(row("#deploys")).toContain("No listeners");
+    expect(row("Slack")).toContain("Everywhere in Slack · 1 line");
+    expect(row("#alerts")).toContain("No lines");
+    expect(row("#deploys")).toContain("No lines");
   });
 
   it("reads the team workspace's places and offers its channel setup", async () => {
@@ -130,12 +130,12 @@ describe("PlacesTab", () => {
     const onViewChange = renderTab();
     const toggle = within(screen.getByRole("group", { name: "Places view" }));
     expect(toggle.getByRole("button", { name: "Places" }).getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(toggle.getByRole("button", { name: "All listeners" }));
-    expect(onViewChange).toHaveBeenCalledWith("listeners");
+    fireEvent.click(toggle.getByRole("button", { name: "Everything" }));
+    expect(onViewChange).toHaveBeenCalledWith("all");
   });
 
   it("shows the flat table in the All listeners view", () => {
-    renderTab("listeners");
+    renderTab("all");
     expect(screen.getByText("Listener table")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Slack" })).toBeNull();
     expect(listPresencePlaces).not.toHaveBeenCalled();

@@ -91,7 +91,7 @@ describe("ActivityTab rows", () => {
     ["claimed by <thread>", eventItem("ev-message", "slack.message", "#incidents", [delivery({ status: "skipped", lastError: "Skipped, claimed by thread t-inc-id.", claimedBy: tInc })]), "Message in #incidents → claimed by t-inc"],
     ["started <workflow> run", eventItem("ev-run", "github.check_run.completed", "acme/api", [delivery({ subscriptionId: "sub-wf", runId: "run-1" })]), "Completed check in acme/api → started Triage failures run"],
     ["skipped: <reason>", eventItem("ev-skip", "github.check_run.completed", "acme/api", [delivery({ status: "skipped", lastError: "Skipped by delivery preferences" })]), "Completed check in acme/api → skipped: delivery preferences"],
-    ["no listener", eventItem("ev-none", "github.check_run.completed", "acme/api", []), "Completed check in acme/api → no listener"],
+    ["no listener", eventItem("ev-none", "github.check_run.completed", "acme/api", []), "Completed check in acme/api → no one listening"],
   ])("reads %s", (_name, item, sentence) => {
     items = [item];
     renderTab();
@@ -159,7 +159,7 @@ describe("ActivityTab rows", () => {
   it("names its window in the Terminology words", () => {
     items = [eventItem("ev-none", "github.check_run.completed", "acme/api", [])];
     renderTab();
-    expect(screen.getByText(/Listener activity from the last 30 days/)).toBeTruthy();
+    expect(screen.getByText(/Activity from the last 30 days/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/subscription|trigger|automation/i);
   });
 });

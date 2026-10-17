@@ -221,7 +221,7 @@ function DefinitionRow({
         )}
 
         <p className="basis-full text-xs leading-5 text-muted">Updated {relativeTime(workflow.updatedAt)}</p>
-        <p className="basis-full text-xs text-muted">{nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : scheduleCount > 0 ? "Routine off" : eventCount > 0 ? "Runs when a listener hears its event" : "Run when needed"}{workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status}` : " · No runs yet"}</p>
+        <p className="basis-full text-xs text-muted">{nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : scheduleCount > 0 ? "Routine off" : eventCount > 0 ? "Runs when its event happens" : "Run when needed"}{workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status}` : " · No runs yet"}</p>
       </div>
       {hasSchema && (
         <RunWorkflowDialog
@@ -245,7 +245,7 @@ function DefinitionRow({
         )}
         {eventCount > 0 && (
           <span
-            aria-label={`${eventCount} listener${eventCount === 1 ? "" : "s"}`}
+            aria-label={`${eventCount} ${eventCount === 1 ? "event" : "events"}`}
             className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
             <Zap className="h-3 w-3" /> {eventCount}
@@ -289,7 +289,7 @@ function DefinitionRow({
               open={deleteOpen}
               onOpenChange={setDeleteOpen}
               title={`Delete "${workflow.name}"?`}
-              description="The workflow, its saved versions, and its listeners and routines are deleted. Settled run history is kept."
+              description="The workflow, its saved versions, and what starts it are deleted. Settled run history is kept."
               confirmLabel="Delete workflow"
               pendingLabel="Deleting…"
               pending={del.isPending}

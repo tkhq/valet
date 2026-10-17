@@ -154,10 +154,10 @@ describe("AutomationWizard", () => {
     expect(review.getByText("When").nextElementSibling?.textContent).toBe("slack.message");
     expect(review.getByText("Scope").nextElementSibling?.textContent).toContain("C123ABC");
     expect(review.getByText("Scope").nextElementSibling?.textContent).toContain("1750000000.123456");
-    expect((screen.getByRole("button", { name: /Create listener/ }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Follow rollout thread" } });
+    expect((screen.getByRole("button", { name: "Create" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Follow rollout thread" } });
     expect(createSubscription).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription).toHaveBeenCalledTimes(1);
     expect(createSchedule).not.toHaveBeenCalled();
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
@@ -189,8 +189,8 @@ describe("AutomationWizard", () => {
     expect(screen.queryByLabelText("Assistant")).toBeNull();
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false);
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Platform replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0]).toMatchObject({
       eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C123" }],
@@ -213,8 +213,8 @@ describe("AutomationWizard", () => {
     addReplyChannel("C123");
     clickNext();
     expect(screen.getByText(/any member of the organization/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Platform replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].audience).toBe("organization");
   });
 
@@ -224,8 +224,8 @@ describe("AutomationWizard", () => {
     addReplyChannel("C123");
     clickNext();
     expect(screen.getByText(/any linked member of Platform/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Platform replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].audience).toBe("team");
   });
 
@@ -235,8 +235,8 @@ describe("AutomationWizard", () => {
     expect(screen.queryByLabelText(/Anyone in the organization/)).toBeNull();
     addReplyChannel("C123");
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Mine" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Mine" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].audience).toBeUndefined();
   });
 
@@ -262,8 +262,8 @@ describe("AutomationWizard", () => {
     clickNext();
 
     // Step 3 — Review: name it, create.
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Slack replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Slack replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     expect(createSchedule).not.toHaveBeenCalled();
     expect(createSubscription).toHaveBeenCalledTimes(1);
@@ -280,10 +280,10 @@ describe("AutomationWizard", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
     expect(screen.getByText(/An assistant answers Slack @-mentions/)).toBeTruthy();
     clickNext();
-    expect(screen.getByText(/This rule uses the organization/)).toBeTruthy();
+    expect(screen.getByText(/Valet replies with the organization/)).toBeTruthy();
     expect(screen.getByText(/Choose below who may invoke it by mention/)).toBeTruthy();
     expect((screen.getByRole("radio", { name: "Platform" }) as HTMLInputElement).disabled).toBe(false);
-    expect(screen.getByText(/no linked account runs as the person who set the rule up/)).toBeTruthy();
+    expect(screen.getByText(/no linked account runs as the person who set this up/)).toBeTruthy();
     // The review describes the selected team's member scope.
     addReplyChannel("C123");
     clickNext();
@@ -301,8 +301,8 @@ describe("AutomationWizard", () => {
     addReplyChannel("C123");
     clickNext();
     expect(screen.getByText(/Mentions by other people do not fire it/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Personal" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Personal" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "assistant", assistant: "user", follow: true, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } });
   });
 
@@ -312,8 +312,8 @@ describe("AutomationWizard", () => {
     clickNext();
     addReplyChannel("C123");
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Team ops" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Team ops" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(createSubscription.mock.calls[0][0].target).toEqual({ kind: "assistant", assistant: "team", teamId: "t_platform", follow: true, thread: { mode: "new" } });
   });
 
@@ -325,8 +325,8 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByLabelText(/The org assistant/));
     expect(screen.getByText(/do not reach the org assistant/)).toBeTruthy();
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Org replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Org replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({ kind: "assistant", assistant: "org", follow: true, thread: { mode: "new" } });
   });
@@ -339,8 +339,8 @@ describe("AutomationWizard", () => {
     addReplyChannel("C456");
     clickNext();
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Two rooms" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Two rooms" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     // The free-text fallback labels a typed id with itself; the picker path
@@ -360,8 +360,8 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /Keep following the thread/ }));
     clickNext();
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Ping only" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Ping only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.eventKeys).toEqual(["slack.app_mention"]);
@@ -401,8 +401,8 @@ describe("AutomationWizard", () => {
     expect((screen.getByLabelText(/Notify your personal workspace/) as HTMLInputElement).checked).toBe(true);
     clickNext(); // Then
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "PR ping" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR ping" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "subject" } });
   });
@@ -421,8 +421,8 @@ describe("AutomationWizard", () => {
     fireEvent.change(screen.getByLabelText("Workflow"), { target: { value: "wf_1" } });
     clickNext(); // Then
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "PR deploy" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR deploy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     expect(createSchedule).not.toHaveBeenCalled();
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
@@ -446,8 +446,8 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByLabelText(/Notify Platform/));
     clickNext();
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "PR watch" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR watch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     expect(createSchedule).not.toHaveBeenCalled();
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
@@ -465,8 +465,8 @@ describe("AutomationWizard", () => {
   function submitAdvanced() {
     clickNext();
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Match rule" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Match rule" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
   }
 
   it("prunes only unsupported filters as selected events change", () => {
@@ -528,8 +528,8 @@ describe("AutomationWizard", () => {
     });
     clickNext(); // Reply
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Slack replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Slack replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({
@@ -562,8 +562,8 @@ describe("AutomationWizard", () => {
     });
     clickNext();
 
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "PR triage" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR triage" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({
@@ -609,7 +609,7 @@ describe("AutomationWizard", () => {
 
     // Step 4 — Review.
     fireEvent.change(screen.getByLabelText("Routine name"), { target: { value: "Morning digest" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create routine/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     expect(createSubscription).not.toHaveBeenCalled();
     expect(createSchedule).toHaveBeenCalledTimes(1);
@@ -662,8 +662,8 @@ describe("AutomationWizard", () => {
     clickNext(); // What: reply
     addReplyChannel("C123");
     clickNext(); // Reply → Review
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: name } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: name } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
   }
 
   it("homepage setup never offers to override a colliding responder", () => {
@@ -673,8 +673,8 @@ describe("AutomationWizard", () => {
     render(<AutomationWizard open onOpenChange={() => {}} replyTeam={{ id: "t_platform", name: "Platform" }} />);
     addReplyChannel("C123");
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Platform replies" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Platform replies" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(screen.getByText("Eng channel replies")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Create anyway" })).toBeNull();
     expect(screen.getByRole("link", { name: "Open Presence" }).getAttribute("href")).toBe("/presence");
@@ -725,7 +725,7 @@ describe("AutomationWizard", () => {
     expect(screen.getByText("Eng channel replies")).toBeTruthy();
     // The refusal-only actions are gone.
     expect(screen.queryByRole("button", { name: /Create anyway/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Create listener/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /^Done$/ }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -746,8 +746,8 @@ describe("AutomationWizard", () => {
       expect(checkedRunsIn()).toBe("A new thread each time");
       expect(screen.getByRole("radio", { name: "One thread per channel" })).toBeTruthy();
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Replies" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Replies" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.target).toMatchObject({ kind: "assistant", thread: { mode: "new" } });
     });
@@ -760,8 +760,8 @@ describe("AutomationWizard", () => {
       clickNext();
       expect(checkedRunsIn()).toBe("One thread per pull request");
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "PRs" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PRs" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.target).toMatchObject({ thread: { mode: "subject" } });
     });
@@ -772,11 +772,11 @@ describe("AutomationWizard", () => {
       clickNext();
       fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
       clickNext();
-      expect(checkedRunsIn()).toBe("This listener's thread");
+      expect(checkedRunsIn()).toBe("Its own thread");
       fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Raw" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Raw" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.target).toMatchObject({ thread: { mode: "new" } });
     });
@@ -803,7 +803,7 @@ describe("AutomationWizard", () => {
       expect(checkedRunsIn()).toBe("This routine's thread");
       clickNext();
       fireEvent.change(screen.getByLabelText("Routine name"), { target: { value: "Digest" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create routine/ }));
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSchedule.mock.calls[0][0] as CreateWorkflowScheduleRequest;
       expect(body.thread).toEqual({ mode: "own" });
       expect(body.target).toEqual({ kind: "assistant", prompt: "Daily digest" });
@@ -835,8 +835,8 @@ describe("AutomationWizard", () => {
       expect(screen.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
       expect(checkedRunsIn()).toBe("A new thread each time");
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Incident replies" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Incident replies" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.eventKeys).toEqual(["slack.app_mention"]);
       expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]);
@@ -852,13 +852,13 @@ describe("AutomationWizard", () => {
       clickNext();
       expect(checkedRunsIn()).toBe("One thread per pull request");
       const options = within(screen.getByRole("group", { name: "Runs in" })).getAllByRole("radio").map((r) => r.parentElement?.textContent);
-      expect(options).toEqual(["A new thread each time", "One thread per pull request", "This listener's thread", "An existing thread…"]);
+      expect(options).toEqual(["A new thread each time", "One thread per pull request", "Its own thread", "An existing thread…"]);
       fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
       expect(screen.getByText("Thread picker for user")).toBeTruthy();
       fireEvent.click(screen.getByRole("radio", { name: "One thread per pull request" }));
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Failed checks" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Failed checks" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.filters).toEqual([{ field: "repo", op: "eq", value: "acme/api", label: "acme/api" }]);
       expect(body.target).toMatchObject({ thread: { mode: "subject" } });
@@ -905,8 +905,8 @@ describe("AutomationWizard", () => {
       expect(screen.getByDisplayValue("acme/api")).toBeTruthy();
       clickNext();
       clickNext();
-      fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Failed checks" } });
-      fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Failed checks" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.filters).toEqual([{ field: "repo", op: "eq", value: "acme/api", label: "acme/api" }]);
     });
@@ -921,8 +921,8 @@ describe("AutomationWizard", () => {
     clickNext();
     expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_2");
     clickNext();
-    fireEvent.change(screen.getByLabelText("Listener name"), { target: { value: "Triage PRs" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create listener/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Triage PRs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.target).toEqual({ kind: "workflow", workflowId: "wf_2" });
   });
@@ -937,9 +937,9 @@ describe("AutomationWizard", () => {
     expect((screen.getByLabelText("Workflow") as HTMLSelectElement).value).toBe("wf_2");
   });
 
-  it("names its flow: a listener for an event rule, a routine for a schedule", () => {
+  it("names its flow: Listen for… for an event, New routine for a schedule", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
-    expect(screen.getByRole("dialog", { name: "New listener" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Listen for…" })).toBeTruthy();
     expect(screen.getByText("What should Valet do?")).toBeTruthy();
     pickOutcome(/On a schedule/);
     expect(screen.getByRole("dialog", { name: "New routine" })).toBeTruthy();
@@ -948,18 +948,18 @@ describe("AutomationWizard", () => {
     clickNext();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Daily digest" } });
     clickNext();
-    expect(screen.getByRole("button", { name: "Create routine" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
     expect(screen.getByLabelText("Routine name")).toBeTruthy();
   });
 
-  it("an event rule ends on Create listener", () => {
+  it("an event ends on Create", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
     pickOutcome(/Send a notification/);
     clickNext();
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     clickNext();
     clickNext();
-    expect(screen.getByRole("button", { name: "Create listener" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create" })).toBeTruthy();
     expect(screen.queryByText(/automation|trigger|subscription/i)).toBeNull();
   });
 

@@ -54,7 +54,7 @@ export function DeliveryList({
   if (deliveries.length === 0) {
     return (
       <p className="text-xs text-muted">
-        {empty ?? "No listener matched this event. Add one in Presence."}
+        {empty ?? "Nothing in Presence matched this event. To act on events like it, select Listen for… on its place in Presence."}
       </p>
     );
   }

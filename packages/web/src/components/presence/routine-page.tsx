@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { TeamSummary, WorkflowRunSummary } from "@valet/api/wire";
-import { usePinnedThreadTitle } from "~/api/listener";
+import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers } from "~/api/workflows";
 import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
@@ -67,6 +67,9 @@ export function RoutinePage({ id }: { id: string }) {
 
 function RoutineBody({ routine }: { routine: Routine }) {
   const sentenceFor = useRoutineSentence([routine]);
+  const pin = routine.detail.thread?.mode === "existing" ? routine.detail.thread : undefined;
+  const pinTitles = usePinnedThreadTitle(pin);
+  const pinThreadTitle = pin ? pinTitles[pin.threadId]?.title ?? undefined : undefined;
   const fire = useRunScheduleNow();
   const update = useUpdateSchedule();
   const me = useMe();
@@ -121,7 +124,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
         {routine.detail.disabledReason && (
           <ThreadProblem
             problem={routine.detail.disabledReason}
-            ruleKind="routine"
+            threadTitle={pinThreadTitle}
             workspace={workspace}
             readOnly={readOnly}
             onPick={(thread) => save({ thread, enabled: true })}

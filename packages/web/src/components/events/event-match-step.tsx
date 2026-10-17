@@ -82,7 +82,7 @@ export function EventMatchStep({
           <p className="mb-1.5 text-xs font-medium text-muted">Filters</p>
           <FilterEditor fields={filterFields} rows={filterRows} onChange={onFilterChange} />
           <p className="mt-1.5 text-xs text-muted">
-            A rule matches only when every filter matches. Add none to match every selected event.
+            Valet acts only when every filter matches. Add none to match every selected event.
           </p>
           {/* A `slack.app_mention` rule is scoped to the creator's own
               mentions and needs a channel filter, unless this explicit
@@ -98,7 +98,7 @@ export function EventMatchStep({
               <span>
                 Any channel
                 <span className="block text-xs text-muted">
-                  Personal rules accept your own mentions. Team assistant rules accept linked team members. A channel filter is required.
+                  In your personal workspace, only your own mentions count. For a team assistant, mentions by linked team members count. A channel filter is required.
                   Check this to listen in every channel the app can see instead.
                 </span>
               </span>

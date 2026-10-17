@@ -132,7 +132,7 @@ const SLACK_ONLY_OUTCOMES: readonly Outcome[] = ["reply", "thread"];
  * preselected workflow on a workflow rule, and a place outside Slack on a
  * notification, because it cannot take a Slack reply. */
 function initialOutcome(
-  startOn: "listener" | "routine",
+  startOn: "event" | "routine",
   preselectedWorkflowId: string | undefined,
   place: PreselectedPlace | undefined,
 ): Outcome {
@@ -162,7 +162,7 @@ export function AutomationWizard({
   onCloseAutoFocus,
   preselectedPlace,
   preselectedWorkflowId,
-  startOn = "listener",
+  startOn = "event",
 }: {
   replyTeam?: { id: string; name: string };
   onCloseAutoFocus?: (event: Event) => void;
@@ -175,9 +175,9 @@ export function AutomationWizard({
   /** Opens on "Run a workflow on an event" with this workflow as the target.
    * Read at mount, like `preselectedPlace`. */
   preselectedWorkflowId?: string;
-  /** The flow the wizard opens on: a listener (an event rule) or a routine
-   * (a schedule). Read at mount. */
-  startOn?: "listener" | "routine";
+  /** The flow the wizard opens on: an event (a line of presence) or a
+   * routine (a schedule). Read at mount. */
+  startOn?: "event" | "routine";
 }) {
   const catalogQ = useEventCatalog();
   const allServices = catalogQ.data?.services ?? [];
@@ -308,9 +308,7 @@ export function AutomationWizard({
   const threadPolicy: AssistantThreadPolicy | null =
     threadChoice === undefined || choiceStale ? defaultThread : threadChoice.policy;
   const threadReady = target.kind !== "assistant" || threadPolicy !== null;
-  const ruleKind = isSchedule ? "routine" : "listener";
-  // The flow's name for the title, the name field, and the Create button.
-  const flowName = isSchedule ? "routine" : "listener";
+  const ruleKind = isSchedule ? "routine" : "presence";
   const runsIn = (idPrefix: string) => (
     <RunsInField
       idPrefix={idPrefix}
@@ -522,7 +520,7 @@ export function AutomationWizard({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         onCloseAutoFocus={onCloseAutoFocus}
-        title={replyTeam ? "Set up Slack replies" : `New ${flowName}`}
+        title={replyTeam ? "Set up Slack replies" : isSchedule ? "New routine" : "Listen for…"}
         description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Pick what Valet does, then fill in the details."}
         className="max-w-lg"
       >
@@ -613,7 +611,7 @@ export function AutomationWizard({
 
           {isLastStep && (
             <ReviewStep
-              flowName={flowName}
+              routine={isSchedule}
               name={name}
               onNameChange={setName}
               following={outcome === "reply" ? follow : outcome === "thread" ? false : undefined}
@@ -643,7 +641,7 @@ export function AutomationWizard({
           {collisions !== null && (
             <CollisionNotice report={collisions.report} committed={collisions.committed} />
           )}
-          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">A matching listener already exists. <Link to="/presence" className="underline">Open Presence</Link> to manage it.</p>}
+          {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">Valet already listens for this. <Link to="/presence" className="underline">Open Presence</Link> to manage it.</p>}
           {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
         </div>
 
@@ -668,7 +666,7 @@ export function AutomationWizard({
               )}
               {isLastStep && (
                 <Button type="button" onClick={() => submit()} disabled={!canCreate}>
-                  {isPending ? "Creating…" : `Create ${flowName}`}
+                  {isPending ? "Creating…" : "Create"}
                 </Button>
               )}
               {!replyTeam && isLastStep && collisions !== null && collisions.report.blocking.length > 0 && (
@@ -817,14 +815,14 @@ function ReplyStep({
     <div className="space-y-4">
       <p className="text-xs text-muted">
         {target.assistant === "team"
-          ? "This rule uses the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A full member of your Slack workspace with no linked account runs as the person who set the rule up. Guests and people from other organizations are denied."
-          : <>This rule fires only when <span className="text-ink">you</span> @-mention the app.
+          ? "Valet replies with the organization’s Slack bot. The team owns and administers the assistant. Choose below who may invoke it by mention. A full member of your Slack workspace with no linked account runs as the person who set this up. Guests and people from other organizations are denied."
+          : <>Valet replies only when <span className="text-ink">you</span> @-mention the app.
             Mentions by other people do not reach {reach}.</>}
       </p>
       {slackUnlinked && target.assistant !== "team" && (
         <p className="text-xs text-danger-500">
-          Your Slack account is not linked, so this rule cannot fire for you yet. Link it in
-          Integrations → Slack, then create the rule.
+          Your Slack account is not linked, so Valet cannot reply to you yet. Link it in
+          Integrations → Slack, then select Create.
         </p>
       )}
 
@@ -833,7 +831,7 @@ function ReplyStep({
         <ChannelMultiSelect channels={channels} onChange={onChannelsChange} disabled={anyChannel} />
         {!anyChannel && (
           <p className="mt-1.5 text-xs text-muted">
-            Select one or more channels. The rule replies only there.
+            Select one or more channels. Valet replies only there.
           </p>
         )}
         {!fixedTeam && <label className="mt-2 flex items-start gap-2 text-sm text-ink">
@@ -1283,12 +1281,12 @@ function ThenStep({
 }
 
 function ReviewStep({
-  flowName,
+  routine,
   name,
   onNameChange,
   summary, when, scope, destination, workflowId, following, reviewAudience,
 }: {
-  flowName: "listener" | "routine";
+  routine: boolean;
   following?: boolean; reviewAudience?: string;
   when: string; scope: string; destination: string; workflowId?: string;
   name: string;
@@ -1303,8 +1301,8 @@ function ReviewStep({
           id="automation-name"
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
-          placeholder={flowName === "routine" ? "Routine name" : "Listener name"}
-          aria-label={flowName === "routine" ? "Routine name" : "Listener name"}
+          placeholder={routine ? "Routine name" : "Name"}
+          aria-label={routine ? "Routine name" : "Name"}
         />
       </div>
       <AutomationReview follow={following} audience={reviewAudience} workflowId={workflowId} when={when} scope={scope} result={summary} destination={destination} />

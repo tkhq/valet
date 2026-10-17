@@ -1,8 +1,9 @@
 /**
  * The one-sentence rows of the Presence hub, as pure functions
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 1, Part D step 1,
- * Part E step 1). A listener, a routine, and an activity row each read as
- * one sentence, so the rules are tested without a render.
+ * Part E step 1, Part F step 1). A line of presence, a routine, and an
+ * activity row each read as one sentence, so the rules are tested without a
+ * render.
  *
  * Copy here uses only the left column of the spec's Terminology table.
  */
@@ -33,7 +34,7 @@ export type WorkflowNames = ReadonlyArray<{ id: string; name: string }>;
 type Catalog = GetWorkflowTriggerCatalogResponse["catalog"];
 
 /**
- * Where a rule's deliveries land, as one phrase for the **Runs in** control.
+ * Where a line's or a routine's deliveries land, as one phrase for the **Runs in** control.
  * `threadTitle` names an `existing` thread; without it the phrase falls back
  * to a generic name.
  */
@@ -72,27 +73,29 @@ function workflowName(workflows: WorkflowNames, workflowId: string | undefined):
 // ── Events in words ─────────────────────────────────────────────────────
 
 /**
- * Short names for the common event keys: the plural for a listener ("for
- * mentions") and the singular for an activity row ("Mention in #incidents").
- * A key that is not here falls back to the event picker's label.
+ * Short names for the common event keys. `when` is the clause after "When"
+ * in a sentence, split into its actor and verb so that two events with one
+ * verb share it ("a pull request review or a check completes"). `one` leads
+ * an activity row ("Mention in #incidents"). A key that is not here falls
+ * back to the event picker's label.
  */
-const EVENT_WORDS: Readonly<Record<string, { many: string; one: string }>> = {
-  "slack.app_mention": { many: "mentions", one: "Mention" },
-  "slack.message": { many: "messages", one: "Message" },
-  "slack.bot_message": { many: "app messages", one: "App message" },
-  "slack.reaction_added": { many: "added reactions", one: "Added reaction" },
-  "slack.reaction_removed": { many: "removed reactions", one: "Removed reaction" },
-  "github.issue_comment.created": { many: "comments", one: "Comment" },
-  "github.pull_request_review_comment.created": { many: "review comments", one: "Review comment" },
-  "github.pull_request_review.submitted": { many: "pull request reviews", one: "Pull request review" },
-  "github.pull_request.opened": { many: "opened pull requests", one: "Opened pull request" },
-  "github.pull_request.ready_for_review": { many: "pull requests ready for review", one: "Pull request ready for review" },
-  "github.pull_request.synchronize": { many: "pull request pushes", one: "Pull request push" },
-  "github.check_run.completed": { many: "completed checks", one: "Completed check" },
-  "github.check_suite.completed": { many: "completed checks", one: "Completed check" },
-  "github.pull_request.checks_completed": { many: "completed checks", one: "Completed check" },
-  "github.workflow_run.completed": { many: "completed workflow runs", one: "Completed workflow run" },
-  "linear.issue.create": { many: "new issues", one: "New issue" },
+const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; one: string }>> = {
+  "slack.app_mention": { when: ["someone", "mentions Valet"], one: "Mention" },
+  "slack.message": { when: ["someone", "posts a message"], one: "Message" },
+  "slack.bot_message": { when: ["an app", "posts a message"], one: "App message" },
+  "slack.reaction_added": { when: ["someone", "adds a reaction"], one: "Added reaction" },
+  "slack.reaction_removed": { when: ["someone", "removes a reaction"], one: "Removed reaction" },
+  "github.issue_comment.created": { when: ["someone", "comments"], one: "Comment" },
+  "github.pull_request_review_comment.created": { when: ["someone", "leaves a review comment"], one: "Review comment" },
+  "github.pull_request_review.submitted": { when: ["a pull request review", "completes"], one: "Pull request review" },
+  "github.pull_request.opened": { when: ["a pull request", "opens"], one: "Opened pull request" },
+  "github.pull_request.ready_for_review": { when: ["a pull request", "is ready for review"], one: "Pull request ready for review" },
+  "github.pull_request.synchronize": { when: ["someone", "pushes to a pull request"], one: "Pull request push" },
+  "github.check_run.completed": { when: ["a check", "completes"], one: "Completed check" },
+  "github.check_suite.completed": { when: ["a check", "completes"], one: "Completed check" },
+  "github.pull_request.checks_completed": { when: ["a check", "completes"], one: "Completed check" },
+  "github.workflow_run.completed": { when: ["a workflow run", "completes"], one: "Completed workflow run" },
+  "linear.issue.create": { when: ["an issue", "is created"], one: "New issue" },
 };
 
 /** "github.workflow_run.completed" → "Workflow run completed". */
@@ -118,13 +121,35 @@ function pickerLabel(key: string, catalog: Catalog | undefined): string | undefi
   return undefined;
 }
 
+/** One event as an actor and a verb. A picker label or a key in words is one clause with no verb to share. */
+function eventClause(key: string, catalog: Catalog | undefined): readonly [string, string] {
+  const known = EVENT_WORDS[key]?.when;
+  if (known) return known;
+  return [pickerLabel(key, catalog) ?? `${lowerFirst(keyInWords(key))} happens`, ""];
+}
+
+/** Joins items as `a`, `a or b`, or `a, b, or c`. */
+function joinOr(items: readonly string[]): string {
+  if (items.length <= 2) return items.join(" or ");
+  return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
+}
+
+/**
+ * The events after "When": each a clause, joined by "or". An event drops its
+ * verb when the next event has the same verb, so the verb is said once.
+ */
 function eventsInWords(keys: readonly string[], catalog: Catalog | undefined): string {
-  const words: string[] = [];
+  const clauses: Array<readonly [string, string]> = [];
   for (const key of keys) {
-    const word = EVENT_WORDS[key]?.many ?? pickerLabel(key, catalog) ?? lowerFirst(keyInWords(key));
-    if (!words.includes(word)) words.push(word);
+    const clause = eventClause(key, catalog);
+    if (!clauses.some(([actor, verb]) => actor === clause[0] && verb === clause[1])) clauses.push(clause);
   }
-  return words.join(" and ");
+  const words = clauses.map(([actor, verb], i) => {
+    const next = clauses[i + 1];
+    const shared = verb.length > 0 && next !== undefined && next[1] === verb;
+    return shared || verb.length === 0 ? actor : `${actor} ${verb}`;
+  });
+  return joinOr(words);
 }
 
 /** One event, as the lead of an activity row. */
@@ -169,7 +194,7 @@ const PLACE_FIELDS: Readonly<Record<Service, readonly string[]>> = {
   linear: ["identifier", "team"],
 };
 
-/** The place a rule listens in when no filter names one. */
+/** The place a line listens in when no filter names one. */
 const ANY_PLACE: Readonly<Record<Service, string>> = {
   slack: "any channel",
   github: "any repository",
@@ -186,13 +211,13 @@ function filterValues(filter: EventSubscriptionFilterWire): string[] {
   return [hasText(filter.label) ? filter.label : filter.value];
 }
 
-function listenerPlace(service: Service | null, filters: readonly EventSubscriptionFilterWire[]): string | null {
+function presencePlace(service: Service | null, filters: readonly EventSubscriptionFilterWire[]): string | null {
   if (service === null) return null;
   for (const field of PLACE_FIELDS[service]) {
     const filter = filters.find((f) => f.field === field && (f.op === "eq" || f.op === "in"));
     if (filter) {
       const values = filterValues(filter);
-      if (values.length > 0) return values.join(" and ");
+      if (values.length > 0) return joinOr(values);
     }
   }
   return ANY_PLACE[service];
@@ -219,48 +244,60 @@ export function eventPlace(refs: Readonly<Record<string, string>> | null | undef
   return null;
 }
 
-// ── Listeners ───────────────────────────────────────────────────────────
+// ── Lines of presence ───────────────────────────────────────────────────
 
-function listenerDoes(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): string {
+function pinnedThread(threads: ThreadTitles, threadId: string): string {
+  const title = threadTitle(threads, threadId);
+  return title === undefined ? "the pinned thread" : `the ${title} thread`;
+}
+
+/** The `<do>` of a line (spec Part C step 2). */
+function presenceDoes(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): string {
   const target = sub.target;
   if (target.kind === "workflow") {
-    return `runs ${workflowName(workflows, target.workflowId) ?? "a workflow"}`;
+    return `run ${workflowName(workflows, target.workflowId) ?? "a workflow"}`;
+  }
+  // An absent policy on conversational keys replies in a new thread per
+  // delivery (delivery threads spec Part A).
+  if ((target.thread === undefined || target.thread === null) && isConversational(sub.eventKeys)) {
+    return "reply in a new thread";
   }
   const policy = displayThreadPolicy(target, sub.eventKeys);
   switch (policy.mode) {
     case "new":
-      return isConversational(sub.eventKeys) ? "replies in a new thread" : "works in a new thread each time";
+      return isConversational(sub.eventKeys) ? "reply in a new thread" : "work in a new thread each time";
     case "subject":
-      return `works in one thread per ${subjectKindForKeys(sub.eventKeys) ?? "place"}`;
+      return `work in one thread per ${subjectKindForKeys(sub.eventKeys) ?? "place"}`;
     case "own":
-      return "works in this listener's thread";
+      return "work in its own thread";
     case "existing":
-      return `works in the thread ${threadTitle(threads, policy.threadId) ?? "you picked"}`;
+      return `work in ${pinnedThread(threads, policy.threadId)}`;
   }
 }
 
 function appearancePart(appearance: Appearance | undefined): string {
-  return hasText(appearance?.displayName) ? ` · as ${appearance.displayName}` : "";
+  return hasText(appearance?.displayName) ? `, as ${appearance.displayName}` : "";
 }
 
 /**
- * A listener as one sentence:
- * `Listens <in|on> <place> for <events>[ from <sender>] · <does>[ · as <appearance>]`.
- * `in` for Slack and Linear, `on` for GitHub.
+ * A line of presence as one sentence:
+ * `When <events>[ from <sender>] <in|on> <place>, <do>[, as <appearance>].`
+ * `in` for Slack and Linear, `on` for GitHub. Without a place:
+ * `When <events>[ from <sender>], <do>[, as <appearance>].`
  */
-export function listenerSentence(
+export function presenceSentence(
   sub: EventSubscriptionWire,
   catalog: Catalog | undefined,
   workflows: WorkflowNames,
   threads: ThreadTitles,
 ): string {
   const service = serviceOf(sub.eventKeys);
-  const place = listenerPlace(service, sub.filters);
+  const place = presencePlace(service, sub.filters);
   const where = place === null ? "" : ` ${service === "github" ? "on" : "in"} ${place}`;
   const sender = senderFilter(sub.filters);
   const from = sender === null ? "" : ` from ${sender}`;
   const events = eventsInWords(sub.eventKeys, catalog);
-  return `Listens${where} for ${events}${from} · ${listenerDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}`;
+  return `When ${events}${from}${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
 }
 
 // ── Routines ────────────────────────────────────────────────────────────
@@ -320,20 +357,21 @@ export function cronInWords(cron: string): string {
   return fallback;
 }
 
+/** The `<do>` of a routine (spec Part E step 1). */
 function routineDoes(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
   if (routine.detail.targetKind === "workflow") {
-    return `runs ${workflowName(workflows, routine.workflowId) ?? "a workflow"}`;
+    return `run ${workflowName(workflows, routine.workflowId) ?? "a workflow"}`;
   }
   const policy = routine.detail.thread ?? { mode: "own" };
   switch (policy.mode) {
     case "new":
-      return "works in a new thread each time";
+      return "work in a new thread each time";
     case "existing":
-      return `works in the thread ${threadTitle(threads, policy.threadId) ?? "you picked"}`;
+      return `work in ${pinnedThread(threads, policy.threadId)}`;
     // A routine has no subject; the server refuses `subject`, so it reads as `own`.
     case "subject":
     case "own":
-      return "works in this routine's thread";
+      return "work in its own thread";
   }
 }
 
@@ -343,9 +381,9 @@ function scheduleInWords(cron: string, timezone: string | undefined): string {
   return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? words : `${words} (${timezone})`;
 }
 
-/** A routine as one sentence: `<schedule in words> · <name> · <does>`. */
+/** A routine as one sentence: `<schedule in words>, <name>: <do>.` */
 export function routineSentence(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
-  return `${scheduleInWords(routine.detail.cron, routine.detail.timezone)} · ${routine.name} · ${routineDoes(routine, workflows, threads)}`;
+  return `${scheduleInWords(routine.detail.cron, routine.detail.timezone)}, ${routine.name}: ${routineDoes(routine, workflows, threads)}.`;
 }
 
 // ── Activity ────────────────────────────────────────────────────────────
@@ -360,7 +398,7 @@ export interface ActivityNames {
   threads?: ThreadTitles;
   /** The workflow a workflow delivery started. */
   workflowName?: string;
-  /** Workflow names by listener id, for a row whose deliveries reach several workflows. */
+  /** Workflow names by subscription id, for a row whose deliveries reach several workflows. */
   workflowsByListener?: Readonly<Record<string, string>>;
   /** The place, when the caller knows a better name than the event's refs give. */
   place?: string;
@@ -430,14 +468,14 @@ export function activityLead(event: ActivityEvent, names: ActivityNames = {}): s
   return `${eventInWords(event.eventKey)}${place === null ? "" : ` in ${place}`}`;
 }
 
-/** Each delivery's outcome, in order. No delivery reads `no listener`. */
+/** Each delivery's outcome, in order. No delivery reads `no one listening`. */
 export function activityOutcomes(
   event: ActivityEvent,
   delivery: EventDeliveryWire | readonly EventDeliveryWire[] | null,
   names: ActivityNames = {},
 ): ActivityOutcome[] {
   const deliveries: readonly EventDeliveryWire[] = delivery === null ? [] : Array.isArray(delivery) ? delivery : [delivery];
-  if (deliveries.length === 0) return [{ words: "no listener" }];
+  if (deliveries.length === 0) return [{ words: "no one listening" }];
   return deliveries.map((d) => deliveryOutcome(event, d, names));
 }
 
@@ -449,7 +487,7 @@ export function outcomeText(outcome: ActivityOutcome): string {
 /**
  * An activity row as one sentence: `<event in words> in <place> → <outcome>`.
  * The outcome is `replied in <thread>`, `delivered to <thread>`, `claimed by
- * <thread>`, `started <workflow> run`, `skipped: <reason>`, or `no listener`.
+ * <thread>`, `started <workflow> run`, `skipped: <reason>`, or `no one listening`.
  * Several deliveries join their outcomes with commas.
  */
 export function activitySentence(

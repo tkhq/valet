@@ -18,7 +18,7 @@ import { PIN_UNAVAILABLE, ProblemBadge, ThreadProblem } from "./problem-badge";
 describe("ProblemBadge", () => {
   it("names an archived pin, and renders nothing without a problem", () => {
     const { rerender, container } = render(<ProblemBadge problem={PIN_UNAVAILABLE} />);
-    expect(screen.getByText("Thread archived").getAttribute("title")).toBe(PIN_UNAVAILABLE);
+    expect(screen.getByText("Thread archived").getAttribute("title")).toBe("The pinned thread is archived. Pick another thread:");
     rerender(<ProblemBadge problem={undefined} />);
     expect(container.textContent).toBe("");
     rerender(<ProblemBadge problem="Something else broke." />);
@@ -27,24 +27,24 @@ describe("ProblemBadge", () => {
 });
 
 describe("ThreadProblem", () => {
-  it("says which rule lost its thread and passes the pick on", () => {
+  it("names the archived thread and passes the pick on", () => {
     const onPick = vi.fn();
-    render(<ThreadProblem problem={PIN_UNAVAILABLE} ruleKind="routine" workspace="user" onPick={onPick} />);
-    expect(screen.getByText("This routine's thread is archived. Pick another thread.")).toBeTruthy();
+    render(<ThreadProblem problem={PIN_UNAVAILABLE} threadTitle="Platform CI" workspace="user" onPick={onPick} />);
+    expect(screen.getByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Pick" }));
     expect(onPick).toHaveBeenCalledWith({ mode: "existing", sessionId: "s", threadId: "t" });
   });
 
-  it("names the owner, with no picker, for a viewer who may not change the rule", () => {
-    render(<ThreadProblem problem={PIN_UNAVAILABLE} ruleKind="listener" workspace="user" readOnly onPick={vi.fn()} />);
-    expect(screen.getByText("This listener's thread is archived. Pick another thread.")).toBeTruthy();
-    expect(screen.getByText("Only its owner can change this listener.")).toBeTruthy();
+  it("names the owner, with no picker, for a viewer who may not change it", () => {
+    render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace="user" readOnly onPick={vi.fn()} />);
+    expect(screen.getByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
+    expect(screen.getByText("Only its owner can change this.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
     expect(screen.queryByText("Select Edit, then choose another option under Runs in.")).toBeNull();
   });
 
   it("names the edit path when no workspace lists threads", () => {
-    render(<ThreadProblem problem={PIN_UNAVAILABLE} ruleKind="listener" workspace={undefined} onPick={vi.fn()} />);
+    render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} onPick={vi.fn()} />);
     expect(screen.getByText("Select Edit, then choose another option under Runs in.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
   });

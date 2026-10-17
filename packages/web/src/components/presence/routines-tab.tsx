@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
-import { usePinnedThreadTitles } from "~/api/listener";
+import { usePinnedThreadTitles } from "~/api/rule";
 import { useRunScheduleNow, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
 import { Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
 import { retryPhrase } from "~/components/events/delivery-copy";

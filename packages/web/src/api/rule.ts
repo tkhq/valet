@@ -1,7 +1,7 @@
 /**
- * Query hooks for one listener's page and one routine's page
+ * Query hooks for one line of presence's page and one routine's page
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 4, Part D step 2):
- * the listener's deliveries and receipts, and the titles of pinned threads.
+ * the line's deliveries and receipts, and the titles of pinned threads.
  */
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type {
@@ -19,8 +19,8 @@ export const qkListener = {
   pinTitle: (sessionId: string, threadId: string) => ["presence", "pin-title", sessionId, threadId] as const,
 };
 
-/** One listener's latest deliveries, newest first, each with its event. */
-export function useListenerDeliveries(id: string) {
+/** One line's latest deliveries, newest first, each with its event. */
+export function useRuleDeliveries(id: string) {
   return useQuery<ListSubscriptionDeliveriesResponse>({
     queryKey: qkListener.deliveries(id),
     queryFn: () => api.listSubscriptionDeliveries(id, 25),
@@ -28,9 +28,9 @@ export function useListenerDeliveries(id: string) {
   });
 }
 
-/** One listener's receipts. Receipts are admin-only, so the caller enables
+/** One line's receipts. Receipts are admin-only, so the caller enables
  * the read only for an organization administrator. */
-export function useListenerReceipts(id: string, enabled: boolean) {
+export function useRuleReceipts(id: string, enabled: boolean) {
   return useQuery<ListEventReceiptsResponse>({
     queryKey: qkListener.receipts(id),
     queryFn: () => api.listEventReceipts({ subscriptionId: id, limit: 10 }),
@@ -55,7 +55,7 @@ export async function pinnedThreadTitle(sessionId: string, threadId: string): Pr
 }
 
 /** The titles of pinned threads as `ThreadTitles`, for sentences. Every
- * page that names a pin (place, listener, routine) reads it here, so an
+ * page that names a pin (place, line of presence, routine) reads it here, so an
  * archived pin reads the same everywhere. A pin reads as untitled while it
  * loads or when no read returns its thread. */
 export function usePinnedThreadTitles(policies: ReadonlyArray<AssistantThreadPolicy | null | undefined>): ThreadTitles {

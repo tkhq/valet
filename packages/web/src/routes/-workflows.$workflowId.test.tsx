@@ -167,12 +167,12 @@ vi.mock("~/api/events", () => ({
 }));
 
 // Thread titles for pinned listeners and routines; none here pins a thread.
-vi.mock("~/api/listener", () => ({ usePinnedThreadTitles: () => ({}) }));
+vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
 
 /** The wizard has its own suite. A stub names the flow it opened on. */
 vi.mock("~/components/events/automation-wizard", () => ({
   AutomationWizard: ({ open, startOn }: { open: boolean; startOn?: string }) =>
-    open ? <div role="dialog" aria-label={startOn === "routine" ? "New routine" : "New listener"} /> : null,
+    open ? <div role="dialog" aria-label={startOn === "routine" ? "New routine" : "Listen for…"} /> : null,
 }));
 
 /** The assistant has a stable conversation address. SessionView renders its
@@ -384,7 +384,7 @@ describe("WorkflowEditorPage", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
-    expect(await screen.findByRole("dialog", { name: "New listener" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "Listen for…" })).toBeTruthy();
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

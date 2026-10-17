@@ -56,7 +56,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
         {first && (
           <p className="text-xs text-muted">
             {showDiagnostics && first.lastEventAt ? `Last incoming activity ${relativeTime(first.lastEventAt)}. ` : ""}
-            Listener activity from the last {first.windowDays} days. Turning off a listener stops new deliveries; existing history stays visible.
+            Activity from the last {first.windowDays} days. If you turn something off in Presence, its new deliveries stop. Existing history stays visible.
             {showDiagnostics && " Diagnostics also include incoming events and problems from the whole organization."}
           </p>
         )}
@@ -64,7 +64,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
         {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
         {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
         {log.data && items.length === 0 && (
-          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "No listener activity yet. To receive events, turn on a listener. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
+          <EmptyRow>{query || filter === "problems" ? "Nothing matches. Choose All or clear the search." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
         )}
         {items.length > 0 && (
           <WorkList>

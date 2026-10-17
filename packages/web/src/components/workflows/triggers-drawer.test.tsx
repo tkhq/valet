@@ -145,14 +145,14 @@ describe("TriggersPanel: listeners and routines", () => {
 
   it("renders a routine as its sentence, linked to its page", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
-    const link = screen.getByText("Every day at 9:00 · Nightly · runs Deploy pipeline").closest("a");
+    const link = screen.getByText("Every day at 9:00, Nightly: run Deploy pipeline.").closest("a");
     expect(link?.getAttribute("data-to")).toBe("/presence/routines");
     expect(link?.getAttribute("data-search")).toBe(JSON.stringify({ routine: "sched_1" }));
   });
 
   it("renders a listener that runs this workflow as its sentence, linked to its page", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
-    const rows = screen.getAllByText("Listens on acme/api for opened pull requests · runs Deploy pipeline");
+    const rows = screen.getAllByText("When a pull request opens on acme/api, run Deploy pipeline.");
     expect(rows).toHaveLength(1);
     const link = rows[0]!.closest("a");
     expect(link?.getAttribute("data-to")).toBe("/presence/rules/$id");
@@ -189,7 +189,7 @@ describe("TriggersPanel: listeners and routines", () => {
   it("opens the wizard on a listener when the new-workflow dialog asked for an event", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" startNew="event" />);
     expect(wizardProps).toHaveBeenLastCalledWith(
-      expect.objectContaining({ open: true, preselectedWorkflowId: "wf_1", startOn: "listener" }),
+      expect.objectContaining({ open: true, preselectedWorkflowId: "wf_1", startOn: "event" }),
     );
   });
 });

@@ -145,11 +145,11 @@ beforeEach(() => {
 describe("RoutinesTab", () => {
   it("lists routines as sentences, with the timezone when not UTC, and no listeners (H8)", async () => {
     wrap(<RoutinesTab />);
-    expect(await screen.findByRole("link", { name: "Every day at 9:00 · Morning summary · works in this routine's thread" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Every weekday at 8:30 (America/Denver) · Standup · works in a new thread each time" })).toBeTruthy();
-    expect(await screen.findByRole("link", { name: "Every day at 2:00 · Nightly build · runs Build" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: "Every day at 9:00, Morning summary: work in its own thread." })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Every weekday at 8:30 (America/Denver), Standup: work in a new thread each time." })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: "Every day at 2:00, Nightly build: run Build." })).toBeTruthy();
     expect(screen.queryByText(/On push/)).toBeNull();
-    expect(screen.getByRole("link", { name: "Every day at 9:00 · Morning summary · works in this routine's thread" }).getAttribute("href"))
+    expect(screen.getByRole("link", { name: "Every day at 9:00, Morning summary: work in its own thread." }).getAttribute("href"))
       .toBe("/presence/routines?routine=S1");
     expect(listWorkflowTriggers).toHaveBeenCalledWith({ ownerType: "user", ownerId: "u-001" });
   });
@@ -178,7 +178,7 @@ describe("RoutinesTab", () => {
 describe("RoutinePage", () => {
   it("shows the sentence and offers fire now, edit, and disable", async () => {
     wrap(<RoutinePage id="S1" />);
-    expect(await screen.findByText("Every day at 9:00 · Morning summary · works in this routine's thread")).toBeTruthy();
+    expect(await screen.findByText("Every day at 9:00, Morning summary: work in its own thread.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Fire now" }));
     await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
     expect(await screen.findByText("Fired. The routine runs now.")).toBeTruthy();
@@ -196,7 +196,7 @@ describe("RoutinePage", () => {
       threads: opts?.archived ? [{ id: "t-ci", sessionId: "s-ws", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1, archivedAt: 2 }] : [],
     }));
     wrap(<RoutinePage id="S1" />);
-    expect(await screen.findByText("Every day at 9:00 · Morning summary · works in the thread Platform CI")).toBeTruthy();
+    expect(await screen.findByText("Every day at 9:00, Morning summary: work in the Platform CI thread.")).toBeTruthy();
   });
 
   it("shows the problem with the picker inline; a pick repins and turns the routine on", async () => {
@@ -205,7 +205,7 @@ describe("RoutinePage", () => {
     });
     wrap(<RoutinePage id="S1" />);
     const problem = await screen.findByRole("region", { name: "Problem" });
-    expect(within(problem).getByText("This routine's thread is archived. Pick another thread.")).toBeTruthy();
+    expect(await within(problem).findByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
     expect(screen.getByText("Thread archived")).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", {

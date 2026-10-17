@@ -8,7 +8,7 @@ import type {
 import {
   activitySentence,
   cronInWords,
-  listenerSentence,
+  presenceSentence,
   routineSentence,
   runsInLabel,
   type RoutineLike,
@@ -50,11 +50,11 @@ function sub(over: Partial<EventSubscriptionWire> & { target: EventSubscriptionT
 const incidents = { field: "channel", op: "eq" as const, value: "C900", label: "#incidents" };
 const acmeApi = { field: "repo", op: "eq" as const, value: "acme/api" };
 
-describe("listenerSentence <does>", () => {
-  it("assistant, conversational keys, new: replies in a new thread", () => {
+describe("presenceSentence <do>", () => {
+  it("assistant, conversational keys, new: reply in a new thread", () => {
     const s = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "new" } } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · replies in a new thread",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, reply in a new thread.",
     );
   });
 
@@ -64,120 +64,169 @@ describe("listenerSentence <does>", () => {
       filters: [acmeApi],
       target: { kind: "assistant", thread: { mode: "new" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens on acme/api for comments · replies in a new thread",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone comments on acme/api, reply in a new thread.",
     );
   });
 
-  it("assistant, other keys, new: works in a new thread each time", () => {
+  it("assistant, other keys, new: work in a new thread each time", () => {
     const s = sub({
       eventKeys: ["slack.reaction_added"],
       filters: [incidents],
       target: { kind: "assistant", thread: { mode: "new" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for added reactions · works in a new thread each time",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone adds a reaction in #incidents, work in a new thread each time.",
     );
   });
 
-  it("assistant, subject: works in one thread per pull request", () => {
+  it("assistant, subject: work in one thread per pull request", () => {
     const s = sub({
       eventKeys: ["github.pull_request_review.submitted", "github.check_run.completed"],
       filters: [acmeApi],
       target: { kind: "assistant", thread: { mode: "subject" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens on acme/api for pull request reviews and completed checks · works in one thread per pull request",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
     );
   });
 
-  it("assistant, subject: works in one thread per channel", () => {
+  it("assistant, subject: work in one thread per issue", () => {
+    const s = sub({
+      eventKeys: ["linear.issue.create"],
+      filters: [{ field: "team", op: "eq", value: "ENG" }],
+      target: { kind: "assistant", thread: { mode: "subject" } },
+    });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When an issue is created in ENG, work in one thread per issue.",
+    );
+  });
+
+  it("assistant, subject: work in one thread per channel", () => {
     const s = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "subject" } } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · works in one thread per channel",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, work in one thread per channel.",
     );
   });
 
-  it("assistant, own: works in this listener's thread", () => {
+  it("assistant, own: work in its own thread", () => {
     const s = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "own" } } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · works in this listener's thread",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, work in its own thread.",
     );
   });
 
-  it("assistant, existing: works in the thread <title>", () => {
+  it("assistant, existing: work in the <title> thread", () => {
     const s = sub({
       eventKeys: ["github.check_run.completed"],
       filters: [acmeApi],
       target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens on acme/api for completed checks · works in the thread Platform CI",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When a check completes on acme/api, work in the Platform CI thread.",
     );
   });
 
-  it("assistant, existing, unknown title: falls back", () => {
+  it("assistant, existing, unknown title: work in the pinned thread", () => {
     const s = sub({
       filters: [incidents],
       target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "gone" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · works in the thread you picked",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, work in the pinned thread.",
     );
   });
 
-  it("workflow: runs <workflow name>", () => {
+  it("workflow: run <workflow name>", () => {
     const s = sub({ filters: [incidents], target: { kind: "workflow", workflowId: "wf-1" } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · runs Triage failures",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, run Triage failures.",
     );
   });
 
-  it("reads an absent policy the way the rule runs it", () => {
+  it("workflow with an unknown name: run a workflow", () => {
+    const s = sub({ filters: [incidents], target: { kind: "workflow", workflowId: "wf-gone" } });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, run a workflow.",
+    );
+  });
+
+  it("absent policy, conversational keys: reply in a new thread", () => {
     const s = sub({ filters: [incidents], target: { kind: "assistant" } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · replies in a new thread",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, reply in a new thread.",
+    );
+    const comment = sub({ eventKeys: ["github.issue_comment.created"], filters: [acmeApi], target: { kind: "assistant" } });
+    expect(presenceSentence(comment, catalog, workflows, threads)).toBe(
+      "When someone comments on acme/api, reply in a new thread.",
+    );
+  });
+
+  it("absent policy, other keys: work in its own thread", () => {
+    const s = sub({ eventKeys: ["github.check_run.completed"], filters: [acmeApi], target: { kind: "assistant" } });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When a check completes on acme/api, work in its own thread.",
     );
   });
 });
 
-describe("listenerSentence parts", () => {
+describe("presenceSentence parts", () => {
   it("uses in for Slack and Linear, on for GitHub", () => {
     const own = { kind: "assistant" as const, thread: { mode: "own" as const } };
-    expect(listenerSentence(sub({ filters: [incidents], target: own }), catalog, workflows, threads)).toMatch(/^Listens in #incidents/);
+    expect(presenceSentence(sub({ filters: [incidents], target: own }), catalog, workflows, threads)).toMatch(/ in #incidents, /);
     expect(
-      listenerSentence(
+      presenceSentence(
         sub({ eventKeys: ["linear.issue.create"], filters: [{ field: "team", op: "eq", value: "ENG" }], target: own }),
         catalog,
         workflows,
         threads,
       ),
-    ).toMatch(/^Listens in ENG for new issues/);
+    ).toBe("When an issue is created in ENG, work in its own thread.");
     expect(
-      listenerSentence(sub({ eventKeys: ["github.check_run.completed"], filters: [acmeApi], target: own }), catalog, workflows, threads),
-    ).toMatch(/^Listens on acme\/api/);
+      presenceSentence(sub({ eventKeys: ["github.check_run.completed"], filters: [acmeApi], target: own }), catalog, workflows, threads),
+    ).toBe("When a check completes on acme/api, work in its own thread.");
   });
 
   it("names the service-wide place when no filter names one", () => {
     const own = { kind: "assistant" as const, thread: { mode: "own" as const } };
-    expect(listenerSentence(sub({ target: own }), catalog, workflows, threads)).toMatch(/^Listens in any channel for mentions/);
+    expect(presenceSentence(sub({ target: own }), catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in any channel, work in its own thread.",
+    );
     expect(
-      listenerSentence(sub({ eventKeys: ["github.check_run.completed"], target: own }), catalog, workflows, threads),
-    ).toMatch(/^Listens on any repository for completed checks/);
+      presenceSentence(sub({ eventKeys: ["github.check_run.completed"], target: own }), catalog, workflows, threads),
+    ).toBe("When a check completes on any repository, work in its own thread.");
   });
 
-  it("joins several places with and", () => {
+  it("leaves the place out when no key names a service", () => {
+    const s = sub({ eventKeys: ["custom.thing_done"], target: { kind: "workflow", workflowId: "wf-1" } });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe("When thing done happens, run Triage failures.");
+  });
+
+  it("joins several places with or", () => {
     const s = sub({
       filters: [{ field: "channel", op: "in", value: ["C1", "C2"], labels: ["#eng", "#ops"] }],
       target: { kind: "assistant", thread: { mode: "own" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toMatch(/^Listens in #eng and #ops for mentions/);
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #eng or #ops, work in its own thread.",
+    );
+  });
+
+  it("joins three events with commas and or, and says each verb once", () => {
+    const s = sub({
+      eventKeys: ["github.pull_request.opened", "github.check_run.completed", "github.check_suite.completed", "github.workflow_run.completed"],
+      filters: [acmeApi],
+      target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When a pull request opens, a check, or a workflow run completes on acme/api, run Triage failures.",
+    );
   });
 
   it("uses the event picker label for a key without a short name", () => {
     const s = sub({ eventKeys: ["github.pull_request.labeled"], filters: [acmeApi], target: { kind: "workflow", workflowId: "wf-1" } });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens on acme/api for a label is added to a pull request · runs Triage failures",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When a label is added to a pull request on acme/api, run Triage failures.",
     );
   });
 
@@ -186,8 +235,8 @@ describe("listenerSentence parts", () => {
       filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
       target: { kind: "assistant", thread: { mode: "own" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions from Alice · works in this listener's thread",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet from Alice in #incidents, work in its own thread.",
     );
   });
 
@@ -196,8 +245,8 @@ describe("listenerSentence parts", () => {
       filters: [incidents],
       target: { kind: "assistant", thread: { mode: "new" }, appearance: { displayName: "Incident bot" } },
     });
-    expect(listenerSentence(s, catalog, workflows, threads)).toBe(
-      "Listens in #incidents for mentions · replies in a new thread · as Incident bot",
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in #incidents, reply in a new thread, as Incident bot.",
     );
   });
 });
@@ -211,41 +260,45 @@ function routine(over: Partial<RoutineLike["detail"]>, workflowId?: string): Rou
 }
 
 describe("routineSentence", () => {
-  it("own: works in this routine's thread", () => {
+  it("own: work in its own thread", () => {
     expect(routineSentence(routine({ thread: { mode: "own" } }), workflows, threads)).toBe(
-      "Every day at 9:00 · Morning summary · works in this routine's thread",
+      "Every day at 9:00, Morning summary: work in its own thread.",
     );
   });
 
   it("absent policy reads as own", () => {
     expect(routineSentence(routine({}), workflows, threads)).toBe(
-      "Every day at 9:00 · Morning summary · works in this routine's thread",
+      "Every day at 9:00, Morning summary: work in its own thread.",
     );
   });
 
-  it("new: works in a new thread each time", () => {
+  it("new: work in a new thread each time", () => {
     expect(routineSentence(routine({ thread: { mode: "new" } }), workflows, threads)).toBe(
-      "Every day at 9:00 · Morning summary · works in a new thread each time",
+      "Every day at 9:00, Morning summary: work in a new thread each time.",
     );
   });
 
-  it("existing: works in the thread <title>", () => {
+  it("existing: work in the <title> thread", () => {
     expect(
       routineSentence(routine({ thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } }), workflows, threads),
-    ).toBe("Every day at 9:00 · Morning summary · works in the thread Platform CI");
+    ).toBe("Every day at 9:00, Morning summary: work in the Platform CI thread.");
+    expect(
+      routineSentence(routine({ thread: { mode: "existing", sessionId: "s", threadId: "gone" } }), workflows, threads),
+    ).toBe("Every day at 9:00, Morning summary: work in the pinned thread.");
   });
 
-  it("workflow: runs <workflow>", () => {
+  it("workflow: run <workflow>", () => {
     expect(routineSentence(routine({ targetKind: "workflow" }, "wf-1"), workflows, threads)).toBe(
-      "Every day at 9:00 · Morning summary · runs Triage failures",
+      "Every day at 9:00, Morning summary: run Triage failures.",
     );
   });
+
   it("names a timezone other than UTC after the schedule words", () => {
     expect(routineSentence(routine({ timezone: "America/Denver" }), workflows, threads)).toBe(
-      "Every day at 9:00 (America/Denver) · Morning summary · works in this routine's thread",
+      "Every day at 9:00 (America/Denver), Morning summary: work in its own thread.",
     );
     expect(routineSentence(routine({ timezone: "UTC" }), workflows, threads)).toBe(
-      "Every day at 9:00 · Morning summary · works in this routine's thread",
+      "Every day at 9:00, Morning summary: work in its own thread.",
     );
   });
 });
@@ -316,9 +369,9 @@ describe("activitySentence outcomes", () => {
     );
   });
 
-  it("no listener", () => {
-    expect(activitySentence(check, null)).toBe("Completed check in acme/api → no listener");
-    expect(activitySentence(check, [])).toBe("Completed check in acme/api → no listener");
+  it("no one listening", () => {
+    expect(activitySentence(check, null)).toBe("Completed check in acme/api → no one listening");
+    expect(activitySentence(check, [])).toBe("Completed check in acme/api → no one listening");
   });
 
   it("falls back when the thread title is unknown", () => {
@@ -328,8 +381,8 @@ describe("activitySentence outcomes", () => {
   });
 
   it("prefers a place the caller names, and omits the place when none is known", () => {
-    expect(activitySentence(check, null, { place: "acme/api#12" })).toBe("Completed check in acme/api#12 → no listener");
-    expect(activitySentence({ eventKey: "slack.team_join" }, null)).toBe("Team join → no listener");
+    expect(activitySentence(check, null, { place: "acme/api#12" })).toBe("Completed check in acme/api#12 → no one listening");
+    expect(activitySentence({ eventKey: "slack.team_join" }, null)).toBe("Team join → no one listening");
   });
 
   it("joins the outcomes of several deliveries", () => {
@@ -345,16 +398,16 @@ describe("activitySentence outcomes", () => {
 
 describe("runsInLabel", () => {
   it("labels each mode", () => {
-    expect(runsInLabel({ mode: "new" }, "channel", "listener")).toBe("A new thread each time");
-    expect(runsInLabel({ mode: "subject" }, "pull request", "listener")).toBe("One thread per pull request");
-    expect(runsInLabel({ mode: "own" }, null, "listener")).toBe("This listener's thread");
+    expect(runsInLabel({ mode: "new" }, "channel", "presence")).toBe("A new thread each time");
+    expect(runsInLabel({ mode: "subject" }, "pull request", "presence")).toBe("One thread per pull request");
+    expect(runsInLabel({ mode: "own" }, null, "presence")).toBe("Its own thread");
     expect(runsInLabel({ mode: "own" }, null, "routine")).toBe("This routine's thread");
     expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "routine", "Deploys"))
       .toBe("The thread Deploys");
   });
 
   it("falls back when the picked thread has no known title", () => {
-    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "listener"))
+    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "presence"))
       .toBe("The thread you picked");
   });
 });

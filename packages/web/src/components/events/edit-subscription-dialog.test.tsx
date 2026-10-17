@@ -149,7 +149,7 @@ describe("EditSubscriptionDialog Runs in", () => {
 
   it("submits a changed policy", () => {
     edit();
-    fireEvent.click(screen.getByRole("radio", { name: "This listener's thread" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Its own thread" }));
     save();
     expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { thread: { mode: "own" } } });
   });
@@ -170,7 +170,7 @@ describe("EditSubscriptionDialog Runs in", () => {
   it("reads a Slack message rule with no stored policy as a new thread, and an own pick as shared", () => {
     edit({ ...sub, eventKeys: ["slack.message"], target: { kind: "assistant", assistant: "user" } });
     expect(screen.getByRole<HTMLInputElement>("radio", { name: "A new thread each time" }).checked).toBe(true);
-    fireEvent.click(screen.getByRole("radio", { name: "This listener's thread" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Its own thread" }));
     expect(screen.getByText("Messages from several Slack conversations will share this thread.")).toBeTruthy();
   });
 

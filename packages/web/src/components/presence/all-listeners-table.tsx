@@ -9,7 +9,7 @@ import { useEventSubscriptions } from "~/api/events";
 import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
 import { errorText } from "~/lib/error-text";
-import { PausedBadge, useListenerSentence } from "./listener-rows";
+import { PausedBadge, usePresenceSentence } from "./presence-rows";
 import { ProblemBadge } from "./problem-badge";
 
 export function AllListenersTable() {
@@ -17,22 +17,22 @@ export function AllListenersTable() {
   // Wait for the owner: an unscoped read lists every workspace's listeners.
   const subscriptions = useEventSubscriptions(owner, { enabled: owner !== undefined });
   const listeners = subscriptions.data?.subscriptions ?? [];
-  const sentence = useListenerSentence(listeners);
+  const sentence = usePresenceSentence(listeners);
 
-  if (subscriptions.isPending) return <LoadingRow label="Loading listeners…" />;
+  if (subscriptions.isPending) return <LoadingRow label="Loading…" />;
   if (subscriptions.isError) {
-    return <ErrorRow>{errorText(subscriptions.error, "Could not load listeners. Reload the page to try again.")}</ErrorRow>;
+    return <ErrorRow>{errorText(subscriptions.error, "Could not load what Valet listens for. Reload the page to try again.")}</ErrorRow>;
   }
   if (listeners.length === 0) {
-    return <EmptyRow>This workspace has no listeners yet. Select New listener to add one.</EmptyRow>;
+    return <EmptyRow>Valet listens nowhere in this workspace yet. Select Listen for… to add something.</EmptyRow>;
   }
   return (
     <div className="max-w-full overflow-x-auto rounded-lg border border-line">
-      <table aria-label="All listeners" className="w-full text-sm">
+      <table aria-label="Everything Valet listens for" className="w-full text-sm">
         <thead>
           <tr className="border-b border-line bg-paper-muted">
             <th scope="col" className="px-3 py-2 text-left font-medium text-muted">Name</th>
-            <th scope="col" className="px-3 py-2 text-left font-medium text-muted">Listener</th>
+            <th scope="col" className="px-3 py-2 text-left font-medium text-muted">What Valet does</th>
             <th scope="col" className="px-3 py-2 text-left font-medium text-muted">Status</th>
           </tr>
         </thead>

@@ -141,7 +141,7 @@ describe("EventDetailBody", () => {
     render(<EventDetailBody data={detailData} />);
     fireEvent.click(screen.getByRole("button", { name: "Redeliver" }));
 
-    expect(await screen.findByText(/matches up to 1 enabled listener/)).toBeTruthy();
+    expect(await screen.findByText(/matches up to 1 line in Presence that is on/)).toBeTruthy();
     expect(screen.getByText(/can start up to 1 run/)).toBeTruthy();
     // One delivery is still on the dispatcher's list, so the press can run
     // the same work twice — the dialog has to say so.
@@ -176,7 +176,7 @@ describe("EventDetailBody", () => {
     fireEvent.click(dialogButtons[dialogButtons.length - 1]);
 
     expect(screen.getByRole("status").textContent).toContain("Nothing was queued");
-    expect(screen.getByRole("status").textContent).toContain("Turn on or edit a listener in Presence");
+    expect(screen.getByRole("status").textContent).toContain("Turn on or edit what should match in Presence");
   });
 
   it("keeps the receipt stages under a disclosure and loads them when it opens", () => {

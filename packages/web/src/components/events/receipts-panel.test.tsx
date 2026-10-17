@@ -81,7 +81,7 @@ it("keeps filtering or failure visible when a later follow-up check completed", 
     { stage: "follow", outcome: "completed", detail: "Follow-up check finished", at: 3000 },
   ], subscriptions: [{ ...fixture.receipts[0]!.subscriptions[0]!, failedFilters: [{ field: "channel", op: "eq" }] }] } ] };
   const view = render(<ReceiptsPanel />);
-  expect(screen.getByText("Excluded by listener filters")).toBeTruthy();
+  expect(screen.getByText("Excluded by filters")).toBeTruthy();
   expect(screen.getByText(/Filters that did not match: channel/)).toBeTruthy();
   data = { ...data, receipts: [{ ...data.receipts[0]!, stages: [...data.receipts[0]!.stages, { stage: "dispatch", outcome: "failed", detail: "Delivery queue failed", at: 2500 }] }] };
   view.rerender(<ReceiptsPanel />);

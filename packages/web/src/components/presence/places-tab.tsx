@@ -23,11 +23,11 @@ import { SERVICE_NAMES, isServiceRoot } from "./places";
 
 export { SERVICE_NAMES, isServiceRoot };
 
-export type PlacesView = "places" | "listeners";
+export type PlacesView = "places" | "all";
 
 const VIEWS = [
   { value: "places", label: "Places" },
-  { value: "listeners", label: "All listeners" },
+  { value: "all", label: "Everything" },
 ] as const;
 
 const SERVICES: readonly PresencePlaceService[] = ["slack", "github", "linear"];
@@ -74,7 +74,7 @@ function count(n: number, one: string, many: string): string {
 export function placeDetail(place: PresencePlaceWire): string {
   const parts: string[] = [];
   if (place.scopeLabel !== undefined && place.listenerCount > 0) parts.push(place.scopeLabel);
-  parts.push(place.listenerCount === 0 ? "No listeners" : count(place.listenerCount, "listener", "listeners"));
+  parts.push(place.listenerCount === 0 ? "No lines" : count(place.listenerCount, "line", "lines"));
   parts.push(place.activeThreadCount === 0 ? "No active thread" : count(place.activeThreadCount, "active thread", "active threads"));
   return parts.join(" · ");
 }
@@ -90,7 +90,7 @@ export function PlacesTab({ view, onViewChange }: { view: PlacesView; onViewChan
           {teamId !== undefined && <ListenButton teamId={teamId} size="sm">Listen in channels</ListenButton>}
           <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
             <Plus aria-hidden className="h-3.5 w-3.5" />
-            New listener
+            Listen for…
           </Button>
         </div>
       </div>

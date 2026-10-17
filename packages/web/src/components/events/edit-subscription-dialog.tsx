@@ -134,7 +134,7 @@ export function EditSubscriptionDialog({
       return;
     }
     if (assistant && thread?.mode === "subject" && subjectKind === null) {
-      setError("This listener's events name no place to group threads by. Pick another Runs in option.");
+      setError("These events name no place to group threads by. Pick another Runs in option.");
       return;
     }
 
@@ -182,7 +182,7 @@ export function EditSubscriptionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title={`${review ? "Review" : "Edit"} ${sub.name}`}
-        description={review ? (sub.enabled ? "This listener is already on. Review its current configuration." : "Review the saved proposal. It stays off until you turn it on.") : "Change what this listener matches. A save keeps its target."}
+        description={review ? (sub.enabled ? `${sub.name} is already on. Review its current configuration.` : "Review the saved proposal. It stays off until you turn it on.") : "Change what this matches. A save keeps its target."}
         className="max-w-lg"
       >
         <div className="space-y-4">
@@ -192,7 +192,7 @@ export function EditSubscriptionDialog({
               id="edit-subscription-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Listener name"
+              placeholder="Name"
             />
           </div>
 
@@ -214,8 +214,8 @@ export function EditSubscriptionDialog({
             <p className="text-xs font-medium text-muted">Then</p>
             <p className="mt-1 text-sm text-ink">{targetLabel}</p>
             <p className="mt-1 text-xs text-muted">
-              This dialog cannot change the target. To use a different target, create a new
-              listener and delete this one.
+              This dialog cannot change the target. To use a different target, select Listen
+              for… on the place, then delete this one.
             </p>
             {/* The target stays fixed, but what the assistant reads is a field
                 of this rule, so it is editable here. */}
@@ -235,7 +235,7 @@ export function EditSubscriptionDialog({
               value={thread}
               onChange={setThread}
               subjectKind={subjectKind}
-              ruleKind="listener"
+              ruleKind="presence"
               workspace={threadWorkspace}
               eventKeys={[...keys]}
               disabled={patch.isPending}
@@ -277,7 +277,7 @@ export function EditSubscriptionDialog({
                 Cancel
               </Button>
               <Button type="button" onClick={() => save()} disabled={patch.isPending}>
-                {patch.isPending ? "Saving…" : review && !sub.enabled ? "Turn on listener" : "Save"}
+                {patch.isPending ? "Saving…" : review && !sub.enabled ? `Turn on ${sub.name}` : "Save"}
               </Button>
               {collisions !== null && collisions.report.blocking.length > 0 && (
                 <Button

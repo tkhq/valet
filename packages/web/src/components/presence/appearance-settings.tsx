@@ -26,7 +26,7 @@ export function AppearanceSettings({ value, onChange, subscription = false, disa
       <p className="text-xs text-muted">
         {subscription
           ? "Leave fields empty to use the workflow or workspace identity. These fields override the workflow's fields."
-          : "Leave fields empty to use the workspace identity. A listener can override these fields."}
+          : "Leave fields empty to use the workspace identity. A place can override these fields."}
         {" "}Explicit identity arguments in tool calls take priority.
       </p>
       <Label htmlFor={`${id}-name`}>Display name</Label>

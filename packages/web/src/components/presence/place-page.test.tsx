@@ -172,11 +172,11 @@ describe("PlacePage", () => {
     expect(getPresencePlace).toHaveBeenCalledWith("user", "github:acme/api");
     expect(screen.getByText("GitHub · Across acme/api")).toBeTruthy();
 
-    const listeners = screen.getByRole("region", { name: "Listeners" });
+    const listeners = screen.getByRole("region", { name: "Valet here" });
     expect(within(listeners).getByText(
-      "Listens on acme/api for pull request reviews and completed checks · works in one thread per pull request",
+      "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
     )).toBeTruthy();
-    expect(await within(listeners).findByText("Listens on acme/api for completed checks · works in the thread Platform CI")).toBeTruthy();
+    expect(await within(listeners).findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
 
     const threads = screen.getByRole("list", { name: "Threads for acme/api" });
@@ -203,8 +203,8 @@ describe("PlacePage", () => {
     }));
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
-    const listeners = await screen.findByRole("region", { name: "Listeners" });
-    expect(await within(listeners).findByText("Listens on acme/api for completed checks · works in the thread Old CI")).toBeTruthy();
+    const listeners = await screen.findByRole("region", { name: "Valet here" });
+    expect(await within(listeners).findByText("When a check completes on acme/api, work in the Old CI thread.")).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
 
@@ -215,13 +215,13 @@ describe("PlacePage", () => {
     await screen.findByRole("heading", { level: 1, name: "#incidents" });
     expect(getPresencePlace).toHaveBeenCalledWith("sre", "slack:T1/C900");
 
-    const sections = ["Listeners", "Appears as", "Threads", "Recent activity"].map((name) => screen.getByRole("region", { name }));
+    const sections = ["Valet here", "Appears as", "Threads", "Recent activity"].map((name) => screen.getByRole("region", { name }));
     for (let i = 1; i < sections.length; i++) {
       expect(sections[i - 1]!.compareDocumentPosition(sections[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
     const listeners = within(sections[0]!);
-    expect(listeners.getByText("Listens in #incidents for mentions · replies in a new thread · as SRE Bot")).toBeTruthy();
-    expect(listeners.getByText("Listens in #incidents for messages · works in the thread t-inc")).toBeTruthy();
+    expect(listeners.getByText("When someone mentions Valet in #incidents, reply in a new thread, as SRE Bot.")).toBeTruthy();
+    expect(listeners.getByText("When someone posts a message in #incidents, work in the t-inc thread.")).toBeTruthy();
 
     const appears = within(sections[1]!);
     expect(appears.getByText("SRE Bot")).toBeTruthy();
@@ -236,7 +236,7 @@ describe("PlacePage", () => {
   it("opens the wizard on this place from Add (H5)", async () => {
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
-    fireEvent.click(await screen.findByRole("button", { name: "Add a listener in #incidents" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Listen for… in #incidents" }));
     expect(screen.getByText("Wizard for #incidents")).toBeTruthy();
     expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
       open: true,
@@ -253,7 +253,7 @@ describe("PlacePage", () => {
       activity: [],
     });
     renderPage("github:acme/api");
-    expect(await screen.findByText("No listener here yet. Select Add to create one.")).toBeTruthy();
+    expect(await screen.findByText("Nothing is set up here yet. Select Listen for… to add something.")).toBeTruthy();
     expect(screen.getByText("No Valet thread works here yet.")).toBeTruthy();
     expect(screen.getByText("Nothing happened here in the last 30 days.")).toBeTruthy();
     expect(screen.getByText("GitHub")).toBeTruthy();
