@@ -30,11 +30,26 @@ function unionFilterFields(
   return out;
 }
 
-/** Both forms mount when opened. Keep their event selection and filter rows together. */
+/**
+ * The pinned rows the pruned rows lack, put back when the fields allow them.
+ * A pinned row is one the caller chose for the reader, such as a preselected
+ * place's filter: an event without its field drops it, and a later event
+ * with the field brings it back.
+ */
+export function restorePinnedRows(rows: UiFilterRow[], pinned: readonly UiFilterRow[], fields: FilterField[]): UiFilterRow[] {
+  const missing = pinned.filter(
+    (pin) => fields.some((f) => f.field === pin.field) && !rows.some((row) => row.id === pin.id || row.field === pin.field),
+  );
+  return missing.length === 0 ? rows : [...missing, ...rows];
+}
+
+/** Both forms mount when opened. Keep their event selection and filter rows
+ * together. `pinnedRows` survive an event change (see `restorePinnedRows`). */
 export function useSubscriptionMatch(
   services: CatalogService[],
   initialKeys: string[] = [],
   initialRows: () => UiFilterRow[] = () => [],
+  pinnedRows: readonly UiFilterRow[] = [],
 ) {
   const [keys, setKeys] = useState(() => new Set(initialKeys));
   const [filterRows, setFilterRows] = useState(initialRows);
@@ -45,7 +60,8 @@ export function useSubscriptionMatch(
     if (next.has(key)) next.delete(key);
     else next.add(key);
     setKeys(next);
-    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(services, next)));
+    const fields = unionFilterFields(services, next);
+    setFilterRows((rows) => restorePinnedRows(pruneFilterRows(rows, fields), pinnedRows, fields));
   }
 
   return { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey };

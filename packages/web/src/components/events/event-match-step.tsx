@@ -42,7 +42,7 @@ export function EventMatchStep({
         )}
         {!catalogLoading && !catalogError && services.length === 0 && (
           <p className="py-2 text-xs text-muted">
-            No plugin publishes events yet. Connect an integration with triggers first.
+            No plugin publishes events yet. Connect an integration that sends events first.
           </p>
         )}
         <div className="max-h-56 space-y-3 overflow-y-auto">

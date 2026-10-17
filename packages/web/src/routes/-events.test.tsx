@@ -274,7 +274,7 @@ describe("EventsPage — Subscriptions", () => {
    */
   function openWizardToTargetStep(eventKey: string) {
     fireEvent.click(screen.getByRole("button", { name: /Manual setup/ }));
-    fireEvent.click(screen.getByLabelText(/Advanced \/ custom trigger/)); // What: raw event flow
+    fireEvent.click(screen.getByLabelText(/Advanced: pick events/)); // What: raw event flow
     clickNext(); // What → Match
     fireEvent.click(screen.getByText(eventKey)); // pick the event key
     clickNext(); // Match → Then
@@ -319,10 +319,10 @@ describe("EventsPage — Subscriptions", () => {
     openWizardToTargetStep("github.pr.merged");
     clickNext(); // Then → Review, keeping the personal-assistant default.
 
-    fireEvent.change(screen.getByLabelText("Automation name"), {
+    fireEvent.change(screen.getByLabelText("Listener name"), {
       target: { value: "Merged PRs" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create listener" }));
 
     await waitFor(() =>
       expect(createMutate).toHaveBeenCalledWith(
@@ -380,10 +380,10 @@ describe("EventsPage — Subscriptions", () => {
     expect(teamRadio.checked).toBe(true);
 
     clickNext(); // Then → Review, keeping the team default.
-    fireEvent.change(screen.getByLabelText("Automation name"), {
+    fireEvent.change(screen.getByLabelText("Listener name"), {
       target: { value: "Team PRs" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create listener" }));
 
     await waitFor(() =>
       expect(createMutate).toHaveBeenCalledWith(
@@ -464,10 +464,10 @@ describe("EventsPage — Subscriptions", () => {
     fireEvent.change(screen.getByLabelText("Workflow"), { target: { value: "wf_team" } });
     clickNext(); // Then → Review
 
-    fireEvent.change(screen.getByLabelText("Automation name"), {
+    fireEvent.change(screen.getByLabelText("Listener name"), {
       target: { value: "Team deploy" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create listener" }));
 
     await waitFor(() =>
       expect(createMutate).toHaveBeenCalledWith(

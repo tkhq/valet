@@ -20,10 +20,10 @@ export function DeliveryPreferences({ value, onChange }: {
     </select>
     {value.deliveryPolicy !== "always" && <>
       <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={value.pauseOnOverlap}
-        onChange={(event) => onChange({ ...value, pauseOnOverlap: event.target.checked })} />Pause this subscription when an overlap occurs</label>
+        onChange={(event) => onChange({ ...value, pauseOnOverlap: event.target.checked })} />Pause this listener when an overlap occurs</label>
       <p className="text-xs leading-5 text-muted">{value.pauseOnOverlap
-        ? "All deliveries from this subscription will stop until you turn it back on. To receive overlapping events after re-enabling, choose ‘Deliver to my personal agent too’."
-        : "Only matching events are skipped. Other events continue to arrive."} Disabled team subscriptions do not count. Event Logs explain each skipped delivery.</p>
+        ? "All deliveries from this listener stop until you turn it back on. To receive overlapping events after you turn it on, choose ‘Deliver to my personal agent too’."
+        : "Only matching events are skipped. Other events continue to arrive."} Team listeners that are off do not count. Activity explains each skipped delivery.</p>
     </>}
   </fieldset>;
 }
