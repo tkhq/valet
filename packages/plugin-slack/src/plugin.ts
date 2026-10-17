@@ -7,6 +7,7 @@ import { slackNaturalSubject, slackSubjects } from "./subjects.js";
 import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
+import { slackConversationalTwin } from "./twins.js";
 
 // Re-exported so the api's Slack app manifest can pin its bot-event
 // subscriptions against the event types these triggers actually match.
@@ -26,6 +27,7 @@ const plugin: ValetPlugin = {
   triggers: slackTriggerDefs,
   eventSubjects: slackSubjects,
   naturalSubject: slackNaturalSubject,
+  conversationalTwin: slackConversationalTwin,
   httpRoutes: slackHttpRoutes,
   transports: [slackTransportFactory],
   filterOptionResolvers: slackFilterOptionResolvers,
