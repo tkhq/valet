@@ -1,13 +1,14 @@
 import { afterEach, expect, it } from "vitest";
 import { Type } from "typebox";
 import { eq } from "drizzle-orm";
-import type { ValetPlugin } from "@valet/engine";
+import type { PluginActionContext, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { credentials, workflowAccountGrants, workflowActionGrants } from "../schema/index.js";
 import { shareCredential, revokeShare } from "../services/credential-shares.js";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { addMember, createTeam } from "../services/teams.js";
 import { createWorkflowDefinition, updateWorkflowDefinition, type WorkflowServiceDeps } from "../workflows/service.js";
+import { workflowsActionPlugin } from "../workflows/actions.js";
 
 
 async function reviewedApproval(url: string, init: RequestInit = {}): Promise<Response> {
@@ -261,4 +262,43 @@ it("rejects account approval if the declared credential service mapping changed 
   expect(approval.status).toBe(409);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+});
+
+const unsupported = async (): Promise<never> => { throw new Error("Unexpected test operation"); };
+function assistantTurn(teamId: string, overrides: Partial<PluginActionContext> = {}): PluginActionContext {
+  return {
+    userId: "local-user", orgId: "local-org", owner: { type: "team", id: teamId }, interactiveActor: { id: "local-user" },
+    sessionId: "session", threadId: "thread", sessionPurpose: "orchestrator", actionId: "workflows.save_workflow", service: "workflows",
+    credentials: { get: async () => null, request: unsupported },
+    sandbox: { id: "sandbox", readFile: unsupported, readBinary: unsupported, writeFile: unsupported, writeBinary: unsupported, readdir: unsupported, stat: unsupported, mkdir: unsupported, rm: unsupported, exec: unsupported },
+    requestDecision: unsupported, signal: new AbortController().signal, threadRead: async () => [], listThreads: async () => [], setModel: unsupported,
+    ...overrides,
+  };
+}
+
+it("grants an assistant save made on the person's own prompt and nothing for automated turns", async () => {
+  const { p, team, deps } = await setup();
+  const save = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.save_workflow");
+  if (!save) throw new Error("save_workflow missing");
+  const automated: [string, Partial<PluginActionContext>][] = [
+    ["event or signal turn", { interactiveActor: undefined }],
+    ["delegated child work", { sessionPurpose: "child" }],
+    ["workflow step", { sessionPurpose: "workflow" }],
+    ["another person's prompt", { interactiveActor: { id: "test-member" } }],
+  ];
+  for (const [label, overrides] of automated) {
+    expect(await save.execute({ name: label, definition }, assistantTurn(team.id, overrides)), label).toMatchObject({ success: true });
+  }
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+
+  const saved = await save.execute({ name: "Requested in chat", definition }, assistantTurn(team.id));
+  const workflowId = saved.data && typeof saved.data === "object" && "workflowId" in saved.data ? saved.data.workflowId : undefined;
+  if (typeof workflowId !== "string") throw new Error("Missing workflow ID");
+  expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId, memberId: "local-user", service: "fixture_account" }]);
+  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId, ownerType: "team", ownerId: team.id }]);
+  const scope = { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`, service: "fixture_account", memberId: "local-user" };
+  await p.workflowStore.createRun("scheduled", { workflowId, definitionVersionId: "v1" }, definition, "v1",
+    { ownerType: "team", ownerId: team.id, actorUserId: scope.actorId });
+  expect(await canBorrowCredential(p.db, { ...scope, sessionId: "wf:scheduled" })).toBe(true);
 });

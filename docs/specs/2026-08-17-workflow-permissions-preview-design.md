@@ -142,8 +142,16 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
 
 Human creation, personal copies, team copies, and template installation share the same transactional authorization helper. A browser save of step changes authorizes known direct tool actions for this workflow when the
 person owns it or administers its team. Layout-only and unchanged saves do not restore grants. Explicit organization, team, and personal
-restrictions remain authoritative. Agent, CLI, MCP, and API-key saves do not grant
-new permissions. Agent-created workflows need one human permission review.
+restrictions remain authoritative. CLI, MCP, and API-key saves do not grant
+new permissions.
+
+An assistant save counts as the person's own save only when that person's
+signed-in prompt started the turn (`ToolContext.interactiveActor`). This covers
+`save_workflow`, `patch_workflow`, `update_model`, and `add_aggregate`. The
+grant uses that person's reach, not the assistant's team principal. Turns from
+events, signals, schedules, channel senders without a Valet account, workflow
+steps, and delegated child work grant nothing. A workflow they create needs one
+human permission review.
 
 For team workflows, a browser save also authorizes the saving person's accounts
 already shared with that team for the declared direct tool services, excluding GitHub. This includes

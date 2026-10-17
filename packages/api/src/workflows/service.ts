@@ -123,6 +123,10 @@ export interface WorkflowOwner {
   /** Tool-origin deletion provenance. HTTP deletion uses its authenticated
    * request principal. Tool calls must never inherit a creator's admin role. */
   deletionAuthority?: { type: "interactive"; userId: string } | { type: "automated" };
+  /** The person whose own signed-in prompt made this assistant save. Set only
+   * from `ToolContext.interactiveActor`, never for events, signals, schedules,
+   * workflow steps or delegated work (`workflows/actions.ts#saverFromContext`). */
+  interactiveSaver?: string;
 }
 
 /** The owner types `workflow_definitions.owner_type` holds. Read off the
@@ -680,9 +684,11 @@ export async function createWorkflowDefinition(
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
-/** A browser save is the person's authorization for this saved graph only. */
-export async function authorizeHumanWorkflowSave(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<void> {
-  if (!owner.humanAccountConsent || owner.agentEditor || owner.principal?.type !== "user") return;
+/** A person's save is their authorization for this saved graph only: a browser
+ * save, or an assistant save made on that person's own signed-in prompt. */
+export async function authorizeHumanWorkflowSave(deps: WorkflowPermissionDeps, saver: WorkflowOwner, workflowId: string): Promise<void> {
+  const owner = savingPerson(saver);
+  if (!owner) return;
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return;
   if (await canGrantWorkflowPermissions(deps, owner, summary)) {
@@ -693,6 +699,17 @@ export async function authorizeHumanWorkflowSave(deps: WorkflowPermissionDeps, o
     await saveWorkflowAccountConsent(deps.db, { orgId: owner.orgId, workflowId, teamId: summary.ownerId,
       userId: owner.userId, services: workflowCredentialServices(deps, summary.definition) });
   }
+}
+
+/** The person a save authorizes, or null for an agent acting on its own. An
+ * interactive assistant save grants with that person's own reach, as their
+ * browser save would, never with the assistant's team principal. */
+function savingPerson(saver: WorkflowOwner): WorkflowOwner | null {
+  if (saver.interactiveSaver !== undefined) {
+    if (saver.interactiveSaver !== saver.userId) return null;
+    return { userId: saver.userId, orgId: saver.orgId, principal: { type: "user", id: saver.userId }, humanAccountConsent: true };
+  }
+  return saver.humanAccountConsent && !saver.agentEditor && saver.principal?.type === "user" ? saver : null;
 }
 
 /** Definitions use workspace ownership rather than assistant routing. */
