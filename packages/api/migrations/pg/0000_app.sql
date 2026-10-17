@@ -1182,7 +1182,11 @@ CREATE TABLE "event_deliveries" (
 	"next_attempt_at" bigint NOT NULL,
 	"last_error" text,
 	"delivered_at" bigint,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- The Destination resolved at ingest (spec 2026-10-16: delivery threads
+	-- and claims, Part C step 6). NULL means resolve at dispatch from the
+	-- binding and the policy only (no waiter consult, Part C step 7).
+	"destination" jsonb
 );
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");

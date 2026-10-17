@@ -2002,6 +2002,14 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "followed_threads", column: "thread_id" },
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "thread_id" text',
   },
+  {
+    // The Destination resolved at ingest (spec 2026-10-16: delivery threads
+    // and claims, Part C step 6). Null means resolve at dispatch from the
+    // binding and the policy only (no waiter consult).
+    describe: "event_deliveries.destination column",
+    probe: { kind: "column", table: "event_deliveries", column: "destination" },
+    sql: 'ALTER TABLE "event_deliveries" ADD COLUMN IF NOT EXISTS "destination" jsonb',
+  },
 
 ];
 
