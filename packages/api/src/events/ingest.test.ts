@@ -278,6 +278,43 @@ describe("ingestEvent event waiter matching", () => {
     errors.mockRestore();
   });
 
+  it("appends every waiter's digest when the delivery insert throws (INV-D6)", async () => {
+    await subscribeAppMention();
+    await subscribeMessages();
+    await linkSender();
+    const insert = vi.spyOn(db.appDb, "transaction").mockRejectedValueOnce(new Error("db down"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // The mention twin would suppress wk_1's digest, but nothing was stored.
+    await expect(ingest(message("Ev-t1", "<@U-BOT> status?"), waiterDeps(), deliverable)).rejects.toThrow("db down");
+    expect(insert).toHaveBeenCalledOnce();
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-t1"]);
+    errors.mockRestore();
+  });
+
+  it("does not count a team-covered personal rule as a claim, so its owner's waiter appends", async () => {
+    await subscribeAppMention();
+    await linkSender();
+    await db.appDb.insert(eventSubscriptions).values({
+      id: "personal-sub", orgId: ORG, ownerType: "user", ownerId: "u-002", createdBy: "u-002",
+      name: "My mentions", eventKeys: ["slack.app_mention"], filters: [{ field: "user", op: "eq", value: "U002" }],
+      target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, enabled: true, createdAt: 1, updatedAt: 1,
+    });
+    await store.createWakeup({ ...waiter(), id: "wk_u", sessionId: "s-u", threadId: "t-u", createdAt: 2 });
+    const sessions = waiterDeps({
+      sessionOrg: async (id) => (id === "s-1" ? { orgId: ORG, ownerType: "team", ownerId: "team-1" }
+        : id === "s-u" ? { orgId: ORG, ownerType: "user", ownerId: "u-002" } : null),
+    });
+    await ingest(mention("Ev-p1:mention"), sessions, deliverable);
+    const rows = await db.appDb.select().from(eventDeliveries);
+    expect(Object.fromEntries(rows.map((r) => [r.subscriptionId, r.destination]))).toEqual({
+      "mention-sub": { kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect" },
+      "personal-sub": null,
+    });
+    await ingest(message("Ev-p1", "<@U-BOT> status?"), sessions, deliverable);
+    expect((await store.getWakeup("wk_u"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-p1"]);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
+  });
+
   it("matches a bot mention when no app_mention subscription covers the channel", async () => {
     await ingest(message("Ev-m2", "<@U-BOT> status?"), waiterDeps(), deliverable);
     expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-m2"]);

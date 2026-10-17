@@ -24,6 +24,7 @@ import {
 import { mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
+import { hasTeamCoverage } from "./delivery-policy.js";
 
 export interface IngestDeps {
   db: AppDb;
@@ -40,7 +41,7 @@ export interface IngestDeps {
 export const CLAIM_FAILURE_STAGE = {
   stage: "claim_resolution",
   outcome: "failed",
-  detail: "Claim resolution failed. The deliveries land by their thread policy, and every matching waiter appends its digest.",
+  detail: "Claim resolution failed. The deliveries land by their conversation binding or thread policy, and every matching waiter appends its digest.",
 } as const;
 
 /**
@@ -321,9 +322,9 @@ export async function ingestEvent(
       try {
         candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
         twin = await conversationalTwinOf(deps.plugins, waiters, orgId, service, event);
-        // A mention's claim candidates are the waiters that accept its
-        // message twin (Part C step 8).
-        if (twin && event.key === "slack.app_mention") {
+        // Both halves of a mention choose over the waiters that accept
+        // either half (Part C step 8).
+        if (twin) {
           candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin));
         }
       } catch (error) {
@@ -475,9 +476,18 @@ async function resolveEventClaims(
 ): Promise<ClaimDecision> {
   const { orgId, service, event } = args;
   const db = deps.db;
+  // The dispatcher's team coverage check, over the same catalog it uses.
+  const coverageCatalog = allCatalogEntries(deps.plugins);
+  const teamCovered = (sub: typeof eventSubscriptions.$inferSelect, e: NormalizedEvent) =>
+    hasTeamCoverage(db, sub, { eventKey: e.key, payload: e.payload, subjects: e.subjects ?? null }, coverageCatalog);
+  const byId = new Map(args.subs.map((sub) => [sub.id, sub]));
   const claimDeps: ClaimDeps = {
     isDeliverable: (owner, target) => isDeliverableTarget({ db }, orgId, owner, target),
-    mentionCovered: (owner, twin) => mentionCoveredBy(db, args.subs, owner, twin, args.catalog),
+    mentionCovered: (owner, twin) => mentionCoveredBy(db, args.subs, owner, twin, args.catalog, teamCovered),
+    teamCovered: async (subscriptionId, e) => {
+      const sub = byId.get(subscriptionId);
+      return sub ? teamCovered(sub, e) : false;
+    },
     ...deps.claims,
   };
   const origin = deps.waiters?.channelOrigin?.(service, event.key, event.payload) ?? null;
