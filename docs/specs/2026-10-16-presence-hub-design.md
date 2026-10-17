@@ -527,6 +527,11 @@ Revision 2 deviations:
   as 1, and a pick that fixes the line drops the count to 0 at once. The
   revision 2 text added the two and kept the dead delivery in the count
   for a day.
+- **Onboarding reads places and routines (Part C step 8).** The Activity
+  pane shows the onboarding cards only when the workspace has no places
+  and no routines. A workspace with a routine is not empty: Valet already
+  does something there on a schedule, and its Activity shows that work.
+  The pane shows the cards only after both reads load.
 
 Revision 1 deviations that revision 2 retires: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the
