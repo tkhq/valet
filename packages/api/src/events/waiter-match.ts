@@ -219,13 +219,3 @@ export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDig
   return digest;
 }
 
-/**
- * The Part E mention rule's predicate: a `slack.message` event mentions the
- * bot when its `text` contains `<@botUserId>`. Always false with no bot id.
- */
-export function mentionsBot(event: NormalizedEvent, botUserId: string | undefined): boolean {
-  if (!botUserId) return false;
-  if (event.key !== "slack.message") return false;
-  const text = asRecord(event.payload)?.text;
-  return typeof text === "string" && text.includes(`<@${botUserId}>`);
-}

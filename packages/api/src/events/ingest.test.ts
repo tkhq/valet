@@ -2,7 +2,7 @@ import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type 
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { eventReceipts, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
+import { eventReceipts, eventSubscriptions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { __resetIngestDropThrottle, ingestEvent, type IngestDeps, type IngestResult } from "./ingest.js";
 import { sanitizeReceiptStages } from "./receipts.js";
@@ -56,10 +56,6 @@ describe("ingestEvent event waiter matching", () => {
       nudge,
       now: () => 5_000,
       slackBotUserId: async () => "U-BOT",
-      // Ingest replaces this with a check over the subscriptions it loaded.
-      appMentionCovered: async () => {
-        throw new Error("ingest must evaluate app_mention coverage from its loaded subscriptions");
-      },
       metrics: { matched: vi.fn(), failed },
       ...over,
     };
@@ -95,11 +91,11 @@ describe("ingestEvent event waiter matching", () => {
     expect(JSON.stringify(stages)).not.toContain("Looks good");
   });
 
-  it("succeeds when the waiter's session is gone", async () => {
+  it("succeeds when the waiter's session is gone, and adds no stage for a waiter that is no candidate", async () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => null }));
     expect(result).toMatchObject({ skipped: true });
     expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
+    expect((await stagesOf()).map((s) => s.stage)).not.toContain("waiter_match");
     expect(nudge).not.toHaveBeenCalled();
   });
 
@@ -201,24 +197,6 @@ describe("ingestEvent event waiter matching", () => {
       expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
       expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
     });
-  });
-
-  it("skips a bot mention that an enabled app_mention subscription covers (mention rule)", async () => {
-    await subscribeAppMention();
-    // The team mention gate admits only a linked team member, so link U002.
-    await db.appDb.insert(teams).values({ id: "team-1", orgId: ORG, name: "SRE", createdAt: 1 });
-    await db.appDb.insert(teamMembers).values({ teamId: "team-1", userId: "u-002", role: "member" });
-    await db.appDb.insert(orgMembers).values({ orgId: ORG, userId: "u-002", role: "member" });
-    await db.appDb.insert(userIdentityLinks).values({ id: "link-u002", provider: "slack", externalId: "U002", userId: "u-002", createdAt: 1 });
-    await ingest(message("Ev-m1", "<@U-BOT> status?"), waiterDeps());
-    expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-    expect(nudge).not.toHaveBeenCalled();
-  });
-
-  it("matches a bot mention that the team gate refuses (unlinked sender)", async () => {
-    await subscribeAppMention();
-    await ingest(message("Ev-m4", "<@U-BOT> status?"), waiterDeps());
-    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-m4"]);
   });
 
   it("matches a bot mention when no app_mention subscription covers the channel", async () => {
