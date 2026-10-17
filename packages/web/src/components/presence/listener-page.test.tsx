@@ -215,7 +215,8 @@ describe("ListenerPage", () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     listEventReceipts.mockResolvedValue({
       receipts: [{
-        id: "rc-1", service: "github", externalId: null, metadata: {}, stages: [], eventKey: "github.check_run.completed", eventId: "ev-1",
+        id: "rc-1", service: "github", externalId: null, metadata: {}, eventKey: "github.check_run.completed", eventId: "ev-1",
+        stages: [{ stage: "subscription_match", outcome: "filter_excluded", detail: "", at: 1_000 }],
         subscriptions: [{ id: "R4", ownerType: "user", ownerId: "u-001", target: "assistant", outcome: "filter_excluded" }],
         createdAt: 1_000, updatedAt: 1_000,
       }],
@@ -224,6 +225,9 @@ describe("ListenerPage", () => {
     renderPage();
     const receipts = await screen.findByRole("region", { name: "Receipts" });
     expect(await within(receipts).findByText("Completed check · excluded by this listener's filters")).toBeTruthy();
+    // The last stage reads in words, not as its identifier.
+    expect(within(receipts).getByText(/Listener matching: Excluded by filters/)).toBeTruthy();
+    expect(within(receipts).queryByText(/filter_excluded/)).toBeNull();
     expect(listEventReceipts).toHaveBeenCalledWith({ subscriptionId: "R4", limit: 10 });
   });
 

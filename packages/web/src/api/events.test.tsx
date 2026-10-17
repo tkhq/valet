@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * A workspace-scoped events query that cannot name its owner yet is HELD —
- * `EventLog` and `SubscriptionsPanel` both do it, because an owner-less
+ * `EventLog` and the All listeners table both do it, because an owner-less
  * REQUEST is the org-wide one. A query that is unscoped on purpose sends no
  * owner either: the Log's "All" state, and the redeliver dialog's org-wide
  * subscription count. These cases pin that the two do not share a cache

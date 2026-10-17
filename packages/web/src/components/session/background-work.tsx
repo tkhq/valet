@@ -531,10 +531,11 @@ export function BackgroundWorkStatusLine({
 /**
  * The thread context card's "Background work" section: every active item
  * of this thread, with its state, its time, and a Cancel when the person
- * may stop it. An event waiter also names what feeds the thread — the
- * listeners and routines that deliver into it (spec Part G) — as a "Fed
- * by" line under its entry. Renders nothing while the thread has no
- * background work.
+ * may stop it. The first event waiter also names what feeds the thread:
+ * the listeners and routines that deliver into it (spec Part G), as a
+ * "Fed by" line under its entry. The line names the thread's feeders, so
+ * it shows once per thread, however many event waiters the thread holds.
+ * Renders nothing while the thread has no background work.
  */
 export function BackgroundWorkSection({
   sessionId,
@@ -553,6 +554,7 @@ export function BackgroundWorkSection({
   // rule's own thread, an existing pin, or a subject thread. It only matters
   // next to the event waiter it explains, so it stays disabled otherwise.
   const feeders = useThreadFeeders(sessionId, threadId, { enabled: own.some((item) => item.kind === "event") });
+  const feedById = own.find((item) => item.kind === "event")?.id;
   if (own.length === 0) return <>{dialog}</>;
   return (
     <section aria-label="Background work" className="border-t border-line py-3">
@@ -575,7 +577,7 @@ export function BackgroundWorkSection({
                       )}
                       {[event.clauses, event.deadline].filter((part): part is string => part !== undefined).map((part) => ` · ${part}`)}
                     </p>
-                    <FeedByLine feeders={feeders.data} />
+                    {item.id === feedById && <FeedByLine feeders={feeders.data} />}
                   </>
                 ) : (
                   <p className="text-xs" title={itemTimeTitle(item)}>{sectionDetail(item, now)}</p>

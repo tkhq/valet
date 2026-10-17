@@ -59,7 +59,7 @@ export function DeliveryList({
   if (deliveries.length === 0) {
     return (
       <p className="text-xs text-muted">
-        {empty ?? "No subscription matched this event. Create one in the Subscriptions tab to act on it."}
+        {empty ?? "No listener matched this event. Add one in Presence."}
       </p>
     );
   }
@@ -92,7 +92,7 @@ export function DeliveryList({
               </Link>
             )}
             {d.runId && (
-              <Link to="/workflows/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
+              <Link to="/presence/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
                 Open run
               </Link>
             )}

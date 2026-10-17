@@ -34,6 +34,10 @@ const LABELS: Record<string, string> = {
   authorization_denied: "Authorization denied", key_mismatch: "Event key did not match", disabled: "Disabled", duplicate: "Duplicate", error: "Error", failed: "Failed",
   delivered: "Delivered", pending: "Pending", skipped: "Skipped", recorded: "Recorded",
 };
+/** A receipt stage or outcome identifier in words, such as `filter_excluded` → `Excluded by filters`. */
+export function receiptLabel(value: string): string {
+  return label(value);
+}
 function label(value: string): string {
   return LABELS[value] ?? value.replaceAll("_", " ").replace(/^./, first => first.toUpperCase());
 }

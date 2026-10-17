@@ -134,7 +134,7 @@ describe("ActivityTab rows", () => {
   it("keeps the deliveries and the receipt stages under a disclosure", () => {
     items = [eventItem("ev-mention", "slack.app_mention", "#incidents", [delivery({ thread: tInc })])];
     renderTab();
-    const disclosure = screen.getByText("Receipt stages").closest("details")!;
+    const disclosure = screen.getByText("Deliveries and receipt stages").closest("details")!;
     expect(disclosure.open).toBe(false);
     expect(within(disclosure).queryByText("Incidents")).toBeNull();
     expect(receiptsQuery).not.toHaveBeenCalled();
@@ -150,7 +150,7 @@ describe("ActivityTab rows", () => {
     role = "member";
     items = [eventItem("ev-mention", "slack.app_mention", "#incidents", [delivery({ thread: tInc })])];
     renderTab();
-    const disclosure = screen.getByText("Receipt stages").closest("details")!;
+    const disclosure = screen.getByText("Deliveries and receipt stages").closest("details")!;
     disclosure.open = true;
     fireEvent(disclosure, new Event("toggle"));
     expect(within(disclosure).getByText("Receipt stages are available to organization administrators.")).toBeTruthy();

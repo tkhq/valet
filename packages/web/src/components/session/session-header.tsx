@@ -85,7 +85,7 @@ export interface SubjectPlace {
 }
 
 /** Pure: the Slack channel id inside a `slack:<team>/<channel>` subject
- * (the channel level only — no deeper thread segment). */
+ * (the channel level only, with no deeper thread segment). */
 function subjectSlackChannelId(subject: string): string | undefined {
   if (!subject.startsWith("slack:")) return undefined;
   const parts = subject.slice("slack:".length).split("/");

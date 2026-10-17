@@ -10,7 +10,7 @@ import { Plus } from "lucide-react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 import { usePinnedThreadTitles } from "~/api/listener";
 import { useRunScheduleNow, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
-import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
+import { Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
 import { retryPhrase } from "~/components/events/delivery-copy";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
@@ -81,12 +81,8 @@ export function RoutinesTab() {
           <WorkRow
             key={routine.id}
             title={<Link to="/presence/routines" search={{ routine: routine.id }}>{sentence(routine)}</Link>}
-            badge={(
-              <>
-                {!routine.enabled && <Badge variant="neutral">Off</Badge>}
-                <ProblemBadge problem={routine.detail.disabledReason} />
-              </>
-            )}
+            // The second line already says Off for a routine that is off.
+            badge={<ProblemBadge problem={routine.detail.disabledReason} />}
             detail={routineWhen(routine)}
             actions={(
               <Button size="sm" variant="ghost" disabled={fire.isPending} onClick={() => fireNow(routine)} aria-label={`Fire ${routine.name} now`}>

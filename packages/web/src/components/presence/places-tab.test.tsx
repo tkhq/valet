@@ -93,6 +93,15 @@ describe("PlacesTab", () => {
     expect(within(screen.getByRole("region", { name: "Linear" })).getByText("Valet is in no Linear team in this workspace yet.")).toBeTruthy();
   });
 
+  it("nests a child row in a list inside its parent's item", async () => {
+    renderTab();
+    await screen.findByRole("link", { name: "acme/api" });
+    const inside = screen.getByRole("list", { name: "Inside acme/api" });
+    expect(within(inside).getAllByRole("listitem").map((item) => within(item).getByRole("link").textContent)).toEqual(["acme/api#12", "acme/api#13"]);
+    // The parent's item holds the nested list.
+    expect(screen.getByRole("link", { name: "acme/api" }).closest("li")?.contains(inside)).toBe(true);
+  });
+
   it("lists a listener over two channels once, under Everywhere in Slack (Review Focus 2)", async () => {
     listPresencePlaces.mockResolvedValue({
       places: [

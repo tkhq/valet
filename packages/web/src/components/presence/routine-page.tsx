@@ -9,13 +9,13 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { WorkflowRunSummary } from "@valet/api/wire";
 import { usePinnedThreadTitle } from "~/api/listener";
+import { useMe } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers } from "~/api/workflows";
 import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
 import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routines-tab";
 
@@ -50,7 +50,13 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const sentenceFor = useRoutineSentence([routine]);
   const fire = useRunScheduleNow();
   const update = useUpdateSchedule();
-  const scope = useWorkspaceScope();
+  const me = useMe();
+  const { ownerType, ownerId } = routine.detail;
+  // Mirrors the server's gate for a personal routine. A team or org routine
+  // is checked by the server, which names the problem when it refuses.
+  const readOnly = ownerType === "user" && me.data !== undefined && ownerId !== me.data.id;
+  // The picker lists the routine owner's threads, whatever the switcher shows.
+  const workspace = ownerType === "user" ? "user" : ownerType === "team" ? ownerId : undefined;
   const [editing, setEditing] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
 
@@ -80,15 +86,16 @@ function RoutineBody({ routine }: { routine: Routine }) {
           <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <Switch
               checked={routine.enabled}
-              disabled={update.isPending}
+              disabled={readOnly || update.isPending}
               onCheckedChange={(enabled) => save({ enabled })}
               aria-label={`${routine.enabled ? "Turn off" : "Turn on"} ${routine.name}`}
             />
             {routine.enabled ? "On" : "Off"}
           </label>
-          <Button size="sm" disabled={fire.isPending} onClick={fireNow}>Fire now</Button>
-          <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>Edit</Button>
+          <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
+          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
         </div>
+        {readOnly && !routine.detail.disabledReason && <p className="text-xs text-muted">Only its owner can change this routine.</p>}
         {message && (
           <p role={message.error ? "alert" : "status"} className={message.error ? "text-sm text-danger-500" : "text-sm text-muted"}>
             {message.text}
@@ -98,9 +105,8 @@ function RoutineBody({ routine }: { routine: Routine }) {
           <ThreadProblem
             problem={routine.detail.disabledReason}
             ruleKind="routine"
-            // The triggers list carries no owner, so the picker lists the
-            // active workspace's threads, as the edit dialog does.
-            workspace={scope.key}
+            workspace={workspace}
+            readOnly={readOnly}
             onPick={(thread) => save({ thread, enabled: true })}
             pending={update.isPending}
           />

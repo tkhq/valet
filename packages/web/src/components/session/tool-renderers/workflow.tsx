@@ -262,7 +262,7 @@ function RunBody({ runId }: { runId: string }) {
           <StatusPill status={run.status} outcome={run.outcome ?? undefined} />
         </div>
         <Link
-          to="/workflows/runs/$runId"
+          to="/presence/runs/$runId"
           params={{ runId }}
           className="inline-flex items-center gap-1 text-xs font-medium text-moss hover:text-moss/80 hover:underline"
         >
@@ -402,7 +402,7 @@ function DefinitionBody({ workflowId }: { workflowId: string }) {
           </span>
         </div>
         <Link
-          to="/workflows/$workflowId"
+          to="/presence/workflows/$workflowId"
           params={{ workflowId }}
           className="inline-flex items-center gap-1 text-xs font-medium text-moss hover:text-moss/80 hover:underline"
         >
@@ -448,7 +448,7 @@ function WorkflowListBody({ rows }: { rows: WorkflowListEntry[] }) {
         {rows.map((w) => (
           <li key={w.workflowId}>
             <Link
-              to="/workflows/$workflowId"
+              to="/presence/workflows/$workflowId"
               params={{ workflowId: w.workflowId }}
               className="flex items-center gap-3 px-3 py-1.5 hover:bg-ink-wash/60 transition-colors"
             >

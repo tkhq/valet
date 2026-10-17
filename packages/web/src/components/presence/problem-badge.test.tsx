@@ -35,6 +35,14 @@ describe("ThreadProblem", () => {
     expect(onPick).toHaveBeenCalledWith({ mode: "existing", sessionId: "s", threadId: "t" });
   });
 
+  it("names the owner, with no picker, for a viewer who may not change the rule", () => {
+    render(<ThreadProblem problem={PIN_UNAVAILABLE} ruleKind="listener" workspace="user" readOnly onPick={vi.fn()} />);
+    expect(screen.getByText("This listener's thread is archived. Pick another thread.")).toBeTruthy();
+    expect(screen.getByText("Only its owner can change this listener.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
+    expect(screen.queryByText("Select Edit, then choose another option under Runs in.")).toBeNull();
+  });
+
   it("names the edit path when no workspace lists threads", () => {
     render(<ThreadProblem problem={PIN_UNAVAILABLE} ruleKind="listener" workspace={undefined} onPick={vi.fn()} />);
     expect(screen.getByText("Select Edit, then choose another option under Runs in.")).toBeTruthy();

@@ -103,7 +103,7 @@ function routine(id: string, over: Partial<Omit<Schedule, "kind" | "detail">> & 
       nextFireAt: Date.now() + 3_600_000,
       lastFiredAt: null,
       ownerType: "user",
-      ownerId: "u1",
+      ownerId: "u-001",
       ...detail,
     },
   };
@@ -159,6 +159,8 @@ describe("RoutinesTab", () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { enabled: false, detail: { disabledReason: PIN_TEXT } })] });
     wrap(<RoutinesTab />);
     expect(await screen.findByText("Thread archived")).toBeTruthy();
+    // The row says Off once, on its second line.
+    expect(screen.getAllByText("Off")).toHaveLength(1);
   });
 
   it("opens the dialog for a new routine", async () => {
@@ -205,6 +207,24 @@ describe("RoutinePage", () => {
       thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" },
       enabled: true,
     }));
+  });
+
+  it("lists the routine owner's threads in the picker, whatever the switcher shows", async () => {
+    listWorkflowTriggers.mockResolvedValue({
+      triggers: [routine("S1", { enabled: false, detail: { disabledReason: PIN_TEXT, ownerType: "team", ownerId: "team-sre" } })],
+    });
+    wrap(<RoutinePage id="S1" />);
+    const problem = await screen.findByRole("region", { name: "Problem" });
+    expect(within(problem).getByRole("button", { name: "Pick Platform Ops from team-sre" })).toBeTruthy();
+  });
+
+  it("keeps another member's personal routine read-only", async () => {
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerId: "u-other" } })] });
+    wrap(<RoutinePage id="S1" />);
+    expect(await screen.findByText("Only its owner can change this routine.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Fire now" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("switch", { name: "Turn off Morning summary" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("lists a workflow routine's runs", async () => {

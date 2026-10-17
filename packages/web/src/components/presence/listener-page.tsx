@@ -20,6 +20,7 @@ import { useMe } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { DeliveryList } from "~/components/events/delivery-list";
 import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
+import { receiptLabel } from "~/components/events/receipts-panel";
 import {
   Avatar, AvatarFallback, AvatarImage, Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection, cardClass,
 } from "~/components/primitives";
@@ -113,13 +114,14 @@ function ListenerBody({ sub }: { sub: EventSubscriptionWire }) {
           <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
         </div>
         {pausedByTeam && <p role="status" className="text-sm text-warning-fg">{PAUSED_BY_TEAM}</p>}
-        {readOnly && <p className="text-xs text-muted">Only its owner can change this listener.</p>}
+        {readOnly && !sub.problem && <p className="text-xs text-muted">Only its owner can change this listener.</p>}
         {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
         {sub.problem && (
           <ThreadProblem
             problem={sub.problem}
             ruleKind="listener"
-            workspace={readOnly ? undefined : workspace}
+            workspace={workspace}
+            readOnly={readOnly}
             onPick={(thread) => save({ thread })}
             pending={patch.isPending}
           />
@@ -199,6 +201,12 @@ export function receiptLine(receipt: EventReceiptWire, listenerId: string): stri
   return decision ? `${event} · ${DECISION_WORDS[decision.outcome]}` : event;
 }
 
+/** The receipt's last stage and its outcome in words, such as `Delivery queue: Delivery queued`. */
+export function lastStageInWords(receipt: EventReceiptWire): string | undefined {
+  const last = receipt.stages.at(-1);
+  return last ? `${receiptLabel(last.stage)}: ${receiptLabel(last.outcome)}` : undefined;
+}
+
 function ListenerReceipts({ id, admin }: { id: string; admin: boolean }) {
   const receiptsQ = useListenerReceipts(id, admin);
   const receipts = receiptsQ.data?.receipts ?? [];
@@ -219,7 +227,7 @@ function ListenerReceipts({ id, admin }: { id: string; admin: boolean }) {
           title={receipt.eventId
             ? <Link to="/presence/events/$eventId" params={{ eventId: receipt.eventId }}>{receiptLine(receipt, id)}</Link>
             : receiptLine(receipt, id)}
-          detail={receipt.stages.at(-1)?.outcome}
+          detail={lastStageInWords(receipt)}
         />
       ))}
     </WorkSection>

@@ -422,6 +422,18 @@ describe("BackgroundWorkSection", () => {
       expect(routine.getAttribute("href")).toBe("/presence/routines?routine=s-1");
     });
 
+    it("shows the line once per thread when the thread holds several event waiters", async () => {
+      const data = eventListing(Date.now());
+      data.wakeups.push({ ...data.wakeups[0]!, id: "wk_e2", reason: "wait for the review" });
+      vi.spyOn(api, "listSessionWakeups").mockResolvedValue(data);
+      vi.spyOn(api, "getThreadFeeders").mockResolvedValue(feeders());
+      renderSection("th-1");
+      const section = within(await screen.findByRole("region", { name: "Background work" }));
+      await section.findByRole("link", { name: "Per pull request" });
+      expect(section.getAllByText(/Fed by:/)).toHaveLength(1);
+      expect(section.getAllByRole("link", { name: "Per pull request" })).toHaveLength(1);
+    });
+
     it("shows nothing extra when the thread has no feeders", async () => {
       vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
       vi.spyOn(api, "getThreadFeeders").mockResolvedValue({ listeners: [], routines: [] });

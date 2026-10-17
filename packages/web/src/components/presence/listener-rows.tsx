@@ -8,6 +8,7 @@ import type { EventSubscriptionWire } from "@valet/api/wire";
 import { usePinnedThreadTitles } from "~/api/presence";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
+import { ProblemBadge } from "./problem-badge";
 import { listenerSentence, type ThreadTitles } from "./sentences";
 
 /**
@@ -32,12 +33,24 @@ export function PausedBadge({ sub }: { sub: EventSubscriptionWire }) {
   return sub.enabled ? null : <Badge variant="neutral">Paused</Badge>;
 }
 
+/** A listener's badges in every list: paused, and a problem such as an
+ * archived pinned thread (spec Part C step 5). */
+export function ListenerBadges({ sub }: { sub: EventSubscriptionWire }) {
+  if (sub.enabled && !sub.problem) return null;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <PausedBadge sub={sub} />
+      <ProblemBadge problem={sub.problem} />
+    </span>
+  );
+}
+
 /** One listener as a work row: the sentence, linked to the listener page. */
 export function ListenerRow({ sub, sentence }: { sub: EventSubscriptionWire; sentence: string }) {
   return (
     <WorkRow
       title={<Link to="/presence/listeners/$id" params={{ id: sub.id }}>{sentence}</Link>}
-      badge={<PausedBadge sub={sub} />}
+      badge={<ListenerBadges sub={sub} />}
       detail={sub.name}
     />
   );

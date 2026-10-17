@@ -35,6 +35,8 @@ vi.mock("~/api/workflows", () => ({
 vi.mock("~/api/presence", () => ({ usePinnedThreadTitles: () => ({}) }));
 
 import { AllListenersTable } from "./all-listeners-table";
+import { ListenerRow } from "./listener-rows";
+import { PIN_UNAVAILABLE } from "./problem-badge";
 
 function listener(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {
@@ -76,6 +78,21 @@ describe("AllListenersTable", () => {
     expect(within(rows[1]!).getByText("Listens on acme/api for completed checks · runs Incident triage")).toBeTruthy();
     expect(within(rows[1]!).getByText("Paused")).toBeTruthy();
     expect(screen.getAllByText(/#alerts/)).toHaveLength(1);
+  });
+
+  it("badges a listener with a problem in the table and in a row (Part C step 5)", () => {
+    const broken = listener("broken", { name: "Pinned", problem: PIN_UNAVAILABLE });
+    subscriptions = { isPending: false, isError: false, error: null, data: { subscriptions: [broken] } };
+    render(<AllListenersTable />);
+    const row = within(screen.getByRole("table", { name: "All listeners" })).getAllByRole("row")[1]!;
+    expect(within(row).getByText("On")).toBeTruthy();
+    expect(within(row).getByText("Thread archived")).toBeTruthy();
+  });
+
+  it("shows the paused and problem badges beside a listener row's sentence", () => {
+    render(<ListenerRow sub={listener("broken", { enabled: false, problem: PIN_UNAVAILABLE })} sentence="Listens on acme/api for failed checks" />);
+    expect(screen.getByText("Paused")).toBeTruthy();
+    expect(screen.getByText("Thread archived")).toBeTruthy();
   });
 
   it("reads the switcher's workspace and waits for it", () => {

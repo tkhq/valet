@@ -104,6 +104,11 @@ describe("EventDetailBody", () => {
     expect(screen.getByText(/"action": "opened"/)).toBeTruthy();
   });
 
+  it("names the place the api sends, as the Activity row does", () => {
+    render(<EventDetailBody data={{ ...detailData, event: { ...detailData.event, place: "acme/app#7" } }} />);
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" })).toBeTruthy();
+  });
+
   it("names the listener and when the delivery retries", () => {
     render(<EventDetailBody data={detailData} />);
     expect(screen.getByText("PR alerts")).toBeTruthy();
@@ -126,7 +131,7 @@ describe("EventDetailBody", () => {
       />,
     );
     expect(screen.getByRole("link", { name: "Delivered to thread" }).getAttribute("href")).toBe("/threads/th_1");
-    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
+    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/presence/runs/wfrun_evt_d3");
     // The sentence links the same thread and run.
     expect(screen.getByRole("link", { name: "a thread" }).getAttribute("href")).toBe("/threads/th_1");
     expect(screen.getByRole("link", { name: "started a workflow run" }).getAttribute("href")).toBe("/presence/runs/wfrun_evt_d3");

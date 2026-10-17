@@ -1052,7 +1052,7 @@ describe("SessionHeader — team assistant", () => {
  * Part G): the header reads the engine thread key and, for a `subject:`
  * key, shows the place label under the title with a link to the place page.
  */
-describe("SessionHeader — subject thread place", () => {
+describe("SessionHeader: subject thread place", () => {
   it("names a GitHub pull request subject and links to its place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo#12" }];
     renderHeader(undefined, "th-1");

@@ -48,7 +48,8 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
   const refs = Object.entries(event.refs);
   const workflowsByListener = useWorkflowsByListener();
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const names = { workflowsByListener };
+  // The same place the Activity row names, so the page's lead matches it.
+  const names = { ...(event.place !== undefined ? { place: event.place } : {}), workflowsByListener };
 
   return (
     <div className="space-y-6">

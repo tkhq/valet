@@ -153,6 +153,17 @@ beforeEach(() => {
 });
 
 describe("PlacePage", () => {
+  it("titles the page by a neutral word, never the raw key, until the place loads or when it fails", async () => {
+    let fail: (err: Error) => void = () => {};
+    getPresencePlace.mockReturnValue(new Promise((_resolve, reject) => { fail = reject; }));
+    renderPage("slack:T1/C900");
+    expect(screen.getByRole("heading", { level: 1, name: "Loading…" })).toBeTruthy();
+    expect(screen.queryByText("slack:T1/C900")).toBeNull();
+    fail(new Error("boom"));
+    expect(await screen.findByRole("heading", { level: 1, name: "Not available" })).toBeTruthy();
+    expect(screen.queryByText("slack:T1/C900")).toBeNull();
+  });
+
   it("shows the header, Listeners, Threads, and Recent activity in order (H3)", async () => {
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");

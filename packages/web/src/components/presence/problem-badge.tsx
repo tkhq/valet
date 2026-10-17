@@ -39,9 +39,12 @@ export function ThreadProblem({
   onPick,
   pending = false,
   error,
+  readOnly = false,
 }: {
   problem: string;
   ruleKind: "listener" | "routine";
+  /** The viewer may not change the rule: no picker, and the text names who can. */
+  readOnly?: boolean;
   /** The workspace key whose threads the picker lists. Absent hides the picker. */
   workspace: string | undefined;
   onPick: (policy: Extract<AssistantThreadPolicy, { mode: "existing" }>) => void;
@@ -53,8 +56,9 @@ export function ThreadProblem({
   return (
     <section aria-label="Problem" className="space-y-2 rounded-md border border-danger-500 bg-danger-wash p-3">
       <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">{text}</p>
-      {pin && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
-      {pin && workspace === undefined && (
+      {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this {ruleKind}.</p>}
+      {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
+      {pin && !readOnly && workspace === undefined && (
         <p className="text-xs text-muted">Select Edit, then choose another option under Runs in.</p>
       )}
       {pending && <p className="text-xs text-muted">Saving…</p>}

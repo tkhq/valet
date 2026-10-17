@@ -18,7 +18,7 @@ export function AutomationReview({ when, scope, result, destination, permissions
     ...(follow !== undefined ? [["Delivery", follow ? "Also deliver later replies from the source thread" : "Deliver only events matching these filters"]] : []),
     ...(audience ? [["Audience", audience === "team" ? "Team members" : "Anyone in the organization"]] : []),
     ...(replaces ? [["Replaces", replaces]] : []),
-    ["Permissions", permissions ?? (workflowId ? <span><a className="text-moss underline" href={`/workflows/${encodeURIComponent(workflowId)}`} target="_blank" rel="noreferrer">Review workflow permissions</a>. Enabling grants no new access. Dynamic actions are checked at runtime.</span> : "Uses this workspace’s existing access. Enabling does not grant new permissions.")],
+    ["Permissions", permissions ?? (workflowId ? <span><a className="text-moss underline" href={`/presence/workflows/${encodeURIComponent(workflowId)}`} target="_blank" rel="noreferrer">Review workflow permissions</a>. Enabling grants no new access. Dynamic actions are checked at runtime.</span> : "Uses this workspace’s existing access. Enabling does not grant new permissions.")],
   ];
   return <dl aria-label="Summary" className="divide-y divide-line rounded-lg border border-line px-3">
     {rows.map(([label, value], index) => <div key={index} className="grid gap-1 py-3 text-sm sm:grid-cols-[6rem_minmax(0,1fr)] sm:gap-3">

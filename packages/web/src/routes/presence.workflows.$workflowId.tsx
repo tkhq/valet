@@ -613,7 +613,7 @@ function RunsDrawer({
         <div className="px-4 py-3 text-xs text-danger-500">Failed to load runs.</div>
       )}
       {!runsQuery.isLoading && runsQuery.error == null && runs.length === 0 && (
-        <div className="px-4 py-3 text-xs text-muted">No runs yet — press Run to start one.</div>
+        <div className="px-4 py-3 text-xs text-muted">No runs yet. Press Run to start one.</div>
       )}
       <ul className="divide-y divide-line/60">
         {runs.map((r) => (
@@ -665,7 +665,7 @@ export function restoreErrorMessage(err: unknown): string {
   const invalid = validationMessages(err);
   if (!invalid) return errorText(err, "The restore failed. Try again.");
   return (
-    "This version was not restored — it does not pass the current validation rules. " +
+    "This version was not restored. It does not pass the current validation rules. " +
     `Correct these in the editor, then save: ${invalid.join("; ")}`
   );
 }
@@ -714,7 +714,7 @@ function HistoryDrawer({
       )}
       {!versionsQ.isLoading && versions.length === 0 && (
         <div className="px-4 py-3 text-xs text-muted">
-          No versions yet — saved before version history existed. The next save creates v1.
+          No versions yet. This workflow was saved before version history existed. The next save creates v1.
         </div>
       )}
       <ul className="divide-y divide-line/60">

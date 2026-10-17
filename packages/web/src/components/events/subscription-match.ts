@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { EventSubscriptionFilterWire } from "@valet/api/wire";
 import { hasChannelScopeFilter } from "~/lib/slack-mention";
 import { incompleteFilterRow, pruneFilterRows, toWireFilters, type FilterField, type UiFilterRow } from "./filter-editor";
@@ -34,7 +34,8 @@ function unionFilterFields(
  * The pinned rows the pruned rows lack, put back when the fields allow them.
  * A pinned row is one the caller chose for the reader, such as a preselected
  * place's filter: an event without its field drops it, and a later event
- * with the field brings it back.
+ * with the field brings it back. The caller passes only the pins that
+ * pruning dropped, so a pin the reader removed stays removed.
  */
 export function restorePinnedRows(rows: UiFilterRow[], pinned: readonly UiFilterRow[], fields: FilterField[]): UiFilterRow[] {
   const missing = pinned.filter(
@@ -44,7 +45,8 @@ export function restorePinnedRows(rows: UiFilterRow[], pinned: readonly UiFilter
 }
 
 /** Both forms mount when opened. Keep their event selection and filter rows
- * together. `pinnedRows` survive an event change (see `restorePinnedRows`). */
+ * together. `pinnedRows` survive an event change (see `restorePinnedRows`),
+ * unless the reader removed them. */
 export function useSubscriptionMatch(
   services: CatalogService[],
   initialKeys: string[] = [],
@@ -54,6 +56,9 @@ export function useSubscriptionMatch(
   const [keys, setKeys] = useState(() => new Set(initialKeys));
   const [filterRows, setFilterRows] = useState(initialRows);
   const filterFields = unionFilterFields(services, keys);
+  // The ids of pinned rows that an event change pruned. Only these come
+  // back: a pin the reader removed is not in the rows when an event changes.
+  const prunedPins = useRef(new Set<string>());
 
   function toggleKey(key: string) {
     const next = new Set(keys);
@@ -61,7 +66,13 @@ export function useSubscriptionMatch(
     else next.add(key);
     setKeys(next);
     const fields = unionFilterFields(services, next);
-    setFilterRows((rows) => restorePinnedRows(pruneFilterRows(rows, fields), pinnedRows, fields));
+    const pruned = pruneFilterRows(filterRows, fields);
+    for (const pin of pinnedRows) {
+      if (filterRows.some((row) => row.id === pin.id) && !pruned.some((row) => row.id === pin.id)) prunedPins.current.add(pin.id);
+    }
+    const restored = restorePinnedRows(pruned, pinnedRows.filter((pin) => prunedPins.current.has(pin.id)), fields);
+    for (const row of restored) prunedPins.current.delete(row.id);
+    setFilterRows(restored);
   }
 
   return { keys, setKeys, filterRows, setFilterRows, filterFields, toggleKey };

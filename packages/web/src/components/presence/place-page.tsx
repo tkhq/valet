@@ -27,8 +27,11 @@ export function PlacePage({ subject }: { subject: string }) {
   const subtitle = place === undefined
     ? undefined
     : [SERVICE_NAMES[place.service], place.listenerCount > 0 ? place.scopeLabel : undefined].filter(Boolean).join(" · ");
+  // The key is a system name (`slack:T1/C900`), so the title waits for the
+  // place's concrete name.
+  const title = place?.label ?? (detail.isError ? "Not available" : "Loading…");
   return (
-    <PresenceDetailPage back="/presence" backLabel="Places" title={place?.label ?? subject} subtitle={subtitle}>
+    <PresenceDetailPage back="/presence" backLabel="Places" title={title} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
         <ErrorRow>{errorText(detail.error, "Could not load this page. Open Places and select it again.")}</ErrorRow>

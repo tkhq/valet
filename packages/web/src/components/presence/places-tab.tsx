@@ -127,7 +127,7 @@ function PlacesByService() {
               ? <EmptyRow className="py-1">{EMPTY_GROUP[service]}</EmptyRow>
               : (
                 <WorkList>
-                  {lines.map((line) => <PlaceRow key={line.place.subject} line={line} />)}
+                  <PlaceTree lines={lines} />
                 </WorkList>
               )}
           </section>
@@ -137,16 +137,37 @@ function PlacesByService() {
   );
 }
 
-function PlaceRow({ line }: { line: PlaceLine }) {
-  const { place, depth } = line;
+/** The rows as a nested list: each child row is an item of a list inside
+ * its parent's item, so a screen reader announces the nesting. */
+function PlaceTree({ lines }: { lines: readonly PlaceLine[] }) {
+  const groups: Array<{ parent: PresencePlaceWire; children: PresencePlaceWire[] }> = [];
+  for (const line of lines) {
+    if (line.depth === 0) groups.push({ parent: line.place, children: [] });
+    else groups.at(-1)?.children.push(line.place);
+  }
   return (
-    <div className={depth === 1 ? "pl-6" : undefined}>
-      <WorkRow
-        title={<Link to="/presence/places/$subject" params={{ subject: place.subject }}>{place.label}</Link>}
-        badge={place.activeThreadCount > 0 ? <Badge variant="accent">Active</Badge> : undefined}
-        {...(place.lastActivityAt !== null ? { time: place.lastActivityAt } : {})}
-        detail={placeDetail(place)}
-      />
-    </div>
+    <ul className="divide-y divide-line">
+      {groups.map(({ parent, children }) => (
+        <li key={parent.subject}>
+          <PlaceRow place={parent} />
+          {children.length > 0 && (
+            <ul aria-label={`Inside ${parent.label}`} className="divide-y divide-line border-t border-line pl-6">
+              {children.map((child) => <li key={child.subject}><PlaceRow place={child} /></li>)}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PlaceRow({ place }: { place: PresencePlaceWire }) {
+  return (
+    <WorkRow
+      title={<Link to="/presence/places/$subject" params={{ subject: place.subject }}>{place.label}</Link>}
+      badge={place.activeThreadCount > 0 ? <Badge variant="accent">Active</Badge> : undefined}
+      {...(place.lastActivityAt !== null ? { time: place.lastActivityAt } : {})}
+      detail={placeDetail(place)}
+    />
   );
 }

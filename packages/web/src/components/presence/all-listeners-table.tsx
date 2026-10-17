@@ -10,6 +10,7 @@ import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
 import { errorText } from "~/lib/error-text";
 import { PausedBadge, useListenerSentence } from "./listener-rows";
+import { ProblemBadge } from "./problem-badge";
 
 export function AllListenersTable() {
   const owner = useListOwner();
@@ -42,7 +43,12 @@ export function AllListenersTable() {
                 <Link to="/presence/listeners/$id" params={{ id: sub.id }} className="hover:underline">{sub.name}</Link>
               </td>
               <td className="px-3 py-2 align-top text-ink [overflow-wrap:anywhere]">{sentence(sub)}</td>
-              <td className="px-3 py-2 align-top">{sub.enabled ? <span className="text-muted">On</span> : <PausedBadge sub={sub} />}</td>
+              <td className="px-3 py-2 align-top">
+                <span className="inline-flex flex-wrap items-center gap-1">
+                  {sub.enabled ? <span className="text-muted">On</span> : <PausedBadge sub={sub} />}
+                  <ProblemBadge problem={sub.problem} />
+                </span>
+              </td>
             </tr>
           ))}
         </tbody>
