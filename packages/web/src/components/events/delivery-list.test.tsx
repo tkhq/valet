@@ -46,6 +46,26 @@ describe("DeliveryList", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 
+  it("names the thread by title when the caller has it", () => {
+    const delivered: EventDeliveryWire = { ...base, id: "d5", status: "delivered", thread: { sessionId: "sess_1", threadId: "th_inc" } };
+    const claimed: EventDeliveryWire = { ...base, id: "d6", status: "skipped", claimedBy: { sessionId: "sess_1", threadId: "th_ci" } };
+    render(<DeliveryList deliveries={[delivered, claimed]} threadTitles={{ th_inc: { title: "Incident 42" }, th_ci: { title: null } }} now={0} />);
+    expect(screen.getByRole("link", { name: "Delivered to Incident 42" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Claimed by thread" })).toBeTruthy();
+  });
+
+  it("leads a listener's row with its event, linked to the event page", () => {
+    const event = { id: "ev_1", service: "github", eventKey: "github.check_run.completed", summary: "CI failed", refs: {}, actor: null, occurredAt: 1, receivedAt: 1 };
+    render(<DeliveryList deliveries={[{ ...base, id: "d7", status: "pending", event }]} empty="No deliveries yet." now={0} />);
+    expect(screen.getByRole("link", { name: "CI failed" }).getAttribute("href")).toBe("/presence/events/ev_1");
+    expect(screen.queryByText("Incident mentions")).toBeNull();
+  });
+
+  it("shows the caller's empty text", () => {
+    render(<DeliveryList deliveries={[]} empty="No deliveries yet." />);
+    expect(screen.getByText("No deliveries yet.")).toBeTruthy();
+  });
+
   it("shows the dead-letter text of a pin that cannot take the delivery", () => {
     const text = "Pick another thread for this rule in Presence.";
     const dead: EventDeliveryWire = { ...base, id: "d4", status: "dead", lastError: text };

@@ -270,6 +270,8 @@ export interface RoutineLike {
   workflowId?: string;
   detail: {
     cron: string;
+    /** IANA name. A zone other than UTC follows the schedule words. */
+    timezone?: string;
     targetKind: "workflow" | "assistant";
     thread?: AssistantThreadPolicy;
   };
@@ -334,9 +336,15 @@ function routineDoes(routine: RoutineLike, workflows: WorkflowNames, threads: Th
   }
 }
 
+/** The schedule in words, with the timezone in parentheses when it is not UTC. */
+function scheduleInWords(cron: string, timezone: string | undefined): string {
+  const words = cronInWords(cron);
+  return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? words : `${words} (${timezone})`;
+}
+
 /** A routine as one sentence: `<schedule in words> · <name> · <does>`. */
 export function routineSentence(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
-  return `${cronInWords(routine.detail.cron)} · ${routine.name} · ${routineDoes(routine, workflows, threads)}`;
+  return `${scheduleInWords(routine.detail.cron, routine.detail.timezone)} · ${routine.name} · ${routineDoes(routine, workflows, threads)}`;
 }
 
 // ── Activity ────────────────────────────────────────────────────────────

@@ -240,6 +240,14 @@ describe("routineSentence", () => {
       "Every day at 9:00 · Morning summary · runs Triage failures",
     );
   });
+  it("names a timezone other than UTC after the schedule words", () => {
+    expect(routineSentence(routine({ timezone: "America/Denver" }), workflows, threads)).toBe(
+      "Every day at 9:00 (America/Denver) · Morning summary · works in this routine's thread",
+    );
+    expect(routineSentence(routine({ timezone: "UTC" }), workflows, threads)).toBe(
+      "Every day at 9:00 · Morning summary · works in this routine's thread",
+    );
+  });
 });
 
 describe("cronInWords", () => {

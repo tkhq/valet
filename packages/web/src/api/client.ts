@@ -205,6 +205,7 @@ import type {
   EventLogResponse,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
+  ListSubscriptionDeliveriesResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
@@ -1120,9 +1121,10 @@ export const api = {
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
-  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number; subscriptionId?: string } = {}) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
+    if (params.subscriptionId) qs.set("subscriptionId", params.subscriptionId);
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
@@ -1132,6 +1134,11 @@ export const api = {
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: (owner?: OwnerFilter) =>
     request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
+  listSubscriptionDeliveries: (id: string, limit?: number) =>
+    request<ListSubscriptionDeliveriesResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/deliveries${limit !== undefined ? `?limit=${limit}` : ""}`,
+    ),
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
