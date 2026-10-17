@@ -140,7 +140,7 @@ export async function createWorkflowSchedule(
     timezone?: string;
     input?: unknown;
     /**
-     * The team that owns an orchestrator-prompt schedule, so a scheduled prompt
+     * The team that owns an assistant-prompt schedule, so a scheduled prompt
      * created in a team workspace fires the TEAM's assistant, not the caller's.
      * This service validates the team under its ownership lock. Ignored for a
      * workflow target (owner follows the workflow).

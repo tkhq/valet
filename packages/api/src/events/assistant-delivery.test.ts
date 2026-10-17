@@ -405,7 +405,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
   });
 });
 
-describe("deliverToAssistantThread — destinations (spec 2026-10-16: delivery threads, Part B)", () => {
+describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery threads, Part B)", () => {
   let testDb: TestPgDb;
   let engineHost: EngineHost;
   let faux: FauxProviderRegistration;

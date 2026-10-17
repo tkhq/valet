@@ -1,8 +1,8 @@
 /**
  * EventDispatcher unit tests (event-system plan Task 6): real PGlite rows
  * for events/subscriptions/deliveries, recording fakes at the two seams
- * (`RunHost`, `deliverToAssistant`). `pollOnce()` is driven directly —
- * no timers, no sleeps.
+ * (`RunHost`, `deliverToAssistant`). The tests call `pollOnce()` directly,
+ * with no timers and no sleeps.
  */
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +32,7 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, subscriptionThreadPolicy, type AssistantDeliverFn } from "./dispatcher.js";
+import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
 import { PinUnavailableError } from "./assistant-delivery.js";
 
 const recordDeliveryDestination = vi.hoisted(() => vi.fn());
@@ -1408,17 +1408,5 @@ describe("deliveryThreadPolicy", () => {
     // A stored policy wins over the default.
     expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: true })).toEqual({ mode: "own" });
     expect(deliveryThreadPolicy({ thread: { mode: "new" } }, { channelOrigin: false })).toEqual({ mode: "new" });
-  });
-});
-
-describe("subscriptionThreadPolicy", () => {
-  it("defaults a follow rule to a thread per conversation and any other rule to its own thread", () => {
-    expect(subscriptionThreadPolicy({ follow: true })).toEqual({ mode: "new" });
-    expect(subscriptionThreadPolicy({ follow: true, thread: null })).toEqual({ mode: "new" });
-    expect(subscriptionThreadPolicy({ follow: false })).toEqual({ mode: "own" });
-    expect(subscriptionThreadPolicy({})).toEqual({ mode: "own" });
-    // A stored policy wins over the default.
-    expect(subscriptionThreadPolicy({ follow: true, thread: { mode: "own" } })).toEqual({ mode: "own" });
-    expect(subscriptionThreadPolicy({ thread: { mode: "subject" } })).toEqual({ mode: "subject" });
   });
 });
