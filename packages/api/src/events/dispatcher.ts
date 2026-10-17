@@ -559,9 +559,11 @@ export class EventDispatcher {
           if (recorded !== "exists") recordDeliveryDestination("pin_unavailable");
           return;
         }
-        // A retry that recovers an admitted dispatch records nothing new: the
-        // receipt already holds the stage, or, with no receipt, the first
-        // attempt already counted it.
+        // A retry that recovers an admitted dispatch records nothing new when
+        // the receipt already holds the stage. With no receipt, a recovered
+        // retry is not counted. Accepted undercount: an attempt that was
+        // admitted, then crashed before recording, on an event with no
+        // receipt, is counted once at most and may be missed.
         const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
           destinationReceiptStage(receiptIds, destination), destinationStageMarker(delivery.id));
         if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {

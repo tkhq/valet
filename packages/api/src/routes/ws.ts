@@ -206,7 +206,12 @@ export function registerWsRoutes(
             if (lifecycle.closed) return;
 
             if (row.ownerType === "team" && !guestOnly) {
-              const visible = threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id));
+              const visible = threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id), {
+                liveThread: (liveSessionId, liveThreadId) => {
+                  const live = providers.engineHost.liveSession(liveSessionId)?.threadById(liveThreadId);
+                  return live ? threadRef(live) : undefined;
+                },
+              });
               // A delivery that records a new Slack channel on a live thread
               // discards the cached answer on the next frame.
               threadShown = cachedThreadVisibility(visible,

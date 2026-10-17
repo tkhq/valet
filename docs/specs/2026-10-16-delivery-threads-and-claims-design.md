@@ -391,8 +391,10 @@ event wakeups spec Part A.
 - **Explicit `own` or `existing` on a channel rule.** A rule that matches
   channel messages and sets `own` or `existing` puts several Slack
   conversations in one thread that can reply to each of them. This is the
-  owner's choice. The default (Part A step 3) gives each conversation its
-  own thread.
+  owner's choice. The default (Part A step 3) keys a thread per delivery
+  (`sub:<rule>:<deliveryId>`). With `follow: true`, later replies in that
+  Slack thread reach the same assistant thread through the binding.
+  Without `follow`, each matching message opens its own thread.
 - **Channel privacy follows content.** Every Slack-sourced assistant
   delivery records its channel on the thread it lands in, in engine thread
   `metadata.slackChannels`, and on a team execution's governing thread. The
