@@ -5,7 +5,7 @@
  */
 import { Link } from "@tanstack/react-router";
 import type { EventSubscriptionWire } from "@valet/api/wire";
-import { usePinnedThreadTitles } from "~/api/presence";
+import { usePinnedThreadTitles } from "~/api/listener";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
 import { ProblemBadge } from "./problem-badge";
@@ -22,7 +22,7 @@ export function useListenerSentence(
 ): (sub: EventSubscriptionWire) => string {
   const catalog = useTriggerCatalog();
   const workflows = useWorkflows();
-  const pinned = usePinnedThreadTitles(listeners);
+  const pinned = usePinnedThreadTitles(listeners.map((sub) => (sub.target.kind === "assistant" ? sub.target.thread : undefined)));
   const threads: ThreadTitles = { ...knownThreads, ...pinned };
   const workflowNames = workflows.data?.workflows ?? [];
   return (sub) => listenerSentence(sub, catalog.data?.catalog, workflowNames, threads);

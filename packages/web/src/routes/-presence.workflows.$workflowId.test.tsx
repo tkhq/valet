@@ -167,7 +167,6 @@ vi.mock("~/api/events", () => ({
 }));
 
 // Thread titles for pinned listeners and routines; none here pins a thread.
-vi.mock("~/api/presence", () => ({ usePinnedThreadTitles: () => ({}) }));
 vi.mock("~/api/listener", () => ({ usePinnedThreadTitles: () => ({}) }));
 
 /** The wizard has its own suite. A stub names the flow it opened on. */

@@ -14,7 +14,6 @@ import {
   useListenerDeliveries,
   useListenerReceipts,
   usePinnedThreadTitle,
-  useThreadTitlesById,
 } from "~/api/listener";
 import { useMe } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
@@ -169,7 +168,6 @@ function AppearsAs({ sub }: { sub: EventSubscriptionWire }) {
 function ListenerDeliveries({ id }: { id: string }) {
   const deliveriesQ = useListenerDeliveries(id);
   const deliveries = deliveriesQ.data?.deliveries ?? [];
-  const titles = useThreadTitlesById(deliveries.flatMap((d) => [d.thread?.threadId, d.claimedBy?.threadId].filter((t): t is string => t !== undefined)));
   return (
     <section aria-label="Deliveries">
       <h2 className="mb-3 font-display text-lg">Deliveries</h2>
@@ -179,7 +177,7 @@ function ListenerDeliveries({ id }: { id: string }) {
           <ErrorRow>{errorText(deliveriesQ.error, "Could not load the deliveries. Reload the page to try again.")}</ErrorRow>
         )}
         {deliveriesQ.isSuccess && (
-          <DeliveryList deliveries={deliveries} threadTitles={titles} empty="This listener has no deliveries yet." />
+          <DeliveryList deliveries={deliveries} empty="This listener has no deliveries yet." />
         )}
       </div>
     </section>

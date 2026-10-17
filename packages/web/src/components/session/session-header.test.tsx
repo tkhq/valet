@@ -104,17 +104,19 @@ vi.mock("@tanstack/react-router", () => ({
     children,
     to,
     params,
+    search,
     ...rest
   }: {
     children: ReactNode;
     to: string;
     params?: Record<string, string>;
+    search?: Record<string, string>;
     [key: string]: unknown;
-  }) => (
-    <a href={params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to} {...rest}>
-      {children}
-    </a>
-  ),
+  }) => {
+    const path = params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to;
+    const query = search ? `?${new URLSearchParams(search).toString()}` : "";
+    return <a href={`${path}${query}`} {...rest}>{children}</a>;
+  },
 }));
 
 vi.mock("~/api/channels", () => ({
@@ -1057,7 +1059,7 @@ describe("SessionHeader: subject thread place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo#12" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "acme/repo#12" });
-    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/repo#12");
+    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/repo#12?workspace=user");
   });
 
   it("names a GitHub repository subject with no issue number", () => {
@@ -1084,13 +1086,39 @@ describe("SessionHeader: subject thread place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "#incidents" });
-    expect(link.getAttribute("href")).toBe("/presence/places/slack:T1/C123");
+    expect(link.getAttribute("href")).toBe("/presence/places/slack:T1/C123?workspace=user");
   });
 
   it("falls back to the raw channel id when the channel name is not resolved", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C999" }];
     renderHeader(undefined, "th-1");
     expect(screen.getByRole("link", { name: "#C999" })).toBeTruthy();
+  });
+
+  it("links the place the server names: a lowercase repository and its pull request", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API#12" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/api#12" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/api#12?workspace=user");
+  });
+
+  it("links a commit subject to its repository", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API@0a1b2c3d" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/api" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/api?workspace=user");
+  });
+
+  it("links a Slack thread subject to its channel", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123/1790000000.000100" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "#C123" }).getAttribute("href")).toBe("/presence/places/slack:T1/C123?workspace=user");
+  });
+
+  it("reads a team thread's place in the team's workspace, not the switcher's", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/api#12" }];
+    renderHeader(undefined, "th-1", { ...baseSession(), owner: { type: "team", id: "team_1" } });
+    expect(screen.getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/presence/places/github:acme/api#12?workspace=team_1");
   });
 
   it("shows no place label for a non-subject thread", () => {

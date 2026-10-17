@@ -1,13 +1,11 @@
 /**
  * Query hooks for the Presence hub (docs/specs/2026-10-16-presence-hub-design.md
- * Part B): the places a workspace is present in, one place's page, and the
- * titles of the threads that listeners pin.
+ * Part B): the places a workspace is present in and one place's page. A
+ * pinned thread's title is `usePinnedThreadTitles` in `./listener`.
  */
-import { useMemo } from "react";
-import { skipToken, useQueries, useQuery } from "@tanstack/react-query";
-import type { EventSubscriptionWire, ListPresencePlacesResponse, PresencePlaceDetailResponse, PresencePlaceWire } from "@valet/api/wire";
+import { skipToken, useQuery } from "@tanstack/react-query";
+import type { ListPresencePlacesResponse, PresencePlaceDetailResponse, PresencePlaceWire } from "@valet/api/wire";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
-import type { ThreadTitles } from "~/components/presence/sentences";
 import { api } from "./client";
 
 /** The workspace key the presence reads take: `user`, or a team id. It is a
@@ -16,8 +14,6 @@ export const qkPresence = {
   all: ["presence"] as const,
   places: (scope: string) => ["presence", "places", scope] as const,
   place: (scope: string, subject: string) => ["presence", "place", scope, subject] as const,
-  threadTitles: (sessionId: string, threadIds: readonly string[]) =>
-    ["presence", "thread-titles", sessionId, ...threadIds] as const,
 };
 
 /** The switcher's workspace as the `scope` the presence reads take. */
@@ -47,39 +43,26 @@ export function usePresencePlace(subject: string) {
   });
 }
 
+const SLACK_SUBJECT_RE = /^slack:([^/]+)(?:\/([^/]+)(?:\/[^/]+)?)?$/;
+const GITHUB_SUBJECT_RE = /^github:([^/#@]+)\/([^/#@]+)(?:#(\d+)|@[0-9a-f]+)?$/i;
+const LINEAR_SUBJECT_RE = /^linear:(?:team\/)?[A-Za-z0-9_-]+$/;
+
 /**
- * The titles of the threads that listeners pin with an `existing` policy, so
- * a sentence reads `works in the thread Platform CI`. One read per assistant
- * session. A thread the read does not return (archived, or not visible)
- * reads as a generic name in the sentence.
+ * The place a subject belongs to, or null when it names none. It mirrors
+ * the server's `placeOfSubject` (packages/api/src/services/presence-places.ts),
+ * so a link names the key the places API lists: a Slack thread belongs to
+ * its channel, a GitHub owner and repository are lowercase, and a commit
+ * (`@<sha>`) belongs to its repository.
  */
-export function usePinnedThreadTitles(listeners: readonly EventSubscriptionWire[]): ThreadTitles {
-  // A new array each render would hand `useQueries` new options every time;
-  // the queries change only when the pinned threads do.
-  const queries = useMemo(() => {
-    const bySession = new Map<string, Set<string>>();
-    for (const sub of listeners) {
-      const thread = sub.target.kind === "assistant" ? sub.target.thread : undefined;
-      if (thread?.mode !== "existing") continue;
-      const ids = bySession.get(thread.sessionId) ?? new Set<string>();
-      ids.add(thread.threadId);
-      bySession.set(thread.sessionId, ids);
-    }
-    return [...bySession].map(([sessionId, ids]) => {
-      const threadIds = [...ids].sort();
-      return {
-        queryKey: qkPresence.threadTitles(sessionId, threadIds),
-        queryFn: () => api.listThreads(sessionId, { fixedIds: threadIds, fixedOnly: true }),
-        staleTime: 60_000,
-      };
-    });
-  }, [listeners]);
-  const results = useQueries({ queries });
-  const titles: Record<string, { title: string | null | undefined }> = {};
-  for (const result of results) {
-    for (const thread of result.data?.threads ?? []) titles[thread.id] = { title: thread.title };
+export function placeOfSubject(subject: string): string | null {
+  const slack = SLACK_SUBJECT_RE.exec(subject);
+  if (slack) return slack[2] ? `slack:${slack[1]}/${slack[2]}` : `slack:${slack[1]}`;
+  const github = GITHUB_SUBJECT_RE.exec(subject);
+  if (github) {
+    const repo = `github:${github[1]!.toLowerCase()}/${github[2]!.toLowerCase()}`;
+    return github[3] ? `${repo}#${github[3]}` : repo;
   }
-  return titles;
+  return LINEAR_SUBJECT_RE.test(subject) ? subject : null;
 }
 
 /**

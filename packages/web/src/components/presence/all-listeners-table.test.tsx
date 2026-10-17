@@ -32,7 +32,7 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
   useWorkflows: () => ({ data: { workflows: [{ id: "wf-1", name: "Incident triage" }] } }),
 }));
-vi.mock("~/api/presence", () => ({ usePinnedThreadTitles: () => ({}) }));
+vi.mock("~/api/listener", () => ({ usePinnedThreadTitles: () => ({}) }));
 
 import { AllListenersTable } from "./all-listeners-table";
 import { ListenerRow } from "./listener-rows";

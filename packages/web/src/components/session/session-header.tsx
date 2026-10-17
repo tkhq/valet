@@ -14,6 +14,7 @@ import {
 import { useRef, useState, type ReactNode } from "react";
 import { ApiError } from "~/api/client";
 import { useWorkspaceChannels } from "~/api/channels";
+import { placeOfSubject } from "~/api/presence";
 import {
   useDeleteSession,
   usePauseSession,
@@ -45,6 +46,7 @@ import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
+import { workspaceKeyForOwner } from "~/lib/workspace-scope";
 import {
   queueBusy,
   useActiveModelForThread,
@@ -77,33 +79,40 @@ export function shortenWorkspace(workspace: string): string {
     : parts[parts.length - 1] ?? workspace;
 }
 
-/** A subject thread's place: the raw subject (after `subject:`), and the
- * label the header shows for it. */
+/** A subject thread's place: the place key the places API lists for the
+ * subject (after `subject:`), and the label the header shows for it. */
 export interface SubjectPlace {
   subject: string;
   label: string;
 }
 
-/** Pure: the Slack channel id inside a `slack:<team>/<channel>` subject
- * (the channel level only, with no deeper thread segment). */
-function subjectSlackChannelId(subject: string): string | undefined {
-  if (!subject.startsWith("slack:")) return undefined;
-  const parts = subject.slice("slack:".length).split("/");
+/** Pure: the Slack channel id inside a `slack:<team>/<channel>` place. */
+function placeSlackChannelId(place: string): string | undefined {
+  if (!place.startsWith("slack:")) return undefined;
+  const parts = place.slice("slack:".length).split("/");
   return parts.length === 2 ? parts[1] : undefined;
 }
 
+/** Pure: the place of a `subject:` thread key, as `placeOfSubject` names it. */
+function subjectKeyPlace(key: string | undefined): string | undefined {
+  if (!key?.startsWith("subject:")) return undefined;
+  return placeOfSubject(key.slice("subject:".length)) ?? undefined;
+}
+
 /**
- * Pure: a subject thread's place label (spec Part G): `#<channel>` for a
- * Slack channel subject, using the resolved channel name when the caller
- * has one and falling back to the raw channel id; `<owner>/<repo>` or
- * `<owner>/<repo>#<n>` for a GitHub subject; `<ID>` for a Linear issue
- * subject; `<KEY>` for a Linear team subject. Undefined for any other key,
- * including a non-subject thread.
+ * Pure: a subject thread's place label (spec Part G). The subject is first
+ * normalized to its place the way the server does, so a Slack thread names
+ * its channel and `github:Acme/API@<sha>` names `acme/api`. The label is
+ * `#<channel>` for a Slack channel, using the resolved channel name when
+ * the caller has one and falling back to the raw channel id;
+ * `<owner>/<repo>` or `<owner>/<repo>#<n>` for GitHub; `<ID>` for a Linear
+ * issue; `<KEY>` for a Linear team. Undefined for any other key, including
+ * a non-subject thread.
  */
 export function subjectPlaceLabel(key: string | undefined, channelName?: string): SubjectPlace | undefined {
-  if (!key?.startsWith("subject:")) return undefined;
-  const subject = key.slice("subject:".length);
-  const channelId = subjectSlackChannelId(subject);
+  const subject = subjectKeyPlace(key);
+  if (subject === undefined) return undefined;
+  const channelId = placeSlackChannelId(subject);
   if (channelId !== undefined) return { subject, label: `#${channelName ?? channelId}` };
   if (subject.startsWith("github:")) return { subject, label: subject.slice("github:".length) };
   if (subject.startsWith("linear:")) {
@@ -377,12 +386,15 @@ export function SessionHeader({
   const channelOwner = owner.type === "user" || owner.type === "team" ? { ownerType: owner.type, ownerId: owner.id } : undefined;
   const channels = useWorkspaceChannels(channelOwner);
   const threadKey = activeThread?.key;
-  const subject = threadKey?.startsWith("subject:") ? threadKey.slice("subject:".length) : undefined;
-  const subjectChannelId = subject !== undefined ? subjectSlackChannelId(subject) : undefined;
+  const subjectPlace = subjectKeyPlace(threadKey);
+  const subjectChannelId = subjectPlace !== undefined ? placeSlackChannelId(subjectPlace) : undefined;
   const subjectChannelName = subjectChannelId !== undefined
     ? channels.data?.channels.find((c) => c.key === `slack:${subjectChannelId}`)?.name
     : undefined;
   const place = subjectPlaceLabel(threadKey, subjectChannelName);
+  // The place page reads in the thread owner's workspace, not the
+  // switcher's: a team thread's place lists the team's listeners.
+  const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
@@ -468,6 +480,7 @@ export function SessionHeader({
           <Link
             to="/presence/places/$subject"
             params={{ subject: place.subject }}
+            search={{ workspace: placeWorkspace }}
             className="text-[11px] text-muted hover:text-ink hover:underline"
           >
             {place.label}

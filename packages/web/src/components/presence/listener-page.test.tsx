@@ -194,14 +194,11 @@ describe("ListenerPage", () => {
     const base = { subscriptionId: "R4", subscriptionName: "Failed checks", attempts: 1, deliveredAt: null, lastError: null, event: EVENT };
     listSubscriptionDeliveries.mockResolvedValue({
       deliveries: [
-        { ...base, id: "d1", status: "delivered", deliveredAt: 1_100, thread: { sessionId: "s-ws", threadId: "t-ci" } },
-        { ...base, id: "d2", status: "skipped", lastError: "Skipped, claimed by thread t-inc.", claimedBy: { sessionId: "s-ws", threadId: "t-inc" } },
+        { ...base, id: "d1", status: "delivered", deliveredAt: 1_100, thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } },
+        { ...base, id: "d2", status: "skipped", lastError: "Skipped, claimed by thread t-inc.", claimedBy: { sessionId: "s-ws", threadId: "t-inc", title: "Incident 42", archived: true } },
         { ...base, id: "d3", status: "dead", lastError: PIN_TEXT },
       ],
     });
-    getThreadAddress.mockImplementation(async (id) => ({
-      id, sessionId: "s-ws", title: id === "t-ci" ? "Platform CI" : "Incident 42", createdAt: 1, archivedAt: null,
-    }));
     renderPage();
     const deliveries = await screen.findByRole("region", { name: "Deliveries" });
     expect((await within(deliveries).findByRole("link", { name: "Delivered to Platform CI" })).getAttribute("href")).toBe("/threads/t-ci");
@@ -209,6 +206,8 @@ describe("ListenerPage", () => {
     expect(within(deliveries).getByText(PIN_TEXT)).toBeTruthy();
     expect(within(deliveries).getAllByRole("link", { name: "CI failed on main" })[0]!.getAttribute("href")).toBe("/presence/events/ev-1");
     expect(listSubscriptionDeliveries).toHaveBeenCalledWith("R4", 25);
+    // The delivery refs carry the titles; the page reads no thread again.
+    expect(getThreadAddress).not.toHaveBeenCalled();
   });
 
   it("lists this listener's receipts for an administrator", async () => {

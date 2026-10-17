@@ -1,8 +1,7 @@
 /**
  * Query hooks for one listener's page and one routine's page
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 4, Part D step 2):
- * the listener's deliveries and receipts, the title of a pinned thread, and
- * the titles of the threads deliveries reached.
+ * the listener's deliveries and receipts, and the titles of pinned threads.
  */
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type {
@@ -18,7 +17,6 @@ export const qkListener = {
   deliveries: (id: string) => ["events", "subscription-deliveries", id] as const,
   receipts: (id: string) => ["events", "receipts", "listener", id] as const,
   pinTitle: (sessionId: string, threadId: string) => ["presence", "pin-title", sessionId, threadId] as const,
-  threadAddress: (threadId: string) => ["presence", "thread-address", threadId] as const,
 };
 
 /** One listener's latest deliveries, newest first, each with its event. */
@@ -56,8 +54,10 @@ export async function pinnedThreadTitle(sessionId: string, threadId: string): Pr
   return found?.title ?? null;
 }
 
-/** The titles of pinned threads as `ThreadTitles`, for sentences. A pin
- * reads as untitled while it loads or when no read returns its thread. */
+/** The titles of pinned threads as `ThreadTitles`, for sentences. Every
+ * page that names a pin (place, listener, routine) reads it here, so an
+ * archived pin reads the same everywhere. A pin reads as untitled while it
+ * loads or when no read returns its thread. */
 export function usePinnedThreadTitles(policies: ReadonlyArray<AssistantThreadPolicy | null | undefined>): ThreadTitles {
   const pins = new Map<string, Extract<AssistantThreadPolicy, { mode: "existing" }>>();
   for (const policy of policies) {
@@ -82,23 +82,4 @@ export function usePinnedThreadTitles(policies: ReadonlyArray<AssistantThreadPol
 /** One pinned thread's title; see `usePinnedThreadTitles`. */
 export function usePinnedThreadTitle(policy: AssistantThreadPolicy | null | undefined): ThreadTitles {
   return usePinnedThreadTitles([policy]);
-}
-
-/** The titles of the threads that deliveries reached or that claimed them,
- * one read per thread. A thread the viewer may not open reads as untitled. */
-export function useThreadTitlesById(threadIds: readonly string[]): ThreadTitles {
-  const unique = [...new Set(threadIds)].sort();
-  const results = useQueries({
-    queries: unique.map((threadId) => ({
-      queryKey: qkListener.threadAddress(threadId),
-      queryFn: () => api.getThreadAddress(threadId),
-      staleTime: 60_000,
-      retry: false,
-    })),
-  });
-  const titles: Record<string, { title: string | null | undefined }> = {};
-  for (const result of results) {
-    if (result.data) titles[result.data.id] = { title: result.data.title };
-  }
-  return titles;
 }

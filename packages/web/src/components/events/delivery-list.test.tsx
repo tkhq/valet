@@ -46,10 +46,10 @@ describe("DeliveryList", () => {
     expect(screen.queryByRole("link")).toBeNull();
   });
 
-  it("names the thread by title when the caller has it", () => {
-    const delivered: EventDeliveryWire = { ...base, id: "d5", status: "delivered", thread: { sessionId: "sess_1", threadId: "th_inc" } };
-    const claimed: EventDeliveryWire = { ...base, id: "d6", status: "skipped", claimedBy: { sessionId: "sess_1", threadId: "th_ci" } };
-    render(<DeliveryList deliveries={[delivered, claimed]} threadTitles={{ th_inc: { title: "Incident 42" }, th_ci: { title: null } }} now={0} />);
+  it("names the thread by the title its ref carries", () => {
+    const delivered: EventDeliveryWire = { ...base, id: "d5", status: "delivered", thread: { sessionId: "sess_1", threadId: "th_inc", title: "Incident 42" } };
+    const claimed: EventDeliveryWire = { ...base, id: "d6", status: "skipped", claimedBy: { sessionId: "sess_1", threadId: "th_ci", title: " " } };
+    render(<DeliveryList deliveries={[delivered, claimed]} now={0} />);
     expect(screen.getByRole("link", { name: "Delivered to Incident 42" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Claimed by thread" })).toBeTruthy();
   });

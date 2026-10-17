@@ -27,7 +27,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 const getPresencePlace = vi.fn<(scope: string, subject: string) => Promise<PresencePlaceDetailResponse>>();
-const listThreads = vi.fn<(sessionId: string, opts?: { fixedIds?: string[]; fixedOnly?: boolean }) => Promise<ListThreadsResponse>>();
+type ListThreadsOpts = { threadId?: string; archived?: boolean };
+const listThreads = vi.fn<(sessionId: string, opts?: ListThreadsOpts) => Promise<ListThreadsResponse>>();
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
   return {
@@ -35,7 +36,7 @@ vi.mock("~/api/client", async (importOriginal) => {
     api: {
       ...actual.api,
       getPresencePlace: (scope: string, subject: string) => getPresencePlace(scope, subject),
-      listThreads: (sessionId: string, opts?: { fixedIds?: string[]; fixedOnly?: boolean }) => listThreads(sessionId, opts),
+      listThreads: (sessionId: string, opts?: ListThreadsOpts) => listThreads(sessionId, opts),
     },
   };
 });
@@ -176,7 +177,7 @@ describe("PlacePage", () => {
       "Listens on acme/api for pull request reviews and completed checks · works in one thread per pull request",
     )).toBeTruthy();
     expect(await within(listeners).findByText("Listens on acme/api for completed checks · works in the thread Platform CI")).toBeTruthy();
-    expect(listThreads).toHaveBeenCalledWith("s-ws", { fixedIds: ["t-ci"], fixedOnly: true });
+    expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
 
     const threads = screen.getByRole("list", { name: "Threads for acme/api" });
     expect(within(threads).getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/threads/t-12");
@@ -191,6 +192,20 @@ describe("PlacePage", () => {
     for (let i = 1; i < order.length; i++) {
       expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
+  });
+
+  it("names an archived pinned thread, as the listener page does", async () => {
+    // The open list leaves the archived thread out; the archived list has it.
+    listThreads.mockImplementation(async (_sessionId, opts) => ({
+      threads: opts?.archived
+        ? [{ id: "t-ci", sessionId: "s-ws", title: "Old CI", createdAt: 1, lastUserActivityAt: 1 }]
+        : [],
+    }));
+    getPresencePlace.mockResolvedValue(ACME_API);
+    renderPage("github:acme/api");
+    const listeners = await screen.findByRole("region", { name: "Listeners" });
+    expect(await within(listeners).findByText("Listens on acme/api for completed checks · works in the thread Old CI")).toBeTruthy();
+    expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
 
   it("reads the team workspace's place, with Appears as, Following, and Active now in order (H4)", async () => {

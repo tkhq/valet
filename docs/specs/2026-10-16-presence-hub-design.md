@@ -338,6 +338,18 @@ Pass criterion: all steps, in one run, from a clean start.
   its own line after the list. The section shows when it has work or a
   `Fed by` line, and hides when it has neither. A routine link opens
   `/presence/routines?routine=<id>`.
+- **A thread header links the server's place key (Part G step 2).** The
+  web `placeOfSubject` mirrors the server's: a Slack thread names its
+  channel, a GitHub owner and repository are lowercase, and a commit
+  (`@<sha>`) names its repository. The link sends `?workspace=` with the
+  thread owner's workspace, so a team thread's place reads the team's
+  listeners whatever the switcher shows.
+- **One pinned title read.** Every page that names a pinned thread reads
+  `usePinnedThreadTitles` in `api/listener.ts`. A miss in the open thread
+  list reads the archived list, so an archived pin reads by its title on
+  the place page, the listener page, and the routine page alike. A
+  delivery row names its thread by the `title` on its thread ref, so no
+  page reads the thread again.
 - **The `/workflows?tab=runs` row has no live source.** No link in the app
   or the api builds that URL today. The row stays so that an old bookmark
   or a later link lands on the Runs tab.

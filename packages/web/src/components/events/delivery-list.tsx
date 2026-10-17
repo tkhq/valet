@@ -1,20 +1,17 @@
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import type { EventDeliveryWire, EventSummaryWire } from "@valet/api/wire";
+import type { EventDeliveryThreadRef, EventDeliveryWire, EventSummaryWire } from "@valet/api/wire";
 import { Badge, textLinkClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
 import { deliveryStatusLine } from "./delivery-copy";
 
-/** Thread titles by thread id; the same shape the Presence sentences take. */
-type ThreadTitles = Readonly<Record<string, { title: string | null | undefined }>>;
-
 /** A delivery, with the event it carried when the list is one listener's. */
 export type DeliveryRow = EventDeliveryWire & { event?: EventSummaryWire };
 
-function titleOf(threads: ThreadTitles, threadId: string): string {
-  const title = threads[threadId]?.title;
-  return title !== undefined && title !== null && title.trim().length > 0 ? title : "thread";
+/** The title the API sends on the thread ref, or `thread` when it has none. */
+function titleOf(ref: EventDeliveryThreadRef): string {
+  return ref.title !== undefined && ref.title.trim().length > 0 ? ref.title : "thread";
 }
 
 /**
@@ -40,19 +37,17 @@ const destinationLinkClass = cn(textLinkClass, "min-h-11 text-xs sm:min-h-0");
  * started, when the API sends one (spec 2026-10-16: delivery threads and
  * claims, Part E step 2). A dead delivery shows its dead-letter text.
  *
- * A row names its thread by title when `threadTitles` has it. A row that
+ * A row names its thread by the title on its thread ref. A row that
  * carries its event (a listener's list) leads with the event, not the rule.
  */
 export function DeliveryList({
   deliveries,
   now = Date.now(),
-  threadTitles = {},
   empty,
 }: {
   deliveries: DeliveryRow[];
   /** Injectable for tests; a delivery countdown is read against it. */
   now?: number;
-  threadTitles?: ThreadTitles;
   /** The text for an empty list. The default suits one event's list. */
   empty?: ReactNode;
 }) {
@@ -83,12 +78,12 @@ export function DeliveryList({
             )}
             {d.thread && (
               <Link to="/threads/$threadId" params={{ threadId: d.thread.threadId }} className={destinationLinkClass}>
-                Delivered to {titleOf(threadTitles, d.thread.threadId)}
+                Delivered to {titleOf(d.thread)}
               </Link>
             )}
             {d.claimedBy && (
               <Link to="/threads/$threadId" params={{ threadId: d.claimedBy.threadId }} className={destinationLinkClass}>
-                Claimed by {titleOf(threadTitles, d.claimedBy.threadId)}
+                Claimed by {titleOf(d.claimedBy)}
               </Link>
             )}
             {d.runId && (
