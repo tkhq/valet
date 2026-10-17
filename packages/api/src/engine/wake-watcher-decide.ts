@@ -718,11 +718,16 @@ export function eventMatchedSignal(
  * The `event.ended` signal (spec F1). For `deadline`, `count` is the number
  * of `event.matched` signals the waiter delivered over its life: with none,
  * the body is the F1 text; otherwise it names the signal count. For `rate`,
- * `count` is the signal count in the rate window.
+ * `count` is the signal count in the rate window. For `delivered`, a claim
+ * redirect delivered the matching event to the thread as a message (spec
+ * 2026-10-16: delivery threads and claims, Part C step 5), and `hours` and
+ * `count` are unused.
  */
-export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours: number, count: number): SignalDraft {
+export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate" | "delivered", hours: number, count: number): SignalDraft {
   let body: string;
-  if (cause === "rate") {
+  if (cause === "delivered") {
+    body = "The matching event arrived in this thread as a message. The wait ended.";
+  } else if (cause === "rate") {
     body = `Ended after ${count} events in an hour. Narrow the clauses, then wait again.`;
   } else if (count === 0) {
     body = `No matching event arrived within ${hours} hours. Check the subject's state before you wait again.`;
@@ -734,6 +739,26 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours:
     body,
     attributes: { ...eventAttributes(row), cause },
     dispatchId: `wakeup:${row.id}:terminal`,
+  };
+}
+
+/**
+ * Pure end decision for a once-mode event waiter that a claim redirect
+ * delivered to (spec 2026-10-16: delivery threads and claims, Part C step
+ * 5). The delivery counts as the waiter's match: the row ends as
+ * `done/fired` with one terminal signal (INV-E5). With no ready digest,
+ * that signal is `event.ended` with cause `delivered`. A digest that arrived
+ * meanwhile goes out in the terminal `event.matched` signal instead. Null
+ * for any other row.
+ */
+export function decideDeliveredWaiter(now: number, row: Wakeup): WakeupDecision | null {
+  if (row.kind !== "event" || row.status !== "running" || row.eventMatch?.once !== true) return null;
+  const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
+  return {
+    to: "done",
+    cause: "fired",
+    patch: { cause: "fired", endedAt: now, eventBuffer: [] },
+    signals: [ready.length > 0 ? eventMatchedSignal(row, ready, row.eventCount + 1, true) : eventEndedSignal(row, "delivered", 0, 0)],
   };
 }
 

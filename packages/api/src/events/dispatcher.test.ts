@@ -33,7 +33,7 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
+import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn, type EventDispatcherDeps } from "./dispatcher.js";
 import { PinUnavailableError, pinNarrowsMessage } from "./assistant-delivery.js";
 import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
@@ -670,6 +670,7 @@ describe("EventDispatcher", () => {
     async function dispatchMention(opts: {
       destination?: unknown; payload?: Record<string, unknown>; origin?: ChannelOrigin;
       deliver?: AssistantDeliverFn;
+      endMatchedWaiter?: EventDispatcherDeps["endMatchedWaiter"];
     } = {}) {
       const { deliveryId, eventId } = await seedDelivery({
         target: { kind: "orchestrator", follow: true },
@@ -686,6 +687,7 @@ describe("EventDispatcher", () => {
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
         deliverToAssistant: deliver, recordDestination,
         resolveChannelOrigin: () => opts.origin ?? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" },
+        ...(opts.endMatchedWaiter ? { endMatchedWaiter: opts.endMatchedWaiter } : {}),
       }).pollOnce();
       return { deliver, deliveryId, eventId };
     }
@@ -752,6 +754,44 @@ describe("EventDispatcher", () => {
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x", ...landed });
       expect(recordDestination.mock.calls).toEqual([["claim_redirect"]]);
+    });
+
+    it("a once-mode redirect target ends after its delivery lands, once per delivery (Part C step 5)", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const order: string[] = [];
+      const endMatchedWaiter = vi.fn(async () => { order.push("end"); return true; });
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
+        destination: { ...redirect, matchedWaiterId: "w-once" },
+      });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => { order.push("deliver"); return { sessionId: "sess-inc", threadId: "thr-inc" }; });
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, recordDestination,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }), endMatchedWaiter,
+      }).pollOnce();
+      expect(order).toEqual(["deliver", "end"]);
+      expect(endMatchedWaiter).toHaveBeenCalledWith({ waiterId: "w-once", sessionId: "sess-inc", threadId: "thr-inc" });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    });
+
+    it("a failed delivery does not end the waiter, and a failed end does not fail the delivery", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-inc", "team", "team-x", "thr-inc");
+      const endMatchedWaiter = vi.fn(async (): Promise<boolean> => { throw new Error("store down"); });
+      const destination = { ...redirect, matchedWaiterId: "w-once" };
+      const failing = await dispatchMention({ destination, endMatchedWaiter, deliver: async () => { throw new Error("transient"); } });
+      expect((await getDelivery(failing.deliveryId)).status).toBe("failed");
+      expect(endMatchedWaiter).not.toHaveBeenCalled();
+      const { deliveryId } = await dispatchMention({
+        destination, endMatchedWaiter, deliver: async () => ({ sessionId: "sess-inc", threadId: "thr-inc" }),
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> again?", ts: "1.3" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.3", messageTs: "1.3" },
+      });
+      expect(endMatchedWaiter).toHaveBeenCalledOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
     });
 
     it("a refused sender dead-letters before a target stamp runs", async () => {

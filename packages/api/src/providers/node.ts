@@ -835,6 +835,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // The catalog a subscription's `{{payload.<field>}}` variable resolves
     // through. It is the same merged catalog the write validator uses.
     plugins,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
     // A claimed waiter gets its digest back when its claim delivery is
     // skipped after ingest (`events/claim-recovery.ts`).
     recoverClaimedDigest: (args) => appendClaimedWaiterDigest(

@@ -563,6 +563,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
     plugins,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
     // A claimed waiter gets its digest back when its claim delivery is
     // skipped after ingest (`events/claim-recovery.ts`).
     recoverClaimedDigest: (args) => appendClaimedWaiterDigest(

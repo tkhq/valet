@@ -136,6 +136,13 @@ export interface EventDispatcherDeps {
    */
   plugins?: ValetPlugin[];
   /**
+   * Ends a once-mode waiter that a claim redirect delivered to, after the
+   * delivery lands (spec 2026-10-16: delivery threads and claims, Part C
+   * step 5). The WakeWatcher owns the end and its one terminal signal
+   * (`WakeWatcher.endDeliveredWaiter`). Absent → the waiter stays running.
+   */
+  endMatchedWaiter?: (args: { waiterId: string; sessionId: string; threadId: string }) => Promise<boolean>;
+  /**
    * Appends the event's digest to the waiter that a claim redirect named,
    * when the dispatcher skips that delivery for a reason decided after
    * ingest (`claim-recovery.ts`). Returns true when the waiter got a digest.
@@ -620,6 +627,9 @@ export class EventDispatcher {
             });
           }
         }
+        if (destination.kind === "target" && destination.matchedWaiterId !== undefined) {
+          await this.endMatchedWaiter(destination.matchedWaiterId, landed);
+        }
       } else if (target.kind === "signal") {
         await this.signalParkedRuns(event, refs);
       } else {
@@ -704,6 +714,21 @@ export class EventDispatcher {
       if (appended) this.recordDestination("claim_recovered");
     } catch (err) {
       console.error(`event dispatch: recovering waiter ${destination.matchedWaiterId}'s digest failed; the waiter misses this event:`, err);
+    }
+  }
+
+  /**
+   * Ends the once-mode waiter that a claim redirect delivered to (spec Part
+   * C step 5). The delivery has landed, so a failure here does not fail it:
+   * the waiter stays running, and the log line is the record.
+   */
+  private async endMatchedWaiter(waiterId: string, landed: DeliveredThread): Promise<void> {
+    const end = this.deps.endMatchedWaiter;
+    if (!end) return;
+    try {
+      await end({ waiterId, sessionId: landed.sessionId, threadId: landed.threadId });
+    } catch (err) {
+      console.error(`event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running:`, err);
     }
   }
 
