@@ -23,6 +23,7 @@ import {
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
+import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { SERVICE_NAMES, isMidGrain, isServiceRoot } from "./places";
 import { isRoutine } from "./routines-tab";
@@ -198,6 +199,11 @@ export function PresenceRail() {
             </Link>
           </li>
         </ul>
+        {placesQ.isError && (
+          <p role="alert" className="px-2.5 text-xs text-danger-500">
+            {errorText(placesQ.error, "Could not load the places. Reload the page to try again.")}
+          </p>
+        )}
         {filtering && (
           <Input
             type="search"
