@@ -26,12 +26,13 @@ export function usePresenceScope(): string {
 }
 
 /** The places the active workspace is present in. */
-export function usePresencePlaces() {
+export function usePresencePlaces(options: { enabled?: boolean; staleTime?: number } = {}) {
   const scope = usePresenceScope();
   return useQuery<ListPresencePlacesResponse>({
     queryKey: qkPresence.places(scope),
     queryFn: () => api.listPresencePlaces(scope),
-    staleTime: 30_000,
+    staleTime: options.staleTime ?? 30_000,
+    enabled: options.enabled ?? true,
   });
 }
 
@@ -96,7 +97,11 @@ export function placeSubjectFor(channelKey: string, places: readonly PresencePla
   return team !== undefined && team !== channel ? `slack:${team}/${channel}` : channelKey;
 }
 
-/** `placeSubjectFor` over the active workspace's places. */
+/** `placeSubjectFor` over the active workspace's places. Only a
+ * channel-only Slack key reads the places list, and the read stays fresh
+ * for five minutes: a thread page shows this link, and the org's Slack
+ * workspace rarely changes. */
 export function usePlaceSubject(channelKey: string): string {
-  return placeSubjectFor(channelKey, usePresencePlaces().data?.places);
+  const places = usePresencePlaces({ enabled: /^slack:[^/]+$/.test(channelKey), staleTime: 5 * 60_000 });
+  return placeSubjectFor(channelKey, places.data?.places);
 }

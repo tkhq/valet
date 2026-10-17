@@ -55,8 +55,12 @@ vi.mock("~/api/client", async (importOriginal) => {
   };
 });
 
+let teamsData: { teams: { id: string; callerRole: "admin" | "member" | null }[] } | undefined = {
+  teams: [{ id: "team-sre", callerRole: "member" }],
+};
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }),
+  useTeams: () => ({ data: teamsData }),
 }));
 
 vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
@@ -81,7 +85,7 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { RoutinesTab } from "./routines-tab";
-import { RoutinePage } from "./routine-page";
+import { RoutinePage, routineReadOnly } from "./routine-page";
 
 const PIN_TEXT = "Pick another thread for this rule in Presence.";
 
@@ -122,6 +126,7 @@ function wrap(node: ReactNode) {
 }
 
 beforeEach(() => {
+  teamsData = { teams: [{ id: "team-sre", callerRole: "member" }] };
   for (const mock of [listWorkflowTriggers, listWorkflows, listWorkflowRuns, runWorkflowScheduleNow, updateWorkflowSchedule, listThreads]) {
     mock.mockReset();
   }
@@ -225,6 +230,29 @@ describe("RoutinePage", () => {
     expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Fire now" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("switch", { name: "Turn off Morning summary" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("keeps a team routine read-only for a viewer outside the team", async () => {
+    teamsData = { teams: [{ id: "team-sre", callerRole: null }] };
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
+    wrap(<RoutinePage id="S1" />);
+    expect(await screen.findByText("Only its owner can change this routine.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("reads a routine as read-only until the viewer and the teams load", () => {
+    const team = routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } });
+    const mine = routine("S2");
+    const member = [{ id: "team-sre", callerRole: "member" as const }];
+    expect(routineReadOnly(mine, undefined, member)).toBe(true);
+    expect(routineReadOnly(mine, { id: "u-001" }, undefined)).toBe(true);
+    expect(routineReadOnly(mine, { id: "u-001" }, member)).toBe(false);
+    expect(routineReadOnly(team, { id: "u-001" }, member)).toBe(false);
+    expect(routineReadOnly(team, { id: "u-001" }, [{ id: "team-sre", callerRole: null }])).toBe(true);
+    // An org routine opens only through its workflow, which the server checks.
+    const org = routine("S3", { detail: { ownerType: "org", ownerId: "acme" } });
+    expect(routineReadOnly(org, { id: "u-001" }, member)).toBe(true);
+    expect(routineReadOnly({ ...org, workflowId: "wf-1" }, { id: "u-001" }, member)).toBe(false);
   });
 
   it("lists a workflow routine's runs", async () => {

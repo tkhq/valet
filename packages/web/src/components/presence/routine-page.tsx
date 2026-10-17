@@ -7,9 +7,9 @@
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import type { WorkflowRunSummary } from "@valet/api/wire";
+import type { TeamSummary, WorkflowRunSummary } from "@valet/api/wire";
 import { usePinnedThreadTitle } from "~/api/listener";
-import { useMe } from "~/api/settings";
+import { useMe, useTeams } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers } from "~/api/workflows";
 import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
@@ -23,6 +23,26 @@ import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./rout
  * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
 export function scheduleRunPrefix(scheduleId: string): string {
   return `wfrun_sch_${scheduleId.replace(/-/g, "").slice(0, 8)}_`;
+}
+
+/**
+ * Whether the viewer may NOT change this routine. It mirrors the server's
+ * trigger access rule (`canAccessTriggerRow`): the owner of a personal
+ * routine, or a member of the owning team. A routine that runs a workflow
+ * may also be open to the people who may act on that workflow, which the
+ * server checks; the page then leaves the controls on. Until the viewer and
+ * the teams load, the routine reads as read-only.
+ */
+export function routineReadOnly(
+  routine: Pick<Routine, "workflowId" | "detail">,
+  me: { id: string } | undefined,
+  teams: readonly Pick<TeamSummary, "id" | "callerRole">[] | undefined,
+): boolean {
+  if (me === undefined || teams === undefined) return true;
+  const { ownerType, ownerId } = routine.detail;
+  if (ownerType === "user" && ownerId === me.id) return false;
+  if (ownerType === "team" && teams.some((team) => team.id === ownerId && team.callerRole !== null)) return false;
+  return routine.workflowId === undefined;
 }
 
 export function RoutinePage({ id }: { id: string }) {
@@ -51,10 +71,9 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const fire = useRunScheduleNow();
   const update = useUpdateSchedule();
   const me = useMe();
+  const teams = useTeams();
   const { ownerType, ownerId } = routine.detail;
-  // Mirrors the server's gate for a personal routine. A team or org routine
-  // is checked by the server, which names the problem when it refuses.
-  const readOnly = ownerType === "user" && me.data !== undefined && ownerId !== me.data.id;
+  const readOnly = routineReadOnly(routine, me.data, teams.data?.teams);
   // The picker lists the routine owner's threads, whatever the switcher shows.
   const workspace = ownerType === "user" ? "user" : ownerType === "team" ? ownerId : undefined;
   const [editing, setEditing] = useState(false);

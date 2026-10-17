@@ -24,6 +24,7 @@ import type {
   RedeliverEventResponse,
 } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
+import { qkPresence } from "./presence";
 
 /** Key marker for a scoped query whose owner has not resolved. Not a valid
  * `ownerType`, so it can never collide with a real owner pair. */
@@ -149,11 +150,14 @@ export function useEventSubscriptions(
 
 /** A workflow-target subscription is the same row the workflow page lists as
  * an event trigger (`["workflows", "triggers", …]`), so every subscription
- * mutation invalidates that key too — else the trigger list serves a stale
- * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`. */
+ * mutation invalidates that key too. Otherwise the trigger list serves a stale
+ * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`.
+ * The Presence reads (places, a place page) list the same rules, so a
+ * listener added from a place page shows there at once. */
 function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+  void qc.invalidateQueries({ queryKey: qkPresence.all });
 }
 
 export function useCreateEventSubscription() {

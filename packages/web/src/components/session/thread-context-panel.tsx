@@ -16,13 +16,13 @@ function PullRequestIcon({ state }: { state: ThreadPullRequest["state"] }) {
   return <Icon className="h-4 w-4 shrink-0" aria-hidden />;
 }
 
-/** `repo #n`, the way the thread header names a pull request. */
 /** The link to the channel's place page, by its team-qualified place key. */
 function ChannelPlaceLink({ channelKey }: { channelKey: string }) {
   const subject = usePlaceSubject(channelKey);
   return <Link to="/presence/places/$subject" params={{ subject }} className="text-xs hover:text-ink">Open channel</Link>;
 }
 
+/** `repo #n`, the way the thread header names a pull request. */
 function pullRequestLabel(pr: ThreadPullRequest): string {
   return `${pr.repo.split("/").at(-1) ?? pr.repo} #${pr.number}`;
 }
