@@ -52,7 +52,12 @@ import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
 import { isDeliverableTarget, PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
 import { resolveDestination, summaryTitle, type Destination } from "./destination.js";
 import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
-import { destinationMetricReason, recordDeliveryDestination } from "../observability/delivery-metrics.js";
+import {
+  destinationMetricReason,
+  recordDeliveryDestination,
+  type DeliveryDestinationMetricReason,
+  type DestinationRecorder,
+} from "../observability/delivery-metrics.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -140,6 +145,11 @@ export interface EventDispatcherDeps {
     origin: ChannelOrigin | null;
     owner: { type: "user" | "team" | "org"; id: string };
   }) => Promise<{ sessionId: string; threadId: string; waiterId: string } | null>;
+  /**
+   * Counts where a delivery landed (spec Part E step 3). Absent → the
+   * `valet_event_delivery_destination` counter. Tests pass a recorder.
+   */
+  recordDestination?: DestinationRecorder;
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -212,13 +222,13 @@ export async function recordSkippedDelivery(db: AppDb, args: {
   orgId: string;
   eventId: string;
   destination: Extract<Destination, { kind: "skip" }>;
-}): Promise<void> {
+}, recordDestination: DestinationRecorder = recordDeliveryDestination): Promise<void> {
   await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${args.destination.reason}.`, attempts: args.attempts + 1 })
     .where(eq(eventDeliveries.id, args.deliveryId));
   const recorded = await appendReceiptStageForEvent(db, args.orgId, args.eventId,
     destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination),
     destinationStageMarker(args.deliveryId));
-  if (recorded !== "exists") recordDeliveryDestination("claim_skip");
+  if (recorded !== "exists") recordDestination("claim_skip");
 }
 
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
@@ -253,6 +263,10 @@ export class EventDispatcher {
   setIngressDrain(drain: () => Promise<void>): void { this.drainIngress = drain; }
 
   constructor(private readonly deps: EventDispatcherDeps) {}
+
+  private recordDestination(reason: DeliveryDestinationMetricReason): void {
+    (this.deps.recordDestination ?? recordDeliveryDestination)(reason);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -501,7 +515,8 @@ export class EventDispatcher {
           });
         const receiptIds = { subscriptionId: sub.id, deliveryId: delivery.id };
         if (destination.kind === "skip") {
-          await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination });
+          await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination },
+            (reason) => this.recordDestination(reason));
           return;
         }
         const author = teamMention
@@ -539,7 +554,7 @@ export class EventDispatcher {
             .where(eq(eventDeliveries.id, deliveryId));
           const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
             { kind: "pin_unavailable", sessionId: destination.sessionId, threadId: destination.threadId }), destinationStageMarker(delivery.id));
-          if (recorded !== "exists") recordDeliveryDestination("pin_unavailable");
+          if (recorded !== "exists") this.recordDestination("pin_unavailable");
           return;
         }
         // A retry that recovers an admitted dispatch records nothing new when
@@ -550,7 +565,7 @@ export class EventDispatcher {
         const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
           destinationReceiptStage(receiptIds, destination), destinationStageMarker(delivery.id));
         if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {
-          recordDeliveryDestination(destinationMetricReason(destination));
+          this.recordDestination(destinationMetricReason(destination));
         }
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
