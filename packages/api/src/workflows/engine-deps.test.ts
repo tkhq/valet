@@ -1,4 +1,4 @@
-import type { Presence } from "@valet/shared";
+import { UNATTENDED_WORKFLOW_KEY, type Presence } from "@valet/shared";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
@@ -998,7 +998,7 @@ it("keys a run a Slack channel's event started by that channel", () => {
 });
 
 
-it("retains durable task references for both workflow dispatch paths and their repairs", async () => {
+it("retains task references and marks both workflow dispatch paths and their repairs unattended", async () => {
   api = await bootTestApi();
   const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
   await seedRun(api, "task-contract-run", "task-contract-workflow");
@@ -1007,13 +1007,13 @@ it("retains durable task references for both workflow dispatch paths and their r
   const task = "Exclude internal repos; return URL, owner, and evidence.";
   const primary = await deps.prompt(sessionId, task, { dispatchId: "workflow:task-contract-run:session" });
   const repair = await deps.prompt(sessionId, "Correct the JSON", { dispatchId: "workflow:task-contract-run:session:repair", taskSourceQueueItemId: primary.queueItemId, queueMode: "followup" });
-  expect((await engineStore.getQueueItem(sessionId, primary.queueItemId))?.metadata).toMatchObject({ preserveTask: true });
-  expect((await engineStore.getQueueItem(sessionId, repair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, taskSourceQueueItemId: primary.queueItemId });
+  expect((await engineStore.getQueueItem(sessionId, primary.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true });
+  expect((await engineStore.getQueueItem(sessionId, repair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, taskSourceQueueItemId: primary.queueItemId });
   const ownerHint = { ownerType: "user", ownerId: LOCAL_USER.id };
   const report = await deps.promptOrchestrator(task, { dispatchId: "workflow:task-contract-run:report", ownerHint, queueMode: "followup" });
   const reportRepair = await deps.promptOrchestrator("Correct the JSON", { dispatchId: "workflow:task-contract-run:report:repair", ownerHint, queueMode: "followup", taskSourceQueueItemId: report.queueItemId });
   expect(reportRepair.sessionId).toBe(report.sessionId);
   expect(reportRepair.threadId).toBe(report.threadId);
-  expect((await engineStore.getQueueItem(report.sessionId, report.queueItemId))?.metadata).toMatchObject({ preserveTask: true });
-  expect((await engineStore.getQueueItem(reportRepair.sessionId, reportRepair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, taskSourceQueueItemId: report.queueItemId });
+  expect((await engineStore.getQueueItem(report.sessionId, report.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true });
+  expect((await engineStore.getQueueItem(reportRepair.sessionId, reportRepair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, taskSourceQueueItemId: report.queueItemId });
 });

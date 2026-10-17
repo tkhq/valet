@@ -8,6 +8,8 @@ export const TOOL_SCOPE_KEY = "toolScope";
 /** Last started task ceiling, retained after queue history is pruned. */
 export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
 export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
+/** Marks a workflow task that nobody watches. The engine does not offer it tools that wait for a person. */
+export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
 const TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 const ACTION_NAME = /^[a-zA-Z0-9_-]+\.(?:[a-zA-Z0-9_.-]+|\*)$/;
 

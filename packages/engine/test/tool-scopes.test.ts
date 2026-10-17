@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
-import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
-import { CONTINUATION_TOOL_SCOPE_KEY } from "@valet/shared";
+import { fauxAssistantMessage, fauxToolCall, getApiProvider, registerApiProvider, registerFauxProvider, Type, unregisterApiProviders, type TranscriptContext } from "@earendil-works/pi-ai/compat";
+import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
+import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
   it("persists a continuation ceiling per thread and replaces it for a new task", async () => {
@@ -120,5 +120,56 @@ describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
     await restored.thread().setToolFocus({ tools: ["bash"], actions: ["slack.*"] });
     expect(restored.thread().effectiveToolScope()).toEqual({ tools: [], actions: [] });
     faux.unregister();
+  });
+});
+
+describe("unattended workflow tasks", () => {
+  const ASKS = ["ask_question", "ask_approval"];
+  /** The tool names the engine offered on the turn's first model request. */
+  async function offeredTools(provider: string, purpose: "workflow" | "orchestrator", metadata: Record<string, unknown>): Promise<string[]> {
+    const faux = registerFauxProvider({ provider });
+    const original = getApiProvider(faux.api);
+    if (!original) throw new Error("faux provider missing");
+    let offered: string[] | undefined;
+    // The transcript declares tools on system messages as they are added or removed.
+    const record = (context: TranscriptContext) => {
+      if (offered) return;
+      const names = new Set<string>();
+      for (const message of context.messages) {
+        if (message.role !== "system") continue;
+        for (const tool of message.toolsAdded ?? []) names.add(tool.name);
+        for (const tool of message.toolsRemoved ?? []) names.delete(tool.name);
+      }
+      offered = [...names];
+    };
+    registerApiProvider({ api: faux.api,
+      stream: (model, context, options) => { record(context); return original.stream(model, context, options); },
+      streamSimple: (model, context, options) => { record(context); return original.streamSimple(model, context, options); },
+    }, `${provider}-recorder`);
+    try {
+      const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose, model: faux.getModel(), builtinTools });
+      faux.setResponses([fauxAssistantMessage("done")]);
+      const receipt = await session.prompt("report", { metadata });
+      await session.thread().awaitResult(receipt.queueItemId);
+      return offered ?? [];
+    } finally {
+      unregisterApiProviders(`${provider}-recorder`);
+      faux.unregister();
+    }
+  }
+
+  it.each([
+    ["a workflow step session", "workflow", {}],
+    ["a workflow task in an assistant thread", "orchestrator", { [UNATTENDED_WORKFLOW_KEY]: true }],
+  ] as const)("does not offer tools that wait for a person to %s", async (label, purpose, metadata) => {
+    const offered = await offeredTools(`unattended-${purpose}`, purpose, metadata);
+    expect(offered, label).toContain("read");
+    for (const name of ASKS) expect(offered, label).not.toContain(name);
+  });
+
+  it("still offers them to a person's own prompt in an assistant thread", async () => {
+    const offered = await offeredTools("attended-orchestrator", "orchestrator", {});
+    for (const name of ASKS) expect(offered).toContain(name);
   });
 });

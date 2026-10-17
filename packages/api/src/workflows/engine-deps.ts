@@ -1,5 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
-import { actionInScope, scopeRefusal } from "@valet/shared";
+import { actionInScope, scopeRefusal, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -391,7 +391,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const receipt = await thread.submitPrompt(text, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
-        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
           ...(context.presence ? { presence: context.presence } : {}) },
         queueMode: promptOpts.queueMode,
       });
@@ -639,7 +639,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
-        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
           ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,

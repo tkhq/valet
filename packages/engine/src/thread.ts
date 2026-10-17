@@ -1,6 +1,6 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -189,6 +189,10 @@ const WORKFLOW_AUTO_CONTINUE_PROMPT =
 
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
+
+/** Tools that wait for a person. An unattended workflow task has nobody to answer them,
+ * so its decisions belong to the workflow's author when the workflow is saved. */
+const ASKS_A_PERSON = new Set(["ask_question", "ask_approval"]);
 
 /** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
  * prevents automatic posting but does not decide whether content is addressed.
@@ -4485,7 +4489,7 @@ export class Thread {
   }
 
   private async continueAfterCompaction(): Promise<void> {
-    const prompt = this.session.options.purpose === "workflow" ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
+    const prompt = this.isUnattendedWorkflowTask() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
     const item = this.runningItem;
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
@@ -5322,11 +5326,18 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
+  /** A workflow step's own session, or a workflow task handed to an assistant thread. */
+  private isUnattendedWorkflowTask(): boolean {
+    return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true;
+  }
+
+  /** `includeRestricted` finds a suspended call's tool on replay, so it keeps every tool. */
   private buildTools(includeRestricted = false): AgentTool[] {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
-    return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
+    const unattended = !includeRestricted && this.isUnattendedWorkflowTask();
+    return all.filter((def) => includeRestricted || (!(unattended && ASKS_A_PERSON.has(def.name)) && (def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
-      : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
+      : toolInScope(this.effectiveToolScope(), def.name))))).map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
       ),

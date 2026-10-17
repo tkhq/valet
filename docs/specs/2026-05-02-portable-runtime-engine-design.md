@@ -431,6 +431,7 @@ Normal settlement, crash settlement, and `awaitResult` reject length, error, and
 The engine does not substitute an earlier answer, recover streamed text, or replay the submission. A clean-stop schema failure retains the workflow's existing exactly-one repair opportunity. If the repair also fails validation, the workflow fails with separate original and repair receipts. Incomplete or failed transport does not trigger schema repair. Intentional silence does not require a channel-specific exception.
 
 Workflow prompts retain their original rendered user entry through compaction using `metadata.preserveTask`.
+Workflow prompts also carry `metadata.unattendedWorkflow`. Their turns get no tools that wait for a person and use the workflow compaction continuation prompt.
 Session and orchestrator repairs carry `taskSourceQueueItemId` from the first submission receipt, including after checkpoint resume.
 The host persists that reference in prompt metadata. The engine restores the original task only for an active submission on its transcript branch.
 Restart and gate replay retain this scope. An unrelated submission removes a previously injected contract.
