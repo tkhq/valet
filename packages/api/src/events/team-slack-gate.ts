@@ -9,6 +9,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { resolvePath, subscriptionMatchesEvent } from "./match.js";
 import { isOrgMember } from "../services/org.js";
 import { isTeamMember } from "../services/teams.js";
+import { assistantScopeOf, isAssistantKind } from "./target-names.js";
 
 /**
  * Who a Slack message shows as written by, when that is not the Valet user it
@@ -98,16 +99,17 @@ export async function followedThreadAudience(
  *
  * `ownerType` is the stored owner where there is one. On a create there is
  * not: the route derives the owner FROM the target, so an undefined owner
- * falls back to the target's own `orchestrator: "team"`. A stored row needs
+ * falls back to the target's own `assistant: "team"`. A stored row needs
  * no such field — the route only ever stamps team ownership on a team
  * orchestrator target, and rows written before that field existed carry the
  * team owner alone.
  */
 export function isTeamAssistantRule(ownerType: string | undefined, target: unknown): boolean {
   if (typeof target !== "object" || target === null) return false;
-  if (!("kind" in target) || target.kind !== "orchestrator") return false;
+  // Stored rows may still carry the old names (`target-names.ts`).
+  if (!("kind" in target) || !isAssistantKind(target.kind)) return false;
   if (ownerType !== undefined) return ownerType === "team";
-  return "orchestrator" in target && target.orchestrator === "team";
+  return assistantScopeOf(target) === "team";
 }
 
 export function isTeamAssistantMention(

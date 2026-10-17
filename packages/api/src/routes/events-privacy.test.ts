@@ -108,7 +108,7 @@ it("leaves a private Slack channel's events out of a non-member's Log", async ()
     { teamId: "team-log", userId: "local-user", role: "member" },
     { teamId: "team-log", userId: "test-member", role: "member" },
   ]);
-  await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
+  await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
   const now = Date.now();
   // The private channel's events are the newest, so a short page holds only them.
   for (const [id, channel, at] of [["log-private", "CPRIV", now + 2], ["log-private-2", "CPRIV", now + 1], ["log-public", "CPUB", now]] as const) {

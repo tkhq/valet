@@ -5,18 +5,18 @@ import { validateSubscription } from "./subscription-write.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { existingThreadError, subjectModeAllowed } from "./thread-policy-write.js";
 
-describe("subscription presence", () => {
-  it.each([{ kind: "workflow", workflowId: "workflow" }, { kind: "orchestrator" }])("validates identity for $kind targets", (target) => {
+describe("subscription appearance", () => {
+  it.each([{ kind: "workflow", workflowId: "workflow" }, { kind: "assistant" }])("validates identity for $kind targets", (target) => {
     const body = { name: "PR helper", eventKeys: ["github.pull_request.opened"], filters: [], target };
-    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, presence: { displayName: "Reviewer", avatarUrl: "https://example.com/a.webp" } } })).toBeNull();
-    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, presence: { avatarUrl: "http://example.com/a" } } })).toContain("HTTPS");
-    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, presence: null } })).toContain("object");
+    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, appearance: { displayName: "Reviewer", avatarUrl: "https://example.com/a.webp" } } })).toBeNull();
+    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, appearance: { avatarUrl: "http://example.com/a" } } })).toContain("HTTPS");
+    expect(validateSubscription([githubPlugin], { ...body, target: { ...target, appearance: null } })).toContain("object");
     expect(validateSubscription([githubPlugin], body)).toBeNull();
   });
 });
 
 describe("subject filter (spec Part G)", () => {
-  const body = { name: "PR helper", eventKeys: ["github.pull_request.opened"], target: { kind: "orchestrator" } };
+  const body = { name: "PR helper", eventKeys: ["github.pull_request.opened"], target: { kind: "assistant" } };
 
   it("accepts eq and prefix for any key, without the field being plugin-declared", () => {
     expect(validateSubscription([githubPlugin], { ...body, filters: [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }] })).toBeNull();
@@ -32,7 +32,7 @@ describe("subject filter (spec Part G)", () => {
 });
 
 describe("derived event keys (spec Part G, Non-goals)", () => {
-  const body = { name: "CI", filters: [], target: { kind: "orchestrator" } };
+  const body = { name: "CI", filters: [], target: { kind: "assistant" } };
 
   it("refuses a derived key and names the fix", () => {
     const error = validateSubscription([githubPlugin], { ...body, eventKeys: ["github.pull_request.checks_completed"] });
@@ -53,19 +53,19 @@ describe("thread policy (spec 2026-10-16: delivery threads, Part A)", () => {
 
   it("accepts every mode on an assistant target", () => {
     for (const thread of [{ mode: "new" }, { mode: "subject" }, { mode: "own" }, { mode: "existing", sessionId: "s1", threadId: "t1" }]) {
-      expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread } })).toBeNull();
+      expect(validateSubscription([githubPlugin], { ...body, target: { kind: "assistant", thread } })).toBeNull();
     }
   });
 
   it("refuses a malformed policy with the shape text", () => {
-    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread: { mode: "bogus" } } }))
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "assistant", thread: { mode: "bogus" } } }))
       .toBe("Thread policy mode must be new, subject, own, or existing.");
-    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread: { mode: "own", extra: 1 } } }))
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "assistant", thread: { mode: "own", extra: 1 } } }))
       .toBe('Thread policy has an unknown field "extra". Remove it.');
   });
 
   it("refuses subject when no selected event names a subject", () => {
-    expect(validateSubscription([githubWithoutSubject], { ...body, target: { kind: "orchestrator", thread: { mode: "subject" } } }))
+    expect(validateSubscription([githubWithoutSubject], { ...body, target: { kind: "assistant", thread: { mode: "subject" } } }))
       .toBe("This rule's events have no subject to group by. Pick another thread option.");
   });
 

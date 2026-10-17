@@ -38,7 +38,7 @@ function sub(over: Partial<TestSub> = {}): TestSub {
     name: "existing",
     eventKeys: ["slack.message"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     ...over,
   };
 }
@@ -47,7 +47,7 @@ function candidate(over: Partial<CollisionCandidate> = {}): CollisionCandidate {
   return {
     eventKeys: ["slack.message"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     ...over,
   };
 }
@@ -266,8 +266,8 @@ describe("computeCollisions — target policy", () => {
 
   it("blocks identical coverage aimed at the same workspace runtime", () => {
     const report = computeCollisions(
-      candidate({ target: { kind: "orchestrator" } }),
-      [sub({ target: { kind: "orchestrator" } })],
+      candidate({ target: { kind: "assistant" } }),
+      [sub({ target: { kind: "assistant" } })],
       CATALOG,
     );
     expect(report.blocking).toHaveLength(1);
@@ -276,7 +276,7 @@ describe("computeCollisions — target policy", () => {
   it("downgrades a workflow↔orchestrator superset to a warning", () => {
     const report = computeCollisions(
       candidate({ target: wf("wf-a") }),
-      [sub({ filters: [chEq("C1")], target: { kind: "orchestrator" } })],
+      [sub({ filters: [chEq("C1")], target: { kind: "assistant" } })],
       CATALOG,
     );
     expect(report.blocking).toHaveLength(0);
@@ -304,7 +304,7 @@ describe("team mention collisions", () => {
   it("detects overlapping team rules without creator filters, including interim rows", () => {
     const candidate: CollisionCandidate = {
       ownerType: "team", eventKeys: ["slack.app_mention"],
-      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
+      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant" },
     };
     const existing = { ...candidate, filters: [...candidate.filters, { field: "user", op: "eq", value: "U_CREATOR" } satisfies SubscriptionFilter] };
     expect(computeCollisions(candidate, [existing], CATALOG).blocking).toHaveLength(1);

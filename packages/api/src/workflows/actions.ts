@@ -1477,7 +1477,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, presence },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1569,12 +1569,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, presence,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
         ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
-          ...(result.trigger.presence ? { presence: result.trigger.presence } : {}),
+          ...(result.trigger.appearance ? { appearance: result.trigger.appearance } : {}),
         },
       }) };
     },

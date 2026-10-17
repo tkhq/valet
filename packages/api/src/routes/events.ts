@@ -58,6 +58,7 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import { slackEventChannel, storedThreadRef } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
+import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
 export const eventsRouter = new Hono<AppEnv>();
@@ -97,7 +98,9 @@ function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSu
     ownerId: row.ownerId,
     eventKeys: row.eventKeys as string[],
     filters: row.filters as EventSubscriptionFilterWire[],
-    target: row.target as EventSubscriptionTargetWire,
+    // Stored rows may carry the old names (spec 2026-10-16: presence hub,
+    // Part H); reads emit the new ones.
+    target: readStoredTarget(row.target) as EventSubscriptionTargetWire,
     // Only a team assistant rule has an audience, so only those rows carry
     // one on the wire. Filling it everywhere would hand a read-modify-write
     // client a field the write path refuses on its own target. Null on such a
@@ -162,14 +165,14 @@ class StaleReplacementError extends Error {}
 /** After an enable turned `replacedId` off: the link is cleared and its ID
  * recorded as `replaced`, so the link acts once and a retry can see it did. */
 function spendReplacement(target: EventSubscriptionTargetWire, replacedId: string | undefined): EventSubscriptionTargetWire {
-  if (replacedId === undefined || target.kind !== "orchestrator") return target;
+  if (replacedId === undefined || target.kind !== "assistant") return target;
   const { replaces: _link, ...rest } = target;
   return { ...rest, replaced: replacedId };
 }
 
 /** The target without a replacement link or its record (`events.propose_subscription`'s `replaces`). */
 function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscriptionTargetWire {
-  if (target.kind !== "orchestrator" || (target.replaces === undefined && target.replaced === undefined)) return target;
+  if (target.kind !== "assistant" || (target.replaces === undefined && target.replaced === undefined)) return target;
   const { replaces: _link, replaced: _record, ...rest } = target;
   return rest;
 }
@@ -198,7 +201,7 @@ async function collisionsForWrite(
       ...r,
       eventKeys: r.eventKeys as string[],
       filters: r.filters as SubscriptionFilter[],
-      target: r.target as EventSubscriptionTargetWire,
+      target: readStoredTarget(r.target) as EventSubscriptionTargetWire,
     }));
   return computeCollisions(candidate, existing, allCatalogEntries(plugins));
 }
@@ -533,13 +536,13 @@ eventsRouter.get("/events/:id", async (c) => {
     .orderBy(desc(eventDeliveries.createdAt));
   // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
   const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
-    deliveryRows.filter((d) => (d.target as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
+    deliveryRows.filter((d) => (readStoredTarget(d.target) as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
   const claims = deliveryRows.flatMap((d) => {
     const threadId = d.status === "skipped" ? claimedThreadId(d.destination) : null;
     return threadId ? [{ deliveryId: d.id, threadId }] : [];
   });
   const [threads, runs, claimed] = await Promise.all([
-    deliveryThreads(c, idsFor("orchestrator")),
+    deliveryThreads(c, idsFor("assistant")),
     deliveryRuns(c, idsFor("workflow")),
     claimThreads(c, claims),
   ]);
@@ -660,6 +663,12 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  // Rename the old target names before anything reads the target (spec
+  // 2026-10-16: presence hub, Part H). The cast is the same unchecked
+  // narrowing as the body's: `validateSubscriptionWrite` below checks it.
+  const renamedTarget = acceptTargetWrite(body.target);
+  if (!renamedTarget.ok) return c.json({ error: renamedTarget.error }, 400);
+  body = { ...body, target: renamedTarget.target as EventSubscriptionTargetWire };
 
   const write = await validateSubscriptionWrite(
     db,
@@ -692,8 +701,8 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = owned.ownerId;
     }
-  } else if (body.target.kind === "orchestrator") {
-    const who = body.target.orchestrator ?? "user";
+  } else if (body.target.kind === "assistant") {
+    const who = body.target.assistant ?? "user";
     if (who === "org") {
       ownerType = "org";
       ownerId = user.orgId;
@@ -895,16 +904,21 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Drop a retired selection from a row the boot repair has not reached yet,
   // so the merged row below validates.
   // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
-  const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
+  // Old rows may carry the old names; the patched row is stored with the new ones.
+  const { assistantId: _retired, ...storedTarget } = readStoredTarget(row.target) as EventSubscriptionTargetWire & { assistantId?: unknown };
   let patchedTarget: EventSubscriptionTargetWire = storedTarget;
-  if (body.presence === null) {
-    const { presence: _cleared, ...rest } = patchedTarget;
+  const appearanceWrite = acceptAppearanceWrite(body);
+  if (!appearanceWrite.ok) return c.json({ error: appearanceWrite.error }, 400);
+  // The validator below checks the shape of a non-null value.
+  const appearance = appearanceWrite.appearance as PatchEventSubscriptionRequest["appearance"];
+  if (appearance === null) {
+    const { appearance: _cleared, ...rest } = patchedTarget;
     patchedTarget = rest;
-  } else if (body.presence !== undefined) {
-    patchedTarget = { ...patchedTarget, presence: body.presence };
+  } else if (appearance !== undefined) {
+    patchedTarget = { ...patchedTarget, appearance };
   }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
-    if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
+    if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
     patchedTarget = { ...patchedTarget,
       ...(body.deliveryPolicy !== undefined ? { deliveryPolicy: body.deliveryPolicy } : {}),
       ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),
@@ -913,7 +927,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // `null` clears the policy, so the rule reads as `own` again. The merged
   // re-validation below checks a new policy's shape and subject mode.
   if (body.thread !== undefined) {
-    if (patchedTarget.kind !== "orchestrator") {
+    if (patchedTarget.kind !== "assistant") {
       return c.json({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." }, 400);
     }
     if (body.thread === null) {
@@ -923,22 +937,22 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       patchedTarget = { ...patchedTarget, thread: body.thread };
     }
   }
-  if (body.enabled === true && patchedTarget.kind === "orchestrator") {
+  if (body.enabled === true && patchedTarget.kind === "assistant") {
     const { overlapPausedAt: _pause, ...rest } = patchedTarget;
     patchedTarget = rest;
   }
 
 
   // The prompt templates are the other part of `target` a patch may rewrite,
-  // and only on an orchestrator target. `null` clears the field, so the rule
+  // and only on an assistant target. `null` clears the field, so the rule
   // delivers the default body again; the merged re-validation below checks a
   // new template against the rule's events. Shape only here: the template
   // language is `events/prompt-template.ts`'s to judge.
   for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
     const patched = body[field];
     if (patched === undefined) continue;
-    if (patchedTarget.kind !== "orchestrator") {
-      return c.json({ error: `${field} is only valid on an orchestrator target` }, 400);
+    if (patchedTarget.kind !== "assistant") {
+      return c.json({ error: `${field} is only valid on an assistant target` }, 400);
     }
     if (patched === null) {
       const { [field]: _cleared, ...rest } = patchedTarget;
@@ -980,9 +994,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const audience = write.audience ?? null;
   // Only a patch that sets the policy re-checks its thread. A rename of a rule
   // whose pinned thread was archived later must still work.
-  // `merged.eventKeys` passed `validateSubscriptionWrite` above.
-  const rule = { eventKeys: merged.eventKeys as string[], filters };
-  if (body.thread != null && patchedTarget.kind === "orchestrator") {
+  if (body.thread != null && patchedTarget.kind === "assistant") {
     const threadError = await existingThreadError(c.var.providers, viewerOf(c),
       { type: row.ownerType, id: row.ownerId }, patchedTarget.thread, rule);
     if (threadError) return c.json({ error: threadError }, 400);
@@ -1006,7 +1018,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Enabling a replacement proposal disables the subscription it replaces
   // (see the update below), so that row is not a collision peer. Same owner
   // only: a target written by hand must not reach another workspace's rule.
-  const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
+  const replaces = arming && patchedTarget.kind === "assistant" ? patchedTarget.replaces : undefined;
   // An assistant subscription only: a workflow trigger is not a version.
   const replaced = replaces === undefined ? undefined : (await db
     .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
@@ -1014,7 +1026,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     .where(and(
       eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
       eq(eventSubscriptions.ownerType, row.ownerType), eq(eventSubscriptions.ownerId, row.ownerId),
-      sql`${eventSubscriptions.target}->>'kind' = 'orchestrator'`,
+      sql`${eventSubscriptions.target}->>'kind' IN ('assistant', 'orchestrator')`,
     ))
     .limit(1))[0];
   // A replacement turns off a version that still replies. If that version is

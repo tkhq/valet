@@ -1,4 +1,4 @@
-import type { Presence } from "@valet/shared";
+import type { Appearance } from "@valet/shared";
 /**
  * Event-delivery dispatcher: drains `event_deliveries` rows into their
  * subscription targets (workflow run start / assistant signal prompt /
@@ -65,6 +65,7 @@ import {
   type DeliveryDestinationMetricReason,
   type DestinationRecorder,
 } from "../observability/delivery-metrics.js";
+import { readStoredTarget } from "./target-names.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -89,7 +90,7 @@ export interface AssistantDeliverFn {
      */
     actorUserId: string;
     signal: SignalContent;
-  presence?: Presence;
+    appearance?: Appearance;
     dispatchId: string;
     /** Where the delivery lands: the resolved destination (spec 2026-10-16:
      * delivery threads, Part B). A skip never reaches this seam. */
@@ -259,17 +260,18 @@ interface OwnedElsewhere {
   reason: "follow_routed" | "mention_covered";
 }
 
-/** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
+/** The `target` jsonb column's shape, read through `readStoredTarget` so old
+ * names arrive renamed. Written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
-  kind: "workflow" | "orchestrator" | "signal";
+  kind: "workflow" | "assistant" | "signal";
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
    * delivery with a channel origin, `subject` for other Slack channel
    * events, else `own`. */
   thread?: unknown;
   workflowId?: string;
-  presence?: Presence;
-  /** When true, an orchestrator channel delivery follows the thread: later
+  appearance?: Appearance;
+  /** When true, an assistant channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
   pauseOnOverlap?: boolean;
@@ -390,7 +392,7 @@ export class EventDispatcher {
       // Both jsonb shapes are owned by their writers: `target` by the
       // subscriptions CRUD validator, `refs` by ingest (NormalizedEvent.refs
       // is Record<string, string>). Same narrowing convention as ingest.ts.
-      const target = sub.target as SubscriptionTarget;
+      const target = readStoredTarget(sub.target) as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
       if (event.orgId !== sub.orgId) throw new Error("Event and subscription organizations differ.");
       const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
@@ -417,8 +419,8 @@ export class EventDispatcher {
       }
 
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy, target.presence);
-      } else if (target.kind === "orchestrator") {
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy, target.appearance);
+      } else if (target.kind === "assistant") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
         // A verified mention carries a human actor. Other shared event work
@@ -562,7 +564,7 @@ export class EventDispatcher {
               attributes,
               origin: origin ?? undefined,
             },
-            ...(target.presence ? { presence: target.presence } : {}),
+            ...(target.appearance ? { appearance: target.appearance } : {}),
             dispatchId: eventDeliveryDispatchId(delivery.id),
             destination,
             ...(inbound ? { inbound } : {}),
@@ -642,7 +644,7 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: actorUserId,
-              // Followed replies need the source rule for current presence
+              // Followed replies need the source rule for current appearance
               // settings and, for teams, audience authorization.
               subscriptionId: sub.id,
               preserveBinding,
@@ -835,7 +837,7 @@ export class EventDispatcher {
     refs: Record<string, string>,
     /** Creator attribution applies only to personal workflows. */
     createdBy: string,
-    presence?: Presence,
+    presence?: Appearance,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
     // definitionVersionId, owner resolved from the definition row. The org

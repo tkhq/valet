@@ -15,6 +15,7 @@ import type { Destination } from "./destination.js";
 import { subscriptionMatchesEvent } from "./match.js";
 import { isTeamAssistantMention, mentionSenderActor } from "./team-slack-gate.js";
 import type { WaiterCandidate, WaiterDecision } from "./waiters.js";
+import { isAssistantKind } from "./target-names.js";
 
 /** The subscription fields claim resolution reads. */
 export interface ClaimSubscription {
@@ -74,9 +75,9 @@ export interface ResolveClaimsArgs {
   conversational(binding: ConversationBinding | null): boolean;
 }
 
-/** True for an assistant target. The stored discriminator is still the legacy value `orchestrator`. */
+/** True for an assistant target. Stored rows may carry the old discriminator `orchestrator` (`target-names.ts`). */
 export function isAssistantTarget(target: unknown): boolean {
-  return typeof target === "object" && target !== null && "kind" in target && target.kind === "orchestrator";
+  return typeof target === "object" && target !== null && "kind" in target && isAssistantKind(target.kind);
 }
 
 export function isPrincipalType(value: string): value is Principal["type"] {

@@ -282,7 +282,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     expect(created.ok).toBe(true);
     expect(await db.select().from(workflowSchedules)).toEqual([
-      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "orchestrator" }),
+      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "assistant" }),
     ]);
   });
 

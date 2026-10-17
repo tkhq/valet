@@ -11,7 +11,7 @@ import { orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/ind
 import { catalogForService } from "./ingest.js";
 import { toDigest } from "./waiter-match.js";
 import type { ConversationBinding } from "./conversation-binding.js";
-import { mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDeps, type ClaimSubscription, type ResolveClaimsArgs } from "./claims.js";
+import { isAssistantTarget, mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDeps, type ClaimSubscription, type ResolveClaimsArgs } from "./claims.js";
 import type { WaiterCandidate } from "./waiters.js";
 
 const ORG = "acme";
@@ -38,7 +38,7 @@ function twins(threadTs?: string): { message: NormalizedEvent; mention: Normaliz
   return { message: slackEvent("slack.message", threadTs), mention: slackEvent("slack.app_mention", threadTs) };
 }
 
-function sub(id: string, owner: Principal, kind: "orchestrator" | "workflow" = "orchestrator"): ClaimSubscription {
+function sub(id: string, owner: Principal, kind: "assistant" | "workflow" = "assistant"): ClaimSubscription {
   return { id, ownerType: owner.type, ownerId: owner.id, target: kind === "workflow" ? { kind, workflowId: "wf-1" } : { kind } };
 }
 
@@ -482,7 +482,7 @@ describe("mentionCoveredBy", () => {
   function rule(owner: Principal, over: Record<string, unknown> = {}) {
     return {
       enabled: true, orgId: ORG, ownerType: owner.type, ownerId: owner.id, createdBy: "u-001",
-      target: { kind: "orchestrator" }, eventKeys: ["slack.app_mention"], filters: [], ...over,
+      target: { kind: "assistant" }, eventKeys: ["slack.app_mention"], filters: [], ...over,
     };
   }
   const mentionFrom = (user: string) => slackEvent("slack.app_mention", undefined, {
@@ -512,5 +512,16 @@ describe("mentionCoveredBy", () => {
     expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { enabled: false })], SRE, mentionFrom("U001"), catalog, notCovered)).toBe(false);
     expect(await mentionCoveredBy(tdb.appDb, [rule(SRE)], PLATFORM, mentionFrom("U001"), catalog, notCovered)).toBe(false);
     expect(await mentionCoveredBy(tdb.appDb, [rule(SRE, { target: { kind: "workflow", workflowId: "wf" } })], SRE, mentionFrom("U001"), catalog, notCovered)).toBe(false);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part H: stored rows keep the old
+// discriminator until a write touches them.
+describe("isAssistantTarget", () => {
+  it("reads both the new and the old discriminator", () => {
+    expect(isAssistantTarget({ kind: "assistant" })).toBe(true);
+    expect(isAssistantTarget({ kind: "orchestrator" })).toBe(true);
+    expect(isAssistantTarget({ kind: "workflow", workflowId: "wf-1" })).toBe(false);
+    expect(isAssistantTarget(null)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type Presence } from "@valet/shared";
+import type { Appearance } from "@valet/shared";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
@@ -37,7 +37,7 @@ async function seedRun(
   runId: string,
   workflowId: string,
   origin?: WorkflowRunOrigin,
-  presence?: { definition?: Presence; run?: Presence },
+  presence?: { definition?: Appearance; run?: Appearance },
 ): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();

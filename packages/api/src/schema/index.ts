@@ -1973,7 +1973,10 @@ export const eventSubscriptions = pgTable(
     eventKeys: jsonb("event_keys").notNull(),
     /** `{ field, op: "eq"|"in"|"prefix"|"contains", value }[]` over catalog-declared fields. */
     filters: jsonb("filters").notNull().default([]),
-    /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
+    /** `{ kind: "workflow", workflowId } | { kind: "assistant" } | { kind: "signal" }`.
+     * Rows written before the rename may say `orchestrator`, `presence`,
+     * and an `orchestrator` scope field; read them through
+     * `events/target-names.ts#readStoredTarget`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
     /** Who may invoke a team assistant by mention. Null reads as `team` —
@@ -2044,15 +2047,17 @@ export const workflowSchedules = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
-    /** Fire target: start a workflow run, or prompt the orchestrator
-     * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
-     * each required only for their own kind. */
-    targetKind: text("target_kind", { enum: ["workflow", "orchestrator"] })
+    /** Fire target: start a workflow run, or prompt the assistant.
+     * `workflow_id`/`prompt` are each required only for their own kind.
+     * New rows store `assistant`. Rows written before the rename store
+     * `orchestrator`, which reads as `assistant` through
+     * `readScheduleTargetKind` (spec 2026-10-16: presence hub, Part H). */
+    targetKind: text("target_kind", { enum: ["workflow", "assistant", "orchestrator"] })
       .notNull()
       .default("workflow"),
     workflowId: text("workflow_id"),
-    /** Prompt submitted to the orchestrator's "schedules" thread when
-     * `target_kind = 'orchestrator'`. */
+    /** Prompt submitted to the assistant when `target_kind` is `assistant`
+     * (or the old `orchestrator`). */
     prompt: text("prompt"),
     /** Where an assistant-prompt schedule's prompts land: an
      * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).

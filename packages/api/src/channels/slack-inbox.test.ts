@@ -200,7 +200,7 @@ async function seedSubscription(
     name: "test subscription",
     eventKeys,
     filters,
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "local-user",
     createdAt: now,
@@ -440,7 +440,7 @@ describe("POST /api/channels/slack/webhook", () => {
     await api.providers.db.insert(eventSubscriptions).values({
       id: "sub_team_near_miss", orgId: "local-org", ownerType: "team", ownerId: "team-near-miss",
       name: "restricted messages", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: channel }],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-near-miss" },
+      target: { kind: "assistant", assistant: "team", teamId: "team-near-miss" },
       enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
     });
 
@@ -465,7 +465,7 @@ describe("POST /api/channels/slack/webhook", () => {
     await api.providers.db.insert(eventSubscriptions).values({
       id: "sub_team_bot_flood", orgId: "local-org", ownerType: "team", ownerId: "team-bot-flood",
       name: "restricted messages", eventKeys: ["slack.message"], filters: [],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-bot-flood" },
+      target: { kind: "assistant", assistant: "team", teamId: "team-bot-flood" },
       enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
     });
 
@@ -487,7 +487,7 @@ describe("POST /api/channels/slack/webhook", () => {
     await api.providers.db.insert(eventSubscriptions).values({
       id: "sub_team_mixed_near_miss", orgId: "local-org", ownerType: "team", ownerId: "team-mixed-near-miss",
       name: "restricted messages", eventKeys: ["slack.message"], filters: [],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-mixed-near-miss" },
+      target: { kind: "assistant", assistant: "team", teamId: "team-mixed-near-miss" },
       enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
     });
 
@@ -630,7 +630,7 @@ describe("POST /api/channels/slack/webhook", () => {
       await api.providers.db.update(eventSubscriptions).set({
         ownerType: "team", ownerId: "team-bot-identity",
         filters: [{ field: "channel", op: "eq", value: channel }],
-        target: { kind: "orchestrator", orchestrator: "team", teamId: "team-bot-identity" },
+        target: { kind: "assistant", assistant: "team", teamId: "team-bot-identity" },
       }).where(eq(eventSubscriptions.id, "sub_slack_bot_message"));
     }
     const body = envelope({ ...botFormMessage(), user }, "Ev-missing-identity");
@@ -803,7 +803,7 @@ describe("POST /api/channels/slack/webhook", () => {
       eventKeys: ["slack.reaction_added"],
       // reactionAdded() is in C500, which this filter excludes.
       filters: [{ field: "channel", op: "eq", value: "C999" }],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "local-user",
       createdAt: now,
@@ -846,7 +846,7 @@ describe("POST /api/channels/slack/webhook", () => {
     await a.providers.db.insert(eventSubscriptions).values(["one", "two"].map((id): typeof eventSubscriptions.$inferInsert => ({
       id, orgId: "local-org", ownerType: "team", ownerId: "notice-team", name: id,
       eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C_NOTICE_${fail}` }],
-      target: { kind: "orchestrator", follow: true }, createdBy: "creator", enabled: true, createdAt: now, updatedAt: now,
+      target: { kind: "assistant", follow: true }, createdBy: "creator", enabled: true, createdAt: now, updatedAt: now,
     })));
     const event = { ...appMention(), channel: `C_NOTICE_${fail}`, user: "U_UNLINKED_NOTICE" };
     for (const [id, workspace, payload] of [
@@ -885,7 +885,7 @@ describe("POST /api/channels/slack/webhook", () => {
       id: "team-sub", orgId: "local-org", ownerType: "team", ownerId: "team-mention",
       name: "Team mentions", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C500" }, { field: "user", op: "eq", value: "U_CREATOR" }],
-      target: { kind: "orchestrator", follow: true }, createdBy: "member-a", enabled: true, createdAt: now, updatedAt: now,
+      target: { kind: "assistant", follow: true }, createdBy: "member-a", enabled: true, createdAt: now, updatedAt: now,
     });
     const body = envelope(appMention(), "Ev-team-member");
     expect((await post(a.baseUrl, body, sign(body))).status).toBe(200);

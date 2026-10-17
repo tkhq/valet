@@ -26,6 +26,13 @@ import { isPrincipalType, mentionCoveredBy, resolveClaims, withTwinCandidates, t
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
+import { isAssistantKind } from "./target-names.js";
+
+/** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
+function receiptTargetKind(target: unknown): string {
+  if (!isRecord(target) || typeof target.kind !== "string") return "unknown";
+  return isAssistantKind(target.kind) ? "assistant" : target.kind;
+}
 
 export interface IngestDeps {
   db: AppDb;
@@ -312,7 +319,7 @@ export async function ingestEvent(
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
         id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown",
+        target: receiptTargetKind(sub.target),
         outcome: outcome === "not_matched" ? "filter_excluded" : outcome,
         ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target), event.subjects) } : {}),
         ...(isRecord(sub.target) && sub.target.kind === "workflow" && typeof sub.target.workflowId === "string" ? { targetId: sub.target.workflowId } : {}),
@@ -320,7 +327,7 @@ export async function ingestEvent(
     }
     for (const sub of configured.filter(sub => !sub.enabled && subscriptionNamesKey(sub, event.key))) {
       decisions.push({ id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown", outcome: "disabled" });
+        target: receiptTargetKind(sub.target), outcome: "disabled" });
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",

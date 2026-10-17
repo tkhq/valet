@@ -78,7 +78,7 @@ describe("ingestEvent event waiter matching", () => {
       id: "mention-sub", orgId: ORG, ownerType: "team", ownerId: "team-1", createdBy: "u-001",
       name: "Team mentions", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C001" }],
-      target: { kind: "orchestrator" }, enabled: true, createdAt: 1, updatedAt: 1,
+      target: { kind: "assistant" }, enabled: true, createdAt: 1, updatedAt: 1,
     });
   }
 
@@ -135,7 +135,7 @@ describe("ingestEvent event waiter matching", () => {
     const subscribeMessages = () => db.appDb.insert(eventSubscriptions).values({
       id: "msg-sub", orgId: ORG, ownerType: "user", ownerId: "u-001", createdBy: "u-001",
       name: "Messages", eventKeys: ["slack.message"], filters: [],
-      target: { kind: "orchestrator" }, enabled: true, createdAt: 1, updatedAt: 1,
+      target: { kind: "assistant" }, enabled: true, createdAt: 1, updatedAt: 1,
     });
     await subscribeMessages();
     const baseline = await ingest(message("Ev-1"));
@@ -213,7 +213,7 @@ describe("ingestEvent event waiter matching", () => {
     await db.appDb.insert(userIdentityLinks).values({ id: "link-u002", provider: "slack", externalId: "U002", userId: "u-002", createdAt: 1 });
   }
 
-  async function subscribeMessages(target: unknown = { kind: "orchestrator" }): Promise<void> {
+  async function subscribeMessages(target: unknown = { kind: "assistant" }): Promise<void> {
     await db.appDb.insert(eventSubscriptions).values({
       id: "msg-sub", orgId: ORG, ownerType: "team", ownerId: "team-1", createdBy: "u-001",
       name: "Channel", eventKeys: ["slack.message"], filters: [],
@@ -345,7 +345,7 @@ describe("ingestEvent event waiter matching", () => {
     await db.appDb.insert(eventSubscriptions).values({
       id: "personal-sub", orgId: ORG, ownerType: "user", ownerId: "u-002", createdBy: "u-002",
       name: "My mentions", eventKeys: ["slack.app_mention"], filters: [{ field: "user", op: "eq", value: "U002" }],
-      target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, enabled: true, createdAt: 1, updatedAt: 1,
+      target: { kind: "assistant", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, enabled: true, createdAt: 1, updatedAt: 1,
     });
     await store.createWakeup({ ...waiter(), id: "wk_u", sessionId: "s-u", threadId: "t-u", createdAt: 2 });
     const sessions = waiterDeps({

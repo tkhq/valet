@@ -1,5 +1,5 @@
 import { isToolScope } from "@valet/shared";
-import { validatePresence } from '@valet/shared';
+import { validateAppearance } from '@valet/shared';
 /**
  * dag/v1 definition validator — linter-grade.
  *
@@ -206,7 +206,7 @@ export function validateWorkflowDefinition(
   const errors: string[] = [];
 
   if (definition.presence !== undefined) {
-    const error = validatePresence(definition.presence);
+    const error = validateAppearance(definition.presence);
     if (error) errors.push(error);
   }
 

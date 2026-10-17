@@ -27,10 +27,11 @@ import {
   type WorkflowOwnerRef,
 } from "./service.js";
 import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
+import { readScheduleTargetKind } from "../events/target-names.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
-  targetKind: "workflow" | "orchestrator";
+  targetKind: "workflow" | "assistant";
   workflowId?: string;
   prompt?: string;
   /** Absent reads as `{ mode: "own" }`. */
@@ -78,7 +79,8 @@ export function nextFireAt(
 function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowScheduleSummary {
   return {
     scheduleId: row.id,
-    targetKind: row.targetKind,
+    // A stored `orchestrator` row reads as `assistant` (spec 2026-10-16: presence hub, Part H).
+    targetKind: readScheduleTargetKind(row.targetKind),
     workflowId: row.workflowId ?? undefined,
     prompt: row.prompt ?? undefined,
     ...(row.threadPolicy !== null ? { thread: readThreadPolicy(row.threadPolicy) } : {}),
@@ -102,10 +104,10 @@ async function scheduleThreadError(
   deps: ScheduleThreadDeps,
   writer: WorkflowOwner,
   owner: Principal,
-  targetKind: "workflow" | "orchestrator",
+  targetKind: "workflow" | "assistant",
   thread: unknown,
 ): Promise<string | null> {
-  if (targetKind !== "orchestrator") {
+  if (targetKind !== "assistant") {
     return "A thread policy applies only to an assistant-prompt schedule. Remove thread from this workflow schedule.";
   }
   const shapeError = validateThreadPolicy(thread);
@@ -230,7 +232,7 @@ export async function createWorkflowSchedule(
 
   if (input.thread !== undefined) {
     const threadError = await scheduleThreadError(deps, owner,
-      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, hasWorkflow ? "workflow" : "orchestrator", input.thread);
+      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, hasWorkflow ? "workflow" : "assistant", input.thread);
     if (threadError) return { ok: false, error: threadError };
   }
 
@@ -239,7 +241,7 @@ export async function createWorkflowSchedule(
     orgId: owner.orgId,
     ownerType: scheduleOwner.ownerType,
     ownerId: scheduleOwner.ownerId,
-    targetKind: hasWorkflow ? "workflow" as const : "orchestrator" as const,
+    targetKind: hasWorkflow ? "workflow" as const : "assistant" as const,
     workflowId: hasWorkflow ? input.workflowId! : null,
     prompt: hasPrompt ? input.prompt! : null,
     threadPolicy: input.thread !== undefined ? readThreadPolicy(input.thread) : null,
@@ -256,7 +258,7 @@ export async function createWorkflowSchedule(
 
   const result = (row: typeof workflowSchedules.$inferSelect): Awaited<ReturnType<typeof createWorkflowSchedule>> => {
     if (input.proposalKey && !isDeepStrictEqual(
-      [row.targetKind, row.workflowId, row.prompt, row.threadPolicy, row.name, row.cron, row.timezone, row.input, row.createdBy],
+      [readScheduleTargetKind(row.targetKind), row.workflowId, row.prompt, row.threadPolicy, row.name, row.cron, row.timezone, row.input, row.createdBy],
       [values.targetKind, values.workflowId, values.prompt, values.threadPolicy, values.name, values.cron, values.timezone, values.input, values.createdBy],
     )) return { ok: false, error: "This proposal key already names a different schedule. Use a new proposal_key." };
     return { ok: true, schedule: rowToSummary(row) };
@@ -376,7 +378,7 @@ export async function updateWorkflowSchedule(
   const row = await accessibleScheduleRow(db, owner, scheduleId);
   if (!row) return { ok: false, status: 404, error: "schedule not found" };
 
-  if (patch.prompt !== undefined && row.targetKind !== "orchestrator") {
+  if (patch.prompt !== undefined && readScheduleTargetKind(row.targetKind) !== "assistant") {
     return {
       ok: false,
       status: 400,
@@ -396,7 +398,7 @@ export async function updateWorkflowSchedule(
 
   if (patch.thread !== undefined && patch.thread !== null) {
     const threadError = await scheduleThreadError(deps, owner,
-      { type: row.ownerType, id: row.ownerId }, row.targetKind, patch.thread);
+      { type: row.ownerType, id: row.ownerId }, readScheduleTargetKind(row.targetKind), patch.thread);
     if (threadError) return { ok: false, status: 400, error: threadError };
   }
 

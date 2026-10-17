@@ -100,18 +100,18 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
 
   it("persists presence per delivery without changing other turns", async () => {
     const deps = { db: testDb.appDb, engineHost };
-    for (const [dispatchId, presence] of [
+    for (const [dispatchId, appearance] of [
       ["presence-first", { displayName: "Hestia", avatarUrl: "https://example.com/hestia.webp" }],
       ["presence-default", undefined],
     ] as const) {
       await deliverToAssistantThread(deps, {
         orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "events" },
         signal: { kind: "signal", signalType: "test", body: dispatchId },
-        dispatchId, presence, mismatchReason: "test",
+        dispatchId, appearance, mismatchReason: "test",
       });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(presence ? { presence } : null);
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(appearance ? { presence: appearance } : null);
     }
   });
 

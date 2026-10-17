@@ -116,7 +116,7 @@ describe("WorkflowScheduler fire ownership", () => {
  it("delivers a team prompt schedule without its creator's identity", async () => {
     await db.insert(workflowSchedules).values({
       id: "team-prompt", orgId: "org-1", ownerType: "team", ownerId: "team-1",
-      targetKind: "orchestrator", prompt: "A teammate changed this prompt", name: "Team prompt",
+      targetKind: "assistant", prompt: "A teammate changed this prompt", name: "Team prompt",
       cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
       createdBy: "original-creator", createdAt: 100, updatedAt: 200,
     });
@@ -137,7 +137,7 @@ describe("WorkflowScheduler thread policy", () => {
   async function seedPromptSchedule(id: string, threadPolicy: unknown) {
     await db.insert(workflowSchedules).values({
       id, orgId: "org-1", ownerType: "user", ownerId: "user-1",
-      targetKind: "orchestrator", prompt: "Summarize the night", name: "Morning summary",
+      targetKind: "assistant", prompt: "Summarize the night", name: "Morning summary",
       cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
       createdBy: "user-1", createdAt: 100, updatedAt: 100, threadPolicy,
     });

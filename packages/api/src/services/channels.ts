@@ -17,6 +17,7 @@ import {
 } from "./channel-messages.js";
 import { workspaceSessionIds } from "../assistants/service.js";
 import { parsePullRequestUrl } from "./thread-pull-requests.js";
+import { isAssistantKind } from "../events/target-names.js";
 
 /** Resolves Slack channel ids to names. Missing ids keep their id. */
 export type ChannelNames = (channelIds: string[]) => Promise<Map<string, string>>;
@@ -118,7 +119,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
   for (const rule of rules) {
     const keys = Array.isArray(rule.eventKeys) ? rule.eventKeys.filter((k): k is string => typeof k === "string") : [];
     const target = rule.target as { kind?: unknown } | null;
-    if (!selectsSlackMention(keys) || target?.kind !== "orchestrator") continue;
+    if (!selectsSlackMention(keys) || !isAssistantKind(target?.kind)) continue;
     const { ids, labels: ruleLabels } = channelFilterIds(rule.filters);
     for (const [id, label] of ruleLabels) labels.set(id, label);
     const own = rule.ownerType === owner.type && rule.ownerId === owner.id;

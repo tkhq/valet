@@ -58,7 +58,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       id: randomUUID(), orgId: ORG, ownerType, ownerId: ownerType === "team" ? "team-1" : "member-a",
       createdBy: "member-a", name: "Team replies", eventKeys: ["slack.app_mention"],
       filters: legacy || ownerType === "user" || workflow ? [channelFilter, creatorFilter] : [channelFilter],
-      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", follow: true },
+      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "assistant", follow: true },
       audience,
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     }).returning();
@@ -299,7 +299,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
 
   it("team writes need channel scope but no creator link or user filter", async () => {
     await tdb.appDb.delete(userIdentityLinks).where(eq(userIdentityLinks.userId, "member-a"));
-    const body = { name: "Team", eventKeys: ["slack.app_mention"], filters: [channelFilter, creatorFilter], target: { kind: "orchestrator", orchestrator: "team", teamId: "team-1" } };
+    const body = { name: "Team", eventKeys: ["slack.app_mention"], filters: [channelFilter, creatorFilter], target: { kind: "assistant", assistant: "team", teamId: "team-1" } };
     const scope = { creatorUserId: "member-a", anyChannel: false, matchChanged: true };
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, body, scope)).toEqual({ ok: true, filters: [channelFilter] });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, scope)).toMatchObject({ ok: false });

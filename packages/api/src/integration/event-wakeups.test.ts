@@ -345,7 +345,7 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await createIncidentTeam(u);
     // The mention rule follows its threads (Scenario E universe).
     await p.db.insert(eventSubscriptions).values(
-      ruleRow("sub-mentions", { type: "team", id: TEAM }, ["slack.app_mention"], [], { kind: "orchestrator", follow: true }),
+      ruleRow("sub-mentions", { type: "team", id: TEAM }, ["slack.app_mention"], [], { kind: "assistant", follow: true }),
     );
 
     // E1 and E2: the channel opens t-inc, and the agent arms the stream wait.

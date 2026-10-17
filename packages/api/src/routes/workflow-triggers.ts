@@ -7,7 +7,7 @@
  * BEFORE `workflowsRouter`, whose `GET /:id` would otherwise swallow
  * `/triggers` as a workflow id.
  */
-import { validatePresence } from "@valet/shared";
+import { type Appearance, validateAppearance } from "@valet/shared";
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -45,6 +45,7 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "../wire/types.js";
+import { acceptAppearanceWrite, isAssistantKind } from "../events/target-names.js";
 
 export const workflowTriggersRouter = new Hono<AppEnv>();
 
@@ -159,23 +160,25 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     return c.json({ error: "name is required" }, 400);
   }
   if (body.target && typeof body.target === "object" && "assistantId" in body.target) return c.json({ error: "Choose a workspace instead of an assistant." }, 400);
-  if (!body.target || (body.target.kind !== "workflow" && body.target.kind !== "orchestrator")) {
+  // `orchestrator` is the old value for `assistant`, accepted for one release
+  // (spec 2026-10-16: presence hub, Part H).
+  if (!body.target || (body.target.kind !== "workflow" && !isAssistantKind(body.target.kind))) {
     return c.json(
       {
         error:
-          'target.kind must be "workflow" (start a run) or "orchestrator" (send a prompt)',
+          'target.kind must be "workflow" (start a run) or "assistant" (send a prompt). Set target.kind to one of them.',
       },
       400,
     );
   }
-  // An orchestrator-prompt schedule created in a team workspace fires the
+  // An assistant-prompt schedule created in a team workspace fires the
   // TEAM's assistant, so it is team-owned. `resolveCreateOwner` settles the
   // owner before anything is written: a cookie caller's team id needs live
   // membership (a non-member's id 404s like an unknown one), a personal key
   // cannot name a team, and a team key always schedules as its own team. A
   // workflow-target schedule ignores teamId (its owner follows the workflow).
   let teamId: string | undefined;
-  if (body.target.kind === "orchestrator") {
+  if (body.target.kind !== "workflow") {
     const created = await resolveCreateOwner({
       principal: c.var.principal,
       authVia: c.var.authVia,
@@ -192,7 +195,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     cron: body.cron,
     timezone: body.timezone,
     workflowId: body.target.kind === "workflow" ? body.target.workflowId : undefined,
-    prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
+    prompt: body.target.kind !== "workflow" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
     thread: body.thread,
@@ -255,12 +258,17 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  if (body.presence !== undefined) {
-    const error = validatePresence(body.presence);
+  // `presence` is the old name, accepted for one release (spec 2026-10-16:
+  // presence hub, Part H).
+  const appearanceWrite = acceptAppearanceWrite(body);
+  if (!appearanceWrite.ok) return c.json({ error: appearanceWrite.error }, 400);
+  if (appearanceWrite.appearance !== undefined) {
+    const error = validateAppearance(appearanceWrite.appearance);
     if (error) return c.json({ error }, 400);
   }
   const result = await createWorkflowTrigger(armDeps(c), owner, {
-    presence: body.presence,
+    // `validateAppearance` accepted the value above.
+    appearance: appearanceWrite.appearance as Appearance | undefined,
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,

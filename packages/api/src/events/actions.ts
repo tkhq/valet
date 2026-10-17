@@ -1,4 +1,4 @@
-import { validatePresence } from "@valet/shared";
+import { validateAppearance } from "@valet/shared";
 import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
@@ -11,6 +11,7 @@ import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
 import { receiptWire, RECEIPT_RETENTION_DAYS } from "./receipts.js";
+import { readStoredTarget } from "./target-names.js";
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -95,7 +96,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
   }))({
     id: "events.list_subscriptions",
     name: "List workspace event subscriptions",
-    description: "List event subscriptions owned by the current personal or team workspace, including IDs and configured presence. Uses exact name matching. Defaults to 25 records; use nextOffset for the next page.",
+    description: "List event subscriptions owned by the current personal or team workspace, including IDs and each configured appearance (the reply name and avatar). Uses exact name matching. Defaults to 25 records; use nextOffset for the next page.",
     riskLevel: "low",
     execute: async ({ name, limit, offset }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
       const pageLimit = limit ?? DEFAULT_LIMIT;
@@ -107,7 +108,9 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId),
         name !== undefined ? eq(eventSubscriptions.name, name) : undefined,
       )).orderBy(eventSubscriptions.id).limit(pageLimit + 1).offset(pageOffset);
-      return { success: true, data: { subscriptions: rows.slice(0, pageLimit), nextOffset: rows.length > pageLimit ? pageOffset + pageLimit : null } };
+      // Stored rows may carry the old target names; the tool answers with the new ones.
+      const subscriptions = rows.slice(0, pageLimit).map((row) => ({ ...row, target: readStoredTarget(row.target) }));
+      return { success: true, data: { subscriptions, nextOffset: rows.length > pageLimit ? pageOffset + pageLimit : null } };
     }),
   });
 
@@ -117,21 +120,23 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
   }))({
     id: "events.set_subscription_presence",
     name: "Set event subscription presence",
-    description: "Replace the channel display name and avatar for an existing subscription in the current personal or team workspace. Use null to clear the override. Does not enable the subscription or change its target, prompts, or matching rules.",
+    description: "Replace the reply display name and avatar (the appearance) for an existing subscription in the current personal or team workspace. Use null to clear the override. Does not enable the subscription or change its target, prompts, or matching rules.",
     riskLevel: "low",
     execute: async ({ subscription_id, presence }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
       if (presence !== null) {
-        const error = validatePresence(presence);
+        const error = validateAppearance(presence);
         if (error) return { success: false, error };
       }
+      // The row stores `appearance`. The old `presence` key goes too, so a
+      // row written before the rename cannot keep a stale identity.
       const [row] = await tx.update(eventSubscriptions).set({
         target: presence === null
-          ? sql`${eventSubscriptions.target} - 'presence'`
-          : sql`jsonb_set(${eventSubscriptions.target}, '{presence}', ${JSON.stringify(presence)}::jsonb, true)`,
+          ? sql`${eventSubscriptions.target} - 'presence' - 'appearance'`
+          : sql`jsonb_set(${eventSubscriptions.target} - 'presence', '{appearance}', ${JSON.stringify(presence)}::jsonb, true)`,
         updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})`,
       }).where(and(eq(eventSubscriptions.id, subscription_id), eq(eventSubscriptions.orgId, scope.orgId),
         eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).returning();
-      return row ? { success: true, data: { subscription: row } }
+      return row ? { success: true, data: { subscription: { ...row, target: readStoredTarget(row.target) } } }
         : { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
     }),
   });
@@ -185,12 +190,12 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       const mentionOnly = input.event_keys.length === 1 && input.event_keys[0] === "slack.app_mention";
       const follow = input.follow ?? (mentionOnly ? true : undefined);
       const target = {
-        kind: "orchestrator" as const, orchestrator: ownerType,
+        kind: "assistant" as const, assistant: ownerType,
         ...(ownerType === "team" ? { teamId: ownerId } : {}),
         ...(follow !== undefined ? { follow } : {}),
         ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
         ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
-        ...(input.presence !== undefined ? { presence: input.presence } : {}),
+        ...(input.presence !== undefined ? { appearance: input.presence } : {}),
         ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
         ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
         ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
@@ -213,7 +218,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
           .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
           .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, replacesId), eq(eventSubscriptions.orgId, values.orgId),
             eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId),
-            sql`${eventSubscriptions.target}->>'kind' = 'orchestrator'`)).limit(1))[0];
+            sql`${eventSubscriptions.target}->>'kind' IN ('assistant', 'orchestrator')`)).limit(1))[0];
         // A repeated proposal key answers with the stored record, whatever
         // happened since to the subscription it replaces.
         const [existing] = await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1);
@@ -250,9 +255,11 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       // the spent form; a proposal stored with no link never does.
       const { replaces: _spent, ...withoutLink } = target;
       const spentTarget = input.replaces === undefined ? values.target : { ...withoutLink, replaced: input.replaces };
-      const expected = isDeepStrictEqual(row.target, spentTarget) ? spentTarget : values.target;
+      // A proposal stored before the rename carries the old target names.
+      const storedTarget = readStoredTarget(row.target);
+      const expected = isDeepStrictEqual(storedTarget, spentTarget) ? spentTarget : values.target;
       if (!isDeepStrictEqual(
-        [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
+        [row.name, row.eventKeys, row.filters, storedTarget, row.audience, row.createdBy],
         [values.name, values.eventKeys, values.filters, expected, values.audience, values.createdBy],
       )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
       return { success: true, data: proposalResult("subscription", row.id, row.enabled, row, written.replaced) };
@@ -361,5 +368,5 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
     },
   });
-  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and configure presence on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
+  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
 }

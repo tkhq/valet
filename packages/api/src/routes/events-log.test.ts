@@ -11,7 +11,7 @@ async function seed(a: TestApi) {
   const now = Date.now();
   await a.providers.db.insert(eventSubscriptions).values({
     id: "sub_mine", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Mine",
-    eventKeys: ["github.push", "slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.push", "slack.*"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   const event = (id: string, at: number) => ({
     id, orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: id, refs: {}, summary: `push ${id}`,
@@ -71,7 +71,7 @@ it("counts only this workspace's deliveries, and shows why a skipped event was s
   const now = Date.now();
   await api.providers.db.insert(eventSubscriptions).values({
     id: "sub_theirs", orgId: "local-org", ownerType: "team", ownerId: "team-b", name: "Theirs",
-    eventKeys: ["github.push"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.push"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   await api.providers.db.insert(events).values({
     id: "ev_skip", orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: "ev_skip", refs: {}, summary: "push ev_skip",
@@ -111,20 +111,20 @@ it("shows a filter miss only where a workspace's rules, or the org's, name its e
   // A disabled rule for the key does not count: ingest never checked it.
   await api.providers.db.insert(eventSubscriptions).values({
     id: "sub_off", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Off",
-    eventKeys: ["github.*"], filters: [], target: { kind: "orchestrator" }, enabled: false, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.*"], filters: [], target: { kind: "assistant" }, enabled: false, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   expect(await ids("user", "local-user")).not.toContain("drop_pr");
   expect(await ids("user", "local-user")).toContain("drop_filter");
   await api.providers.db.insert(eventSubscriptions).values({
     id: "sub_reviews", orgId: "local-org", ownerType: "team", ownerId: "reviews", name: "Reviews",
-    eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   expect(await ids("team", "reviews")).toContain("drop_pr");
   expect(await ids("user", "local-user")).not.toContain("drop_pr");
   // An org-owned rule for the key shows the miss in every workspace.
   await api.providers.db.insert(eventSubscriptions).values({
     id: "sub_org_prs", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Org PRs",
-    eventKeys: ["github.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.*"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   expect(await ids("user", "local-user")).toContain("drop_pr");
 });
@@ -134,7 +134,7 @@ it("includes events an org-owned rule received, skips other orgs, and looks back
   const now = Date.now();
   await api.providers.db.insert(eventSubscriptions).values({
     id: "sub_org", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Org rule",
-    eventKeys: ["github.push"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.push"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   const event = (id: string, orgId: string, at: number) => ({
     id, orgId, service: "github", eventKey: "github.push", dedupeKey: id, refs: {}, summary: id, payload: {}, occurredAt: at, receivedAt: at,

@@ -150,13 +150,13 @@ describe("EventDispatcher", () => {
     { policy: "ignoreIfAnyTeamSubscribed", member: true, enabled: true, sameOrg: false, expected: "delivered" },
   ])("evaluates current team coverage: $policy member=$member enabled=$enabled sameOrg=$sameOrg", async ({ policy, member, enabled, sameOrg, expected }) => {
     const db = tdb.appDb;
-    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: policy, pauseOnOverlap: true } });
+    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "assistant", deliveryPolicy: policy, pauseOnOverlap: true } });
     const teamOrg = sameOrg ? ORG : "other-org";
     await db.insert(teams).values({ id: "coverage-team", orgId: teamOrg, name: "Coverage", createdAt: Date.now() });
     if (member) await db.insert(teamMembers).values({ teamId: "coverage-team", userId: "user-1", role: "member" });
     await db.insert(eventSubscriptions).values({
       id: "coverage-rule", orgId: teamOrg, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
-      eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+      eventKeys: ["github.issues.*"], filters: [], target: { kind: "assistant", assistant: "team", teamId: "coverage-team" },
       enabled, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -173,13 +173,13 @@ describe("EventDispatcher", () => {
   it("a team subscription's matching subject filter suppresses delivery under ignoreIfMyTeamSubscribed (spec Part G)", async () => {
     const db = tdb.appDb;
     const subjects = ["github:acme", "github:acme/site", "github:acme/site#7"];
-    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
     await db.insert(teams).values({ id: "subject-team", orgId: ORG, name: "Subject", createdAt: Date.now() });
     await db.insert(teamMembers).values({ teamId: "subject-team", userId: "user-1", role: "member" });
     await db.insert(eventSubscriptions).values({
       id: "subject-rule", orgId: ORG, ownerType: "team", ownerId: "subject-team", name: "Team coverage",
       eventKeys: ["github.issues.*"], filters: [{ field: "subject", op: "eq", value: "github:acme/site#7" }],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team" },
+      target: { kind: "assistant", assistant: "team", teamId: "subject-team" },
       enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -192,14 +192,14 @@ describe("EventDispatcher", () => {
   it("a team subscription's non-matching subject filter does not suppress delivery (spec Part G)", async () => {
     const db = tdb.appDb;
     const subjects = ["github:acme", "github:acme/site", "github:acme/site#7"];
-    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
     await db.insert(teams).values({ id: "subject-team-2", orgId: ORG, name: "Subject2", createdAt: Date.now() });
     await db.insert(teamMembers).values({ teamId: "subject-team-2", userId: "user-1", role: "member" });
     await db.insert(eventSubscriptions).values({
       id: "subject-rule-2", orgId: ORG, ownerType: "team", ownerId: "subject-team-2", name: "Team coverage",
       // Names a different issue on the same repo — the key matches, the subject does not.
       eventKeys: ["github.issues.*"], filters: [{ field: "subject", op: "eq", value: "github:acme/site#999" }],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team-2" },
+      target: { kind: "assistant", assistant: "team", teamId: "subject-team-2" },
       enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -211,9 +211,9 @@ describe("EventDispatcher", () => {
 
   it("skips only matching events without pausing and respects a later disabled team rule on retry", async () => {
     const db = tdb.appDb;
-    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, status: "failed", attempts: 1 });
+    const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "assistant", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, status: "failed", attempts: 1 });
     await db.insert(teams).values({ id: "retry-team", orgId: ORG, name: "Retry", createdAt: Date.now() });
-    await db.insert(eventSubscriptions).values({ id: "retry-rule", orgId: ORG, ownerType: "team", ownerId: "retry-team", name: "Coverage", eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "retry-team" }, enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now() });
+    await db.insert(eventSubscriptions).values({ id: "retry-rule", orgId: ORG, ownerType: "team", ownerId: "retry-team", name: "Coverage", eventKeys: ["github.issues.*"], filters: [], target: { kind: "assistant", assistant: "team", teamId: "retry-team" }, enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now() });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
@@ -242,7 +242,7 @@ describe("EventDispatcher", () => {
       updatedAt: now,
     });
     const { eventId, subscriptionId, deliveryId } = await seedDelivery({
-      target: { kind: "workflow", workflowId: "wf-1", presence: { displayName: "Event Hestia" } },
+      target: { kind: "workflow", workflowId: "wf-1", appearance: { displayName: "Event Hestia" } },
     });
 
     const runHost = fakeRunHost();
@@ -341,7 +341,7 @@ describe("EventDispatcher", () => {
     });
     const postedAt = Date.now();
     const { deliveryId } = await seedDelivery({
-      target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+      target: { kind: "assistant" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
       payload: { issue: { pull_request: { html_url: url } }, comment: { id: 501, body: "Done.", created_at: new Date(postedAt).toISOString(), user: { login: "me", type: "User" } } },
     });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -400,10 +400,10 @@ describe("EventDispatcher", () => {
 
   it("lands a Slack event with no thread to reply into in its channel's thread", async () => {
     // A reaction in a channel has no Slack thread to answer. With no policy
-    // set, the channel's subject thread holds it, so channels never share a
-    // thread (spec 2026-10-16: delivery threads, Part A step 3).
-    await seedDelivery({
-      target: { kind: "orchestrator" }, ownerType: "org",
+    // set, the rule's own thread holds it (spec 2026-10-16: delivery
+    // threads, Part A step 3).
+    const { subscriptionId } = await seedDelivery({
+      target: { kind: "assistant" }, ownerType: "org",
       service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
       refs: { channel: "CPRIV" }, summary: "reaction :eyes: added in CPRIV by U9", subjects: ["slack:T1/CPRIV"],
       payload: { type: "reaction_added", item: { channel: "CPRIV", ts: "1.2" }, user: "U9", reaction: "eyes" },
@@ -414,7 +414,7 @@ describe("EventDispatcher", () => {
   });
 
   it("delivers an assistant-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
-    const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, ownerType: "org" });
+    const { eventId, deliveryId } = await seedDelivery({ target: { kind: "assistant" }, ownerType: "org" });
 
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
@@ -460,7 +460,7 @@ describe("EventDispatcher", () => {
   it("channel-origin orchestrator delivery: readable body + origin + sender, no raw JSON", async () => {
     await seedMentionMember("team-x");
     const { deliveryId } = await seedDelivery({
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       ownerType: "team",
       ownerId: "team-x",
       service: "slack",
@@ -523,7 +523,7 @@ describe("EventDispatcher", () => {
     it("renders the user prompt template in place of the default body", async () => {
       await seedDelivery({
         target: {
-          kind: "orchestrator",
+          kind: "assistant",
           userPromptTemplate: "{{payload.sender}} opened {{payload.repo}} ({{refs.installation_id}}): {{event.key}}",
         },
         payload: PAYLOAD,
@@ -540,7 +540,7 @@ describe("EventDispatcher", () => {
 
     it("renders the system prompt above the body the rule would have delivered", async () => {
       await seedDelivery({
-        target: { kind: "orchestrator", systemPrompt: "Triage {{event.key}}. Answer in one sentence." },
+        target: { kind: "assistant", systemPrompt: "Triage {{event.key}}. Answer in one sentence." },
         payload: PAYLOAD,
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -556,7 +556,7 @@ describe("EventDispatcher", () => {
     it("keeps a channel message readable through {{event.body}}", async () => {
       await seedMentionMember("team-y");
       await seedDelivery({
-        target: { kind: "orchestrator", userPromptTemplate: "In #deploys: {{event.body}}" },
+        target: { kind: "assistant", userPromptTemplate: "In #deploys: {{event.body}}" },
         ownerType: "team",
         ownerId: "team-y",
         service: "slack",
@@ -583,7 +583,7 @@ describe("EventDispatcher", () => {
     });
 
     it("delivers the default body untouched when the rule configures no template", async () => {
-      await seedDelivery({ target: { kind: "orchestrator" }, payload: PAYLOAD });
+      await seedDelivery({ target: { kind: "assistant" }, payload: PAYLOAD });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await dispatcherWith(deliver).pollOnce();
 
@@ -597,7 +597,7 @@ describe("EventDispatcher", () => {
     await seedMentionMember("team-x");
     async function dispatchMention(follow: boolean) {
       await seedDelivery({
-        target: { kind: "orchestrator", follow },
+        target: { kind: "assistant", follow },
         ownerType: "team",
         ownerId: "team-x",
         service: "slack",
@@ -631,7 +631,7 @@ describe("EventDispatcher", () => {
 
   it("retains the subscription for personal follow presence", async () => {
     const { subscriptionId } = await seedDelivery({
-      target: { kind: "orchestrator", follow: true, presence: { displayName: "Personal helper" } },
+      target: { kind: "assistant", follow: true, presence: { displayName: "Personal helper" } },
       service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
       payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
     });
@@ -645,9 +645,28 @@ describe("EventDispatcher", () => {
       .toMatchObject({ ownerType: "user", ownerId: "user-1", subscriptionId });
   });
 
+  // Spec 2026-10-16 presence hub, Part H step 3: no backfill runs, so a
+  // stored row with the old names must still deliver.
+  it("delivers a stored row with the old names to the assistant with its appearance", async () => {
+    await seedDelivery({
+      target: { kind: "orchestrator", orchestrator: "user", presence: { displayName: "Legacy helper" } },
+      service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
+      payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
+    });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({
+      db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToAssistant: deliver,
+      resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2" }),
+    });
+    await dispatcher.pollOnce();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0]![0].appearance).toEqual({ displayName: "Legacy helper" });
+  });
+
   it("does not create a second follow path for a message subscription", async () => {
     const { deliveryId } = await seedDelivery({
-      target: { kind: "orchestrator", follow: true }, service: "slack",
+      target: { kind: "assistant", follow: true }, service: "slack",
       eventKey: "slack.message", eventKeys: ["slack.message"],
       refs: { channel: "C1" }, summary: "Reply",
       payload: { type: "message", channel: "C1", user: "U9", text: "reply", ts: "1.3", thread_ts: "1.2" },
@@ -677,7 +696,7 @@ describe("EventDispatcher", () => {
       endMatchedWaiter?: EventDispatcherDeps["endMatchedWaiter"];
     } = {}) {
       const { deliveryId, eventId } = await seedDelivery({
-        target: { kind: "orchestrator", follow: true },
+        target: { kind: "assistant", follow: true },
         ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
         refs: { channel: "C1", user: "U9" }, summary: "Mention",
@@ -730,7 +749,7 @@ describe("EventDispatcher", () => {
 
     it("a skip stamp marks the row skipped with its reason and never calls the seam (C1, INV-D3)", async () => {
       const { deliveryId } = await seedDelivery({
-        target: { kind: "orchestrator" }, destination: { kind: "skip", reason: "claimed by thread thr-w" },
+        target: { kind: "assistant" }, destination: { kind: "skip", reason: "claimed by thread thr-w" },
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await new EventDispatcher({
@@ -766,7 +785,7 @@ describe("EventDispatcher", () => {
       const order: string[] = [];
       const endMatchedWaiter = vi.fn(async () => { order.push("end"); return true; });
       const { deliveryId } = await seedDelivery({
-        target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+        target: { kind: "assistant", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
         destination: { ...redirect, matchedWaiterId: "w-once" },
@@ -803,7 +822,7 @@ describe("EventDispatcher", () => {
       opts: { ts?: string; slackBotUserId?: EventDispatcherDeps["slackBotUserId"] } = {}) {
       const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] };
       const { deliveryId } = await seedDelivery({
-        target: { kind: "orchestrator" }, ownerType: "team", ownerId: "team-x", service: "slack",
+        target: { kind: "assistant" }, ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.message", eventKeys: ["slack.message"], refs: { channel: "C1" }, summary: "Reply",
         payload: { type: "message", channel: "C1", user, text, ts: opts.ts ?? "1.700000", thread_ts: "1.2" }, actor: { externalId: user },
         destination: stamp,
@@ -867,7 +886,7 @@ describe("EventDispatcher", () => {
         const now = Date.now();
         await tdb.appDb.insert(eventSubscriptions).values({
           id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
-          target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+          target: { kind: "assistant", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
         });
         const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin],
           { slackBotUserId: (orgId) => matchers.slackBotUserId(orgId) });
@@ -884,7 +903,7 @@ describe("EventDispatcher", () => {
       const now = Date.now();
       await tdb.appDb.insert(eventSubscriptions).values({
         id: "rule-m", orgId: ORG, ownerType: "team", ownerId: "team-x", name: "Mentions", eventKeys: ["slack.app_mention"], filters: [],
-        target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
+        target: { kind: "assistant", follow: true }, enabled: true, createdBy: "member-9", createdAt: now, updatedAt: now,
       });
       const { deliver, deliveryId } = await dispatchFollowedReply("U9", "<@U-BOT> rollback ready?", [slackPlugin]);
       expect(deliver).not.toHaveBeenCalled();
@@ -920,7 +939,7 @@ describe("EventDispatcher", () => {
       // The agent archives the claim thread after ingest stamped it.
       await tdb.appDb.insert(sessionThreads).values({ id: "thr-inc", sessionId: "sess-inc", createdAt: 1, archivedAt: Date.now() });
       const { deliveryId, eventId, subscriptionId } = await seedDelivery({
-        target: { kind: "orchestrator", follow: true, thread: { mode: "own" } }, ownerType: "team", ownerId: "team-x", service: "slack",
+        target: { kind: "assistant", follow: true, thread: { mode: "own" } }, ownerType: "team", ownerId: "team-x", service: "slack",
         eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
         destination: { ...redirect, matchedWaiterId: "w-once" },
@@ -954,12 +973,12 @@ describe("EventDispatcher", () => {
         issue: { pull_request: { html_url: url } }, comment: { id, body: "Please rename it.", created_at: new Date(at).toISOString(), user: { login: "reviewer", type: "User" } },
       });
       const { deliveryId } = await seedDelivery({
-        target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+        target: { kind: "assistant" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
         payload: comment(601, postedAt), destination: stamp,
       });
       // A fresh comment still waits for the own-write record, stamp or not.
       const fresh = await seedDelivery({
-        target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
+        target: { kind: "assistant" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
         payload: comment(602, Date.now()), destination: stamp,
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-pr", threadId: "thr-pr" }));
@@ -1033,12 +1052,12 @@ describe("EventDispatcher", () => {
       const db = tdb.appDb;
       const stamp = { ...redirect, matchedWaiterId: "w-once" };
       const { deliveryId } = await seedDelivery({
-        target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp,
+        target: { kind: "assistant", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp,
       });
       await db.insert(teams).values({ id: "coverage-team", orgId: ORG, name: "Coverage", createdAt: Date.now() });
       await db.insert(eventSubscriptions).values({
         id: "coverage-rule", orgId: ORG, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
-        eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+        eventKeys: ["github.issues.*"], filters: [], target: { kind: "assistant", assistant: "team", teamId: "coverage-team" },
         enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
       });
       const appended = new Set<string>();
@@ -1069,11 +1088,11 @@ describe("EventDispatcher", () => {
     it("a binding stamp skipped as team-covered gives its suppressed waiter the digest once, before the skipped write", async () => {
       const db = tdb.appDb;
       const stamp = { kind: "target", sessionId: "sess-inc", threadId: "thr-inc", reason: "conversation_follow", suppressedWaiterIds: ["w-stream"] };
-      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp });
+      const { deliveryId } = await seedDelivery({ target: { kind: "assistant", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, destination: stamp });
       await db.insert(teams).values({ id: "coverage-team", orgId: ORG, name: "Coverage", createdAt: Date.now() });
       await db.insert(eventSubscriptions).values({
         id: "coverage-rule", orgId: ORG, ownerType: "team", ownerId: "coverage-team", name: "Team coverage",
-        eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
+        eventKeys: ["github.issues.*"], filters: [], target: { kind: "assistant", assistant: "team", teamId: "coverage-team" },
         enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
       });
       const statusAtRecover: string[] = [];
@@ -1122,7 +1141,7 @@ describe("EventDispatcher", () => {
 
       function mentionDelivery() {
         return seedDelivery({
-          target: { kind: "orchestrator", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
+          target: { kind: "assistant", follow: true }, ownerType: "team", ownerId: "team-x", service: "slack",
           eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"], refs: { channel: "C1", user: "U9" }, summary: "Mention",
           payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" }, actor: { externalId: "U9" },
           destination: stamp,
@@ -1166,7 +1185,7 @@ describe("EventDispatcher", () => {
     });
 
     it("a skip for a reason decided after ingest recovers nothing without a matched waiter", async () => {
-      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, destination: redirect });
+      const { deliveryId } = await seedDelivery({ target: { kind: "assistant" }, destination: redirect });
       await tdb.appDb.update(eventSubscriptions).set({ enabled: false });
       const recover = vi.fn(async () => true);
       await new EventDispatcher({
@@ -1246,7 +1265,7 @@ describe("EventDispatcher", () => {
   });
 
   it("failure increments attempts, sets next_attempt_at per backoff, records last_error", async () => {
-    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
     const deliver = vi.fn<AssistantDeliverFn>(async () => {
       throw new Error("orchestrator boom");
     });
@@ -1283,7 +1302,7 @@ describe("EventDispatcher", () => {
 
   it("marks the delivery dead on the 5th failure", async () => {
     const { deliveryId } = await seedDelivery({
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       status: "failed",
       attempts: 4,
     });
@@ -1317,7 +1336,7 @@ describe("EventDispatcher", () => {
     dispatcher.setIngressDrain(ingress);
     try {
       for (let i = 0; i < 2; i++) {
-        const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+        const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
         await dispatcher.pollOnce();
         expect((await getDelivery(deliveryId)).status).toBe("delivered");
       }
@@ -1327,7 +1346,7 @@ describe("EventDispatcher", () => {
   });
 
   it("claimed rows are skipped by a concurrent pollOnce", async () => {
-    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
     // PGlite is single-connection, so the claim UPDATEs serialize and a
     // true cross-connection EvalPlanQual interleave can't be reproduced
     // here. This test only covers the sequential shape (d2 polls after
@@ -1382,14 +1401,14 @@ describe("EventDispatcher", () => {
     }
 
     it("own: keys on the rule and titles the thread by the rule name", async () => {
-      const { subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "own" } } });
+      const { subscriptionId } = await seedDelivery({ target: { kind: "assistant", thread: { mode: "own" } } });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await dispatcherWith(deliver).pollOnce();
       expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
     });
 
     it("new: keys on the delivery id, so a retry reuses the same key", async () => {
-      const { subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "new" } } });
+      const { subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "assistant", thread: { mode: "new" } } });
       let calls = 0;
       const deliver = vi.fn<AssistantDeliverFn>(async () => {
         calls += 1;
@@ -1408,12 +1427,12 @@ describe("EventDispatcher", () => {
     });
 
     it("subject: two rules of one owner on one pull request share one key (INV-D8)", async () => {
-      const { eventId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "subject" } }, subjects: PR_SUBJECTS });
+      const { eventId, subscriptionId } = await seedDelivery({ target: { kind: "assistant", thread: { mode: "subject" } }, subjects: PR_SUBJECTS });
       const secondSub = randomUUID();
       const now = Date.now();
       await tdb.appDb.insert(eventSubscriptions).values({
         id: secondSub, orgId: ORG, ownerType: "user", ownerId: "user-1", name: "second rule", eventKeys: ["github.issues.*"],
-        filters: [], target: { kind: "orchestrator", thread: { mode: "subject" } }, enabled: true, createdBy: "user-1", createdAt: now, updatedAt: now,
+        filters: [], target: { kind: "assistant", thread: { mode: "subject" } }, enabled: true, createdBy: "user-1", createdAt: now, updatedAt: now,
       });
       await tdb.appDb.insert(eventDeliveries).values({ id: randomUUID(), eventId, subscriptionId: secondSub, status: "pending", attempts: 0, nextAttemptAt: now - 1_000, createdAt: now });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -1426,7 +1445,7 @@ describe("EventDispatcher", () => {
 
     it("existing: a pin that cannot receive deliveries dead-letters with the fix text", async () => {
       const pin = { mode: "existing", sessionId: "sess-pin", threadId: "thr-pin" };
-      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: pin } });
+      const { deliveryId } = await seedDelivery({ target: { kind: "assistant", thread: pin } });
       const deliver = vi.fn<AssistantDeliverFn>(async () => { throw new PinUnavailableError(); });
       recordDestination.mockClear();
       await dispatcherWith(deliver).pollOnce();
@@ -1450,7 +1469,7 @@ describe("EventDispatcher", () => {
     });
 
     it("records the destination stage on the event's receipt and counts the reason", async () => {
-      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
       await tdb.appDb.insert(eventReceipts).values({
         id: "rcpt-1", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
       });
@@ -1467,13 +1486,13 @@ describe("EventDispatcher", () => {
     it("defaults an absent policy per delivery: new with a channel origin, never a shared thread for channel content", async () => {
       // A mention rule that does not follow still opens a thread per Slack conversation.
       const mention = await seedDelivery({
-        target: { kind: "orchestrator" }, service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
+        target: { kind: "assistant" }, service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
       });
       // A follow rule's Slack event with no channel origin and no subject gets
       // its own thread, so it never mixes with another channel's content.
       const reaction = await seedDelivery({
-        target: { kind: "orchestrator", follow: true }, service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
+        target: { kind: "assistant", follow: true }, service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
         payload: { type: "reaction_added", item: { channel: "C1", ts: "1.2" }, user: "U9", reaction: "eyes" },
       });
       const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
@@ -1487,7 +1506,7 @@ describe("EventDispatcher", () => {
     });
 
     it("records the destination stage and the counter once when a retry recovers an admitted dispatch (M6)", async () => {
-      const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      const { eventId, deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
       await tdb.appDb.insert(eventReceipts).values({
         id: "rcpt-retry", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
       });
@@ -1502,7 +1521,7 @@ describe("EventDispatcher", () => {
     });
 
     it("does not count a recovered retry again when the event has no receipt", async () => {
-      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
       recordDestination.mockClear();
       await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
       await tdb.appDb.update(eventDeliveries).set({ status: "pending", nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
@@ -1511,7 +1530,7 @@ describe("EventDispatcher", () => {
     });
 
     it("a skip marks the delivery skipped and creates no thread (INV-D3)", async () => {
-      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
       recordDestination.mockClear();
       await recordSkippedDelivery(tdb.appDb, {
         deliveryId, subscriptionId, attempts: 0, orgId: ORG, eventId, destination: { kind: "skip", reason: "claimed by thread thr-w" },
@@ -1565,7 +1584,7 @@ describe("EventDispatcher — team-owned subscriptions", () => {
       name: "test sub",
       eventKeys: ["github.issues.*"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "author-user",
       createdAt: now,

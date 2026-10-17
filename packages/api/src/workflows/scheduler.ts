@@ -33,6 +33,7 @@ import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/
 import { definitionVersionId } from "./definition-version.js";
 import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
 import type { WorkflowOwner } from "./service.js";
+import { readScheduleTargetKind } from "../events/target-names.js";
 
 const POLL_MS = 30_000;
 
@@ -112,7 +113,7 @@ export class WorkflowScheduler {
   ): Promise<"ok" | { error: string; pinUnavailable?: true }> {
     const { db, workflowRunHost } = this.deps;
 
-    if (schedule.targetKind === "orchestrator") {
+    if (readScheduleTargetKind(schedule.targetKind) === "assistant") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
         return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
       }

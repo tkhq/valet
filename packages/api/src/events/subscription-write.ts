@@ -8,7 +8,7 @@
  * workflow trigger service (`workflows/trigger-service.ts`), and the template
  * installer (`workflows/templates.ts`).
  */
-import { readThreadPolicy, validatePresence, validateThreadPolicy } from "@valet/shared";
+import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
@@ -16,16 +16,18 @@ import { eventKeyMatches, SUBJECT_FILTER_FIELD, validateRegexPattern, type Subsc
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
+import { acceptTargetWrite } from "./target-names.js";
 import { NO_SUBJECT_ERROR, subjectModeAllowed } from "./thread-policy-write.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
-/** The optional prompt templates an orchestrator target may carry. */
+/** The optional prompt templates an assistant target may carry. */
 const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
 // silently never fire. Re-add once a waitForEvent node exists.
-const TARGET_KINDS = ["workflow", "orchestrator"] as const;
+// The old `orchestrator` kind is renamed before this check (`target-names.ts`).
+const TARGET_KINDS = ["workflow", "assistant"] as const;
 
 /**
  * Validates a subscription body against the merged plugin catalog. Returns a
@@ -123,19 +125,23 @@ export function validateSubscription(
   if (typeof body.target !== "object" || body.target === null) {
     return "target must be an object";
   }
-  const target = body.target as Record<string, unknown>;
+  // The old names validate as the new ones for one release (spec
+  // 2026-10-16: presence hub, Part H). The writer stores the renamed target.
+  const renamed = acceptTargetWrite(body.target);
+  if (!renamed.ok) return renamed.error;
+  const target = renamed.target as Record<string, unknown>;
   if (typeof target.kind !== "string" || !(TARGET_KINDS as readonly string[]).includes(target.kind)) {
     return `unknown target kind: ${String(target.kind)}`;
   }
-  if (target.presence !== undefined) {
-    const error = validatePresence(target.presence);
+  if (target.appearance !== undefined) {
+    const error = validateAppearance(target.appearance);
     if (error) return error;
   }
   // The thread policy (spec 2026-10-16: delivery threads, Part A). Shape and
   // subject checks only; `existing` needs the owner, so the writer checks
   // it with `validateExistingThread` once the owner is known.
   if (target.thread !== undefined) {
-    if (target.kind !== "orchestrator") {
+    if (target.kind !== "assistant") {
       return "A thread policy applies only to an assistant target. Remove thread from this workflow rule.";
     }
     const error = validateThreadPolicy(target.thread);
@@ -148,24 +154,24 @@ export function validateSubscription(
     return "workflow target requires workflowId";
   }
   if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
-    if (target.kind !== "orchestrator" || (target.orchestrator !== undefined && target.orchestrator !== "user")) return "Delivery preferences apply only to personal assistant subscriptions.";
+    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Delivery preferences apply only to personal assistant subscriptions.";
     if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown delivery policy.";
     if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
   }
-  if (target.kind === "orchestrator") {
-    const who = target.orchestrator;
+  if (target.kind === "assistant") {
+    const who = target.assistant;
     if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
-      return `unknown target orchestrator: ${String(who)}`;
+      return `Unknown target assistant: ${String(who)}. Use user, team, or org.`;
     }
-    // `orchestrator` and `teamId` are one choice expressed in two fields, so
+    // `assistant` and `teamId` are one choice expressed in two fields, so
     // each is refused without the other. A team target with no id names no
     // team; a teamId on a user or org target names a team the delivery would
     // never reach, and would read as if it did.
     if (who === "team" && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
-      return "team orchestrator target requires teamId";
+      return "A team assistant target requires teamId. Choose the team.";
     }
     if (who !== "team" && target.teamId !== undefined) {
-      return "teamId is only valid when orchestrator is team";
+      return "teamId is only valid when assistant is team. Remove teamId.";
     }
     if (target.assistantId !== undefined) {
       return "Assistant selection is not supported. Choose the personal or team workspace instead.";
@@ -190,7 +196,7 @@ export function validateSubscription(
     // A workflow keeps its own prompt configuration on its llm and session
     // nodes. A prompt field here would name a prompt nothing renders.
     for (const field of PROMPT_FIELDS) {
-      if (target[field] !== undefined) return `${field} is only valid on an orchestrator target`;
+      if (target[field] !== undefined) return `${field} is only valid on an assistant target`;
     }
   }
   return null;

@@ -376,11 +376,11 @@ describe("DB-backed actions", () => {
     const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
     expect(await tool.execute(input, ctx({ userId: "other" }))).toMatchObject({ success: false });
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, presence: input.presence } } } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, appearance: input.presence } } } } });
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
     await db.update(eventSubscriptions).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true } } });
-    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
+    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { appearance: input.presence } } } } });
   });
 
   it("keeps one proposal key separate per workflow", async () => {
@@ -651,7 +651,7 @@ describe("DB-backed actions", () => {
     );
     if (!scheduled.success) throw new Error(scheduled.error);
     expect(await db.select().from(workflowSchedules)).toContainEqual(
-      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "orchestrator" }),
+      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "assistant" }),
     );
   });
 
@@ -1831,7 +1831,7 @@ describe("update actions", () => {
       orgId: DB_USER.orgId,
       ownerType: "user",
       ownerId: DB_USER.id,
-      targetKind: "orchestrator",
+      targetKind: "assistant",
       workflowId: null,
       prompt: "hello",
       name: "original name",

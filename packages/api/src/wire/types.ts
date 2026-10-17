@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Presence } from "@valet/shared";
-export type { Presence } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
+export type { Appearance } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -2847,7 +2847,7 @@ export interface ListWorkflowActionRequiredResponse {
 export interface WorkflowScheduleTriggerDetail {
   cron: string;
   timezone: string;
-  targetKind: "workflow" | "orchestrator";
+  targetKind: "workflow" | "assistant";
   prompt?: string;
   /** Where an assistant-prompt schedule's prompts land. Absent reads as
    * `{ mode: "own" }`. Never `subject`: a schedule has no subject. */
@@ -2904,7 +2904,8 @@ export type CreateWorkflowScheduleRequest = {
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
   | {
       target: {
-        kind: "orchestrator";
+        /** `"orchestrator"` is the old value, accepted for one release. Reads emit `"assistant"`. */
+        kind: "assistant" | "orchestrator";
         prompt: string;
       };
     }
@@ -2925,7 +2926,7 @@ export interface UpdateWorkflowScheduleRequest {
 export interface WorkflowScheduleResponse {
   schedule: {
     scheduleId: string;
-    targetKind: "workflow" | "orchestrator";
+    targetKind: "workflow" | "assistant";
     workflowId?: string;
     prompt?: string;
     /** See `CreateWorkflowScheduleRequest.thread`. */
@@ -2941,7 +2942,10 @@ export interface WorkflowScheduleResponse {
 }
 
 export interface CreateWorkflowEventTriggerRequest {
-  presence?: Presence;
+  /** The display name and avatar Valet uses when it replies. */
+  appearance?: Appearance;
+  /** @deprecated Send `appearance`. Accepted for one release; a request that sends both is refused. */
+  presence?: Appearance;
   workflowId: string;
   name: string;
   eventKeys: string[];
@@ -2965,7 +2969,7 @@ export interface UpdateWorkflowEventTriggerRequest {
 
 export interface WorkflowEventTriggerResponse {
   trigger: {
-    presence?: Presence;
+    appearance?: Appearance;
     triggerId: string;
     workflowId: string;
     name: string;
@@ -4893,15 +4897,24 @@ export interface FilterOptionsResponse {
 // validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignoreIfAnyTeamSubscribed";
 
+/**
+ * A rule's target. Reads always carry these names. For one release, a write
+ * may also send the old names (spec 2026-10-16: presence hub, Part H):
+ * `presence` for `appearance`, `kind: "orchestrator"` for
+ * `kind: "assistant"`, and the field `orchestrator` for `assistant`. A write
+ * that sends both names for one field is refused (`events/target-names.ts`).
+ */
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string; presence?: Presence }
-  /** `teamId` is required when `orchestrator` is `"team"`, and refused
-   * otherwise — the two fields are one choice, and a `teamId` alongside
+  | { kind: "workflow"; workflowId: string; appearance?: Appearance }
+  /** `teamId` is required when `assistant` is `"team"`, and refused
+   * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
   | {
-      kind: "orchestrator";
-      presence?: Presence;
-      orchestrator?: "user" | "team" | "org";
+      kind: "assistant";
+      /** The display name and avatar Valet uses when it replies. UI copy calls it "Appears as". */
+      appearance?: Appearance;
+      /** Which assistant receives the deliveries. Absent reads as `user`. */
+      assistant?: "user" | "team" | "org";
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
@@ -5075,8 +5088,10 @@ export interface ListEventSubscriptionsResponse {
 }
 
 export interface PatchEventSubscriptionRequest {
-  /** Replace channel identity. Null clears the override; omission preserves it. */
-  presence?: Presence | null;
+  /** Replace the reply identity. Null clears the override; omission preserves it. */
+  appearance?: Appearance | null;
+  /** @deprecated Send `appearance`. Accepted for one release; a patch that sends both is refused. */
+  presence?: Appearance | null;
   deliveryPolicy?: EventDeliveryPolicy;
   pauseOnOverlap?: boolean;
   name?: string;

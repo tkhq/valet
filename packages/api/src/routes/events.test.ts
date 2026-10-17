@@ -66,7 +66,7 @@ const VALID_BODY: CreateEventSubscriptionRequest = {
   name: "pr opens",
   eventKeys: ["github.pull_request.opened"],
   filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
-  target: { kind: "orchestrator" },
+  target: { kind: "assistant" },
 };
 
 async function postSubscription(
@@ -125,7 +125,7 @@ async function seedSubscriptionRow(
     name: opts.name ?? `seeded ${id}`,
     eventKeys: opts.eventKeys ?? ["github.push"],
     filters: opts.filters ?? [],
-    target: opts.target ?? { kind: "orchestrator" },
+    target: opts.target ?? { kind: "assistant" },
     enabled: opts.enabled ?? true,
     createdBy: "someone",
     createdAt: now,
@@ -173,22 +173,22 @@ describe("GET /api/events/catalog", () => {
 });
 
 describe("POST /api/event-subscriptions", () => {
-  it("persists, replaces, and clears channel presence without changing the match", async () => {
+  it("persists, replaces, and clears the appearance without changing the match", async () => {
     const a = await boot();
-    const presence = { displayName: "Issue helper", avatarUrl: "https://example.com/a.webp" };
-    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, presence } });
+    const appearance = { displayName: "Issue helper", avatarUrl: "https://example.com/a.webp" };
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, appearance } });
     expect(created.status).toBe(201);
     const body = await created.json() as CreateEventSubscriptionResponse;
-    expect(body.target).toMatchObject({ presence });
-    const invalid = await patchSubscription(a.baseUrl, body.id, { presence: { avatarUrl: "http://example.com/a" } });
+    expect(body.target).toMatchObject({ appearance });
+    const invalid = await patchSubscription(a.baseUrl, body.id, { appearance: { avatarUrl: "http://example.com/a" } });
     expect(invalid.status).toBe(400);
-    const replaced = await patchSubscription(a.baseUrl, body.id, { presence: { displayName: "New helper" } });
+    const replaced = await patchSubscription(a.baseUrl, body.id, { appearance: { displayName: "New helper" } });
     expect(replaced.status).toBe(200);
-    expect((await replaced.json() as CreateEventSubscriptionResponse).target).toMatchObject({ presence: { displayName: "New helper" } });
-    const cleared = await patchSubscription(a.baseUrl, body.id, { presence: null });
+    expect((await replaced.json() as CreateEventSubscriptionResponse).target).toMatchObject({ appearance: { displayName: "New helper" } });
+    const cleared = await patchSubscription(a.baseUrl, body.id, { appearance: null });
     expect(cleared.status).toBe(200);
     const result = await cleared.json() as CreateEventSubscriptionResponse;
-    expect(result.target).not.toHaveProperty("presence");
+    expect(result.target).not.toHaveProperty("appearance");
     expect(result.filters).toEqual(VALID_BODY.filters);
   });
 
@@ -228,7 +228,7 @@ describe("POST /api/event-subscriptions", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -550,7 +550,7 @@ describe("GET /api/event-subscriptions", () => {
     const created = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
       name: "org watch",
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(created.status).toBe(201);
     await seedSubscriptionRow(a, "sub_mine", "local-org", { name: "mine", ownerId: "local-user" });
@@ -567,7 +567,7 @@ describe("GET /api/event-subscriptions", () => {
     const created = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
       name: "org watch",
-      target: { kind: "orchestrator", orchestrator: "org" },
+      target: { kind: "assistant", assistant: "org" },
     });
     expect(created.status).toBe(201);
     await seedSubscriptionRow(a, "sub_team", "local-org", {
@@ -677,7 +677,7 @@ describe("PATCH /api/event-subscriptions/:id", () => {
   it("an org-owned subscription is mutable by any org member", async () => {
     const a = await boot();
     const created = (await (
-      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } })
+      await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", assistant: "org" } })
     ).json()) as CreateEventSubscriptionResponse;
     expect(created.ownerType).toBe("org");
 
@@ -1109,7 +1109,7 @@ describe("event subscriptions — team ownership", () => {
 
   const teamBody: CreateEventSubscriptionRequest = {
     ...VALID_BODY,
-    target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+    target: { kind: "assistant", assistant: "team", teamId: "team_1" },
   };
 
   it("stamps a team target with the TEAM as owner, not the creating member", async () => {
@@ -1137,7 +1137,7 @@ describe("event subscriptions — team ownership", () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_2" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_2" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(404);
@@ -1207,7 +1207,7 @@ describe("event subscriptions — team ownership", () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_nope" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_nope" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(404);
@@ -1217,22 +1217,22 @@ describe("event subscriptions — team ownership", () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "team" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("team orchestrator target requires teamId");
+    expect(((await res.json()) as { error: string }).error).toBe("A team assistant target requires teamId. Choose the team.");
   });
 
   it("400s a teamId on a user target — it would read as delivering to the team, and does not", async () => {
     const a = await bootWithTeam();
     const res = await postSubscription(
       a.baseUrl,
-      { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "user", teamId: "team_1" } },
+      { ...VALID_BODY, target: { kind: "assistant", assistant: "user", teamId: "team_1" } },
       { "x-valet-test-user-id": "test-member" },
     );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when orchestrator is team");
+    expect(((await res.json()) as { error: string }).error).toBe("teamId is only valid when assistant is team. Remove teamId.");
   });
 
   it("lets another member of the same team change and delete it", async () => {
@@ -1309,7 +1309,7 @@ describe("event-subscription assistant target", () => {
       body: JSON.stringify({
         name: "to ops",
         eventKeys: ["github.pull_request.opened"],
-        target: { kind: "orchestrator", orchestrator: "user", assistantId: mine },
+        target: { kind: "assistant", assistant: "user", assistantId: mine },
       }),
     });
     expect(res.status).toBe(400);
@@ -1326,7 +1326,7 @@ describe("event-subscription assistant target", () => {
       body: JSON.stringify({
         name: "nope",
         eventKeys: ["github.pull_request.opened"],
-        target: { kind: "orchestrator", orchestrator: "user", assistantId: foreign },
+        target: { kind: "assistant", assistant: "user", assistantId: foreign },
       }),
     });
     expect(res.status).toBe(400);
@@ -1346,7 +1346,7 @@ describe("event-subscription assistant target", () => {
         body: JSON.stringify({
           name: "repoint me",
           eventKeys: ["github.pull_request.opened"],
-          target: { kind: "orchestrator", orchestrator: "user" },
+          target: { kind: "assistant", assistant: "user" },
         }),
       })
     ).json()) as { id: string; target: { assistantId?: string } };
@@ -1372,14 +1372,14 @@ describe("event-subscription assistant target", () => {
     await a.providers.db.insert(eventSubscriptions).values({
       id: "legacy-assistant-rule", orgId: "local-org", ownerType: "user", ownerId: "local-user",
       name: "legacy", eventKeys: ["github.push"], filters: [],
-      target: { kind: "orchestrator", orchestrator: "user", assistantId: "asst_retired" },
+      target: { kind: "assistant", assistant: "user", assistantId: "asst_retired" },
       enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
     });
     const res = await patchSubscription(a.baseUrl, "legacy-assistant-rule", { enabled: false });
     expect(res.status).toBe(200);
     const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "legacy-assistant-rule"));
     expect(row.enabled).toBe(false);
-    expect(row.target).toEqual({ kind: "orchestrator", orchestrator: "user" });
+    expect(row.target).toEqual({ kind: "assistant", assistant: "user" });
   });
 
   it("refuses assistantId on a workflow target", async () => {
@@ -1410,7 +1410,7 @@ describe("event-subscription prompt templates", () => {
     name: "triage",
     eventKeys: ["github.pull_request.opened"],
     target: {
-      kind: "orchestrator",
+      kind: "assistant",
       systemPrompt: "Triage this pull request. Answer in one sentence.",
       userPromptTemplate: "{{payload.sender}} opened {{payload.repo}}: {{event.summary}}",
     },
@@ -1422,7 +1422,7 @@ describe("event-subscription prompt templates", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
     expect(body.target).toMatchObject({
-      kind: "orchestrator",
+      kind: "assistant",
       systemPrompt: PROMPT_BODY.target.systemPrompt,
       userPromptTemplate: PROMPT_BODY.target.userPromptTemplate,
     });
@@ -1432,7 +1432,7 @@ describe("event-subscription prompt templates", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...PROMPT_BODY,
-      target: { kind: "orchestrator", userPromptTemplate: "{{session.history}}" },
+      target: { kind: "assistant", userPromptTemplate: "{{session.history}}" },
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
@@ -1444,7 +1444,7 @@ describe("event-subscription prompt templates", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...PROMPT_BODY,
-      target: { kind: "orchestrator", userPromptTemplate: "{{payload.comment_body}}" },
+      target: { kind: "assistant", userPromptTemplate: "{{payload.comment_body}}" },
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("payload.comment_body");
@@ -1454,7 +1454,7 @@ describe("event-subscription prompt templates", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...PROMPT_BODY,
-      target: { kind: "orchestrator", systemPrompt: "Watch {{refs.repo" },
+      target: { kind: "assistant", systemPrompt: "Watch {{refs.repo" },
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("unclosed");
@@ -1464,7 +1464,7 @@ describe("event-subscription prompt templates", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...PROMPT_BODY,
-      target: { kind: "orchestrator", systemPrompt: "Follow this: {{payload.sender}}" },
+      target: { kind: "assistant", systemPrompt: "Follow this: {{payload.sender}}" },
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
@@ -1477,7 +1477,7 @@ describe("event-subscription prompt templates", () => {
     const res = await postSubscription(a.baseUrl, {
       ...PROMPT_BODY,
       target: {
-        kind: "orchestrator",
+        kind: "assistant",
         systemPrompt: 'Reply with JSON like {"summary": {"text": "x"}}',
       },
     });
@@ -1496,7 +1496,7 @@ describe("event-subscription prompt templates", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe(
-      "systemPrompt is only valid on an orchestrator target",
+      "systemPrompt is only valid on an assistant target",
     );
   });
 
@@ -1515,7 +1515,7 @@ describe("event-subscription prompt templates", () => {
     const cleared = (await (
       await patchSubscription(a.baseUrl, created.id, { systemPrompt: null, userPromptTemplate: null })
     ).json()) as PatchEventSubscriptionResponse;
-    expect(cleared.target).toEqual({ kind: "orchestrator" });
+    expect(cleared.target).toEqual({ kind: "assistant" });
   });
 
   it("400s a patched template that names a variable the rule's events do not declare", async () => {
@@ -1534,7 +1534,7 @@ describe("event-subscription prompt templates", () => {
       await postSubscription(a.baseUrl, {
         name: "pr numbers",
         eventKeys: ["github.pull_request.opened"],
-        target: { kind: "orchestrator", userPromptTemplate: "PR {{payload.pr_number}}" },
+        target: { kind: "assistant", userPromptTemplate: "PR {{payload.pr_number}}" },
       })
     ).json()) as EventSubscriptionWire;
 
@@ -1699,7 +1699,7 @@ describe("mention scoping (slack.app_mention)", () => {
     name: "my mentions",
     eventKeys: ["slack.app_mention"],
     filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
   };
 
   it("a team-owned mention subscription uses membership instead of a creator filter", async () => {
@@ -1709,7 +1709,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -1727,7 +1727,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const now = Date.now();
     await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: now });
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
-    const teamTarget: EventSubscriptionTargetWire = { kind: "orchestrator", orchestrator: "team", teamId: "team_1" };
+    const teamTarget: EventSubscriptionTargetWire = { kind: "assistant", assistant: "team", teamId: "team_1" };
 
     const open = await postSubscription(a.baseUrl, { ...MENTION_BODY, target: teamTarget, audience: "organization" });
     expect(open.status).toBe(201);
@@ -1756,7 +1756,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
     });
     const created = (await res.json()) as CreateEventSubscriptionResponse;
 
@@ -1779,7 +1779,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const created = (await (await postSubscription(a.baseUrl, {
       name: "my mentions", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C1" }],
-      target: { kind: "orchestrator", orchestrator: "user" },
+      target: { kind: "assistant", assistant: "user" },
     })).json()) as CreateEventSubscriptionResponse;
 
     const list = (await (await fetch(`${a.baseUrl}/api/event-subscriptions`)).json()) as ListEventSubscriptionsResponse;
@@ -1794,7 +1794,7 @@ describe("mention scoping (slack.app_mention)", () => {
   });
 
   // The runtime gate treats team ownership plus an orchestrator target as a
-  // team mention rule, with no `orchestrator: "team"` on the target. The write
+  // team mention rule, with no `assistant: "team"` on the target. The write
   // gate must read the same rows the same way.
   it("patches the audience of a team-owned rule whose target names no orchestrator", async () => {
     const a = await bootSlack();
@@ -1804,7 +1804,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await seedSubscriptionRow(a, "sub_runtime", "local-org", {
       ownerType: "team", ownerId: "team_1", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C1" }],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
     });
 
     const res = await patchSubscription(a.baseUrl, "sub_runtime", { audience: "organization" });
@@ -1819,7 +1819,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "local-user", role: "admin" });
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1" },
+      target: { kind: "assistant", assistant: "team", teamId: "team_1" },
       audience: "everyone",
     });
     expect(res.status).toBe(400);
@@ -1830,7 +1830,7 @@ describe("mention scoping (slack.app_mention)", () => {
 
   it.each<EventSubscriptionTargetWire>([
     { kind: "workflow", workflowId: "wf_1" },
-    { kind: "orchestrator", orchestrator: "user" },
+    { kind: "assistant", assistant: "user" },
   ])("refuses an audience on a target that is not a team assistant (%o)", async (target) => {
     const a = await bootSlack();
     await linkSlack(a, "local-user", "U_LOCAL");
@@ -1850,7 +1850,7 @@ describe("mention scoping (slack.app_mention)", () => {
     await linkSlack(a, "member-b", "U_B");
     await seedSubscriptionRow(a, "sub-replay", "local-org", {
       ownerType: "team", ownerId: "team-replay", eventKeys: ["slack.app_mention"],
-      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator" },
+      filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant" },
     });
     // An event from a channel nobody has classified stays hidden (`routes/events.ts#eventVisibleTo`).
     await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C1", isPrivate: false, checkedAt: Date.now() });
@@ -2015,7 +2015,7 @@ describe("mention scoping (slack.app_mention)", () => {
       name: "all channel messages",
       eventKeys: ["slack.message"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as CreateEventSubscriptionResponse;
@@ -2305,7 +2305,7 @@ describe("replacement proposals", () => {
     const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH };
     await seedSubscriptionRow(a, "sub_live", "local-org", { ...mine, name: "replies v1" });
     await seedSubscriptionRow(a, "sub_next", "local-org", {
-      ...mine, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
+      ...mine, name: "replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_live" },
     });
   }
 
@@ -2324,7 +2324,7 @@ describe("replacement proposals", () => {
     });
     await seedSubscriptionRow(a, "sub_stray", "local-org", {
       ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
-      filters: [{ field: "repo", op: "eq", value: "acme/stray" }], target: { kind: "orchestrator", replaces: "sub_colleague" },
+      filters: [{ field: "repo", op: "eq", value: "acme/stray" }], target: { kind: "assistant", replaces: "sub_colleague" },
     });
     expect((await patchSubscription(a.baseUrl, "sub_stray", { enabled: true })).status).toBe(409);
     expect(await enabledById(a)).toMatchObject({ sub_colleague: true, sub_stray: false });
@@ -2335,7 +2335,7 @@ describe("replacement proposals", () => {
     });
     await seedSubscriptionRow(a, "sub_takeover", "local-org", {
       ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
-      filters: [{ field: "repo", op: "eq", value: "acme/takeover" }], target: { kind: "orchestrator", replaces: "sub_trigger" },
+      filters: [{ field: "repo", op: "eq", value: "acme/takeover" }], target: { kind: "assistant", replaces: "sub_trigger" },
     });
     expect((await patchSubscription(a.baseUrl, "sub_takeover", { enabled: true })).status).toBe(409);
     expect(await enabledById(a)).toMatchObject({ sub_trigger: true, sub_takeover: false });
@@ -2371,7 +2371,7 @@ describe("replacement proposals", () => {
     const a = await boot();
     await seedReplacement(a);
     await seedSubscriptionRow(a, "sub_sibling", "local-org", {
-      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v3", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v3", enabled: false, target: { kind: "assistant", replaces: "sub_live" },
     });
     expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
     await expectStale(a, "sub_next");
@@ -2382,7 +2382,7 @@ describe("replacement proposals", () => {
     const a = await boot();
     await seedReplacement(a);
     const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
-    await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "orchestrator", replaces: "sub_next" } });
+    await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "assistant", replaces: "sub_next" } });
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
     // Roll back by hand: the new version off, the original on.
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
@@ -2390,7 +2390,7 @@ describe("replacement proposals", () => {
     await expectStale(a, "sub_v3");
     expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false, sub_v3: false });
     // A proposal for the restored original works while it is on; once it is paused, it is stale too.
-    await seedSubscriptionRow(a, "sub_q", "local-org", { ...mine, name: "replies q", target: { kind: "orchestrator", replaces: "sub_live" } });
+    await seedSubscriptionRow(a, "sub_q", "local-org", { ...mine, name: "replies q", target: { kind: "assistant", replaces: "sub_live" } });
     expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
     await expectStale(a, "sub_q");
   });
@@ -2400,7 +2400,7 @@ describe("replacement proposals", () => {
     await seedReplacement(a);
     const [before] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
     const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
-    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
+    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "assistant", replaces: "sub_live" } });
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
     // The replaced row keeps its own target, so a retried proposal for it still matches.
     const [after] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
@@ -2412,7 +2412,7 @@ describe("replacement proposals", () => {
   it("refuses a replacement whose version was removed, and keeps its link", async () => {
     const a = await boot();
     await seedSubscriptionRow(a, "sub_orphan", "local-org", {
-      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" },
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v2", enabled: false, target: { kind: "assistant", replaces: "sub_gone" },
     });
     const refused = await patchSubscription(a.baseUrl, "sub_orphan", { enabled: true });
     expect(refused.status).toBe(409);
@@ -2449,7 +2449,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
   const ARCHIVED = "This thread is archived. Pick an open thread.";
 
   function withThread(thread: unknown): unknown {
-    return { ...VALID_BODY, target: { kind: "orchestrator", thread } };
+    return { ...VALID_BODY, target: { kind: "assistant", thread } };
   }
 
   it("refuses an existing thread of another owner", async () => {
@@ -2488,9 +2488,9 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...mine }));
     expect(res.status).toBe(201);
     const created = (await res.json()) as CreateEventSubscriptionResponse;
-    expect(created.target).toEqual({ kind: "orchestrator", thread: { mode: "existing", ...mine } });
+    expect(created.target).toEqual({ kind: "assistant", thread: { mode: "existing", ...mine } });
     const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
-    expect(row.target).toEqual({ kind: "orchestrator", thread: { mode: "existing", ...mine } });
+    expect(row.target).toEqual({ kind: "assistant", thread: { mode: "existing", ...mine } });
   });
 
   it("refuses an owner's thread outside an assistant conversation", async () => {
@@ -2514,7 +2514,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     const personal = await seedAssistantThread(a.providers.db, {
       orgId: "local-org", owner: { type: "user", id: "test-member" }, sessionId: "sess-personal", threadId: "thr-personal",
     });
-    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread } });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread } });
     const asMember = { "x-valet-test-user-id": "test-member" };
 
     const refused = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...personal }), asMember);
@@ -2559,7 +2559,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
       orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-incident",
       key: "sub:incident", slackChannels: ["CPINPRIV"],
     });
-    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread } });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread } });
     const asOutsider = { "x-valet-test-user-id": "test-member" };
     try {
       // A team member outside the private channel gets the cross-owner text.
@@ -2659,7 +2659,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
       orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-helper",
       key: "app-assistant:test-member",
     });
-    const body = { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread: { mode: "existing", ...helper } } };
+    const body = { ...VALID_BODY, target: { kind: "assistant", assistant: "team", teamId: "team_1", thread: { mode: "existing", ...helper } } };
     const res = await postSubscription(a.baseUrl, body, { "x-valet-test-user-id": "test-member" });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: CROSS_OWNER });
@@ -2672,7 +2672,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
       orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
     });
     const created = (await (await postSubscription(a.baseUrl, withThread({ mode: "new" }))).json()) as CreateEventSubscriptionResponse;
-    expect(created.target).toEqual({ kind: "orchestrator", thread: { mode: "new" } });
+    expect(created.target).toEqual({ kind: "assistant", thread: { mode: "new" } });
 
     const refused = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "existing", ...foreign } });
     expect(refused.status).toBe(400);
@@ -2680,13 +2680,13 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
 
     const subject = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "subject" } });
     expect(subject.status).toBe(200);
-    expect(((await subject.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "orchestrator", thread: { mode: "subject" } });
+    expect(((await subject.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant", thread: { mode: "subject" } });
 
     const cleared = await patchSubscription(a.baseUrl, created.id, { thread: null });
     expect(cleared.status).toBe(200);
-    expect(((await cleared.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "orchestrator" });
+    expect(((await cleared.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant" });
     const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
-    expect(row.target).toEqual({ kind: "orchestrator" });
+    expect(row.target).toEqual({ kind: "assistant" });
   });
 
   it("refuses a thread patch on a workflow rule", async () => {
@@ -2697,5 +2697,97 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     const res = await patchSubscription(a.baseUrl, "sub_wf", { thread: { mode: "new" } });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." });
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part H: `presence` became `appearance`, and
+// the assistant target's `orchestrator` names became `assistant`. The API
+// accepts both on write for one release and emits only the new names.
+describe("Part H renames on /api/event-subscriptions", () => {
+  async function storedTarget(a: TestApi, id: string): Promise<unknown> {
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, id));
+    return row!.target;
+  }
+
+  it("accepts the old presence field on create, stores and emits appearance", async () => {
+    const a = await boot();
+    const appearance = { displayName: "Issue helper" };
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", presence: appearance } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toEqual({ kind: "assistant", appearance });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", appearance });
+  });
+
+  it("accepts the new names on create", async () => {
+    const a = await boot();
+    const appearance = { displayName: "Issue helper" };
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", assistant: "user", appearance } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", appearance });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", assistant: "user", appearance });
+  });
+
+  it("accepts the old orchestrator scope field on create and emits assistant", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "org" } });
+    expect(res.status).toBe(201);
+    const body = await res.json() as CreateEventSubscriptionResponse;
+    expect(body.ownerType).toBe("org");
+    expect(body.target).toEqual({ kind: "assistant", assistant: "org" });
+    expect(await storedTarget(a, body.id)).toEqual({ kind: "assistant", assistant: "org" });
+  });
+
+  it("refuses a create that sends both presence and appearance", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      target: { kind: "assistant", presence: { displayName: "Old" }, appearance: { displayName: "New" } },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Send appearance, not presence." });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("refuses a create that sends both orchestrator and assistant", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "assistant", orchestrator: "user", assistant: "user" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Send assistant, not orchestrator." });
+  });
+
+  it("accepts the old presence field on patch and refuses both names", async () => {
+    const a = await boot();
+    const created = await (await postSubscription(a.baseUrl, VALID_BODY)).json() as CreateEventSubscriptionResponse;
+    const old = await patchSubscription(a.baseUrl, created.id, { presence: { displayName: "Old name" } });
+    expect(old.status).toBe(200);
+    expect((await old.json() as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant", appearance: { displayName: "Old name" } });
+    expect(await storedTarget(a, created.id)).toEqual({ kind: "assistant", appearance: { displayName: "Old name" } });
+    const both = await patchSubscription(a.baseUrl, created.id, { presence: { displayName: "A" }, appearance: { displayName: "B" } });
+    expect(both.status).toBe(400);
+    expect(await both.json()).toEqual({ error: "Send appearance, not presence." });
+    const cleared = await patchSubscription(a.baseUrl, created.id, { presence: null });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json() as PatchEventSubscriptionResponse).target).toEqual({ kind: "assistant" });
+  });
+
+  it("reads a stored row with the old names as the new names", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(eventSubscriptions).values({
+      id: "legacy-row", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "legacy",
+      eventKeys: ["github.pull_request.opened"], filters: [],
+      target: { kind: "orchestrator", orchestrator: "user", presence: { displayName: "Legacy helper" } },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const list = await (await fetch(`${a.baseUrl}/api/event-subscriptions`)).json() as ListEventSubscriptionsResponse;
+    expect(list.subscriptions.find((s) => s.id === "legacy-row")?.target).toEqual({
+      kind: "assistant", assistant: "user", appearance: { displayName: "Legacy helper" },
+    });
+    // A patch rewrites the row it touches with the new names.
+    const renamed = await patchSubscription(a.baseUrl, "legacy-row", { name: "renamed" });
+    expect(renamed.status).toBe(200);
+    expect(await storedTarget(a, "legacy-row")).toEqual({ kind: "assistant", assistant: "user", appearance: { displayName: "Legacy helper" } });
   });
 });

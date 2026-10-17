@@ -8,7 +8,7 @@
  * Scoped deliberately to workflow targets: orchestrator/signal
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
-import { readPresence, type Presence } from "@valet/shared";
+import { readAppearance, type Appearance } from "@valet/shared";
 import { linearEventArmBlock } from "../services/linear-ingress.js";
 import { proposalId } from "../events/proposals.js";
 import { randomUUID } from "node:crypto";
@@ -33,9 +33,10 @@ import {
   type WorkflowOwner,
   type WorkflowOwnerRef,
 } from "./service.js";
+import { appearanceOf } from "../events/target-names.js";
 
 export interface WorkflowTriggerSummary {
-  presence?: Presence;
+  appearance?: Appearance;
   triggerId: string;
   workflowId: string;
   name: string;
@@ -69,11 +70,12 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
 }
 
 function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTriggerSummary | null {
-  const target = row.target as { kind?: string; workflowId?: string; presence?: unknown };
+  const target = row.target as { kind?: string; workflowId?: string };
   if (target?.kind !== "workflow" || typeof target.workflowId !== "string") return null;
-  const presence = readPresence(target.presence);
+  // Stored rows may carry the old `presence` name (`events/target-names.ts`).
+  const appearance = readAppearance(appearanceOf(row.target));
   return {
-    ...(presence ? { presence } : {}),
+    ...(appearance ? { appearance } : {}),
     triggerId: row.id,
     workflowId: target.workflowId,
     name: row.name,
@@ -93,10 +95,10 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
-  input: { workflowId: string; name: string; presence?: Presence; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
+  input: { workflowId: string; name: string; appearance?: Appearance; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const db = deps.db;
-  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.presence !== undefined ? { presence: input.presence } : {}) };
+  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.appearance !== undefined ? { appearance: input.appearance } : {}) };
   const write = await validateSubscriptionWrite(
     db,
     deps.plugins,
