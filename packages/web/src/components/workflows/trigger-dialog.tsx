@@ -1,4 +1,7 @@
-import { type Presence, validatePresence } from "@valet/shared";
+import { type AssistantThreadPolicy, type Presence, validatePresence } from "@valet/shared";
+import { PICK_A_THREAD_ERROR, RunsInField } from "~/components/presence/runs-in-field";
+import { runsInLabel, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
+import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "~/components/events/automation-review";
 /**
@@ -10,7 +13,9 @@ import { AutomationReview } from "~/components/events/automation-review";
  * Schedule fields: name, cron, timezone (default: local), target radio
  * (workflow | orchestrator), workflow select (hidden when `workflowId` prop
  * set), prompt textarea (orchestrator target), input JSON textarea (workflow
- * target).
+ * target), and **Runs in** for an assistant schedule: a new thread each time,
+ * the routine's own thread, or an existing thread. A schedule has no
+ * subject, so the subject option never shows.
  *
  * Event fields: name, workflow select (same hide rule), event key select
  * (from useTriggerCatalog), filters JSON textarea.
@@ -96,6 +101,14 @@ export function TriggerDialog({
   const [prompt, setPrompt] = useState("");
   const [inputJson, setInputJson] = useState("");
   const [inputJsonError, setInputJsonError] = useState<string | null>(null);
+  // Where an assistant schedule's prompts land. Null while "An existing
+  // thread…" is chosen and no thread is picked yet. Reset by the open effect.
+  const [thread, setThread] = useState<AssistantThreadPolicy | null>({ mode: "own" });
+  // A new assistant schedule posts no teamId, so it belongs to your personal
+  // workspace. An edit keeps its owner, which this dialog does not receive;
+  // the active workspace is the closest match.
+  const scope = useWorkspaceScope();
+  const threadWorkspace = isEditing ? scope.key : PERSONAL;
 
   // ── event fields ───────────────────────────────────────────────────────
   const [presence, setPresence] = useState<Presence>({});
@@ -141,6 +154,7 @@ export function TriggerDialog({
         setTargetKind(editing.detail.targetKind);
         setSelectedWorkflowId(editing.workflowId ?? workflowId ?? "");
         setPrompt(editing.detail.prompt ?? "");
+        setThread(editing.detail.thread ?? { mode: "own" });
         setInputJson(
           editing.detail.input != null ? JSON.stringify(editing.detail.input, null, 2) : "",
         );
@@ -159,6 +173,7 @@ export function TriggerDialog({
       setTargetKind("workflow");
       setSelectedWorkflowId(workflowId ?? "");
       setPrompt("");
+      setThread({ mode: "own" });
       setInputJson("");
       setInputJsonError(null);
       setEventKey("");
@@ -204,6 +219,11 @@ export function TriggerDialog({
       return;
     }
 
+    if (kind === "schedule" && targetKind === "orchestrator" && thread === null) {
+      setFormError(PICK_A_THREAD_ERROR);
+      return;
+    }
+
     // Client-side: require a workflow selection on create when the workflowId
     // prop is absent and a workflow target is needed.
     if (!isEditing) {
@@ -237,6 +257,7 @@ export function TriggerDialog({
             timezone?: string;
             prompt?: string;
             input?: unknown;
+            thread?: AssistantThreadPolicy;
           };
           const body: ScheduleUpdate = review && !orig.enabled ? { enabled: true } : {};
           if (name !== orig.name) body.name = name;
@@ -244,6 +265,10 @@ export function TriggerDialog({
           if (timezone !== orig.detail.timezone) body.timezone = timezone;
           if (orig.detail.targetKind === "orchestrator" && prompt !== (orig.detail.prompt ?? "")) {
             body.prompt = prompt;
+          }
+          if (orig.detail.targetKind === "orchestrator" && thread !== null &&
+            !sameThreadPolicy(thread, orig.detail.thread ?? { mode: "own" })) {
+            body.thread = thread;
           }
           if (orig.detail.targetKind === "workflow") {
             if (parsedInput !== undefined) {
@@ -260,6 +285,7 @@ export function TriggerDialog({
             await createSchedule.mutateAsync({
               ...base,
               target: { kind: "orchestrator", prompt },
+              ...(thread !== null ? { thread } : {}),
             });
           } else {
             const wfId = workflowId ?? selectedWorkflowId;
@@ -498,6 +524,18 @@ export function TriggerDialog({
                 </div>
               )}
 
+              {targetKind === "orchestrator" && (
+                <RunsInField
+                  idPrefix="trigger"
+                  value={thread}
+                  onChange={setThread}
+                  subjectKind={null}
+                  ruleKind="routine"
+                  workspace={threadWorkspace}
+                  disabled={isPending}
+                />
+              )}
+
               {/* Input JSON textarea — workflow target */}
               {(targetKind === "workflow" ||
                 (isEditing &&
@@ -629,7 +667,7 @@ export function TriggerDialog({
           <AutomationReview workflowId={targetKind === "workflow" ? selectedWorkflowId || workflowId : undefined} when={kind === "schedule" ? `${cron} (${timezone})` : eventKey}
             scope={kind === "schedule" ? "This workspace" : filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
             result={targetKind === "orchestrator" ? prompt : "Run the workflow with its configured steps and inputs"}
-            destination={targetKind === "orchestrator" ? "Workspace assistant, in a scheduled thread" : workflows.find(w => w.id === selectedWorkflowId)?.name || selectedWorkflowId || workflowId}
+            destination={targetKind === "orchestrator" ? `Workspace assistant. Runs in: ${thread !== null ? runsInLabel(thread, null, "routine") : "an existing thread"}` : workflows.find(w => w.id === selectedWorkflowId)?.name || selectedWorkflowId || workflowId}
           />
           {formError && (
             <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
