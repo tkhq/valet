@@ -19,7 +19,7 @@ import type {
   ToolDef,
   ToolResult,
 } from "./types.js";
-import { isDecisionGateExpired } from "./decision-gate.js";
+import { isDecisionGateExpired, isUnattendedWorkflowRefusal } from "./decision-gate.js";
 import { encodeToolOutput } from "./tool-output.js";
 
 /**
@@ -355,6 +355,9 @@ export type InvokeActionResult =
    * no Valet account (`ToolContext.externalSender`). No gate opens, so a
    * newcomer can never send a teammate an approval request. */
   | { kind: "denied-external-sender" }
+  /** The action needs approval and no one watches this unattended workflow
+   * task (`ToolContext.unattendedWorkflow`). No gate opened. */
+  | { kind: "denied-unattended" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
@@ -426,6 +429,12 @@ export interface ToolApprovalGateContext {
 
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
  * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
+/** An approval to list a service's tools through a teammate's account, not to
+ * run an action. Refusing it only hides those tools. */
+export function isToolDiscoveryApproval(context: Record<string, unknown> | undefined): boolean {
+  return toolApprovalGateContext(context)?.toolId.endsWith(`.${DISCOVERY_ACTION_NAME}`) === true;
+}
+
 export function toolApprovalGateContext(
   context: Record<string, unknown> | undefined,
 ): ToolApprovalGateContext | null {
@@ -676,6 +685,7 @@ export async function invokeAction(
       const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
       // yet been decided — distinct from an outright deny.
+      if (isUnattendedWorkflowRefusal(resolution)) return { kind: "denied-unattended" };
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
       if (!approvalActorMatches(entry, ctx, resolution)) return { kind: "denied-approval" };
@@ -843,6 +853,17 @@ export async function invokeAction(
       return { kind: "expired-approval" };
     }
     const resolution = gateOutcome.resolution;
+    // No gate opened for an unattended workflow task, so no host resolution
+    // runs. Audit it like the external-sender refusal.
+    if (isUnattendedWorkflowRefusal(resolution)) {
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: "denied",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+      });
+      return { kind: "denied-unattended" };
+    }
     // An undecided gate (command path): no resolution happened, so no
     // onResolution side effects run and no audit record is emitted here —
     // the re-driven invocation after the gate resolves emits the terminal
@@ -1458,6 +1479,10 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "denied-external-sender":
       return {
         text: `denied: ${toolId} needs approval, and this message came from someone with no Valet account. Do not retry it. Tell them a teammate with a Valet account must ask for this.`,
+      };
+    case "denied-unattended":
+      return {
+        text: `denied: ${toolId} needs approval, and no one can approve during an unattended workflow run. Do not retry it. Say in the result that this step needs approval. To run it unattended, the workflow's owner can move it to a tool step, which saving the workflow approves, or a team admin can allow it by policy. For a teammate's shared account, connect a team account on the team's Integrations page.`,
       };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse

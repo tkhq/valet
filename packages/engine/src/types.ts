@@ -720,6 +720,9 @@ export interface ToolContext {
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */
   externalSender?: boolean;
+  /** Nobody watches this workflow task. `requestDecision` refuses new gates,
+   * and the decision tools return a fail-closed result instead of asking. */
+  unattendedWorkflow?: boolean;
   channelType?: string;
   channelId?: string;
   decisionGateId?: string;
@@ -2629,6 +2632,9 @@ export interface CreateSessionOptions {
   systemContext?: Array<{ name: string; content: string; order?: number }>;
   /** Host context for one thread, assembled with the session system context. */
   threadSystemContext?: (thread: { id: string; key: string }) => string | undefined;
+  /** True for a thread nobody watches, such as a workflow run's own thread.
+   * `requestDecision` refuses decisions on its turns that a person did not type. */
+  unattendedThread?: (thread: { id: string; key: string }) => boolean;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
@@ -2837,6 +2843,8 @@ export type ChildSpawner = (
     parentThreadId: string;
     actorUserId: string;
     owner: Principal;
+    /** The spawning task is an unattended workflow task, so the child refuses decisions too. */
+    unattendedWorkflow?: boolean;
     /** The spawning submission's channel origin, so the child.settled
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */
@@ -2902,7 +2910,7 @@ export type ChildStatusReader = (
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

@@ -40,6 +40,14 @@ export class DecisionGateWithdrawnError extends Error {
   }
 }
 
+/** `DecisionResolution.resolvedBy` when an unattended workflow task asked for a
+ * decision. Nobody watches the task, so no gate opened (`Thread.requestDecision`). */
+export const UNATTENDED_WORKFLOW_DECISION = "unattended-workflow";
+
+export function isUnattendedWorkflowRefusal(resolution: { resolvedBy?: string }): boolean {
+  return resolution.resolvedBy === UNATTENDED_WORKFLOW_DECISION;
+}
+
 export class DecisionGateExpiredError extends Error {
   /**
    * `ordinal` is the expired gate's ordinal, carried so audit records can

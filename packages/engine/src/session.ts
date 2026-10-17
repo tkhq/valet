@@ -148,6 +148,11 @@ function formatPluginOutcome(
         ok: false,
         output: "This action needs approval. Only a teammate with a Valet account can run it.",
       };
+    case "denied-unattended":
+      return {
+        ok: false,
+        output: "This action needs approval, and no one can approve during an unattended workflow run. Move it to a tool step, which saving the workflow approves, or ask a team admin to allow it by policy.",
+      };
     case "denied-approval":
       return {
         ok: false,
