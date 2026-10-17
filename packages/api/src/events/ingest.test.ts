@@ -2,7 +2,8 @@ import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type 
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { eventReceipts, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventReceipts, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
+import type { ClaimDeps } from "./claims.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { __resetIngestDropThrottle, ingestEvent, type IngestDeps, type IngestResult } from "./ingest.js";
 import { sanitizeReceiptStages } from "./receipts.js";
@@ -61,8 +62,8 @@ describe("ingestEvent event waiter matching", () => {
     };
   }
 
-  function ingest(event: NormalizedEvent, waiters?: WaiterMatchDeps): Promise<IngestResult> {
-    const deps: IngestDeps = { db: db.appDb, plugins: [slackPlugin], ...(waiters ? { waiters } : {}) };
+  function ingest(event: NormalizedEvent, waiters?: WaiterMatchDeps, claims?: Partial<ClaimDeps>): Promise<IngestResult> {
+    const deps: IngestDeps = { db: db.appDb, plugins: [slackPlugin], ...(waiters ? { waiters } : {}), ...(claims ? { claims } : {}) };
     return ingestEvent(deps, { orgId: ORG, service: "slack", event });
   }
 
@@ -199,8 +200,86 @@ describe("ingestEvent event waiter matching", () => {
     });
   });
 
+  /** The waiter's thread `t-1` can receive a delivery of team-1. */
+  const deliverable: Partial<ClaimDeps> = { isDeliverable: async () => true };
+
+  /** Links U002 to a team-1 member, so the team mention gate admits U002. */
+  async function linkSender(): Promise<void> {
+    await db.appDb.insert(teams).values({ id: "team-1", orgId: ORG, name: "SRE", createdAt: 1 });
+    await db.appDb.insert(teamMembers).values({ teamId: "team-1", userId: "u-002", role: "member" });
+    await db.appDb.insert(orgMembers).values({ orgId: ORG, userId: "u-002", role: "member" });
+    await db.appDb.insert(userIdentityLinks).values({ id: "link-u002", provider: "slack", externalId: "U002", userId: "u-002", createdAt: 1 });
+  }
+
+  async function subscribeMessages(target: unknown = { kind: "orchestrator" }): Promise<void> {
+    await db.appDb.insert(eventSubscriptions).values({
+      id: "msg-sub", orgId: ORG, ownerType: "team", ownerId: "team-1", createdBy: "u-001",
+      name: "Channel", eventKeys: ["slack.message"], filters: [],
+      target, enabled: true, createdAt: 1, updatedAt: 1,
+    });
+  }
+
+  function mention(dedupeKey: string): NormalizedEvent {
+    const m = message(dedupeKey, "<@U-BOT> status?");
+    return { ...m, key: "slack.app_mention", payload: { type: "app_mention", channel: "C001", user: "U002", text: "<@U-BOT> status?", thread_ts: "1712345678.000100" } };
+  }
+
+  async function deliveryStamps(): Promise<unknown[]> {
+    return (await db.appDb.select().from(eventDeliveries)).map((d) => d.destination);
+  }
+
+  it("suppresses the message digest of a mention that the owner's rule delivers (Part C step 8)", async () => {
+    await subscribeAppMention();
+    await linkSender();
+    await ingest(message("Ev-m1", "<@U-BOT> status?"), waiterDeps(), deliverable);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
+    expect(nudge).not.toHaveBeenCalled();
+  });
+
+  it("stamps the mention's redirect to the waiting thread and appends no digest (C2)", async () => {
+    await subscribeAppMention();
+    await linkSender();
+    const result = await ingest(mention("Ev-m1:mention"), waiterDeps(), deliverable);
+    expect(result).toMatchObject({ deliveries: 1 });
+    expect(await deliveryStamps()).toEqual([{ kind: "target", sessionId: "s-1", threadId: "t-1", reason: "claim_redirect" }]);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
+  });
+
+  it("appends the message digest of a mention that the team gate refuses (C4)", async () => {
+    await subscribeAppMention();
+    await ingest(message("Ev-m4", "<@U-BOT> status?"), waiterDeps(), deliverable);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-m4"]);
+  });
+
+  it("stamps an ambient channel message as claimed by the waiting thread, which appends (C1)", async () => {
+    await subscribeMessages();
+    await ingest(message("Ev-c1"), waiterDeps(), deliverable);
+    expect(await deliveryStamps()).toEqual([{ kind: "skip", reason: "claimed by thread t-1" }]);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-c1"]);
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "1 event waiter matched." });
+  });
+
+  it("never stamps a workflow delivery (INV-D7)", async () => {
+    await subscribeMessages({ kind: "workflow", workflowId: "wf-1" });
+    await ingest(message("Ev-w1"), waiterDeps(), deliverable);
+    expect(await deliveryStamps()).toEqual([null]);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toHaveLength(1);
+  });
+
+  it("leaves the delivery unstamped and the waiter appending when claim resolution throws (INV-D6)", async () => {
+    await subscribeMessages();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await ingest(message("Ev-f1"), waiterDeps(), { isDeliverable: async () => { throw new Error("db down"); } });
+    expect(result).toMatchObject({ deliveries: 1 });
+    expect(await deliveryStamps()).toEqual([null]);
+    expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-f1"]);
+    expect(await stagesOf()).toContainEqual({ stage: "claim_resolution", outcome: "failed", detail: expect.stringContaining("thread policy") });
+    expect(failed).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
   it("matches a bot mention when no app_mention subscription covers the channel", async () => {
-    await ingest(message("Ev-m2", "<@U-BOT> status?"), waiterDeps());
+    await ingest(message("Ev-m2", "<@U-BOT> status?"), waiterDeps(), deliverable);
     expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-m2"]);
   });
 

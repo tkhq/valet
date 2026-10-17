@@ -13,15 +13,51 @@ import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js"
 import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { appendWaiterDigests, evaluateWaiterCandidates, recordWaiterMatchFailure, waiterMatchStage, type WaiterMatchDeps } from "./waiters.js";
+import {
+  appendWaiterDigests,
+  evaluateWaiterCandidates,
+  recordWaiterMatchFailure,
+  waiterMatchStage,
+  type WaiterCandidate,
+  type WaiterMatchDeps,
+} from "./waiters.js";
+import { mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
+import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
+import { isDeliverableTarget } from "./assistant-delivery.js";
 
 export interface IngestDeps {
   db: AppDb;
   plugins: ValetPlugin[];
   /** In-process dispatcher nudge; wired in main.ts. */
   onIngest?: () => void;
-  /** Event waiter matching (spec 2026-10-15: event wakeups, Part E). Absent: no waiter matching. */
+  /** Event waiter matching (spec 2026-10-15: event wakeups, Part E). Absent: no waiter matching and no claims. */
   waiters?: WaiterMatchDeps;
+  /** Overrides for claim resolution (spec 2026-10-16: delivery threads and claims, Part C). Tests only. */
+  claims?: Partial<ClaimDeps>;
+}
+
+/** The receipt stage for a claim resolution failure (INV-D6). Metadata only. */
+export const CLAIM_FAILURE_STAGE = {
+  stage: "claim_resolution",
+  outcome: "failed",
+  detail: "Claim resolution failed. The deliveries land by their thread policy, and every matching waiter appends its digest.",
+} as const;
+
+/**
+ * The other half of a Slack mention, from the plugin that owns `service`
+ * (spec 2026-10-16: delivery threads and claims, Part C step 8), or null.
+ */
+async function conversationalTwinOf(
+  plugins: ValetPlugin[],
+  waiters: WaiterMatchDeps,
+  orgId: string,
+  service: string,
+  event: NormalizedEvent,
+): Promise<NormalizedEvent | null> {
+  const plugin = plugins.find((p) => p.conversationalTwin && (p.triggers ?? []).some((t) => t.service === service));
+  if (!plugin?.conversationalTwin) return null;
+  const botUserId = service === "slack" ? await waiters.slackBotUserId(orgId) : undefined;
+  return plugin.conversationalTwin(event, botUserId ? { botUserId } : {});
 }
 
 /**
@@ -271,21 +307,56 @@ export async function ingestEvent(
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
       detail: `${subs.length} enabled subscriptions checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 matching-key subscriptions.`,
     }, { subscriptions: decisions });
-    // Event waiters match before the early return for an unmatched event,
-    // inside their own error boundary: a failure here never changes the
-    // subscription outcome or fails ingestion (INV-E2).
-    if (deps.waiters) {
-      const waiters = deps.waiters;
+    // Event waiters evaluate before the early return for an unmatched event,
+    // and claims resolve before the deliveries are inserted (spec
+    // 2026-10-16: delivery threads and claims, Part C step 1). Each step
+    // has its own error boundary: a failure never changes the subscription
+    // outcome or fails ingestion (INV-E2), and a claim failure stamps
+    // nothing and lets every waiter append (INV-D6).
+    const waiters = deps.waiters;
+    let candidates: WaiterCandidate[] = [];
+    let claims: ClaimDecision | null = null;
+    if (waiters) {
+      let twin: NormalizedEvent | null = null;
       try {
-        const candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
-        const appended = await appendWaiterDigests(waiters, service, candidates);
-        // An event that no running waiter shares a subject with adds no stage.
-        if (candidates.length > 0) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
+        candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
+        twin = await conversationalTwinOf(deps.plugins, waiters, orgId, service, event);
+        // A mention's claim candidates are the waiters that accept its
+        // message twin (Part C step 8).
+        if (twin && event.key === "slack.app_mention") {
+          candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin));
+        }
       } catch (error) {
         recordWaiterMatchFailure(waiters);
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
       }
+      if (candidates.some((c) => c.accepted)) {
+        try {
+          claims = await resolveEventClaims(deps, { orgId, service, event, twin, subs, matched, candidates, catalog });
+          if (claims.failedOwners > 0) {
+            recordWaiterMatchFailure(waiters);
+            await appendReceiptStage(deps.db, receiptId, CLAIM_FAILURE_STAGE);
+          }
+        } catch (error) {
+          claims = null;
+          recordWaiterMatchFailure(waiters);
+          console.error(`[ingest] receipt ${receiptId ?? "unavailable"} claim resolution failed`, error);
+          await appendReceiptStage(deps.db, receiptId, CLAIM_FAILURE_STAGE);
+        }
+      }
     }
+    // Appends the waiters' digests per the claim decisions, then records
+    // the stage. Without decisions, every accepted waiter appends.
+    const appendDigests = async (decisions: ClaimDecision["waiters"] | undefined): Promise<void> => {
+      if (!waiters || candidates.length === 0) return;
+      try {
+        const appended = await appendWaiterDigests(waiters, service, candidates, decisions);
+        await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
+      } catch (error) {
+        recordWaiterMatchFailure(waiters);
+        console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter append failed`, error);
+      }
+    };
     const namedSubscriptions = subs.filter((sub) => subscriptionNamesKey(sub, event.key));
     const namedSubscription = namedSubscriptions.length > 0;
     // A sender denial is an authorization diagnostic, not a filter miss. Never
@@ -304,12 +375,13 @@ export async function ingestEvent(
       await logFilterExcludedDrop(deps.db, orgId, event.key, diagnosticPayload);
     }
     if (matched.length === 0) {
+      await appendDigests(claims?.waiters);
       await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the subscription decisions." });
       return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 
     phase = "event and delivery persistence";
-    const result = await deps.db.transaction(async (tx) => {
+    const persist = () => deps.db.transaction(async (tx) => {
       const inserted = await tx
         .insert(events)
         .values({
@@ -348,11 +420,24 @@ export async function ingestEvent(
             attempts: 0,
             nextAttemptAt: now,
             createdAt: now,
+            // The claim stamp the dispatcher executes (Part C step 6). An
+            // unstamped delivery resolves from the binding and the policy.
+            destination: claims?.deliveries.get(sub.id) ?? null,
           })),
         );
       }
       return { eventId, duplicate: false, deliveries: matched.length, linkedEventId: eventId };
     });
+    let result: Awaited<ReturnType<typeof persist>>;
+    try {
+      result = await persist();
+    } catch (error) {
+      // No delivery was stored, so a suppressed digest would be lost. Every
+      // accepted waiter appends (INV-D6).
+      await appendDigests(undefined);
+      throw error;
+    }
+    await appendDigests(claims?.waiters);
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
       detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored with ${result.deliveries} pending deliveries. Open its activity entry for delivery attempts and workflow results.`,
@@ -368,4 +453,42 @@ export async function ingestEvent(
     console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }
+}
+
+/**
+ * Resolves the claims for one ingested event (spec 2026-10-16: delivery
+ * threads and claims, Part C). One conversation binding lookup runs per
+ * owner that has a claim candidate.
+ */
+async function resolveEventClaims(
+  deps: IngestDeps,
+  args: {
+    orgId: string;
+    service: string;
+    event: NormalizedEvent;
+    twin: NormalizedEvent | null;
+    subs: Array<typeof eventSubscriptions.$inferSelect>;
+    matched: Array<typeof eventSubscriptions.$inferSelect>;
+    candidates: WaiterCandidate[];
+    catalog: EventCatalogEntry[];
+  },
+): Promise<ClaimDecision> {
+  const { orgId, service, event } = args;
+  const db = deps.db;
+  const claimDeps: ClaimDeps = {
+    isDeliverable: (owner, target) => isDeliverableTarget({ db }, orgId, owner, target),
+    mentionCovered: (owner, twin) => mentionCoveredBy(db, args.subs, owner, twin, args.catalog),
+    ...deps.claims,
+  };
+  const origin = deps.waiters?.channelOrigin?.(service, event.key, event.payload) ?? null;
+  const bindingEvent = { key: event.key, payload: event.payload };
+  return resolveClaims(claimDeps, {
+    orgId,
+    event,
+    twin: args.twin,
+    matched: args.matched,
+    candidates: args.candidates,
+    binding: (owner) => conversationBinding(db, orgId, owner, bindingEvent, origin),
+    conversational: (binding) => isConversationalEvent(bindingEvent, origin, binding),
+  });
 }
