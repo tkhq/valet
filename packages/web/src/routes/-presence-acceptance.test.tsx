@@ -1,18 +1,21 @@
 // @vitest-environment jsdom
 /**
- * The Presence hub acceptance scenario, H1 to H12
+ * The Presence hub acceptance scenario, P1 to P12
  * (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
  *
  * The test renders the app's real route tree (`routeTree.gen.ts`, with the
  * root layout, the nav, and the workspace switcher) under a memory history.
  * The network is a `fetch` stub that answers each api path with a fixture
  * typed by the wire types, so every query hook, search schema, and redirect
- * runs as it does in the browser. The repo has no browser driver for the
- * web app; the api integration suite `integration/presence-hub.test.ts`
- * runs the data half of the scenario over a real database.
+ * runs as it does in the browser. The stub keeps the writes the scenario
+ * makes (a create, a pick) and lists them on the next read. The repo has no
+ * browser driver for the web app; the api integration suite
+ * `integration/presence-hub.test.ts` runs the data half of the scenario
+ * over a real database.
  *
- * H11 renders the thread context card's background section on its own
- * router, because the thread page needs a live session socket.
+ * P11 renders the thread context card's background section on its own
+ * router, because the thread page needs a live session socket. The thread
+ * header's place label is a pure function, so P11 asserts it directly.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
@@ -20,15 +23,16 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
   CreateEventSubscriptionRequest,
+  CreateWorkflowScheduleRequest,
   EnsureWorkspaceRuntimeResponse,
   EventDeliveryWire,
   EventLogItem,
   EventLogResponse,
   EventSubscriptionWire,
+  EventSummaryWire,
   GetEventCatalogResponse,
   GetWorkflowTriggerCatalogResponse,
   ListAllWorkflowRunsResponse,
-  ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   ListIdentityLinksResponse,
   ListPresencePlacesResponse,
@@ -37,9 +41,11 @@ import type {
   ListThreadsResponse,
   ListWorkflowTriggersResponse,
   ListWorkflowsResponse,
+  PatchEventSubscriptionRequest,
   PresencePlaceDetailResponse,
   PresencePlaceWire,
   TeamSummary,
+  WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
 import type { ReactNode } from "react";
@@ -80,14 +86,16 @@ vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
 
 import { routeTree } from "../routeTree.gen";
 import { BackgroundWorkSection } from "~/components/session/background-work";
+import { subjectPlaceLabel } from "~/components/session/session-header";
 import { TooltipProvider } from "~/components/primitives";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 const NOW = Date.now();
+/** The dead-letter text the api stores for an archived pin. */
 const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
 
-function listener(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
+function line(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {
     id, name: id, ownerType: "user", ownerId: "u-001", eventKeys: [], filters: [],
     target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, ...over,
@@ -97,39 +105,40 @@ function listener(id: string, over: Partial<EventSubscriptionWire>): EventSubscr
 const ACME_REPO = [{ field: "repo", op: "eq" as const, value: "acme/api" }];
 const INCIDENTS_CHANNEL = [{ field: "channel", op: "eq" as const, value: "C900", label: "#incidents" }];
 
-const R1 = listener("R1", {
+const R1 = line("R1", {
   name: "Reviews and checks",
   eventKeys: ["github.pull_request_review.submitted", "github.check_run.completed"],
   filters: ACME_REPO,
   target: { kind: "assistant", thread: { mode: "subject" } },
 });
-const R4 = listener("R4", {
-  name: "Failed checks",
+const R4_BROKEN = line("R4", {
+  name: "CI failures",
   eventKeys: ["github.check_run.completed"],
   filters: ACME_REPO,
   target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" } },
   problem: PIN_UNAVAILABLE,
 });
-const M = listener("M", {
-  name: "M", ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"], filters: INCIDENTS_CHANNEL,
-  target: { kind: "assistant", assistant: "team", teamId: "sre", appearance: { displayName: "SRE Bot" }, thread: { mode: "new" } },
+const M = line("M", {
+  name: "Incident mentions", ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"], filters: INCIDENTS_CHANNEL,
+  target: { kind: "assistant", assistant: "team", teamId: "sre", appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
 });
-const P = listener("P", {
-  name: "P", ownerType: "team", ownerId: "sre", eventKeys: ["slack.message"], filters: INCIDENTS_CHANNEL,
+const P = line("P", {
+  name: "Channel watch", ownerType: "team", ownerId: "sre", eventKeys: ["slack.message"], filters: INCIDENTS_CHANNEL,
   target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "existing", sessionId: "s-sre", threadId: "t-inc" } },
 });
 
-function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, listenerCount: number, activeThreadCount: number, scopeLabel?: string): PresencePlaceWire {
-  return { subject, label, service, parent, listenerCount, activeThreadCount, lastActivityAt: NOW - 60_000, ...(scopeLabel ? { scopeLabel } : {}) };
+function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, listenerCount: number, activeThreadCount: number): PresencePlaceWire {
+  return { subject, label, service, parent, listenerCount, activeThreadCount, lastActivityAt: NOW - 60_000 };
 }
 
-const ACME_API = place("github:acme/api", "acme/api", "github", null, 2, 0, "Across acme/api");
+const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, 0, 0);
 const INCIDENTS_USER = place("slack:T1/C900", "#incidents", "slack", "slack:T1", 0, 0);
 const INCIDENTS_SRE = place("slack:T1/C900", "#incidents", "slack", "slack:T1", 2, 1);
-const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, 0, 0);
+const ACME_API = place("github:acme/api", "acme/api", "github", null, 2, 1);
+const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", 0, 0);
 
 const PLACES: Record<string, ListPresencePlacesResponse> = {
-  user: { places: [SLACK_ROOT, INCIDENTS_USER, ACME_API] },
+  user: { places: [SLACK_ROOT, INCIDENTS_USER, ACME_API, ACME_API_12] },
   sre: { places: [SLACK_ROOT, INCIDENTS_SRE] },
 };
 
@@ -137,30 +146,33 @@ function conversation(sessionId: string, threadId: string, title: string, url?: 
   return { sessionId, threadId, title, lastActivityAt: NOW - 120_000, ...(url ? { url } : {}) };
 }
 
-const PLACE_DETAIL: Record<string, PresencePlaceDetailResponse> = {
+const C2_MENTION: EventSummaryWire = {
+  id: "ev-c2", service: "slack", eventKey: "slack.app_mention", summary: "@Valet the deploy is failing",
+  refs: { channel: "C900", channel_name: "incidents" }, actor: { externalId: "U-alice", login: "alice" },
+  occurredAt: NOW - 30_000, receivedAt: NOW - 30_000,
+};
+
+/** The place pages, by `<workspace> <place key>`. The lines come from `rules` at read time. */
+const PLACE_DETAIL: Record<string, Omit<PresencePlaceDetailResponse, "listeners">> = {
   "user github:acme/api": {
     place: ACME_API,
-    listeners: [R1, R4],
     threads: {
       subject: [conversation("s-u", "t-12", "acme/api#12"), conversation("s-u", "t-13", "acme/api#13")],
       following: [],
-      active: [],
+      active: [conversation("s-u", "t-12", "acme/api#12")],
     },
     activity: [],
   },
   "sre slack:T1/C900": {
     place: INCIDENTS_SRE,
-    listeners: [M, P],
     threads: {
       subject: [],
       following: [conversation("s-sre", "t-inc", "t-inc", "https://acme.slack.com/archives/C900/p1")],
       active: [conversation("s-sre", "t-inc", "t-inc")],
     },
-    activity: [],
+    activity: [C2_MENTION],
   },
 };
-
-const LISTENERS: Record<string, EventSubscriptionWire[]> = { user: [R1, R4], sre: [M, P] };
 
 const S1: WorkflowTriggerItem = {
   kind: "schedule", id: "S1", name: "Morning summary", enabled: true,
@@ -169,14 +181,14 @@ const S1: WorkflowTriggerItem = {
     thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
   },
 };
-const WF_EVENT: WorkflowTriggerItem = {
-  kind: "event", id: "R-wf", workflowId: "wf-1", name: "Run triage", enabled: true,
-  detail: { eventKeys: ["github.check_run.completed"], filters: [] },
-};
-const WF_LISTENER = listener("R-wf", {
+const WF_LINE = line("R-wf", {
   name: "Run triage", eventKeys: ["github.check_run.completed"], filters: ACME_REPO,
   target: { kind: "workflow", workflowId: "wf-1" },
 });
+const WF_EVENT: WorkflowTriggerItem = {
+  kind: "event", id: "R-wf", workflowId: "wf-1", name: "Run triage", enabled: true,
+  detail: { eventKeys: ["github.check_run.completed"], filters: ACME_REPO },
+};
 const WF_ROUTINE: WorkflowTriggerItem = {
   kind: "schedule", id: "S-wf", workflowId: "wf-1", name: "Nightly triage", enabled: true,
   detail: {
@@ -196,36 +208,24 @@ const RUNS: ListAllWorkflowRunsResponse = {
 };
 
 function delivery(over: Partial<EventDeliveryWire>): EventDeliveryWire {
-  return { id: "d-1", subscriptionId: "M", subscriptionName: "M", status: "delivered", attempts: 1, lastError: null, deliveredAt: NOW, ...over };
+  return { id: "d-1", subscriptionId: "M", subscriptionName: "Incident mentions", status: "delivered", attempts: 1, lastError: null, deliveredAt: NOW, ...over };
 }
-function logEvent(id: string, eventKey: string, deliveries: EventDeliveryWire[], status: EventLogItem["status"]): EventLogItem {
+function logEvent(id: string, service: string, eventKey: string, placeName: string, deliveries: EventDeliveryWire[], status: EventLogItem["status"]): EventLogItem {
   return {
-    kind: "event", id, at: NOW - 30_000, status, service: "slack", eventKey, summary: `summary of ${id}`, actor: "alice",
-    reason: null, detail: null, deliveryCount: deliveries.length, place: "#incidents", deliveries,
+    kind: "event", id, at: NOW - 30_000, status, service, eventKey, summary: `summary of ${id}`, actor: "alice",
+    reason: null, detail: null, deliveryCount: deliveries.length, place: placeName, deliveries,
   };
 }
 const T_INC = { sessionId: "s-sre", threadId: "t-inc", title: "t-inc" };
-const LOG: Record<string, EventLogResponse> = {
-  sre: {
-    items: [
-      logEvent("ev-c2", "slack.app_mention", [delivery({ thread: T_INC })], "delivered"),
-      logEvent("ev-c1", "slack.message", [delivery({ id: "d-2", subscriptionId: "P", subscriptionName: "P", status: "skipped", lastError: "Skipped, claimed by thread t-inc.", claimedBy: T_INC })], "skipped"),
-    ],
-    nextCursor: null, lastEventAt: NOW - 30_000, windowDays: 30,
-  },
-};
+const C2_ROW = logEvent("ev-c2", "slack", "slack.app_mention", "#incidents", [delivery({ thread: T_INC })], "delivered");
+/** The sre delivery that dead-lettered on R4's archived pin. */
+const DEAD_ROW = logEvent("ev-14", "github", "github.check_run.completed", "acme/api#14", [
+  delivery({ id: "d-14", subscriptionId: "R4", subscriptionName: "CI failures", status: "dead", attempts: 3, lastError: PIN_UNAVAILABLE, deliveredAt: null }),
+], "failed");
 
-const RECEIPTS: ListEventReceiptsResponse = {
-  receipts: [{
-    id: "rc-c2", service: "slack", externalId: "Ev-C2", metadata: {}, eventKey: "slack.app_mention", eventId: "ev-c2",
-    stages: [
-      { stage: "classification", outcome: "accepted", detail: "Mention classified", at: NOW - 30_000 },
-      { stage: "dispatch", outcome: "enqueued", detail: "Queued for t-inc", at: NOW - 29_000 },
-    ],
-    subscriptions: [], createdAt: NOW - 30_000, updatedAt: NOW - 29_000,
-  }],
-  nextCursor: null, lastReceiptAt: NOW - 30_000, retentionDays: 7,
-};
+function logPage(items: EventLogItem[]): EventLogResponse {
+  return { items, nextCursor: null, lastEventAt: NOW - 30_000, windowDays: 30 };
+}
 
 const TRIGGER_CATALOG: GetWorkflowTriggerCatalogResponse = { catalog: [] };
 const EVENT_CATALOG: GetEventCatalogResponse = {
@@ -261,13 +261,20 @@ const WAKEUPS: ListSessionWakeupsResponse = {
   }],
   leases: [],
 };
-const FEEDERS: ListThreadFeedersResponse = { listeners: [{ id: "M", name: "M" }, { id: "P", name: "P" }], routines: [] };
+const FEEDERS: ListThreadFeedersResponse = {
+  listeners: [{ id: "M", name: "Incident mentions" }, { id: "P", name: "Channel watch" }],
+  routines: [],
+};
 
 // ── The fetch stub ───────────────────────────────────────────────────────
 
+/** The lines each workspace owns, as the api lists them now. Writes change these. */
+const rules: Record<string, EventSubscriptionWire[]> = {};
+/** Routines each workspace owns, as the api lists them now. */
+const routines: Record<string, WorkflowTriggerItem[]> = {};
 const created: CreateEventSubscriptionRequest[] = [];
-/** Listeners the scenario creates, by workspace key, as the api lists them after the write. */
-const createdListeners: Record<string, EventSubscriptionWire[]> = {};
+const createdRoutines: CreateWorkflowScheduleRequest[] = [];
+const patches: Array<{ id: string; body: PatchEventSubscriptionRequest }> = [];
 const unhandled: string[] = [];
 
 function json(body: unknown, status = 200): Response {
@@ -278,25 +285,80 @@ function scopeOf(query: URLSearchParams): string {
   return query.get("scope") ?? (query.get("ownerType") === "team" ? query.get("ownerId") ?? "user" : "user");
 }
 
-async function answer(method: string, url: URL, body: string | undefined): Promise<Response> {
-  const path = url.pathname;
-  const q = url.searchParams;
+function placeHasLine(subject: string, sub: EventSubscriptionWire): boolean {
+  if (subject === "slack:T1/C900") return sub.filters.some((f) => f.field === "channel" && f.value === "C900");
+  if (subject === "github:acme/api") return sub.target.kind === "assistant" && sub.filters.some((f) => f.field === "repo" && f.value === "acme/api");
+  return false;
+}
+
+function readBody<T>(body: string | undefined): T {
+  // The stub reads the body the client serialized from the same wire type.
+  return JSON.parse(body ?? "{}") as T;
+}
+
+function answerWrite(method: string, path: string, body: string | undefined): Response | undefined {
   if (method === "POST" && path === "/api/event-subscriptions") {
-    const request = JSON.parse(body ?? "{}") as CreateEventSubscriptionRequest;
+    const request = readBody<CreateEventSubscriptionRequest>(body);
     created.push(request);
     const team = request.target.kind === "assistant" && request.target.assistant === "team" ? request.target.teamId : undefined;
-    const row = listener("R-new", {
+    const row = line("R-new", {
       name: request.name, eventKeys: request.eventKeys, filters: request.filters ?? [], target: request.target,
       ...(team !== undefined ? { ownerType: "team" as const, ownerId: team } : {}),
     });
-    (createdListeners[team ?? "user"] ??= []).push(row);
+    (rules[team ?? "user"] ??= []).push(row);
     return json(row, 201);
+  }
+  const patch = /^\/api\/event-subscriptions\/([^/]+)$/.exec(path);
+  if (method === "PATCH" && patch) {
+    const id = decodeURIComponent(patch[1]!);
+    const request = readBody<PatchEventSubscriptionRequest>(body);
+    patches.push({ id, body: request });
+    for (const list of Object.values(rules)) {
+      const index = list.findIndex((sub) => sub.id === id);
+      const current = list[index];
+      if (current === undefined) continue;
+      // A pin change clears the problem (spec Deviations, Problem state source).
+      const { problem: _cleared, ...rest } = current;
+      // The scenario's one write pins a thread; null (clear the pin) is not in it.
+      const next: EventSubscriptionWire = request.thread !== undefined && request.thread !== null && current.target.kind === "assistant"
+        ? { ...rest, target: { ...current.target, thread: request.thread } }
+        : current;
+      list[index] = next;
+      return json(next);
+    }
+    return json({ error: "not in the scenario" }, 404);
+  }
+  if (method === "POST" && path === "/api/workflows/schedules") {
+    const request = readBody<CreateWorkflowScheduleRequest>(body);
+    createdRoutines.push(request);
+    const response: WorkflowScheduleResponse = {
+      schedule: {
+        scheduleId: "S-new", targetKind: "assistant", name: request.name, cron: request.cron, timezone: request.timezone ?? "UTC",
+        enabled: true, lastFiredAt: null, nextFireAt: NOW + 86_400_000,
+      },
+    };
+    (routines.user ??= []).push({
+      kind: "schedule", id: "S-new", name: request.name, enabled: true,
+      detail: {
+        cron: request.cron, timezone: request.timezone ?? "UTC", targetKind: "assistant", thread: { mode: "own" },
+        nextFireAt: NOW + 86_400_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+      },
+    });
+    return json(response, 201);
   }
   const runtime = /^\/api\/workspaces\/([^/]+)\/runtime$/.exec(path);
   if (method === "POST" && runtime) {
     const ensured: EnsureWorkspaceRuntimeResponse = runtime[1] === "user" ? { sessionId: "s-u" } : { sessionId: "s-sre", workspaceSessionId: "s-sre" };
     return json(ensured);
   }
+  return undefined;
+}
+
+async function answer(method: string, url: URL, body: string | undefined): Promise<Response> {
+  const path = url.pathname;
+  const q = url.searchParams;
+  const write = answerWrite(method, path, body);
+  if (write !== undefined) return write;
   if (method !== "GET") {
     unhandled.push(`${method} ${path}`);
     return json({ error: "not in the scenario" }, 404);
@@ -305,30 +367,34 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
   const placeMatch = /^\/api\/presence\/places\/(.+)$/.exec(path);
   if (placeMatch) {
     const scope = scopeOf(q);
-    const detail = PLACE_DETAIL[`${scope} ${decodeURIComponent(placeMatch[1]!)}`];
+    const subject = decodeURIComponent(placeMatch[1]!);
+    const detail = PLACE_DETAIL[`${scope} ${subject}`];
     if (!detail) return json({ error: "Valet is not present in that place in this workspace." }, 404);
-    const extra = (createdListeners[scope] ?? []).filter((sub) => sub.filters.some((f) => f.value === "C900") && detail.place.subject.endsWith("/C900"));
-    return json({ ...detail, listeners: [...detail.listeners, ...extra] });
+    const response: PresencePlaceDetailResponse = { ...detail, listeners: (rules[scope] ?? []).filter((sub) => placeHasLine(subject, sub)) };
+    return json(response);
   }
   if (path === "/api/presence/feeders") return json(FEEDERS);
   if (path === "/api/workflows/trigger-catalog") return json(TRIGGER_CATALOG);
   if (path === "/api/workflows/triggers") {
     const response: ListWorkflowTriggersResponse = q.get("workflowId") === "wf-1"
       ? { triggers: [WF_EVENT, WF_ROUTINE] }
-      : { triggers: scopeOf(q) === "user" ? [S1] : [] };
+      : { triggers: routines[scopeOf(q)] ?? [] };
     return json(response);
   }
   if (path === "/api/workflows/runs") return json(RUNS);
   if (path === "/api/workflows") return json(WORKFLOWS);
   if (path === "/api/event-subscriptions") {
     const owner = q.get("ownerType") ? scopeOf(q) : undefined;
-    const subscriptions = owner === undefined ? [...LISTENERS.user!, ...LISTENERS.sre!, WF_LISTENER] : LISTENERS[owner] ?? [];
+    const subscriptions = owner === undefined ? [...(rules.user ?? []), ...(rules.sre ?? []), WF_LINE] : rules[owner] ?? [];
     const response: ListEventSubscriptionsResponse = { subscriptions };
     return json(response);
   }
   if (/^\/api\/event-subscriptions\/[^/]+\/deliveries$/.test(path)) return json({ deliveries: [] });
-  if (path === "/api/events/log") return json(LOG[scopeOf(q)] ?? { items: [], nextCursor: null, lastEventAt: null, windowDays: 30 });
-  if (path === "/api/events/receipts") return json(q.get("q") === "ev-c2" ? RECEIPTS : { ...RECEIPTS, receipts: [] });
+  if (path === "/api/events/log") {
+    if (scopeOf(q) !== "sre") return json(logPage([]));
+    return json(logPage(q.get("problems") === "1" ? [DEAD_ROW] : [C2_ROW, DEAD_ROW]));
+  }
+  if (path === "/api/events/receipts") return json({ receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 });
   if (path === "/api/workflows/wf-1") return json(WORKFLOWS.workflows[0]);
   if (path === "/api/workflows/wf-1/runs") return json({ runs: [] });
   if (path === "/api/events/catalog") return json(EVENT_CATALOG);
@@ -341,8 +407,13 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
 }
 
 beforeEach(() => {
+  rules.user = [R1, R4_BROKEN];
+  rules.sre = [M, P];
+  routines.user = [S1];
+  routines.sre = [];
   created.length = 0;
-  for (const key of Object.keys(createdListeners)) delete createdListeners[key];
+  createdRoutines.length = 0;
+  patches.length = 0;
   unhandled.length = 0;
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -370,151 +441,195 @@ async function switchWorkspace(from: string, to: string) {
   await screen.findByRole("button", { name: `Workspace: ${to}. Change workspace` });
 }
 
-async function openTab(name: string) {
-  await userEvent.click(screen.getByRole("tab", { name }));
+function rail() {
+  return within(screen.getByRole("navigation", { name: "Presence" }));
 }
 
-describe("Presence hub acceptance (H1 to H12)", () => {
-  it("walks the scenario in one run", { timeout: 60_000 }, async () => {
+/** The rail's Activity row. Its name carries the problem count. */
+function activityRow(): HTMLElement {
+  return rail().getByRole("link", { name: /^Activity/ });
+}
+
+/** The sentence links of a section of lines, in order. */
+function sentences(section: HTMLElement): string[] {
+  return within(section).getAllByRole("link").map((link) => link.textContent ?? "").filter((text) => text.startsWith("When "));
+}
+
+describe("Presence hub acceptance (P1 to P12)", () => {
+  it("walks the scenario in one run", { timeout: 90_000 }, async () => {
     const router = mountApp("/");
 
-    // H1: one nav entry, Presence; no Events or Automation entry.
+    // P1: the nav shows Presence and Workflows, and no Events or Automation entry.
     const nav = await screen.findByRole("navigation", { name: /primary|main/i });
     expect(within(nav).getByRole("link", { name: "Presence" })).toBeTruthy();
+    expect(within(nav).getByRole("link", { name: "Workflows" })).toBeTruthy();
     expect(within(nav).queryByRole("link", { name: "Events" })).toBeNull();
     expect(within(nav).queryByRole("link", { name: "Automation" })).toBeNull();
 
-    // H2: /presence opens on Places, grouped Slack, GitHub, Linear.
+    // P2: /presence opens on Activity. The rail shows Activity with a problem
+    // count of 1, Routines with 1, then Slack and GitHub; acme/api has 2
+    // lines and an active dot; no pull request shows.
     await userEvent.click(within(nav).getByRole("link", { name: "Presence" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence"));
-    expect(screen.getByRole("tab", { name: "Places" }).getAttribute("aria-selected")).toBe("true");
-    const groups = ["Slack", "GitHub", "Linear"].map((name) => screen.getByRole("region", { name }));
-    for (let i = 1; i < groups.length; i++) {
-      expect(groups[i - 1]!.compareDocumentPosition(groups[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    }
-    const github = within(groups[1]!);
-    expect(rowText(await github.findByRole("link", { name: "acme/api" }))).toContain("Across acme/api · 2 listeners · No active thread");
-    expect(rowText(within(groups[0]!).getByRole("link", { name: "#incidents" }))).toContain("No listeners · No active thread");
+    expect(await screen.findByRole("searchbox", { name: "Place" })).toBeTruthy();
+    await waitFor(() => expect(activityRow().textContent).toBe("Activity1"));
+    expect(activityRow().getAttribute("aria-current")).toBe("page");
+    await waitFor(() => expect(rail().getByRole("link", { name: /^Routines/ }).textContent).toBe("Routines1"));
+    const groups = rail().getAllByRole("group").map((group) => group.getAttribute("aria-label"));
+    expect(groups).toEqual(["Slack", "GitHub"]);
+    const acmeApi = await within(rail().getByRole("group", { name: "GitHub" })).findByRole("link", { name: /^acme\/api/ });
+    expect(acmeApi.textContent).toBe("acme/api2");
+    expect(within(acmeApi).getByRole("img", { name: "Active thread" })).toBeTruthy();
+    expect(within(acmeApi).getByRole("img", { name: "Has a problem" })).toBeTruthy();
+    expect(rail().queryByRole("link", { name: /acme\/api#12/ })).toBeNull();
 
-    // H3: acme/api lists R1 and R4 as sentences, and its subject threads.
-    await userEvent.click(github.getByRole("link", { name: "acme/api" }));
-    await screen.findByRole("heading", { level: 1, name: "acme/api" });
-    const listeners = screen.getByRole("region", { name: "Listeners" });
-    expect(within(listeners).getByText(
-      "Listens on acme/api for pull request reviews and completed checks · works in one thread per pull request",
-    )).toBeTruthy();
-    expect(await within(listeners).findByText("Listens on acme/api for completed checks · works in the thread Platform CI")).toBeTruthy();
-    const subjectThreads = within(screen.getByRole("list", { name: "Threads for acme/api" }));
-    expect(subjectThreads.getByRole("link", { name: "acme/api#12" })).toBeTruthy();
-    expect(subjectThreads.getByRole("link", { name: "acme/api#13" })).toBeTruthy();
+    // P3: acme/api reads R1 and R4 as sentences; R4 carries the inline
+    // problem line and a picker; Threads lists the pull request threads.
+    await userEvent.click(acmeApi);
+    expect(await screen.findByRole("heading", { level: 2, name: "acme/api" })).toBeTruthy();
+    expect(screen.getByText("GitHub", { selector: "p" })).toBeTruthy();
+    const here = screen.getByRole("region", { name: "Valet here" });
+    await waitFor(() => expect(sentences(here)).toEqual([
+      "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
+      "When a check completes on acme/api, work in the Platform CI thread.",
+    ]));
+    const inline = within(within(here).getByRole("group", { name: "Problem" }));
+    expect(inline.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
+    expect(await within(inline.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
+    const prThreads = within(screen.getByRole("list", { name: "One thread per pull request" }));
+    expect(prThreads.getAllByRole("link").map((link) => link.textContent)).toEqual(["acme/api#12", "acme/api#13"]);
 
-    // H4: in the sre workspace, #incidents lists M and P, Appears as, the
-    // active thread, and the followed Slack thread.
+    // P4: in the sre workspace, #incidents lists M and P as sentences,
+    // Appears as Ops Bot, the active and the followed thread, and the C2 mention.
     await switchWorkspace("Personal", "SRE");
-    await waitFor(() => expect(router.state.location.pathname).toBe("/presence"));
-    await userEvent.click(await within(screen.getByRole("region", { name: "Slack" })).findByRole("link", { name: "#incidents" }));
-    await screen.findByRole("heading", { level: 1, name: "#incidents" });
-    const incidents = within(screen.getByRole("region", { name: "Listeners" }));
-    expect(incidents.getByText("Listens in #incidents for mentions · replies in a new thread · as SRE Bot")).toBeTruthy();
-    expect(incidents.getByText("Listens in #incidents for messages · works in the thread t-inc")).toBeTruthy();
-    expect(within(screen.getByRole("region", { name: "Appears as" })).getByText("SRE Bot")).toBeTruthy();
+    await userEvent.click(await within(rail().getByRole("group", { name: "Slack" })).findByRole("link", { name: /^#incidents/ }));
+    expect(await screen.findByRole("heading", { level: 2, name: "#incidents" })).toBeTruthy();
+    const incidents = await screen.findByRole("region", { name: "Valet here" });
+    await waitFor(() => expect(sentences(incidents)).toEqual([
+      "When someone mentions Valet in #incidents, reply in a new thread, as Ops Bot.",
+      "When someone posts a message in #incidents, work in the t-inc thread.",
+    ]));
+    expect(within(screen.getByRole("region", { name: "Appears as" })).getByText("Ops Bot")).toBeTruthy();
     expect(within(screen.getByRole("list", { name: "Active now" })).getByRole("link", { name: "t-inc" })).toBeTruthy();
-    expect(within(screen.getByRole("list", { name: "Following" })).getByRole("link", { name: /Slack thread/ })).toBeTruthy();
+    const following = within(screen.getByRole("list", { name: "Following" }));
+    expect(following.getAllByRole("listitem")).toHaveLength(1);
+    expect(following.getByRole("link", { name: /Slack thread/ })).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Recent activity" })).getByRole("link", { name: "Mention in #incidents" })).toBeTruthy();
 
-    // H5: Add on #incidents opens the wizard on the place; a mention rule
-    // with the default Runs in replies in a new thread.
-    await userEvent.click(screen.getByRole("button", { name: "Add a listener in #incidents" }));
-    const wizard = within(await screen.findByRole("dialog", { name: "New listener" }));
-    await userEvent.click(wizard.getByLabelText(/Reply to Slack mentions/));
-    await userEvent.click(wizard.getByRole("button", { name: /^Next$/ }));
+    // P5: Listen for… on #incidents opens the wizard fixed on the place. The
+    // When step offers only Slack, and the preview reads the default line.
+    // Create stores the policy `{ mode: "new" }`.
+    await userEvent.click(within(incidents).getByRole("button", { name: "Listen for…" }));
+    const wizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
+    expect(within(wizard.getByRole("group", { name: "When" })).getAllByRole("radio").map((r) => r.parentElement?.textContent))
+      .toEqual(["Someone mentions Valet in Slack"]);
+    const preview = wizard.getByTestId("wizard-preview");
+    expect(preview.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
     expect(wizard.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
-    expect(checkedRunsIn(wizard)).toBe("A new thread each time");
-    await userEvent.click(wizard.getByRole("button", { name: /^Next$/ }));
-    await userEvent.type(wizard.getByLabelText("Listener name"), "Incident replies");
-    await userEvent.click(wizard.getByRole("button", { name: /Create listener/ }));
+    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
+    await userEvent.type(wizard.getByLabelText("Name"), "Incident replies");
+    await userEvent.click(wizard.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]!.eventKeys).toEqual(["slack.app_mention"]);
+    expect(created[0]!.filters).toEqual([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]);
     expect(created[0]!.target).toMatchObject({ kind: "assistant", thread: { mode: "new" } });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New listener" })).toBeNull());
-    const sentences = await waitFor(() => {
-      const rows = within(screen.getByRole("region", { name: "Listeners" })).getAllByRole("link").map((link) => link.textContent ?? "");
-      expect(rows).toHaveLength(3);
-      return rows;
-    });
-    expect(sentences[2]).toMatch(/replies in a new thread$/);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Listen for…" })).toBeNull());
+    await waitFor(() => expect(sentences(screen.getByRole("region", { name: "Valet here" }))).toContain(
+      "When someone mentions Valet in #incidents, reply in a new thread.",
+    ));
 
-    // H6: on acme/api, a notification for failed checks defaults to one
-    // thread per pull request and offers the other three modes.
+    // P6: New routine opens the wizard on the schedule step. The preview
+    // reads the Part E sentence, and the row shows Next and Fire now.
     await switchWorkspace("SRE", "Personal");
-    await userEvent.click(await within(screen.getByRole("region", { name: "GitHub" })).findByRole("link", { name: "acme/api" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Add a listener in acme/api" }));
-    const notify = within(await screen.findByRole("dialog", { name: "New listener" }));
-    expect(notify.getByLabelText(/Send a notification/)).toHaveProperty("checked", true);
-    await userEvent.click(notify.getByRole("button", { name: /^Next$/ }));
-    await userEvent.click(notify.getByRole("checkbox", { name: /github\.check_run\.completed/ }));
-    await userEvent.click(notify.getByRole("button", { name: /^Next$/ }));
-    expect(checkedRunsIn(notify)).toBe("One thread per pull request");
-    const modes = within(notify.getByRole("group", { name: "Runs in" })).getAllByRole("radio").map((r) => r.parentElement?.textContent);
-    expect(modes).toEqual(["A new thread each time", "One thread per pull request", "This listener's thread", "An existing thread…"]);
-    await userEvent.click(notify.getByRole("radio", { name: "An existing thread…" }));
-    // INV-H4: the picker lists the workspace's open threads, not the archived one.
-    expect(notify.getByLabelText("Search threads")).toBeTruthy();
-    const picker = within(notify.getByRole("listbox", { name: "Threads" }));
-    expect(await picker.findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
-    expect(picker.queryByRole("option", { name: /Platform CI/ })).toBeNull();
-    await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New listener" })).toBeNull());
+    await userEvent.click(rail().getByRole("link", { name: /^Routines/ }));
+    const routinesPane = await screen.findByRole("region", { name: "Routines" });
+    await userEvent.click(within(routinesPane).getByRole("button", { name: "New routine" }));
+    const routineWizard = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await userEvent.type(routineWizard.getByLabelText("Cron"), "0 9 * * 1-5");
+    await userEvent.clear(routineWizard.getByLabelText("Timezone"));
+    await userEvent.type(routineWizard.getByLabelText("Timezone"), "UTC");
+    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
+    await userEvent.type(routineWizard.getByLabelText("Prompt"), "Summarize open incidents.");
+    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
+    await userEvent.type(routineWizard.getByLabelText("Routine name"), "Incident digest");
+    expect(routineWizard.getByTestId("wizard-preview").textContent).toBe("Every weekday at 9:00, Incident digest: work in its own thread.");
+    await userEvent.click(routineWizard.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createdRoutines).toHaveLength(1));
+    expect(createdRoutines[0]).toMatchObject({ name: "Incident digest", cron: "0 9 * * 1-5", timezone: "UTC" });
+    const digest = await within(routinesPane).findByRole("link", { name: "Every weekday at 9:00, Incident digest: work in its own thread." });
+    expect(digest.closest("div")?.parentElement?.textContent).toMatch(/Next: /);
+    expect(within(routinesPane).getByRole("button", { name: "Fire Incident digest now" })).toBeTruthy();
 
-    // H7: R4 carries a problem badge; its page names the problem with the picker inline.
-    expect(within(screen.getByRole("region", { name: "Listeners" })).getByText("Thread archived")).toBeTruthy();
-    await userEvent.click(screen.getByRole("link", { name: "Listens on acme/api for completed checks · works in the thread Platform CI" }));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/listeners/R4"));
-    const problem = within(await screen.findByRole("region", { name: "Problem" }));
-    expect(problem.getByRole("alert").textContent).toBe("This listener's thread is archived. Pick another thread.");
-    expect(await within(problem.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
+    // P7: R4's page shows the breadcrumb, the sentence as the title, the
+    // fact strip with Edit, and the problem line with the picker.
+    await userEvent.click(rail().getByRole("link", { name: /^acme\/api/ }));
+    await userEvent.click(await screen.findByRole("link", { name: "When a check completes on acme/api, work in the Platform CI thread." }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/R4"));
+    const crumbs = within(await screen.findByRole("navigation", { name: "Breadcrumb" }));
+    expect(crumbs.getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
+    expect(crumbs.getByText("CI failures").getAttribute("aria-current")).toBe("page");
+    expect(await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
+    const facts = screen.getByLabelText("Facts");
+    expect([...facts.querySelectorAll("dt")].map((term) => term.textContent)).toEqual(["When", "Do", "Runs in", "Appears as"]);
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    const problem = within(screen.getByRole("region", { name: "Problem" }));
+    expect(problem.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
+    expect(screen.getByRole("region", { name: "Deliveries" })).toBeTruthy();
 
-    // H8: the Routines tab reads S1 as a sentence, with Fire now, edit, and enable.
-    await userEvent.click(screen.getByRole("link", { name: /Places/ }));
-    await openTab("Routines");
-    const routines = within(await screen.findByRole("region", { name: "Routines" }));
-    const s1 = await routines.findByRole("link", { name: "Every day at 9:00 · Morning summary · works in this routine's thread" });
-    expect(routines.getByRole("button", { name: "Fire Morning summary now" })).toBeTruthy();
-    await userEvent.click(s1);
-    const edit = await screen.findByRole("button", { name: "Edit" });
-    await waitFor(() => expect(edit.hasAttribute("disabled")).toBe(false));
-    expect(screen.getByRole("button", { name: "Fire now" }).hasAttribute("disabled")).toBe(false);
-    expect(screen.getByRole("switch", { name: "Turn off Morning summary" }).hasAttribute("disabled")).toBe(false);
+    // P8: a pick patches the pin; the problem line goes, the sentence names
+    // the new thread, and the rail's problem count drops to 0.
+    await userEvent.click(await within(problem.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toEqual({ id: "R4", body: { thread: { mode: "existing", sessionId: "s-u", threadId: "t-ops" } } });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Problem" })).toBeNull());
+    expect(await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform Ops thread." })).toBeTruthy();
+    await waitFor(() => expect(activityRow().textContent).toBe("Activity"));
 
-    // H9: the Activity tab reads the C2 mention and the C1 message as sentences.
+    // P9: in sre, the Problems chip shows the dead-lettered delivery; with
+    // the chip off, the C2 mention reads as replied in t-inc.
     await switchWorkspace("Personal", "SRE");
-    await act(async () => { await router.navigate({ to: "/presence/activity" }); });
+    await userEvent.click(activityRow());
+    await userEvent.click(await screen.findByRole("button", { name: "Problems" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ status: "problems" }));
+    const dead = await screen.findByRole("link", { name: "Completed check in acme/api#14" });
+    expect(dead.parentElement?.textContent).toBe("Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver");
+    expect(screen.queryByRole("link", { name: "Mention in #incidents" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "All" }));
     const mention = await screen.findByRole("link", { name: "Mention in #incidents" });
     expect(mention.parentElement?.textContent).toBe("Mention in #incidents → replied in t-inc");
-    const message = screen.getByRole("link", { name: "Message in #incidents" });
-    expect(message.parentElement?.textContent).toBe("Message in #incidents → claimed by t-inc");
-    await userEvent.click(screen.getAllByText("Deliveries and receipt stages")[0]!);
-    expect(await screen.findByText(/Mention classified/)).toBeTruthy();
 
-    // H10: Workflows and Runs show what /workflows showed; the editor's panel
-    // lists the workflow's listeners and routines as sentences.
+    // P10: Workflows has the list and a Runs view at its own URL. The
+    // editor's panel lists the workflow's lines and routines as sentences,
+    // and its Add opens the wizard fixed on the workflow.
     await switchWorkspace("SRE", "Personal");
-    await openTab("Workflows");
+    await userEvent.click(within(nav).getByRole("link", { name: "Workflows" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
     expect(await screen.findByRole("link", { name: "Triage failures" })).toBeTruthy();
-    await openTab("Runs");
+    await userEvent.click(within(screen.getByRole("navigation", { name: "Workflows sections" })).getByRole("link", { name: "Runs" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/workflows/runs"));
     expect(await screen.findByText("Triage failures")).toBeTruthy();
-    await act(async () => { await router.navigate({ to: "/presence/workflows/$workflowId", params: { workflowId: "wf-1" } }); });
-    await userEvent.click(await screen.findByRole("button", { name: "Listeners and routines" }));
-    const panel = within(await screen.findByRole("region", { name: "Listeners and routines" }));
-    expect(await panel.findByRole("link", { name: "Listens on acme/api for completed checks · runs Triage failures" })).toBeTruthy();
-    expect(panel.getByRole("link", { name: /^Every day at 2:00 · / })).toBeTruthy();
+    await act(async () => { await router.navigate({ to: "/workflows/$workflowId", params: { workflowId: "wf-1" } }); });
+    await userEvent.click(await screen.findByRole("button", { name: "What starts it" }));
+    const panel = within(await screen.findByRole("region", { name: "What starts it" }));
+    expect(await panel.findByRole("link", { name: "When a check completes on acme/api, run Triage failures." })).toBeTruthy();
+    expect(panel.getByRole("link", { name: "Every day at 2:00, Nightly triage: run Triage failures." })).toBeTruthy();
+    await userEvent.click(panel.getByRole("button", { name: "Add" }));
+    const addWizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
+    const doChoices = within(addWizard.getByRole("group", { name: "Do" })).getAllByRole("radio");
+    const enabled = doChoices.filter((radio) => !(radio instanceof HTMLInputElement && radio.disabled));
+    expect(enabled.map((radio) => radio.parentElement?.textContent)).toEqual(["Run a workflow"]);
+    expect(enabled[0]).toHaveProperty("checked", true);
+    await userEvent.keyboard("{Escape}");
 
-    // H12: every old URL redirects to its Presence URL.
+    // P12: each old URL redirects, and none returns a 404.
     for (const [from, to] of [
       ["/events?tab=subscriptions", "/presence"],
       ["/events/ev-c2", "/presence/events/ev-c2"],
-      ["/workflows/wf-1", "/presence/workflows/wf-1"],
-      ["/workflows/runs/run-1", "/presence/runs/run-1"],
       ["/channel?key=slack%3AT1%2FC900", "/presence/places/slack%3AT1%2FC900"],
+      ["/presence/listeners/R4", "/presence/rules/R4"],
+      ["/presence/workflows", "/workflows"],
+      ["/presence/runs/run-1", "/workflows/runs/run-1"],
     ] as const) {
       await act(async () => { await router.navigate({ href: from }); });
       await waitFor(() => expect(decodeURIComponent(router.state.location.pathname)).toBe(decodeURIComponent(to)));
@@ -522,12 +637,12 @@ describe("Presence hub acceptance (H1 to H12)", () => {
     }
 
     // Every Presence read had a fixture. The reads left over belong to the
-    // chrome, the workflow editor's other panels, and the pages that H12's
+    // chrome, the workflow editor's other panels, and the pages that P12's
     // redirects land on; each has its own suite.
     expect(unhandled.filter((call) => /\/api\/(presence|event-subscriptions|events\/log|workflows\/triggers)/.test(call))).toEqual([]);
   });
 
-  it("H11: the thread card's background section names the listeners that feed t-inc", async () => {
+  it("P11: the thread card names the lines that feed t-inc, and a pull request thread names its repository", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const root = createRootRoute({
       component: () => <TooltipProvider><BackgroundWorkSection sessionId="s-sre" threadId="t-inc" canCancel={false} /></TooltipProvider>,
@@ -535,20 +650,13 @@ describe("Presence hub acceptance (H1 to H12)", () => {
     const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
     render(<QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>);
     const section = within(await screen.findByRole("region", { name: "Background work" }));
-    expect(section.getByText(/wait for the incident to close/)).toBeTruthy();
     const fedBy = await section.findByText(/Fed by:/);
-    expect(fedBy.textContent).toBe("Fed by: M, P");
-    expect(section.getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/listeners/M");
-    expect(section.getByRole("link", { name: "P" }).getAttribute("href")).toBe("/presence/listeners/P");
+    expect(fedBy.textContent).toBe("Fed by: Incident mentions, Channel watch");
+    expect(section.getByRole("link", { name: "Incident mentions" }).getAttribute("href")).toBe("/presence/rules/M");
+    expect(section.getByRole("link", { name: "Channel watch" }).getAttribute("href")).toBe("/presence/rules/P");
+
+    // The thread header renders inside the thread page, which needs a live
+    // socket; its place label is the pure `subjectPlaceLabel`.
+    expect(subjectPlaceLabel("subject:github:acme/api#12")).toEqual({ subject: "github:acme/api#12", label: "acme/api#12" });
   });
 });
-
-/** The text of the list row that holds a link. */
-function rowText(link: HTMLElement): string {
-  return link.closest("li")?.textContent ?? "";
-}
-
-function checkedRunsIn(scope: ReturnType<typeof within>): string {
-  const radios = within(scope.getByRole("group", { name: "Runs in" })).getAllByRole("radio");
-  return radios.find((r) => r instanceof HTMLInputElement && r.checked)?.parentElement?.textContent ?? "";
-}
