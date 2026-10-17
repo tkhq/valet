@@ -55,7 +55,7 @@ import { workflowRequestContext } from "../workflows/request-context.js";
 import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { channelsVisibleTo, threadEntry, threadsVisibleTo } from "./_thread-access.js";
-import { slackEventChannel } from "../services/thread-access.js";
+import { slackEventChannel, storedThreadRef } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
@@ -440,7 +440,7 @@ async function deliveryThreads(
     const deliveryId = byDispatchId.get(row.dispatch_id);
     if (deliveryId === undefined || found.has(deliveryId)) continue;
     const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
-    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(row.key)) continue;
+    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) continue;
     found.set(deliveryId, { sessionId: row.session_id, threadId: row.thread_id });
   }
   return found;

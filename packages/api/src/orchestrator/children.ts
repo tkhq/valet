@@ -19,7 +19,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
-import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql } from "../services/thread-access.js";
+import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql, threadSlackChannelsSql } from "../services/thread-access.js";
 import {
   namespaceInternalDispatchId,
   PendingCapError,
@@ -1527,7 +1527,8 @@ async function childReachableFrom(
 ): Promise<boolean> {
   if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
   const governing = governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link");
-  const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing)} AS shared,
+  const channels = threadSlackChannelsSql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`);
+  const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing, channels)} AS shared,
     (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key
     FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; key: string | null; shared: boolean; reader_key: string | null }> };
   const parent = result.rows[0];

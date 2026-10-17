@@ -35,7 +35,7 @@ interface ArtifactRow {
  * what the whole team shares (`services/thread-access.ts`).
  */
 export async function collectWorkspaceBriefingSources(db: AppDb, orgId: string, owner: Principal): Promise<BriefingEvidence[]> {
-  const teamShared = owner.type === "team" ? (key: SQL) => sharedWithWholeTeamSql(orgId, key) : undefined;
+  const teamShared = owner.type === "team" ? (key: SQL, slackChannels?: SQL) => sharedWithWholeTeamSql(orgId, key, slackChannels) : undefined;
   const threadKey = governingThreadKeySql;
   // The channel a Slack event names, whatever its shape: ingest copies it to
   // `refs.channel` (`plugin-slack/src/triggers.ts`), and a reaction keeps it at

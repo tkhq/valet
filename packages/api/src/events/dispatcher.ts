@@ -86,6 +86,8 @@ export interface AssistantDeliverFn {
     inbound?: InboundChannelMessage;
     /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
     author?: PromptAuthor;
+    /** The Slack channel the content came from, which the thread records for its read gate. */
+    slackChannel?: string;
   }): Promise<DeliveredThread>;
 }
 
@@ -499,6 +501,7 @@ export class EventDispatcher {
             destination,
             ...(inbound ? { inbound } : {}),
             ...(author ? { author } : {}),
+            ...(slackChannel ? { slackChannel } : {}),
           });
         } catch (err) {
           if (!(err instanceof PinUnavailableError) || destination.kind !== "target") throw err;

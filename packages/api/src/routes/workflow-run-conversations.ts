@@ -1,4 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
+import { storedThreadRef } from "../services/thread-access.js";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, assistantExecutions, sessionThreads } from "../schema/index.js";
@@ -26,7 +27,7 @@ export async function workflowRunConversations(c: Context<AppEnv>, runId: string
   const conversations: WorkflowRunConversation[] = [];
   for (const row of rows) {
     const session = await loadOwnedSession(c, row.sessionId);
-    if (!session || !await threadsVisibleTo(c, session)(row.key)) continue;
+    if (!session || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.sessionId, row.threadId, row.key))) continue;
     conversations.push({ sessionId: row.sessionId, threadId: row.threadId,
       ...(row.title ? { title: row.title } : {}),
       ...(row.sessionId.startsWith(`wf:${runId}:`) ? { nodeId: row.sessionId.split(":")[2] } : {}),

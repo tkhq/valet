@@ -22,3 +22,22 @@ describe("session thread title", () => {
     } finally { session.suspendTimers(); faux.unregister(); }
   });
 });
+
+describe("thread metadata list", () => {
+  it("adds a value once and persists it", async () => {
+    const faux = registerFauxProvider({ provider: "thread-metadata-list" });
+    const store = new InMemorySessionStore();
+    const session = await new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } })
+      .createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel() });
+    try {
+      const thread = await session.createThread("sub:rule-1", { title: "Rule" });
+      await thread.addToMetadataList("slackChannels", "C1");
+      await thread.addToMetadataList("slackChannels", "C1");
+      await thread.addToMetadataList("slackChannels", "C2");
+      expect(thread.toThreadData().metadata?.slackChannels).toEqual(["C1", "C2"]);
+      const persisted = (await store.listThreads(session.id)).find((t) => t.id === thread.id);
+      expect(persisted?.metadata?.slackChannels).toEqual(["C1", "C2"]);
+      expect(persisted?.metadata?.title).toBe("Rule");
+    } finally { session.suspendTimers(); faux.unregister(); }
+  });
+});

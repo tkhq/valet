@@ -3,7 +3,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { encodePageCursor } from "../lib/page-cursor.js";
 import { sharedBriefingRun } from "./workspace-briefing-visibility.js";
-import { governingThreadKeySql } from "./thread-access.js";
+import { governingThreadKeySql, threadSlackChannelsSql } from "./thread-access.js";
 import type { WorkspaceOutcome, WorkspaceOutcomesResponse } from "../wire/types.js";
 
 export interface OutcomeCursor { at: number; id: string; }
@@ -27,10 +27,11 @@ export function safeOutcomeUrl(value: string | null): string | undefined {
   } catch { return undefined; }
 }
 
-/** `shared`, when given, keeps only outcomes from threads it accepts, by thread key. */
+/** `shared`, when given, keeps only outcomes from threads it accepts, by
+ * thread key and the Slack channels the thread holds content from. */
 export async function listWorkspaceOutcomes(
   db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor,
-  shared?: (threadKey: SQL) => SQL,
+  shared?: (threadKey: SQL, slackChannels?: SQL) => SQL,
 ): Promise<WorkspaceOutcomesResponse> {
   // A run carries its org, so its outcomes outlive the workflow's deletion.
   const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,r.org_id) = ${orgId}
@@ -41,7 +42,8 @@ export async function listWorkspaceOutcomes(
     // A write from a session with no recorded thread cannot be judged, so a
     // shared view leaves it out.
     ...(shared ? [sql`(outcomes.session_id IS NULL OR (outcomes.thread_id IS NOT NULL
-      AND ${shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`, "parent link"))}))`] : []),
+      AND ${shared(governingThreadKeySql(sql`outcomes.session_id`, sql`outcomes.thread_id`, "parent link"),
+        threadSlackChannelsSql(sql`outcomes.session_id`, sql`outcomes.thread_id`))}))`] : []),
   ];
   const sharedRun = shared && owner.type === "team"
     ? sql`(r.id IS NULL OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})` : sql`true`;
