@@ -54,7 +54,7 @@ import { threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { isAuthorizedForOwner } from "../workflows/service.js";
-import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
+import { runEventVisible, runOriginVisible, threadRef } from "../services/thread-access.js";
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
@@ -501,7 +501,7 @@ fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
   await engineSession.ensureDefaultThread();
   const found = engineSession.threadById(c.req.param("threadId"));
-  const thread = found && await threadsVisibleTo(c, row)(found.key) ? found : undefined;
+  const thread = found && await threadsVisibleTo(c, row)(threadRef(found)) ? found : undefined;
   const path = c.req.query("path");
   const entries = thread && path ? await thread.readEntries() : [];
   const file = entries
@@ -558,7 +558,7 @@ fileUploadRouter.get("/:id/threads/:threadId/files/:fileId", async (c) => {
   }
   const thread = await engineStore.getThread(row.id, c.req.param("threadId"));
   const fileId = c.req.param("fileId");
-  if (!thread || !await threadsVisibleTo(c, row)(thread.key) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fileId)) {
+  if (!thread || !await threadsVisibleTo(c, row)(thread) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fileId)) {
     return c.json({ error: "file not found" }, 404);
   }
   const file = await readGeneratedFile(db, blobs, { orgId: row.orgId, sessionId: row.id, threadId: thread.id }, fileId);

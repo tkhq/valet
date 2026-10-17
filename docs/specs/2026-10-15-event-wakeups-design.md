@@ -138,7 +138,7 @@ field, with path `channel.name`.
 | E2 | The agent calls `conversations.join` for `C900`, posts its thread link to `C900`, then calls `wait_for_event` with subject `slack:T001/C900`, clause `[{ key: "slack.message", bots: false }]`, `once: false`, `min_interval_seconds: 30`, reason `Incident inc-db-latency`, `max_hours: 168`. | The posted message contains the link `<public url>/threads/t-inc`. One running event waiter exists on `t-inc`. |
 | E3 | Fixture sends three messages from `U002` and `U003` in `C900` before the next WakeWatcher pass. | `t-inc` receives one `event.matched` signal that lists all three. |
 | E4 | 20 seconds after E3's signal, fixture sends one more message. | `t-inc` receives its signal no earlier than 30 seconds after E3's signal. |
-| E5 | Fixture sends a top-level message `<@U-BOT> status?` from `U001` and the matching `app_mention` event. | The team assistant receives exactly one turn for that post, from the `slack.app_mention` subscription, in the thread for that Slack post. The event waiter skips the `message` event, so `t-inc` receives no signal for it. |
+| E5 | Fixture sends a top-level message `<@U-BOT> status?` from `U001` and the matching `app_mention` event. | `t-inc` receives exactly one turn for that post, from the `slack.app_mention` subscription (`2026-10-15-incident-mention-routing-design.md`). The event waiter skips the `message` event, so `t-inc` receives no `event.matched` signal for it. |
 
 Pass criterion: all steps of all five scenarios, in one run each, from a
 clean start.
@@ -157,8 +157,11 @@ Scenario errata (Task 16):
   review). A second test, "Scenario A errata", covers that path: a
   check run on another pull request sends no signal, and a commit status
   that completes the last check sends `checks_completed · success`.
-- E5 said `t-inc` receives the mention. A top-level mention opens its own
-  assistant thread, keyed by its Slack post (`slack:C900:<ts>`). The
+- E5 said `t-inc` receives the mention. Before incident mention routing, a
+  top-level mention opened its own assistant thread, keyed by its Slack
+  post (`slack:C900:<ts>`). The routing spec
+  (`2026-10-15-incident-mention-routing-design.md`) sends a mention in a
+  watched channel to the watching thread, so E5 holds as written. The
   mention rule holds: the subscription delivers the post once, and the
   waiter does not.
 
@@ -539,9 +542,14 @@ step that returns early for an event that no subscription matched.
 
 Mention rule: a `slack.message` event whose text contains `<@bot user id>`
 MUST NOT match an event waiter when an enabled subscription naming
-`slack.app_mention` matches that channel. The matcher evaluates that
-subscription with the existing subscription matcher against the same
-payload. The mention then reaches the agent once, through the subscription.
+`slack.app_mention` matches that channel and its sender gate admits the
+sender. The matcher evaluates that subscription with the existing
+subscription matcher against the same payload. It then runs the
+dispatcher's own sender gate (`mentionSenderActor`), without a drop log.
+The mention then reaches the agent once, through the subscription. When
+the gate refuses the sender, for example an unlinked sender under a team
+rule, no subscription delivers the mention. The event waiter then MUST
+receive it as an ordinary channel message.
 7. Append a receipt stage `waiter_match` with the count of waiters that
    matched. The stage holds metadata only. An event with no candidate
    waiter adds no stage.

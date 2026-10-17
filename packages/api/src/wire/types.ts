@@ -11,7 +11,7 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { Presence } from "@valet/shared";
+import type { AssistantThreadPolicy, Presence } from "@valet/shared";
 export type { Presence } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
@@ -2774,6 +2774,9 @@ export interface WorkflowScheduleTriggerDetail {
   timezone: string;
   targetKind: "workflow" | "orchestrator";
   prompt?: string;
+  /** Where an assistant-prompt schedule's prompts land. Absent reads as
+   * `{ mode: "own" }`. Never `subject`: a schedule has no subject. */
+  thread?: AssistantThreadPolicy;
   input?: unknown;
   nextFireAt: number;
   lastFiredAt: number | null;
@@ -2818,6 +2821,10 @@ export type CreateWorkflowScheduleRequest = {
    * create-workflow take.
    */
   teamId?: string;
+  /** Where the prompts land, for an assistant-prompt schedule only. Absent reads
+   * as `{ mode: "own" }`. The server refuses `subject` and a policy on a
+   * workflow target. */
+  thread?: AssistantThreadPolicy;
 } & (
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
   | {
@@ -2835,6 +2842,9 @@ export interface UpdateWorkflowScheduleRequest {
   enabled?: boolean;
   prompt?: string;
   input?: unknown;
+  /** Replace the thread policy. `null` clears it, so the schedule reads as
+   * `{ mode: "own" }` again. Absent leaves it alone. */
+  thread?: AssistantThreadPolicy | null;
 }
 
 export interface WorkflowScheduleResponse {
@@ -2843,6 +2853,8 @@ export interface WorkflowScheduleResponse {
     targetKind: "workflow" | "orchestrator";
     workflowId?: string;
     prompt?: string;
+    /** See `CreateWorkflowScheduleRequest.thread`. */
+    thread?: AssistantThreadPolicy;
     name: string;
     cron: string;
     timezone: string;
@@ -4849,6 +4861,13 @@ export type EventSubscriptionTargetWire =
        * proposal reads it to tell a spent link from one that never existed.
        */
       replaced?: string;
+      /**
+       * Where this rule's deliveries land (spec 2026-10-16: delivery
+       * threads, Part A). Absent reads as `{ mode: "own" }`. The server
+       * refuses `subject` when no selected event names a subject, and an
+       * `existing` thread that is not an open thread of the rule's owner.
+       */
+      thread?: AssistantThreadPolicy;
     };
 
 /**
@@ -4982,14 +5001,16 @@ export interface PatchEventSubscriptionRequest {
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
   /**
-   * Re-point an orchestrator rule at a different assistant of the SAME owner.
-   * `null` clears the choice, so the owner's default answers again. Absent
-   * leaves it alone.
+   * Replace this assistant rule's thread policy. `null` clears it, so the
+   * rule reads as `{ mode: "own" }` again. Absent leaves it alone. See
+   * `EventSubscriptionTargetWire` for the checks. An `existing` thread is
+   * checked against the row's stored owner.
    *
-   * The only part of `target` a patch may touch. Changing the owner is not a
-   * field edit — it decides the row's mutation ACL and its collision peers —
-   * so a rule that should belong elsewhere is rewritten, not patched.
+   * The owner is not patchable. Changing the owner is not a field edit: it
+   * decides the row's mutation ACL and its collision peers. A rule that
+   * should belong elsewhere is rewritten, not patched.
    */
+  thread?: AssistantThreadPolicy | null;
   /**
    * Rewrite this orchestrator rule's prompt templates. `null` clears the
    * field, so the rule delivers the default body again. Absent leaves it

@@ -47,7 +47,7 @@ describe("updateWorkflowSchedule", () => {
     const before = created.schedule.nextFireAt;
 
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { name: "morning digest", enabled: false },
@@ -70,7 +70,7 @@ describe("updateWorkflowSchedule", () => {
     if (!created.ok) throw new Error(created.error);
 
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { cron: "0 18 * * *" },
@@ -92,7 +92,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { enabled: false },
@@ -101,7 +101,7 @@ describe("updateWorkflowSchedule", () => {
 
     const later = NOW + 7 * 24 * 3600 * 1000;
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { enabled: true },
@@ -121,7 +121,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { cron: "not a cron" },
@@ -135,7 +135,7 @@ describe("updateWorkflowSchedule", () => {
 
   it("returns 404 for an unknown id or another org's schedule", async () => {
     const missing = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       "nope",
       { name: "x" },
@@ -152,7 +152,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const crossOrg = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       { userId: OWNER.userId, orgId: "org_other" },
       created.schedule.scheduleId,
       { name: "x" },
@@ -183,7 +183,7 @@ describe("updateWorkflowSchedule", () => {
     );
     if (!created.ok) throw new Error(created.error);
     const updated = await updateWorkflowSchedule(
-      db,
+      armDeps(),
       OWNER,
       created.schedule.scheduleId,
       { prompt: "nope" },

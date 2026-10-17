@@ -267,7 +267,7 @@ async function canSendToSourceSession(
   const thread = artifact.sourceThreadId ? await providers.engineStore.getThread(row.id, artifact.sourceThreadId) : null;
   if (artifact.sourceThreadId && !thread) return { ok: false };
   const visible = threadVisibility(providers, row, { orgId: artifact.orgId, userId: user.id });
-  if (!(await visible(thread?.key ?? null))) return { ok: false };
+  if (!(await visible(thread ?? null))) return { ok: false };
   return { ok: true, row };
 }
 
@@ -569,7 +569,7 @@ artifactsRouter.post("/share", async (c) => {
           orgId,
           userId: principal?.type === "team" ? undefined : principal?.id ?? scope.actorUserId,
         });
-        if (!thread || !await visible(thread.key)) {
+        if (!thread || !await visible(thread)) {
           return c.json({ error: "Source thread not found. Publish from a thread you can access in the source work." }, 404);
         }
       }

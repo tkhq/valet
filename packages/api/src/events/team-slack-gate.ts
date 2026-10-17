@@ -117,6 +117,25 @@ export function isTeamAssistantMention(
   return eventKey === "slack.app_mention" && isTeamAssistantRule(sub.ownerType, sub.target);
 }
 
+/**
+ * The dispatcher's sender gate for an orchestrator delivery: the user id the
+ * delivery acts as, or null when the gate refuses the sender. A team
+ * assistant mention acts as its verified sender (`teamMentionActor`). Any
+ * other rule acts as its owner and refuses nobody. The event waiter's mention
+ * rule reuses this gate, so a mention that the dispatcher refuses stays an
+ * ordinary channel message for the waiter (incident mention routing, Part C).
+ */
+export async function mentionSenderActor(
+  db: AppDb,
+  sub: { orgId: string; ownerType: string; ownerId: string; target: unknown; audience?: string | null; createdBy: string },
+  eventKey: string,
+  payload: unknown,
+  logDenied = true,
+): Promise<string | null> {
+  if (isTeamAssistantMention(sub, eventKey)) return teamMentionActor(db, sub, payload, logDenied);
+  return sub.ownerType === "user" ? sub.createdBy : `${sub.ownerType}:${sub.ownerId}`;
+}
+
 /** No identity or membership cache: removal applies to the next match. */
 export async function teamMentionActor(
   db: AppDb,

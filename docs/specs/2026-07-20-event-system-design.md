@@ -244,6 +244,10 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     (`event_target_mismatch`) and throw. A rule that carries prompt templates
     renders the body first (see "Orchestrator prompt templates" below); one
     that carries none delivers the body described here unchanged.
+    The rule's thread policy, a conversation binding, or a waiter claim picks
+    the destination thread. The delivery threads spec
+    (`2026-10-16-delivery-threads-and-claims-design.md`, Part B) defines that
+    choice; no events thread or per-channel thread heuristic remains.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that

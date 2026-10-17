@@ -1,4 +1,6 @@
-import { type Presence, validatePresence } from "@valet/shared";
+import { type AssistantThreadPolicy, type Presence, validatePresence } from "@valet/shared";
+import { RunsInField } from "~/components/presence/runs-in-field";
+import { defaultWizardThreadPolicy, subjectKindForKeys } from "~/components/presence/thread-policy-copy";
 import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "./automation-review";
 import { parseSlackThreadLink } from "./slack-thread-preset";
@@ -103,6 +105,15 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
     : { kind: "orchestrator", orchestrator: "user" };
 }
 
+/** The workspace key whose assistant threads the Runs in picker lists. The
+ * org assistant has no workspace key, so its rules cannot pin a thread here. */
+function threadWorkspaceFor(target: TargetChoice): string | undefined {
+  if (target.kind !== "orchestrator") return undefined;
+  if (target.orchestrator === "user") return "user";
+  if (target.orchestrator === "team") return target.teamId;
+  return undefined;
+}
+
 function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   if (outcome === "reply") {
     return { labels: ["What", "Reply", "Review"], count: 3 };
@@ -163,6 +174,11 @@ export function AutomationWizard({
   // no audience at all.
   const [audience, setAudience] = useState<EventSubscriptionAudienceWire>("organization");
   const [follow, setFollow] = useState(true);
+  // The reader's Runs in choice, or undefined while the wizard default holds.
+  // The default follows the outcome and the picked events, so it is derived,
+  // not stored. A pick remembers its workspace: an existing thread of one
+  // assistant is not valid after the target moves to another.
+  const [threadChoice, setThreadChoice] = useState<{ policy: AssistantThreadPolicy | null; workspace: string | undefined } | undefined>(undefined);
   const [deliveryPreferences, setDeliveryPreferences] = useState<DeliveryPreferencesValue>({ deliveryPolicy: "always", pauseOnOverlap: true });
   const [error, setError] = useState<string | null>(null);
   // The collision report of the last create attempt (TKAI-294).
@@ -178,6 +194,7 @@ export function AutomationWizard({
   // different outcome's flow, so an outcome switch resets both.
   function chooseOutcome(next: Outcome) {
     setOutcome(next);
+    setThreadChoice(undefined);
     setAnyChannel(false);
     setReplyChannels([]);
   }
@@ -216,6 +233,33 @@ export function AutomationWizard({
   // outcome forbids.
   const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced" || outcome === "thread";
 
+  // Runs in: the subject kind the selected events name, the wizard default,
+  // and the policy the create posts. A subject choice falls back to the
+  // default once the events no longer name a subject, and an existing-thread
+  // choice falls back once the target is another assistant.
+  const threadWorkspace = threadWorkspaceFor(target);
+  const subjectKind = isSchedule ? null : outcome === "reply" ? "channel" : subjectKindForKeys([...keys]);
+  const defaultThread = defaultWizardThreadPolicy(outcome, subjectKind);
+  const choiceStale = threadChoice !== undefined && (
+    (threadChoice.policy?.mode === "subject" && subjectKind === null) ||
+    ((threadChoice.policy === null || threadChoice.policy.mode === "existing") && threadChoice.workspace !== threadWorkspace)
+  );
+  const threadPolicy: AssistantThreadPolicy | null =
+    threadChoice === undefined || choiceStale ? defaultThread : threadChoice.policy;
+  const threadReady = target.kind !== "orchestrator" || threadPolicy !== null;
+  const ruleKind = isSchedule ? "routine" : "listener";
+  const runsIn = (idPrefix: string) => (
+    <RunsInField
+      idPrefix={idPrefix}
+      value={threadPolicy}
+      onChange={(policy) => setThreadChoice({ policy, workspace: threadWorkspace })}
+      subjectKind={subjectKind}
+      ruleKind={ruleKind}
+      workspace={threadWorkspace}
+      eventKeys={outcome === "reply" ? [SLACK_APP_MENTION] : isSchedule ? [] : [...keys]}
+    />
+  );
+
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
   const targetReady = replyTeam
     ? target.kind === "orchestrator" && target.orchestrator === "team" && target.teamId === replyTeam.id
@@ -231,19 +275,19 @@ export function AutomationWizard({
   function canAdvance(): boolean {
     if (step === 1) return true; // An outcome always has a value.
     if (outcome === "reply") {
-      return step === 2 && replyScoped && (!replyTeam || targetReady);
+      return step === 2 && replyScoped && threadReady && (!replyTeam || targetReady);
     }
     if (step === 2) {
       if (outcome === "thread") return threadPreset !== null;
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
     }
-    if (step === 3) return targetReady;
+    if (step === 3) return targetReady && threadReady;
     return true;
   }
 
   const isLastStep = step === plan.count;
   const canCreate =
-    name.trim().length > 0 && targetReady && (outcome !== "reply" || replyScoped) && !isPending;
+    name.trim().length > 0 && targetReady && threadReady && (outcome !== "reply" || replyScoped) && !isPending;
 
   function next() {
     setError(null);
@@ -277,6 +321,8 @@ export function AutomationWizard({
     if (presenceError) { setError(presenceError); return; }
     const presenceFields = Object.keys(presence).length > 0 ? { presence } : {};
     setError(null);
+    // `canCreate` already refuses a null policy on an assistant target.
+    const threadField = threadPolicy !== null ? { thread: threadPolicy } : {};
 
     // Shared by both subscription branches: a 409 collision renders the
     // colliding rules with a "Create anyway" path; a committed write that
@@ -325,7 +371,7 @@ export function AutomationWizard({
           // The reply step collects the same optional templates the Then step
           // collects for the other assistant outcomes. Empty fields are left
           // off, so the rule posts the target it always did.
-          target: { ...mentionTarget, ...presenceFields, follow, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.orchestrator === "user" ? deliveryPreferences : {}) },
+          target: { ...mentionTarget, ...presenceFields, follow, ...threadField, ...promptFieldsToTarget(promptTemplates), ...(mentionTarget.orchestrator === "user" ? deliveryPreferences : {}) },
           // Only a team assistant has an audience; the server refuses one
           // on any other target.
           ...(mentionTarget.orchestrator === "team" ? { audience } : {}),
@@ -351,9 +397,9 @@ export function AutomationWizard({
       const templates = promptFieldsToTarget(promptTemplates);
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
-          ? { ...orchestratorTargetFrom(target), follow: false, ...templates, ...(target.kind === "orchestrator" && target.orchestrator === "user" ? deliveryPreferences : {}) }
+          ? { ...orchestratorTargetFrom(target), follow: false, ...threadField, ...templates, ...(target.kind === "orchestrator" && target.orchestrator === "user" ? deliveryPreferences : {}) }
           : target.kind === "orchestrator"
-            ? { ...target, ...(outcome === "thread" ? { follow: false } : {}), ...templates, ...(target.orchestrator === "user" ? deliveryPreferences : {}) }
+            ? { ...target, ...(outcome === "thread" ? { follow: false } : {}), ...threadField, ...templates, ...(target.orchestrator === "user" ? deliveryPreferences : {}) }
             : target;
       createSubscription.mutate(
         {
@@ -396,6 +442,7 @@ export function AutomationWizard({
             kind: "orchestrator",
             prompt: prompt.trim(),
           },
+          ...threadField,
           ...(target.orchestrator === "team" ? { teamId: target.teamId } : {}),
         },
         {
@@ -439,6 +486,7 @@ export function AutomationWizard({
               onPromptTemplatesChange={setPromptTemplates}
             />
           )}
+          {step === 2 && outcome === "reply" && runsIn("automation-reply")}
 
           {step === 2 && outcome === "thread" && <div className="space-y-2">
             <Label htmlFor="slack-thread-link">Slack thread link</Label>
@@ -486,6 +534,7 @@ export function AutomationWizard({
               onPromptTemplatesChange={setPromptTemplates}
             />
           )}
+          {step === 3 && (isEventOutcome || isSchedule) && target.kind === "orchestrator" && runsIn("automation")}
 
           {isLastStep && !isSchedule && target.kind === "orchestrator" && target.orchestrator === "user" && (
             <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />
@@ -578,6 +627,7 @@ type EventSubscriptionTarget =
       deliveryPolicy?: DeliveryPreferencesValue["deliveryPolicy"];
       pauseOnOverlap?: boolean;
       follow?: boolean;
+      thread?: AssistantThreadPolicy;
       systemPrompt?: string;
       userPromptTemplate?: string;
     });

@@ -1,4 +1,5 @@
-import type { Presence } from "@valet/shared";
+import type { AssistantThreadPolicy, Presence } from "@valet/shared";
+import { displayThreadPolicy, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
 import type { DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * The pure diff behind the edit-subscription dialog: compare the form state
@@ -36,6 +37,10 @@ function sameKeySet(a: string[], b: string[]): boolean {
  * A prompt template is read only for an assistant target, the one kind that
  * renders one. An emptied field sends `null`, which clears it on the row and
  * returns the rule to the default event message.
+ *
+ * A thread policy is read only for an assistant target. It is compared with
+ * the policy the row runs with today (`displayThreadPolicy`), so an
+ * unchanged default is not written as an explicit policy.
  */
 export function buildSubscriptionPatch(
   sub: EventSubscriptionWire,
@@ -47,6 +52,7 @@ export function buildSubscriptionPatch(
     presence?: Presence;
     prompts?: PromptFieldsValue;
     deliveryPreferences?: DeliveryPreferencesValue;
+    thread?: AssistantThreadPolicy;
   },
 ): PatchEventSubscriptionRequest | null {
   const body: PatchEventSubscriptionRequest = {};
@@ -76,6 +82,11 @@ export function buildSubscriptionPatch(
       if (next === stored) continue;
       body[field] = next.length > 0 ? next : null;
     }
+  }
+
+  if (form.thread !== undefined && sub.target.kind === "orchestrator" &&
+    !sameThreadPolicy(form.thread, displayThreadPolicy(sub.target, sub.eventKeys))) {
+    body.thread = form.thread;
   }
 
   if (form.deliveryPreferences && sub.ownerType === "user" && sub.target.kind === "orchestrator") {

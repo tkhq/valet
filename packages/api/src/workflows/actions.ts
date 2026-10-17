@@ -1503,7 +1503,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await updateWorkflowSchedule(
-        getDeps().db,
+        armDepsFrom(getDeps()),
         owner,
         schedule_id,
         { name, cron, timezone, enabled, prompt, input },

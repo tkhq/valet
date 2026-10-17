@@ -8,7 +8,7 @@
  * workflow trigger service (`workflows/trigger-service.ts`), and the template
  * installer (`workflows/templates.ts`).
  */
-import { validatePresence } from "@valet/shared";
+import { readThreadPolicy, validatePresence, validateThreadPolicy } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
@@ -16,6 +16,7 @@ import { eventKeyMatches, SUBJECT_FILTER_FIELD, validateRegexPattern, type Subsc
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
+import { NO_SUBJECT_ERROR, subjectModeAllowed } from "./thread-policy-write.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
 /** The optional prompt templates an orchestrator target may carry. */
@@ -58,10 +59,12 @@ export function validateSubscription(
   // e.g. a GitHub-only `repo` filter on a `linear.issue.*` subscription,
   // which then silently never matches anything.
   const selectedEntries: EventCatalogEntry[] = [];
+  const patterns: string[] = [];
   for (const pattern of body.eventKeys) {
     if (typeof pattern !== "string" || pattern.length === 0) {
       return "eventKeys entries must be non-empty strings";
     }
+    patterns.push(pattern);
     const covered = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
     // Derived keys stay unavailable to subscriptions (spec 2026-10-15: event
     // wakeups, Part G and Non-goals): the dispatcher has no derive step. A
@@ -127,6 +130,19 @@ export function validateSubscription(
   if (target.presence !== undefined) {
     const error = validatePresence(target.presence);
     if (error) return error;
+  }
+  // The thread policy (spec 2026-10-16: delivery threads, Part A). Shape and
+  // subject checks only; `existing` needs the owner, so the writer checks
+  // it with `validateExistingThread` once the owner is known.
+  if (target.thread !== undefined) {
+    if (target.kind !== "orchestrator") {
+      return "A thread policy applies only to an assistant target. Remove thread from this workflow rule.";
+    }
+    const error = validateThreadPolicy(target.thread);
+    if (error) return error;
+    if (readThreadPolicy(target.thread).mode === "subject" && !subjectModeAllowed(patterns, plugins)) {
+      return NO_SUBJECT_ERROR;
+    }
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "workflow target requires workflowId";

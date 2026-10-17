@@ -714,7 +714,7 @@ export const eventReceipts = pgTable("event_receipts", {
   subscriptions: jsonb("subscriptions").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id)]);
+}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id), index("event_receipts_event").on(t.orgId, t.eventId)]);
 
 export const eventDropLog = pgTable(
   "event_drop_log",
@@ -2017,6 +2017,12 @@ export const followedThreads = pgTable(
      * must narrow every thread it opened. Null on a follow bound before the
      * column, and on one no mention rule bound; both read as team-only. */
     subscriptionId: text("subscription_id"),
+    /** The assistant thread the binding delivery landed in (spec
+     * 2026-10-16: delivery threads, Part B step 5). Later messages in the
+     * Slack thread go there. Null on a follow bound before the columns; the
+     * router then keeps the Slack thread key (`slack:{channel}:{threadTs}`). */
+    sessionId: text("session_id"),
+    threadId: text("thread_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
@@ -2045,10 +2051,10 @@ export const workflowSchedules = pgTable(
     /** Prompt submitted to the orchestrator's "schedules" thread when
      * `target_kind = 'orchestrator'`. */
     prompt: text("prompt"),
-    /** Which of the owner's assistants the prompt goes to, when
-     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
-     * on any schedule that named none — both read as "the owner's default".
-     * Ignored for a `workflow` target, which has no assistant. */
+    /** Where an assistant-prompt schedule's prompts land: an
+     * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).
+     * Null reads as `{ mode: "own" }`. Always null for a `workflow` target. */
+    threadPolicy: jsonb("thread_policy"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),

@@ -739,4 +739,21 @@ describe("validateValetPlugin event contracts", () => {
       expect(res.issues.some((i) => i.path === "derivedEvents[0].derive")).toBe(true);
     }
   });
+
+  it("accepts a plugin with a naturalSubject function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      naturalSubject: (_event: NormalizedEvent) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a naturalSubject that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", naturalSubject: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "naturalSubject")).toBe(true);
+    }
+  });
 });

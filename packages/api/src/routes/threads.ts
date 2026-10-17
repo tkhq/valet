@@ -89,7 +89,7 @@ async function inThread(
   }
   if (!sessionId) return c.json({ error: "Thread not found." }, 404);
   const thread = await engineStore.getThread(sessionId, threadId);
-  if (!thread || (appSession && purpose !== "decision" && !await threadsVisibleTo(c, appSession)(thread.key))) return c.json({ error: "Thread not found." }, 404);
+  if (!thread || (appSession && purpose !== "decision" && !await threadsVisibleTo(c, appSession)(thread))) return c.json({ error: "Thread not found." }, 404);
   if (c.req.query("threadId") !== undefined && c.req.query("threadId") !== threadId) {
     return c.json({ error: "threadId must match the URL." }, 400);
   }

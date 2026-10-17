@@ -5246,6 +5246,24 @@ export class Thread {
       readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY]));
   }
 
+  /**
+   * Add `value` to the string list at `metadata[key]` and persist it. A
+   * value already in the list is a no-op. Hosts use it to record facts about
+   * a thread's content, such as where its messages came from.
+   *
+   * The in-memory metadata takes the value before the write, so a save that
+   * runs while this one waits carries it too. Such a fact narrows who may
+   * read the thread, so if the write fails the value stays in memory, and the
+   * next save persists it.
+   */
+  async addToMetadataList(key: string, value: string): Promise<void> {
+    const current = this.threadMetadata?.[key];
+    const list = Array.isArray(current) ? current.filter((item): item is string => typeof item === "string") : [];
+    if (list.includes(value)) return;
+    this.threadMetadata = { ...this.threadMetadata, [key]: [...list, value] };
+    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+  }
+
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
     const metadata = { ...this.threadMetadata, [TOOL_SCOPE_KEY]: scope ?? {} };

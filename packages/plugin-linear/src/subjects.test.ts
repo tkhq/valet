@@ -1,5 +1,18 @@
+import type { NormalizedEvent } from "@valet/engine";
 import { describe, expect, it } from "vitest";
-import { issueFromUrl, linearEventSubjects, linearSubjects } from "./subjects.js";
+import { issueFromUrl, linearEventSubjects, linearNaturalSubject, linearSubjects } from "./subjects.js";
+
+function event(overrides: Partial<NormalizedEvent> = {}): NormalizedEvent {
+  return {
+    key: "linear.issue.create",
+    dedupeKey: "d1",
+    occurredAt: "2026-10-16T00:00:00.000Z",
+    refs: {},
+    summary: "issue created",
+    payload: {},
+    ...overrides,
+  };
+}
 
 // Recorded webhook payloads, trimmed to the fields `linearEventSubjects`
 // reads (spec: docs/specs/2026-10-15-event-wakeups-design.md, Part A4/A6).
@@ -107,5 +120,22 @@ describe("linearSubjects.fromUrl", () => {
 describe("linearSubjects url", () => {
   it('url("linear:ENG-7") is the issue URL', () => {
     expect(linearSubjects.url("linear:ENG-7")).toBe("https://linear.app/issue/ENG-7");
+  });
+});
+
+describe("linearNaturalSubject", () => {
+  it("returns the issue subject when the payload names one", () => {
+    const { subjects } = linearEventSubjects("Issue", issueCreateTriage);
+    expect(linearNaturalSubject(event({ subjects }))).toEqual({ subject: "linear:ENG-8", label: "ENG-8" });
+  });
+
+  it("falls back to the team subject when no issue is named", () => {
+    const { subjects } = linearEventSubjects("Comment", commentNoParent);
+    expect(linearNaturalSubject(event({ subjects }))).toEqual({ subject: "linear:team/ENG", label: "ENG" });
+  });
+
+  it("returns null when the event names no team or issue", () => {
+    const { subjects } = linearEventSubjects("Other", {});
+    expect(linearNaturalSubject(event({ subjects }))).toBeNull();
   });
 });

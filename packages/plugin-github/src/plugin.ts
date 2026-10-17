@@ -5,7 +5,7 @@ import { githubPlugin } from "./actions/actions.js";
 import { githubDerivedEvents } from "./derived.js";
 import { githubFilterOptionResolvers } from "./filter-options.js";
 import { githubHttpRoutes } from "./http/index.js";
-import { githubSubjects } from "./subjects.js";
+import { githubNaturalSubject, githubSubjects } from "./subjects.js";
 import { githubTemplates } from "./templates.js";
 import { githubTriggerDefs } from "./triggers.js";
 
@@ -18,6 +18,7 @@ const plugin: ValetPlugin = {
   actions: [githubPlugin],
   triggers: githubTriggerDefs,
   eventSubjects: githubSubjects,
+  naturalSubject: githubNaturalSubject,
   derivedEvents: githubDerivedEvents,
   filterOptionResolvers: githubFilterOptionResolvers,
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")],

@@ -30,6 +30,9 @@ export interface FollowedThreadRow extends FollowedThreadKey {
    * current invocation audience on every later message. Absent → team-only,
    * which is what every follow bound before the column means. */
   subscriptionId?: string;
+  /** The assistant thread the binding delivery landed in. Later messages in
+   * the Slack thread go there. Absent → the router keeps the Slack thread key. */
+  target?: { sessionId: string; threadId: string };
 }
 
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
@@ -50,6 +53,8 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       lastActivityAt: now,
       lastSeenTs: row.lastSeenTs ?? null,
       subscriptionId: row.subscriptionId ?? null,
+      sessionId: row.target?.sessionId ?? null,
+      threadId: row.target?.threadId ?? null,
     });
   const target = [followedThreads.orgId, followedThreads.channelType,
     followedThreads.channelId, followedThreads.threadTs];
@@ -72,6 +77,9 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       // thread decides which membership the router re-checks for the new
       // actor.
       subscriptionId: row.subscriptionId ?? null,
+      // A re-bind moves later messages to the thread this mention landed in.
+      sessionId: row.target?.sessionId ?? null,
+      threadId: row.target?.threadId ?? null,
       lastActivityAt: now,
     },
   });

@@ -1,5 +1,18 @@
+import type { NormalizedEvent } from "@valet/engine";
 import { describe, expect, it } from "vitest";
-import { slackEventSubjects, slackSubjects } from "./subjects.js";
+import { slackEventSubjects, slackNaturalSubject, slackSubjects } from "./subjects.js";
+
+function event(overrides: Partial<NormalizedEvent> = {}): NormalizedEvent {
+  return {
+    key: "slack.message",
+    dedupeKey: "d1",
+    occurredAt: "2026-10-16T00:00:00.000Z",
+    refs: {},
+    summary: "message",
+    payload: {},
+    ...overrides,
+  };
+}
 
 describe("slackEventSubjects", () => {
   it("a threaded reply carries workspace, channel, and thread subjects", () => {
@@ -96,5 +109,33 @@ describe("slackSubjects label/url", () => {
 
   it("url() returns null", () => {
     expect(slackSubjects.url("slack:T001/C001/1712345678.000100")).toBeNull();
+  });
+});
+
+describe("slackNaturalSubject", () => {
+  it("returns the channel subject labeled with the channel name", () => {
+    const e = event({
+      subjects: ["slack:T001", "slack:T001/C001"],
+      refs: { channel: "C001", channel_name: "incidents" },
+    });
+    expect(slackNaturalSubject(e)).toEqual({ subject: "slack:T001/C001", label: "#incidents" });
+  });
+
+  it("returns the channel id label when the channel name is unknown", () => {
+    const e = event({
+      subjects: ["slack:T001", "slack:T001/C001"],
+      refs: { channel: "C001" },
+    });
+    expect(slackNaturalSubject(e)).toEqual({ subject: "slack:T001/C001", label: "C001" });
+  });
+
+  it("returns null for a team-only event with no channel", () => {
+    const e = event({ key: "slack.team_join", subjects: ["slack:T001"], refs: {} });
+    expect(slackNaturalSubject(e)).toBeNull();
+  });
+
+  it("returns null when the event has no subjects", () => {
+    const e = event({ subjects: [], refs: {} });
+    expect(slackNaturalSubject(e)).toBeNull();
   });
 });

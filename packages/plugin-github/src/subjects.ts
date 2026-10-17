@@ -2,7 +2,7 @@
  * GitHub event normalization: subjects, status, and bot detection (spec:
  * docs/specs/2026-10-15-event-wakeups-design.md, Part A1/A2/A5).
  */
-import type { EventSubjects } from "@valet/engine";
+import type { EventSubjects, NormalizedEvent } from "@valet/engine";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -139,6 +139,22 @@ function url(subject: string): string | null {
   const ownerMatch = /^[^/#@]+$/.exec(rest);
   if (ownerMatch) return `https://github.com/${rest}`;
   return null;
+}
+
+/** A `github:<owner>/<repo>#<n>` subject (a pull request or issue). */
+const PR_OR_ISSUE_SUBJECT_RE = /^github:[^/#@]+\/[^/#@]+#\d+$/;
+/** A `github:<owner>/<repo>` subject, with no pull request, issue, or sha. */
+const REPO_SUBJECT_RE = /^github:[^/#@]+\/[^/#@]+$/;
+
+/**
+ * The pull request or issue an event names, else its repository (spec Part
+ * D). Returns null when the event names no repository.
+ */
+export function githubNaturalSubject(event: NormalizedEvent): { subject: string; label: string } | null {
+  const subject =
+    event.subjects?.find((s) => PR_OR_ISSUE_SUBJECT_RE.test(s)) ?? event.subjects?.find((s) => REPO_SUBJECT_RE.test(s));
+  if (!subject) return null;
+  return { subject, label: subject.slice("github:".length) };
 }
 
 export const githubSubjects: EventSubjects = { fromUrl, label, url };

@@ -7,7 +7,7 @@
  * public webhook documentation — `"user"` for a human actor, `"application"`
  * for an OAuth app / bot actor. No change to A4's wording was needed.
  */
-import type { EventSubjects } from "@valet/engine";
+import type { EventSubjects, NormalizedEvent } from "@valet/engine";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -104,6 +104,24 @@ function url(subject: string): string | null {
   const rest = subject.slice("linear:".length);
   if (rest.startsWith("team/")) return null;
   return `https://linear.app/issue/${rest}`;
+}
+
+/** A `linear:<IDENTIFIER>` subject (an issue, never a team). */
+const ISSUE_SUBJECT_RE = /^linear:(?!team\/)[A-Za-z0-9_-]+$/;
+/** A `linear:team/<KEY>` subject. */
+const TEAM_SUBJECT_RE = /^linear:team\/([A-Za-z0-9_-]+)$/;
+
+/**
+ * The issue an event names, else its team (spec Part D). Returns null when
+ * the event names no team or issue.
+ */
+export function linearNaturalSubject(event: NormalizedEvent): { subject: string; label: string } | null {
+  const issueSubject = event.subjects?.find((s) => ISSUE_SUBJECT_RE.test(s));
+  if (issueSubject) return { subject: issueSubject, label: issueSubject.slice("linear:".length) };
+  const teamSubject = event.subjects?.find((s) => TEAM_SUBJECT_RE.test(s));
+  if (!teamSubject) return null;
+  const teamKey = TEAM_SUBJECT_RE.exec(teamSubject)?.[1] ?? teamSubject.slice("linear:team/".length);
+  return { subject: teamSubject, label: teamKey };
 }
 
 export const linearSubjects: EventSubjects = { fromUrl, label, url };

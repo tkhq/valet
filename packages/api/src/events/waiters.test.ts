@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InMemorySessionStore,
   type DerivedEventDef,
@@ -7,7 +7,10 @@ import {
   type ValetPlugin,
   type Wakeup,
 } from "@valet/engine";
-import { linearPreviousStatusRef, matchEventWaiters, type WaiterMatchDeps } from "./waiters.js";
+import slackPlugin from "@valet/plugin-slack/plugin";
+import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
+import { appMentionCoveredBy, linearPreviousStatusRef, matchEventWaiters, type WaiterMatchDeps } from "./waiters.js";
 
 const ORG = "acme";
 const THREAD_SUBJECT = "slack:T001/C001/1712345678.000100";
@@ -280,5 +283,51 @@ describe("linearPreviousStatusRef", () => {
   });
   it("returns null when the update did not change the state", () => {
     expect(linearPreviousStatusRef({ data: { team: { key: "ENG" } }, updatedFrom: { title: "x" } })).toBeNull();
+  });
+});
+
+/**
+ * The mention rule counts a mention as covered only when the
+ * app_mention subscription's sender gate admits the sender (incident
+ * mention routing, Part C). A refused mention stays an ordinary channel
+ * message for the event waiter.
+ */
+describe("appMentionCoveredBy", () => {
+  let tdb: TestPgDb;
+  beforeEach(async () => {
+    tdb = await freshTestPgDb();
+    await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "SRE", createdAt: 1 });
+    await tdb.appDb.insert(teamMembers).values({ teamId: "team-x", userId: "u-001", role: "member" });
+    await tdb.appDb.insert(orgMembers).values({ orgId: ORG, userId: "u-001", role: "member" });
+    await tdb.appDb.insert(userIdentityLinks).values({ id: "link-1", provider: "slack", externalId: "U001", userId: "u-001", createdAt: 1 });
+  });
+
+  function sub(ownerType: "team" | "user", ownerId: string) {
+    return {
+      enabled: true, orgId: ORG, ownerType, ownerId, createdBy: "u-001",
+      target: { kind: "orchestrator" }, eventKeys: ["slack.app_mention"], filters: [],
+    };
+  }
+
+  function mentionFrom(user: string): NormalizedEvent {
+    return slackMessage({ payload: { type: "message", channel: "C001", user, text: "<@U-BOT> status?" } });
+  }
+
+  it("covers a team mention from a linked member", async () => {
+    expect(await appMentionCoveredBy(tdb.appDb, [sub("team", "team-x")], mentionFrom("U001"), [])).toBe(true);
+  });
+
+  it("does not cover a team mention from an unlinked sender, so the waiter receives it", async () => {
+    expect(await appMentionCoveredBy(tdb.appDb, [sub("team", "team-x")], mentionFrom("U002"), [])).toBe(false);
+  });
+
+  it("covers an unlinked sender's mention under a personal rule, which has no sender gate", async () => {
+    // A personal mention rule must name its user filter (mention-scope rule).
+    const personal = { ...sub("user", "u-001"), filters: [{ field: "user", op: "eq", value: "U002" }] };
+    expect(await appMentionCoveredBy(tdb.appDb, [personal], mentionFrom("U002"), [slackPlugin])).toBe(true);
+  });
+
+  it("does not cover a mention under a disabled rule", async () => {
+    expect(await appMentionCoveredBy(tdb.appDb, [{ ...sub("team", "team-x"), enabled: false }], mentionFrom("U001"), [])).toBe(false);
   });
 });

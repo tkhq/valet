@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, threadReadAccess, threadVisibility } from "./thread-access.js";
+import { cachedThreadVisibility, runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -274,4 +274,111 @@ it("denies unresolved source pairs instead of treating them as shared", async ()
   expect(await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, sources)).toEqual(new Set(["source:public"]));
   await db.execute(sql`DELETE FROM engine_threads WHERE session_id='source'`);
   expect(await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, sources)).toEqual(new Set());
+});
+
+/**
+ * Rule threads (`sub:`, `subject:`, `schedule:`) carry no channel in their
+ * key. A delivery records its Slack channel on the thread
+ * (`metadata.slackChannels`), and the read gate follows that content.
+ */
+it("gates a team rule thread by the private channel content it holds", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CRULEPRIV: ["UMEMBER"], CRULEOTHER: ["UOTHER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Rule threads", creatorUserId: "local-user" });
+  // A team rule with the `own` policy delivers into an execution keyed `sub:<rule>`.
+  const execution = await ensureAssistantExecution(p, { type: "team", id: t.id }, { orgId: "local-org", actorUserId: "local-user" }, "sub:rule-1");
+  const thread = await execution.session.createThread("sub:rule-1");
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CRULEPRIV");
+  const session = { ownerType: "team", id: execution.sessionId };
+  const sees = (userId: string) => threadVisibility(p, session, { orgId: "local-org", userId })(threadRef(thread));
+  expect(await sees("member")).toBe(true);
+  expect(await sees("outsider")).toBe(false);
+  // A list of threads applies the same gate from the store.
+  const listed = (userId: string) => visibleThreadIds(p, { ownerType: "team" }, { orgId: "local-org", userId }, [{ sessionId: execution.sessionId, threadId: thread.id }]);
+  expect([...await listed("member")]).toEqual([`${execution.sessionId}:${thread.id}`]);
+  expect([...await listed("outsider")]).toEqual([]);
+  // Content from two private channels needs membership in both.
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CRULEOTHER");
+  expect(await sees("member")).toBe(false);
+  // A team web thread may not read it, so the agent cannot repeat it there.
+  const canRead = threadReadAccess(p);
+  expect(await canRead({ owner: team, orgId: "local-org", reader: ref("web:default"), target: { id: thread.id, key: "sub:rule-1" } })).toBe(false);
+  // Content every member sees leaves it out.
+  await p.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CRULEPUB", isPrivate: false, checkedAt: Date.now() }).onConflictDoNothing();
+  const shared = await p.db.execute(sql`SELECT ${sharedWithWholeTeamSql("local-org", sql`'sub:rule-1'::text`,
+    threadSlackChannelsSql(sql`${execution.sessionId}`, sql`${thread.id}`))} AS shared`) as { rows: Array<{ shared: boolean }> };
+  expect(shared.rows[0]?.shared).toBe(false);
+});
+
+it("gates a Slack subject thread by its channel and leaves a thread without Slack content open", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CSUBJPRIV: ["UMEMBER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const sees = (userId: string, thread: string | { key: string; metadata?: Record<string, unknown> }) =>
+    threadVisibility(p, { ownerType: "team" }, { orgId: "local-org", userId })(thread);
+  expect(await sees("member", "subject:slack:T001/CSUBJPRIV")).toBe(true);
+  expect(await sees("outsider", "subject:slack:T001/CSUBJPRIV")).toBe(false);
+  // A rule thread with no Slack content is open to the team.
+  expect(await sees("outsider", { key: "sub:rule-2", metadata: {} })).toBe(true);
+  expect(await sees("outsider", "schedule:sched-1")).toBe(true);
+  expect(await sees("outsider", "subject:github:acme/api#12")).toBe(true);
+  // The shared-content SQL reads the subject key's channel too.
+  await p.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CSUBJPUB", isPrivate: false, checkedAt: Date.now() });
+  const shared = async (key: string) => {
+    const result = await p.db.execute(sql`SELECT ${sharedWithWholeTeamSql("local-org", sql`${key}::text`)} AS shared`) as { rows: Array<{ shared: boolean }> };
+    return result.rows[0]?.shared;
+  };
+  expect(await shared("subject:slack:T001/CSUBJPUB")).toBe(true);
+  expect(await shared("subject:slack:T001/CSUBJPRIV")).toBe(false);
+});
+
+it("stops showing a live thread's frames once a delivery records a private channel on it", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CLIVEPRIV: ["UMEMBER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Live stream", creatorUserId: "local-user" });
+  const execution = await ensureAssistantExecution(p, { type: "team", id: t.id }, { orgId: "local-org", actorUserId: "local-user" }, "sub:rule-live");
+  const thread = await execution.session.createThread("sub:rule-live");
+  const visible = threadVisibility(p, { ownerType: "team", id: execution.sessionId }, { orgId: "local-org", userId: "outsider" });
+  // The socket's frame check, with a TTL far longer than the test.
+  const shown = cachedThreadVisibility(visible, (id) => id === thread.id ? threadRef(thread) : undefined,
+    async () => undefined, 60 * 60_000);
+  expect(await shown(thread.id)).toBe(true);
+  // A private-channel delivery lands in the thread while the socket is open.
+  await thread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CLIVEPRIV");
+  expect(await shown(thread.id)).toBe(false);
+});
+
+it("stops showing a child's frames once its parent thread records a private channel, before the TTL", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await connectSlack(api, { CPARENTPRIV: ["UMEMBER"] });
+  await linkIdentity(p.db, { provider: "slack", externalId: "UOUT", userId: "outsider" });
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Inherited", creatorUserId: "local-user" });
+  // A team execution is a child of its governing thread in the assistant's root session.
+  const execution = await ensureAssistantExecution(p, { type: "team", id: t.id }, { orgId: "local-org", actorUserId: "local-user" }, "sub:rule-parent");
+  const parentLink = await p.db.execute(sql`SELECT parent_session_id, parent_thread_id FROM engine_sessions WHERE id = ${execution.sessionId}`) as {
+    rows: Array<{ parent_session_id: string | null; parent_thread_id: string | null }>;
+  };
+  const parent = parentLink.rows[0];
+  if (!parent?.parent_session_id || !parent.parent_thread_id) throw new Error("expected the execution to link its governing thread");
+  const parentThread = p.engineHost.liveSession(parent.parent_session_id)?.threadById(parent.parent_thread_id);
+  if (!parentThread) throw new Error("expected the governing thread to be live");
+  const child = await execution.session.createThread("sub:rule-parent");
+  const liveThread = (sessionId: string, threadId: string) => {
+    const live = p.engineHost.liveSession(sessionId)?.threadById(threadId);
+    return live ? threadRef(live) : undefined;
+  };
+  const visible = threadVisibility(p, { ownerType: "team", id: execution.sessionId }, { orgId: "local-org", userId: "outsider" }, { liveThread });
+  const shown = cachedThreadVisibility(visible, (id) => id === child.id ? threadRef(child) : undefined, async () => undefined, 60 * 60_000);
+  expect(await shown(child.id)).toBe(true);
+  // A private-channel delivery lands in the parent while the child's socket is open.
+  await parentThread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CPARENTPRIV");
+  expect(await shown(child.id)).toBe(false);
 });

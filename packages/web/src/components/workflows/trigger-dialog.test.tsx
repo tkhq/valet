@@ -56,6 +56,13 @@ vi.mock("~/api/workflows", () => ({
   useWorkflowTriggers: () => ({ data: { triggers: [] }, isLoading: false, error: null }),
 }));
 
+// The thread picker reads the network; emit one fixed pick instead.
+vi.mock("~/components/presence/thread-picker", () => ({
+  ThreadPicker: ({ onPick }: { onPick: (p: { mode: "existing"; sessionId: string; threadId: string }, title: string) => void }) => (
+    <button type="button" onClick={() => onPick({ mode: "existing", sessionId: "s1", threadId: "t1" }, "Deploys")}>Pick Deploys</button>
+  ),
+}));
+
 import { TriggerDialog } from "./trigger-dialog";
 
 describe("TriggerDialog", () => {
@@ -74,7 +81,50 @@ describe("TriggerDialog", () => {
         cron: "0 9 * * *",
         timezone: expect.any(String),
         target: { kind: "orchestrator", prompt: "summarize" },
+        thread: { mode: "own" },
       }),
+    );
+  });
+
+  it("offers a routine's Runs in options for an assistant schedule and posts the pick", async () => {
+    createScheduleMutateAsync.mockClear().mockResolvedValue({});
+    render(<TriggerDialog open onOpenChange={() => {}} />);
+    fireEvent.click(screen.getByText(/^Schedule$/));
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "digest" } });
+    fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
+    expect(screen.queryByRole("group", { name: "Runs in" })).toBeNull();
+    fireEvent.click(screen.getByLabelText(/^assistant$/i));
+    expect(screen.getByRole<HTMLInputElement>("radio", { name: "This routine's thread" }).checked).toBe(true);
+    expect(screen.getByRole("radio", { name: "A new thread each time" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "An existing thread…" })).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: /One thread per/ })).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "An existing thread…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick Deploys" }));
+    fireEvent.change(screen.getByLabelText(/prompt/i), { target: { value: "summarize" } });
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() =>
+      expect(createScheduleMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+        thread: { mode: "existing", sessionId: "s1", threadId: "t1" },
+      })),
+    );
+  });
+
+  it("sends a changed policy on an assistant schedule edit, and nothing when unchanged", async () => {
+    updateScheduleMutateAsync.mockClear().mockResolvedValue({});
+    const item: WorkflowTriggerItem = {
+      kind: "schedule", id: "sch_a", name: "Digest", enabled: true,
+      detail: { cron: "0 9 * * *", timezone: "UTC", targetKind: "orchestrator", prompt: "summarize", nextFireAt: 1, lastFiredAt: null },
+    };
+    const { unmount } = render(<TriggerDialog open onOpenChange={() => {}} editing={item} />);
+    fireEvent.click(screen.getByText(/^Save$/));
+    await waitFor(() => expect(updateScheduleMutateAsync).toHaveBeenCalledWith({ id: "sch_a", body: {} }));
+    unmount();
+    updateScheduleMutateAsync.mockClear();
+    render(<TriggerDialog open onOpenChange={() => {}} editing={item} />);
+    fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
+    fireEvent.click(screen.getByText(/^Save$/));
+    await waitFor(() =>
+      expect(updateScheduleMutateAsync).toHaveBeenCalledWith({ id: "sch_a", body: { thread: { mode: "new" } } }),
     );
   });
 
