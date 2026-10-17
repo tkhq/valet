@@ -876,9 +876,9 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await p.db.insert(teamMembers).values({ teamId: TEAM, userId: USER, role: "admin" });
     const subscription = (id: string, eventKeys: string[], filters: SubscriptionFilter[], follow = false): typeof eventSubscriptions.$inferInsert => ({
       id, orgId: ORG, ownerType: "team", ownerId: TEAM, createdBy: USER, name: id, eventKeys, filters,
-      // A follow rule opens one thread per mention (policy `new`), as in
-      // spec 2026-10-16 Scenario T10.
-      target: { kind: "orchestrator", ...(follow ? { follow: true, thread: { mode: "new" } } : {}) }, enabled: true, createdAt: now, updatedAt: now,
+      // No thread policy: a follow rule defaults to a thread per mention
+      // (`new`), any other rule to its own thread (spec 2026-10-16, Part A step 3).
+      target: { kind: "orchestrator", ...(follow ? { follow: true } : {}) }, enabled: true, createdAt: now, updatedAt: now,
     });
     await p.db.insert(eventSubscriptions).values([
       subscription("sub-incidents", ["slack.channel_created"], [{ field: "channel_name", op: "prefix", value: "inc-" }]),
@@ -1021,7 +1021,7 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     expect(await queuedSignals(u, "slack.app_mention")).toHaveLength(1);
 
     // M6: the agent cancels the watching waiter. A later mention opens its own
-    // thread, keyed by its delivery (policy `new`), and the dispatcher binds a
+    // thread, keyed by its delivery (the follow rule's default `new` policy), and the dispatcher binds a
     // follow to that thread.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U002", "incident closed, stop watching"));

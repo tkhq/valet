@@ -32,7 +32,7 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
+import { EventDispatcher, recordSkippedDelivery, subscriptionThreadPolicy, type AssistantDeliverFn } from "./dispatcher.js";
 import { PinUnavailableError } from "./assistant-delivery.js";
 
 const recordDeliveryDestination = vi.hoisted(() => vi.fn());
@@ -822,7 +822,7 @@ describe("EventDispatcher", () => {
         waiter("other", "sess-2", { createdAt: 400 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
 
@@ -874,7 +874,7 @@ describe("EventDispatcher", () => {
         waiter("archived", "sess-archived", { createdAt: 100 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
@@ -929,7 +929,7 @@ describe("EventDispatcher", () => {
         waiter("primary", "sess-primary", { createdAt: 150, primarySubject: "slack:T001/C1/9.9" }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
 
@@ -952,15 +952,17 @@ describe("EventDispatcher", () => {
         waiter("archived", "sess-archived", { createdAt: 200 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
 
     it("binds the follow to the thread the mention landed in, and the binding wins the next mention (Part B step 5)", async () => {
       await seedMentionMember("team-x");
-      const { deliver } = await dispatchMention([]);
-      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key" });
+      const { deliver, deliveryId } = await dispatchMention([]);
+      // A follow rule with no policy opens a thread per mention (Part A step 3).
+      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+      expect(deliver.mock.calls[0]?.[0].destination).toHaveProperty("key", expect.stringMatching(new RegExp(`:${deliveryId}$`)));
       // The thread records the content's channel for its read gate.
       expect(deliver.mock.calls[0]?.[0].slackChannel).toBe("C1");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
@@ -987,7 +989,7 @@ describe("EventDispatcher", () => {
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
-      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
     });
   });
 
@@ -1371,4 +1373,16 @@ describe("EventDispatcher — team-owned subscriptions", () => {
     expect(args.actorUserId).toBe("author-user");
   });
 
+});
+
+describe("subscriptionThreadPolicy", () => {
+  it("defaults a follow rule to a thread per conversation and any other rule to its own thread", () => {
+    expect(subscriptionThreadPolicy({ follow: true })).toEqual({ mode: "new" });
+    expect(subscriptionThreadPolicy({ follow: true, thread: null })).toEqual({ mode: "new" });
+    expect(subscriptionThreadPolicy({ follow: false })).toEqual({ mode: "own" });
+    expect(subscriptionThreadPolicy({})).toEqual({ mode: "own" });
+    // A stored policy wins over the default.
+    expect(subscriptionThreadPolicy({ follow: true, thread: { mode: "own" } })).toEqual({ mode: "own" });
+    expect(subscriptionThreadPolicy({ thread: { mode: "subject" } })).toEqual({ mode: "subject" });
+  });
 });
