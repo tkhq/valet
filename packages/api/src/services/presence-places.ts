@@ -155,21 +155,37 @@ export function listenerPlaces(rule: { eventKeys: unknown; filters: unknown }, s
   });
 }
 
-/** A place's label: the concrete name, or the reach of a parent row. `names` maps Slack channel ids to names. */
+/** A place's concrete name. `names` maps Slack channel ids to names. */
 export function placeLabel(place: string, names: ReadonlyMap<string, string>): string {
-  if (place === GITHUB_ROOT) return "Everywhere in GitHub";
-  if (place === LINEAR_ROOT) return "Everywhere in Linear";
+  if (place === GITHUB_ROOT) return "GitHub";
+  if (place === LINEAR_ROOT) return "Linear";
   const slack = SLACK_RE.exec(place);
   if (slack) {
-    if (!slack[2]) return "Everywhere in Slack";
+    if (!slack[2]) return "Slack";
     const name = names.get(slack[2]);
     return name ? `#${name.replace(/^#/, "")}` : slack[2];
   }
   const github = GITHUB_RE.exec(place);
-  if (github) return github[3] ? `${github[1]}/${github[2]}#${github[3]}` : `Across ${github[1]}/${github[2]}`;
+  if (github) return github[3] ? `${github[1]}/${github[2]}#${github[3]}` : `${github[1]}/${github[2]}`;
   const team = LINEAR_TEAM_RE.exec(place);
-  if (team) return `Across ${team[1]}`;
+  if (team) return team[1]!;
   return place.startsWith("linear:") ? place.slice("linear:".length) : place;
+}
+
+/**
+ * The reach of a parent row, the place a listener lists when its filters
+ * name no single place (spec Part B step 2), or undefined for a row that is
+ * no parent: a channel, a pull request or issue, a Linear issue.
+ */
+export function placeScopeLabel(place: string): string | undefined {
+  if (place === GITHUB_ROOT) return "Everywhere in GitHub";
+  if (place === LINEAR_ROOT) return "Everywhere in Linear";
+  const slack = SLACK_RE.exec(place);
+  if (slack) return slack[2] ? undefined : "Everywhere in Slack";
+  const github = GITHUB_RE.exec(place);
+  if (github) return github[3] ? undefined : `Across ${github[1]}/${github[2]}`;
+  const team = LINEAR_TEAM_RE.exec(place);
+  return team ? `Across ${team[1]}` : undefined;
 }
 
 /** The Slack channel id of a channel place, or null. */
@@ -359,11 +375,30 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (channelId && !(await access.canSee(`slack:${channelId}`))) places.delete(place);
   }
 
+  // Every parent a row names is a row. A parent that only its children name
+  // has no counts of its own and takes its children's newest activity.
+  const synthesized = new Set<string>();
+  for (let pending = [...places.values()]; pending.length > 0;) {
+    const next: PlaceState[] = [];
+    for (const child of pending) {
+      const parent = child.wire.parent;
+      if (parent === null || (places.has(parent) && !synthesized.has(parent))) continue;
+      const created = !places.has(parent);
+      const state = placeFor(parent);
+      if (!state) continue;
+      if (created) { synthesized.add(parent); next.push(state); }
+      if (child.wire.lastActivityAt !== null) touch(state, child.wire.lastActivityAt);
+    }
+    pending = next;
+  }
+
   const channelIds = [...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null);
   const resolved = channelIds.length > 0 ? await access.names(channelIds).catch(() => new Map<string, string>()) : new Map<string, string>();
   for (const [id, name] of resolved) channelNames.set(id, name);
   for (const state of places.values()) {
     state.wire.label = placeLabel(state.wire.subject, channelNames);
+    const scopeLabel = placeScopeLabel(state.wire.subject);
+    if (scopeLabel !== undefined) state.wire.scopeLabel = scopeLabel;
     state.wire.listenerCount = state.listeners.length;
     state.wire.activeThreadCount = state.active.size;
   }

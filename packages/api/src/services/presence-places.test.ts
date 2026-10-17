@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { listenerPlaces, parentPlace, placeCovers, placeLabel, placeOfSubject } from "./presence-places.js";
+import { listenerPlaces, parentPlace, placeCovers, placeLabel, placeOfSubject, placeScopeLabel } from "./presence-places.js";
 
 describe("placeOfSubject", () => {
   it("maps a subject to the place it belongs to", () => {
@@ -79,16 +79,29 @@ describe("listenerPlaces", () => {
 });
 
 describe("placeLabel", () => {
-  it("names the concrete place, and the parent rows by their reach", () => {
+  it("names the concrete place", () => {
     expect(placeLabel("slack:T1/C900", new Map([["C900", "incidents"]]))).toBe("#incidents");
     expect(placeLabel("slack:T1/C900", new Map())).toBe("C900");
-    expect(placeLabel("slack:T1", new Map())).toBe("Everywhere in Slack");
+    expect(placeLabel("slack:T1", new Map())).toBe("Slack");
     expect(placeLabel("github:acme/api#12", new Map())).toBe("acme/api#12");
-    expect(placeLabel("github:acme/api", new Map())).toBe("Across acme/api");
-    expect(placeLabel("github:*", new Map())).toBe("Everywhere in GitHub");
+    expect(placeLabel("github:acme/api", new Map())).toBe("acme/api");
+    expect(placeLabel("github:*", new Map())).toBe("GitHub");
     expect(placeLabel("linear:ENG-42", new Map())).toBe("ENG-42");
-    expect(placeLabel("linear:team/ENG", new Map())).toBe("Across ENG");
-    expect(placeLabel("linear:*", new Map())).toBe("Everywhere in Linear");
+    expect(placeLabel("linear:team/ENG", new Map())).toBe("ENG");
+    expect(placeLabel("linear:*", new Map())).toBe("Linear");
+  });
+});
+
+describe("placeScopeLabel", () => {
+  it("names a parent row's reach, and nothing for any other row", () => {
+    expect(placeScopeLabel("slack:T1")).toBe("Everywhere in Slack");
+    expect(placeScopeLabel("github:acme/api")).toBe("Across acme/api");
+    expect(placeScopeLabel("github:*")).toBe("Everywhere in GitHub");
+    expect(placeScopeLabel("linear:team/ENG")).toBe("Across ENG");
+    expect(placeScopeLabel("linear:*")).toBe("Everywhere in Linear");
+    expect(placeScopeLabel("slack:T1/C900")).toBeUndefined();
+    expect(placeScopeLabel("github:acme/api#12")).toBeUndefined();
+    expect(placeScopeLabel("linear:ENG-42")).toBeUndefined();
   });
 });
 

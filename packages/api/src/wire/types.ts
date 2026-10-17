@@ -1105,10 +1105,13 @@ export type PresencePlaceService = "slack" | "github" | "linear";
  */
 export interface PresencePlaceWire {
   subject: string;
-  /** `#incidents`, `acme/api#12`, `ENG-42`; a parent row reads `Across acme/api` or `Everywhere in Slack`. */
+  /** The concrete name: `#incidents`, `acme/api`, `acme/api#12`, `ENG`, `ENG-42`, `Slack`, `GitHub`, `Linear`. */
   label: string;
+  /** Set only on a parent row: the reach of the listeners that list there, such
+   * as `Across acme/api`, `Across ENG`, or `Everywhere in Slack`. */
+  scopeLabel?: string;
   service: PresencePlaceService;
-  /** The parent place's subject, or null for a top-level row. */
+  /** The parent place's subject, or null for a top-level row. Every parent a row names is also a row. */
   parent: string | null;
   /** Listeners placed at this row. A listener that names no single place counts at its parent only. */
   listenerCount: number;

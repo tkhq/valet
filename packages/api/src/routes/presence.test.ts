@@ -124,17 +124,38 @@ it("lists the workspace's places by service, with parents, counts, and the 30-da
   expect([...map.keys()].sort()).toEqual([
     "github:acme/api", "github:acme/api#12", "linear:ENG-42", "linear:team/ENG", "slack:T1", "slack:T1/C900", "slack:T1/C902",
   ]);
+  expect(map.get("slack:T1/C900")?.scopeLabel).toBeUndefined();
   expect(map.get("slack:T1/C900")).toMatchObject({ label: "#incidents", service: "slack", parent: "slack:T1", listenerCount: 1, activeThreadCount: 1 });
-  expect(map.get("slack:T1")).toMatchObject({ label: "Everywhere in Slack", parent: null, listenerCount: 1, activeThreadCount: 0 });
+  expect(map.get("slack:T1")).toMatchObject({ label: "Slack", scopeLabel: "Everywhere in Slack", parent: null, listenerCount: 1, activeThreadCount: 0 });
   expect(map.get("slack:T1/C902")).toMatchObject({ parent: "slack:T1", listenerCount: 0, lastActivityAt: 5_000 });
-  expect(map.get("github:acme/api")).toMatchObject({ label: "Across acme/api", parent: null, listenerCount: 1 });
+  expect(map.get("github:acme/api")).toMatchObject({ label: "acme/api", scopeLabel: "Across acme/api", parent: null, listenerCount: 1 });
   expect(map.get("github:acme/api#12")).toMatchObject({ label: "acme/api#12", parent: "github:acme/api", listenerCount: 0 });
-  expect(map.get("linear:team/ENG")).toMatchObject({ label: "Across ENG", listenerCount: 1 });
+  expect(map.get("linear:team/ENG")).toMatchObject({ label: "ENG", scopeLabel: "Across ENG", listenerCount: 1 });
   expect(map.get("linear:ENG-42")).toMatchObject({ label: "ENG-42", parent: "linear:team/ENG", lastActivityAt: now - DAY });
   // The 31-day-old event and the team's rule add nothing to the personal workspace.
   expect(map.has("linear:ENG-7")).toBe(false);
   expect(map.has("slack:T1/C777")).toBe(false);
   expect(subjectThread.id).toBeTruthy();
+});
+
+it("lists the parent of a lone child place, with no counts and the child's activity", async () => {
+  api = await boot();
+  const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  const lone = await session.createThread("subject:github:acme/api#12");
+  const rows = await places(api, "user");
+  expect(rows).toHaveLength(2);
+  const map = bySubject(rows);
+  expect(map.get("github:acme/api#12")).toMatchObject({ parent: "github:acme/api", label: "acme/api#12" });
+  const child = map.get("github:acme/api#12")!;
+  expect(map.get("github:acme/api")).toEqual({
+    subject: "github:acme/api", label: "acme/api", scopeLabel: "Across acme/api", service: "github", parent: null,
+    listenerCount: 0, activeThreadCount: 0, lastActivityAt: child.lastActivityAt,
+  });
+  expect(child.lastActivityAt).not.toBeNull();
+  expect(lone.id).toBeTruthy();
+  // The synthesized parent opens as a place page with its child's thread.
+  const detail = await (await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("github:acme/api")}?scope=user`)).json() as PresencePlaceDetailResponse;
+  expect(detail.threads.subject.map((t) => t.threadId)).toEqual([lone.id]);
 });
 
 it("scopes a team workspace to the team's rules and sessions", async () => {
@@ -149,7 +170,7 @@ it("scopes a team workspace to the team's rules and sessions", async () => {
   await personal.session.createThread("subject:github:acme/web#1");
 
   const rows = await places(api, team.id);
-  expect(rows.map((row) => row.subject).sort()).toEqual(["slack:T1/C777", "slack:T1/C778"]);
+  expect(rows.map((row) => row.subject).sort()).toEqual(["slack:T1", "slack:T1/C777", "slack:T1/C778"]);
   expect((await fetch(`${api.baseUrl}/api/presence/places?scope=no-such-team`)).status).toBe(404);
   expect((await fetch(`${api.baseUrl}/api/presence/places`)).status).toBe(400);
 });
@@ -159,7 +180,7 @@ it("hides a private channel's place from a viewer outside the channel", async ()
   await connectSlack(api, { CSECRET: ["USOMEONE"] });
   await rule(api, { id: "r-secret", eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: "CSECRET" }] });
   await rule(api, { id: "r-open", eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: "COPEN" }] });
-  expect((await places(api, "user")).map((row) => row.subject)).toEqual(["slack:T1/COPEN"]);
+  expect((await places(api, "user")).map((row) => row.subject).sort()).toEqual(["slack:T1", "slack:T1/COPEN"]);
 });
 
 it("shows one place with its listeners, threads of its child places, and recent activity", async () => {
@@ -183,7 +204,7 @@ it("shows one place with its listeners, threads of its child places, and recent 
   const res = await fetch(`${api.baseUrl}/api/presence/places/${subject}?scope=user`);
   expect(res.status).toBe(200);
   const detail = await res.json() as PresencePlaceDetailResponse;
-  expect(detail.place).toMatchObject({ subject: "github:acme/api", label: "Across acme/api", listenerCount: 1 });
+  expect(detail.place).toMatchObject({ subject: "github:acme/api", label: "acme/api", scopeLabel: "Across acme/api", listenerCount: 1 });
   expect(detail.listeners.map((l) => l.id)).toEqual(["r1"]);
   expect(detail.threads.subject.map((t) => t.threadId).sort()).toEqual([pr12.id, pr13.id].sort());
   expect(detail.threads.subject.map((t) => t.threadId)).not.toContain(other.id);
