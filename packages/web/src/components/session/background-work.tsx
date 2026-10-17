@@ -120,7 +120,7 @@ const KIND_NOUN: Record<BackgroundItem["kind"], [singular: string, plural: strin
   process: ["process", "processes"],
   watch: ["watch", "watches"],
   timer: ["timer", "timers"],
-  event: ["event waiter", "event waiters"],
+  event: ["wait", "waits"],
   hold: ["hold", "holds"],
 };
 
