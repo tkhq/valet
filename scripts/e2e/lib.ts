@@ -119,6 +119,9 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/event-wakeups.test.ts",
   "src/integration/event-claims.test.ts",
   "src/integration/delivery-threads.test.ts",
+  // The Presence hub acceptance's data half runs keyless: event ingest, the
+  // dispatcher, and the scheduler over PGlite, with a fetch stub for Slack.
+  "src/integration/presence-hub.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",

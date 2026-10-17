@@ -333,7 +333,12 @@ it("answers a private channel's place page with the same 404 as an absent place"
   const absent = await detailOf(api, "slack:T1/CNOWHERE");
   expect(hidden.status).toBe(404);
   expect(absent.status).toBe(404);
-  expect(await hidden.json()).toEqual(await absent.json());
+  const absentBody: unknown = await absent.json();
+  expect(await hidden.json()).toEqual(absentBody);
+  // A channel-only key resolves to the same hidden channel and answers the same 404.
+  const channelOnly = await detailOf(api, "slack:CSECRET");
+  expect(channelOnly.status).toBe(404);
+  expect(await channelOnly.json()).toEqual(absentBody);
   // A member sees the same page.
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "USOMEONE", userId: USER });
   expect((await detailOf(api, "slack:T1/CSECRET")).status).toBe(200);
