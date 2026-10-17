@@ -429,6 +429,12 @@ export interface ToolApprovalGateContext {
 
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
  * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
+/** An approval to list a service's tools through a teammate's account, not to
+ * run an action. Refusing it only hides those tools. */
+export function isToolDiscoveryApproval(context: Record<string, unknown> | undefined): boolean {
+  return toolApprovalGateContext(context)?.toolId.endsWith(`.${DISCOVERY_ACTION_NAME}`) === true;
+}
+
 export function toolApprovalGateContext(
   context: Record<string, unknown> | undefined,
 ): ToolApprovalGateContext | null {

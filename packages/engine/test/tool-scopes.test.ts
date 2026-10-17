@@ -172,6 +172,26 @@ describe("unattended workflow tasks", () => {
       .toEqual([{ status: "resolved", resolvedBy: UNATTENDED_WORKFLOW_DECISION, type: "approval" }]);
   });
 
+  it("refuses tool discovery through a teammate's account without failing the step", async () => {
+    const faux = registerFauxProvider({ provider: "unattended-discovery" });
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      let refusal: DecisionResolution | undefined;
+      const tools: ToolDef[] = [{ name: "list_granola", description: "Lists tools", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        refusal = await ctx.requestDecision({ type: "approval", title: "Let a teammate use your Granola account?", resumeKey: "granola.__valet_discovery__:{}",
+          context: { tool_id: "granola.__valet_discovery__" } });
+        return { text: "listed" };
+      } }];
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose: "workflow", model: faux.getModel(), builtinTools: [], tools });
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("list_granola", {})], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+      const receipt = await session.prompt("roll up", {});
+      await session.thread().awaitResult(receipt.queueItemId);
+      expect(refusal).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
+      expect(await store.listDecisionGates(session.id)).toEqual([]);
+    } finally { faux.unregister(); }
+  });
+
   it("leaves a person's own prompt in an assistant thread attended", async () => {
     const { seen } = await decide("attended-orchestrator", "orchestrator", { ask: false });
     expect(seen.unattended).toBeUndefined();

@@ -13,7 +13,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
-import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
+import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
@@ -5490,7 +5490,8 @@ export class Thread {
           // A refused approval means an action did not run. Record it as an
           // already-resolved gate, never pending, so the workflow can fail the
           // step after a restart too (`workflows/engine-deps.ts#awaitResult`).
-          if (req.type === "approval") await this.recordUnattendedRefusal(req, gateCtx, refusal);
+          // A refused tool discovery only hides that service's tools.
+          if (req.type === "approval" && !isToolDiscoveryApproval(req.context)) await this.recordUnattendedRefusal(req, gateCtx, refusal);
           return refusal;
         }
         // One gate cycle at a time per thread (see gateCycleTail): the next
