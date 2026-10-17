@@ -12,6 +12,11 @@ import { redirect } from "@tanstack/react-router";
  * Revision 2 also moved one line of presence from `/presence/listeners/$id`
  * to `/presence/rules/$id`.
  *
+ * `/workflows` is a live page and a legacy route at once. Before revision 1,
+ * its `?tab=scheduled` and `?tab=triggers` opened schedules and `?tab=runs`
+ * opened runs. Those URLs redirect; every other `/workflows` URL matches no
+ * row and serves the list.
+ *
  * A row keeps every search param it does not consume, so `workspace`,
  * `review`, `q`, `gate`, and the rest arrive at the new URL unchanged.
  *
@@ -21,6 +26,7 @@ import { redirect } from "@tanstack/react-router";
 
 /** A route the Presence hub replaced. */
 export type LegacyRoute =
+  | "/workflows"
   | "/events"
   | "/events/$eventId"
   | "/presence/workflows"
@@ -56,7 +62,9 @@ export interface PresenceRedirectRow {
   from: LegacyRoute;
   /** Which URLs of `from` this row takes, in words, for test names. */
   when: string;
-  /** Absent means every URL of `from` that an earlier row did not take. */
+  /** Absent means every URL of `from` that an earlier row did not take. A
+   * `from` whose rows all have `matches` serves its own page for a URL that
+   * no row takes. */
   matches?: (search: Search) => boolean;
   to: PresencePath;
   mapParams: (params: Params, search: Search) => Params;
@@ -105,7 +113,37 @@ function activitySearch(search: Search): Search {
 
 const dropTab = (search: Search): Search => without(search, "tab");
 
+/** The pre-revision-1 Workflows tabs that listed schedules. */
+const SCHEDULE_TABS = ["scheduled", "triggers"] as const;
+
 export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
+  {
+    from: "/workflows",
+    when: "a Scheduled or Triggers review link",
+    matches: (search) => tabIs(...SCHEDULE_TABS)(search) && text(search, "review") !== undefined,
+    to: "/presence/routines",
+    mapParams: noParams,
+    mapSearch: (search) => ({ ...without(search, "tab", "review"), routine: text(search, "review") ?? "" }),
+    example: { params: {}, search: { tab: "triggers", review: "sched-1" } },
+  },
+  {
+    from: "/workflows",
+    when: "the Scheduled or Triggers tab",
+    matches: tabIs(...SCHEDULE_TABS),
+    to: "/presence/routines",
+    mapParams: noParams,
+    mapSearch: (search) => without(search, "tab", "review"),
+    example: { params: {}, search: { tab: "scheduled" } },
+  },
+  {
+    from: "/workflows",
+    when: "the Runs tab",
+    matches: tabIs("runs"),
+    to: "/workflows/runs",
+    mapParams: noParams,
+    mapSearch: dropTab,
+    example: { params: {}, search: { tab: "runs" } },
+  },
   {
     from: "/events",
     when: "the Log tab or a legacy Log tab value",
@@ -205,22 +243,27 @@ function readSearch(raw: unknown): Search {
   return Object.fromEntries(Object.entries(raw));
 }
 
-/** Where an old URL goes now: the first row of `from` that takes it. */
-export function presenceRedirectFor(from: LegacyRoute, params: Params, rawSearch: unknown): PresenceTarget {
+/**
+ * Where an old URL goes now: the first row of `from` that takes it, or
+ * `undefined` when no row takes it. Only a `from` whose rows all have
+ * `matches` (`/workflows`) returns `undefined`; that URL serves its page.
+ */
+export function presenceRedirectFor(from: LegacyRoute, params: Params, rawSearch: unknown): PresenceTarget | undefined {
   const search = readSearch(rawSearch);
   const row = PRESENCE_REDIRECTS.find((candidate) => candidate.from === from && (candidate.matches?.(search) ?? true));
-  // Each `from` ends with a row that has no `matches`, so a row is always found.
-  if (!row) throw new Error(`No Presence redirect for ${from}.`);
+  if (!row) return undefined;
   return { to: row.to, params: row.mapParams(params, search), search: row.mapSearch(search) };
 }
 
-/** A `beforeLoad` for an old route: it throws the redirect to the new URL.
- * It reads `location.search`, the search as the URL carried it, because a
- * route's `validateSearch` drops the keys it does not know. Exported
- * standalone so a test can call it without a router. */
+/** A `beforeLoad` for an old route: it throws the redirect to the new URL,
+ * and returns without a redirect when no row takes the URL. It reads
+ * `location.search`, the search as the URL carried it, because a route's
+ * `validateSearch` drops the keys it does not know. Exported standalone so a
+ * test can call it without a router. */
 export function redirectToPresence(from: LegacyRoute) {
-  return ({ params, location }: { params: Params; location: { search: unknown } }): never => {
+  return ({ params, location }: { params: Params; location: { search: unknown } }): void => {
     const target = presenceRedirectFor(from, params, location.search);
+    if (target === undefined) return;
     throw redirect({ to: target.to, params: target.params, search: target.search, replace: true });
   };
 }

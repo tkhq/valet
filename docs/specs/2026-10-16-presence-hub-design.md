@@ -505,7 +505,16 @@ Revision 2 deviations:
   has no label. The wizard preview reads the draft through the same
   renderer, so the preview equals the stored sentence.
 
+- **Old Workflows tabs redirect from the live page (Part A step 4).**
+  `/workflows` serves the Workflows list and is also a legacy route.
+  `/workflows?tab=scheduled` and `?tab=triggers` redirect to
+  `/presence/routines`. With `&review=<id>`, they redirect to
+  `/presence/routines?routine=<id>`. `/workflows?tab=runs` redirects to
+  `/workflows/runs`. Each `/workflows` row has a match condition, so a URL
+  that no row takes serves the list.
+
 Revision 1 deviations that revision 2 retires: the All listeners view, the
-place header's reach label, the empty service-wide row rule, the routine
-page as a tab child, and the `/workflows?tab=runs` redirect row (the
-Workflows section serves `/workflows` again).
+place header's reach label, the empty service-wide row rule, and the
+routine page as a tab child. The `/workflows?tab=runs` row now goes to
+`/workflows/runs`, because the Workflows section serves `/workflows`
+again.

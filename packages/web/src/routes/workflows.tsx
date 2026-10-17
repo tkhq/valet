@@ -8,8 +8,7 @@ import { cn } from "~/lib/cn";
  * Workflows/Runs pills) over the list, composer, and Runs view (spec Part A,
  * Part G). The editor (`/workflows/$workflowId`) and the run page
  * (`/workflows/runs/$runId`) need the full height, so they render without
- * the header; `workflowsTabFor` returns `undefined` for them, mirroring
- * `routes/presence.tsx`'s `presenceTabFor`.
+ * the header; `workflowsTabFor` returns `undefined` for them.
  */
 export const Route = createFileRoute("/workflows")({
   component: WorkflowsLayout,

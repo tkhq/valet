@@ -1,8 +1,9 @@
 /**
- * Every old Events, Automation, and channel URL redirects to its Presence URL
- * and keeps its search params (spec Part A step 4, INV-H1). One test per row
- * of the table, one per legacy Events `tab` value, and one for the thrown
- * redirect each old route's `beforeLoad` uses.
+ * Every old Events, Automation, Workflows tab, and channel URL redirects to
+ * its new URL and keeps its search params (spec Part A step 4, INV-H1). One
+ * test per row of the table, one per legacy `tab` value, one for a
+ * `/workflows` URL that no row takes, and one for the thrown redirect each
+ * old route's `beforeLoad` uses.
  */
 import { isRedirect } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
@@ -30,6 +31,7 @@ describe("presence redirect table", () => {
       "/presence/runs/$runId",
       "/presence/workflows",
       "/presence/workflows/$workflowId",
+      "/workflows",
     ]);
   });
 
@@ -76,10 +78,10 @@ describe("presence redirect table", () => {
   });
 
   it("keeps a valid Log status, drops an invalid one, and reads the old problemsQ search", () => {
-    expect(target("/events", {}, { tab: "log", status: "problems" }).search).toEqual({ status: "problems" });
-    expect(target("/events", {}, { tab: "log", status: "all" }).search).toEqual({});
-    expect(target("/events", {}, { tab: "log", problemsQ: "timeout" }).search).toEqual({ q: "timeout" });
-    expect(target("/events", {}, { tab: "log", q: "a", problemsQ: "b" }).search).toEqual({ q: "a" });
+    expect(target("/events", {}, { tab: "log", status: "problems" })?.search).toEqual({ status: "problems" });
+    expect(target("/events", {}, { tab: "log", status: "all" })?.search).toEqual({});
+    expect(target("/events", {}, { tab: "log", problemsQ: "timeout" })?.search).toEqual({ q: "timeout" });
+    expect(target("/events", {}, { tab: "log", q: "a", problemsQ: "b" })?.search).toEqual({ q: "a" });
   });
 
   it("sends one event to its Presence URL", () => {
@@ -130,6 +132,39 @@ describe("presence redirect table", () => {
     });
   });
 
+  describe("pre-revision-1 Workflows tabs", () => {
+    it.each(["scheduled", "triggers"])("tab=%s opens Routines and keeps the workspace", (tab) => {
+      expect(target("/workflows", {}, { tab, workspace: "t1" })).toEqual({
+        to: "/presence/routines",
+        params: {},
+        search: { workspace: "t1" },
+      });
+    });
+
+    it.each(["scheduled", "triggers"])("tab=%s with a review opens that routine", (tab) => {
+      expect(target("/workflows", {}, { tab, review: "sched-1", workspace: "t1" })).toEqual({
+        to: "/presence/routines",
+        params: {},
+        search: { routine: "sched-1", workspace: "t1" },
+      });
+    });
+
+    it("tab=runs opens the Runs view and keeps the workspace", () => {
+      expect(target("/workflows", {}, { tab: "runs", workspace: "t1" })).toEqual({
+        to: "/workflows/runs",
+        params: {},
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("every other /workflows URL matches no row and serves the list", () => {
+      expect(target("/workflows", {}, {})).toBeUndefined();
+      expect(target("/workflows", {}, { workspace: "t1" })).toBeUndefined();
+      expect(target("/workflows", {}, { tab: "workflows" })).toBeUndefined();
+      expect(target("/workflows", {}, { review: "sched-1" })).toBeUndefined();
+    });
+  });
+
   it("sends /channel?key= to the place page", () => {
     expect(target("/channel", {}, { key: "slack:C123", workspace: "t1" })).toEqual({
       to: "/presence/places/$subject",
@@ -155,12 +190,28 @@ describe("presence redirect table", () => {
     // Walks the table: each row resolves for a search built to select it.
     for (const row of PRESENCE_REDIRECTS) {
       const resolved = presenceRedirectFor(row.from, row.example.params, row.example.search);
-      expect(resolved.to, `${row.from} (${row.when})`).toBe(row.to);
+      expect(resolved?.to, `${row.from} (${row.when})`).toBe(row.to);
     }
   });
 });
 
 describe("redirectToPresence", () => {
+  it("returns without a redirect when no row takes the URL", () => {
+    expect(() => redirectToPresence("/workflows")({ params: {}, location: { search: { workspace: "t1" } } })).not.toThrow();
+  });
+
+  it("throws a redirect for a /workflows tab that moved", () => {
+    let thrown: unknown;
+    try {
+      redirectToPresence("/workflows")({ params: {}, location: { search: { tab: "scheduled", review: "sched-1" } } });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRedirect(thrown)).toBe(true);
+    if (!isRedirect(thrown)) return;
+    expect(thrown.options).toMatchObject({ to: "/presence/routines", search: { routine: "sched-1" }, replace: true });
+  });
+
   it("throws a replace redirect built from the table", () => {
     let thrown: unknown;
     try {

@@ -31,17 +31,18 @@ import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { WorkflowCreation } from "~/components/workflows/workflow-creation";
 import { relativeTime } from "~/lib/relative-time";
 import { useListOwner } from "~/lib/use-list-owner";
+import { redirectToPresence } from "./-presence-redirects";
 
 /** `/workflows`: the workflow list and composer, back at its own top-nav
- * entry (spec Part A, Part G step 1). `validateSearch` keeps `workspace`,
- * `run`, `gate`, and `review` typed for links built before this move. */
+ * entry (spec Part A, Part G step 1). A pre-revision-1 `?tab=` URL redirects
+ * from `beforeLoad` (`-presence-redirects.ts`, INV-H1); every other URL
+ * serves the list. The redirect reads the raw `location.search`, so
+ * `validateSearch` keeps only `workspace`. */
 export const Route = createFileRoute("/workflows/")({
+  beforeLoad: redirectToPresence("/workflows"),
   component: WorkflowsTab,
-  validateSearch: (search: Record<string, unknown>): { workspace?: string; run?: string; gate?: string; review?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { workspace?: string } => ({
     workspace: typeof search.workspace === "string" ? search.workspace : undefined,
-    run: typeof search.run === "string" ? search.run : undefined,
-    gate: typeof search.gate === "string" ? search.gate : undefined,
-    review: typeof search.review === "string" ? search.review : undefined,
   }),
 });
 
