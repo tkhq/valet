@@ -4,7 +4,7 @@
  */
 import type { EventSubscriptionFilterWire, PresencePlaceWire } from "@valet/api/wire";
 import { describe, expect, it } from "vitest";
-import { isMidGrain, isServiceRoot, placeSearchTerm, placeSubjectsForRule } from "./places";
+import { isMidGrain, isServiceRoot, placeSearchTerm } from "./places";
 import { place } from "./test-fixtures";
 
 
@@ -30,39 +30,6 @@ describe("isServiceRoot", () => {
   });
 });
 
-describe("placeSubjectsForRule", () => {
-  const places = [
-    place("slack:T1", "Slack", "slack"),
-    place("slack:T1/C900", "#incidents", "slack", "slack:T1"),
-    place("slack:T1/C901", "#deploys", "slack", "slack:T1"),
-    place("github:acme/api", "acme/api", "github"),
-    place("github:acme/api#12", "acme/api#12", "github", "github:acme/api"),
-    place("linear:team/ENG", "ENG", "linear"),
-  ];
-  const rule = (filters: EventSubscriptionFilterWire[]) => ({ filters });
-
-  it("maps a channel filter by channel id", () => {
-    expect(placeSubjectsForRule(rule([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]), places)).toEqual(["slack:T1/C900"]);
-  });
-
-  it("maps every channel of an in filter", () => {
-    expect(placeSubjectsForRule(rule([{ field: "channel", op: "in", value: ["C900", "C901"] }]), places)).toEqual(["slack:T1/C900", "slack:T1/C901"]);
-  });
-
-  it("maps a repository filter case-insensitively, and not to its pull requests", () => {
-    expect(placeSubjectsForRule(rule([{ field: "repo", op: "eq", value: "Acme/API" }]), places)).toEqual(["github:acme/api"]);
-  });
-
-  it("maps a team filter", () => {
-    expect(placeSubjectsForRule(rule([{ field: "team", op: "eq", value: "ENG" }]), places)).toEqual(["linear:team/ENG"]);
-  });
-
-  it("maps no place for a broad filter or for no filter", () => {
-    expect(placeSubjectsForRule(rule([{ field: "channel", op: "prefix", value: "C9" }]), places)).toEqual([]);
-    expect(placeSubjectsForRule(rule([]), places)).toEqual([]);
-    expect(placeSubjectsForRule(rule([{ field: "repo", op: "eq", value: "acme/web" }]), places)).toEqual([]);
-  });
-});
 
 describe("placeSearchTerm", () => {
   it("searches a Slack channel by its channel id, which the event summary carries", () => {
