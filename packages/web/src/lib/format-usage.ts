@@ -19,12 +19,12 @@ export function formatUsd(n: number): string {
   return `$${trimZero((n / 1_000).toFixed(1))}k`;
 }
 
-/** Dollar display with four decimals, for the Usage page and workflow
- * steps, where sub-cent differences matter. A cost too small to show at that
- * precision reads "<$0.0001", never "$0.0000". */
+/** Dollar display for the Usage page and workflow step costs: four
+ * decimals below a dollar, so a small step's cost never reads as zero, and
+ * cents from a dollar up, so a total reads as money ($184.20). */
 export function formatUsdPrecise(n: number): string {
   if (n > 0 && n < 0.00005) return "<$0.0001";
-  return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(Math.abs(n) >= 1 ? 2 : 4)}`;
 }
 
 function trimZero(s: string): string {

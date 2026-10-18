@@ -5,7 +5,7 @@ import { api } from "~/api/client";
 import { useMessages } from "~/api/queries";
 import { useMe } from "~/api/settings";
 import { useSessionWebSocket } from "~/api/ws";
-import { Badge, Spinner } from "~/components/primitives";
+import { Badge, LoadingRow } from "~/components/primitives";
 import { Composer } from "~/components/session/composer";
 import { MessageList } from "~/components/session/message-list";
 import { errorText } from "~/lib/error-text";
@@ -63,7 +63,7 @@ export function SharedThreadView({ address, guest }: {
       You cannot open this thread. {errorText(messagesQ.error)} Ask {guest.ownerName} to share it again.
     </div>;
   }
-  if (messagesQ.isLoading) return <div className="flex-1 grid place-items-center text-sm text-muted"><Spinner /> Loading thread…</div>;
+  if (messagesQ.isLoading) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Loading thread…" /></div>;
 
   const header = (
     <header className="flex min-h-[--nav-height] flex-wrap items-center gap-2 border-b border-line bg-paper px-3 py-2 sm:px-4">

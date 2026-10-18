@@ -60,6 +60,8 @@ function ArtifactsNav() {
  * which was added last (the old `text-muted` base + `text-ink` active pair
  * rendered no visible active state at all).
  */
+/** One look for every top-level destination, the Plugins menu included. */
+const NAV_BASE = "shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash";
 const NAV_ACTIVE = "text-ink font-medium bg-ink-wash";
 const NAV_INACTIVE = "text-muted hover:text-ink";
 
@@ -78,7 +80,7 @@ function NavLink({
   // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not fit,
   // so a link must keep its own width instead of being squeezed into a
   // wrapped two-line label.
-  const base = "shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash";
+  const base = NAV_BASE;
   if (active !== undefined) {
     return (
       <Link to={to} className={`${base} ${active ? NAV_ACTIVE : NAV_INACTIVE}`}>
@@ -240,9 +242,9 @@ export function TopNav() {
       </nav>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className={`hidden shrink-0 gap-1 md:inline-flex ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
+          <button type="button" className={`${NAV_BASE} hidden items-center gap-1 md:inline-flex ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
             Plugins <ChevronDown className="h-3 w-3" aria-hidden />
-          </Button>
+          </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" aria-label="Plugins" className="w-56">
           {securityEnabled ? <DropdownMenuItem asChild>

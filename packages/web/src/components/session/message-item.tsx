@@ -57,8 +57,12 @@ export const MessageItem = memo(function MessageItem({
   viewerId,
   onReply,
   ratings = true,
+  continuation = false,
 }: {
   message: StreamMessage;
+  /** The same assistant turn as the row above: no repeated author, time,
+   *  and model line. The row's actions still show on hover. */
+  continuation?: boolean;
   /** True for the last message while the agent is mid-turn — an empty
    *  assistant row is then a streaming placeholder, not a failed turn. */
   suppressEmptyPlaceholder?: boolean;
@@ -78,21 +82,26 @@ export const MessageItem = memo(function MessageItem({
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
   return (
-    <article data-message-id={message.id} className="group min-w-0 px-5 py-3 sm:px-8">
+    <article data-message-id={message.id} className={cn("group min-w-0 px-5 sm:px-8", continuation ? "pb-3" : "py-3")}>
       {/* Row background spans full width; the content column is capped at a
           readable measure and centered — prose and tool cards both benefit. */}
       <div className={cn(
         "mx-auto flex w-full min-w-0 max-w-3xl justify-end"
       )}>
 
-        <div className={cn("flex-1 min-w-0 space-y-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
-          <div className="text-xs text-muted flex min-w-0 flex-wrap items-center gap-2">
-            <span className="font-medium text-[--fg]/80">
+        <div className={cn("relative flex-1 min-w-0 space-y-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
+          <div className={cn("text-xs text-muted flex min-w-0 flex-wrap items-center gap-2",
+            // A continuation keeps only its hover actions, floated so they
+            // take no line of their own.
+            continuation && "absolute right-0 top-0 z-10")}>
+            {!continuation && <>
+            <span className="font-medium text-ink/80">
               {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
             </span>
             <span>•</span>
-            <span>{formatTime(message.createdAt)}</span>
-            {message.role === "assistant" && message.model && (
+            <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+            </>}
+            {!continuation && message.role === "assistant" && message.model && (
               <span
                 className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
                 title={message.model}
@@ -101,7 +110,7 @@ export const MessageItem = memo(function MessageItem({
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
-            <div className="ml-auto flex items-center gap-1">
+            <div className={cn("flex items-center gap-1", !continuation && "ml-auto")}>
               {message.role === "assistant" && message.completed === true && copyText && onReply && (
                 <button
                   type="button"
@@ -511,5 +520,5 @@ function SettledBadge({ outcome }: { outcome: SettledOutcome }) {
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
