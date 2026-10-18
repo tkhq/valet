@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Label, Select, Spinner, cardClass } from "~/components/primitives";
+import { Badge, Button, Callout, Input, Label, Select, Spinner, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -481,9 +481,9 @@ function ReviewList() {
           <Spinner size={14} /> Loading reviews…
         </div>
       ) : error ? (
-        <div className="rounded-md border border-danger-500/30 bg-danger-wash px-3 py-2 text-sm text-danger-600">
+        <Callout tone="danger">
           Could not load reviews. Reload the page to retry.
-        </div>
+        </Callout>
       ) : reviews.length === 0 ? (
         <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center">
           <p className="text-sm text-ink">No reviews yet</p>

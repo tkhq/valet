@@ -6,6 +6,7 @@ export * from "./dropdown-menu.js";
 export * from "./popover.js";
 export * from "./tooltip.js";
 export * from "./card.js";
+export * from "./callout.js";
 export * from "./avatar.js";
 export * from "./badge.js";
 export * from "./spinner.js";

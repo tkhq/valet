@@ -9,6 +9,7 @@
  * message gets.
  */
 import { CodeBlock } from "~/components/code-block";
+import { Callout } from "~/components/primitives";
 import { RUN_STATUS_GLYPH } from "./editor/flow-node";
 import { formatRunOutput, runOutputSummaries, type RunResult, type RunResultDiagnostic } from "./run-detail-helpers";
 
@@ -120,7 +121,7 @@ export function RunResultPanel({ result }: RunResultPanelProps) {
  */
 function DiagnosticsBlock({ diagnostics }: { diagnostics: RunResultDiagnostic[] }) {
   return (
-    <div className="mt-4 rounded border border-amber-500/40 bg-amber-500/5 p-3">
+    <Callout tone="warning" className="mt-4 p-3">
       <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-300">
         {diagnostics.length === 1
           ? "1 template path did not resolve"
@@ -154,6 +155,6 @@ function DiagnosticsBlock({ diagnostics }: { diagnostics: RunResultDiagnostic[] 
         Each path above produced an empty value. Correct the paths in the workflow, then start a
         new run.
       </p>
-    </div>
+    </Callout>
   );
 }

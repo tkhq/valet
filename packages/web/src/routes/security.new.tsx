@@ -5,7 +5,7 @@ import type { CreateSessionRequest } from "@valet/api/wire";
 import { useCreateSession } from "~/api/queries";
 import { useSecurityPreview } from "~/api/security";
 import { workspaceForRepo } from "~/components/repo-combobox";
-import { Button, Label, Select, Spinner } from "~/components/primitives";
+import { Button, Callout, Label, Select, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import {
   ConfigForm,
@@ -290,12 +290,9 @@ export function SecurityNewPage() {
               <Spinner size={14} /> Loading the seeded config and plan…
             </div>
           ) : previewQ.isError ? (
-            <div
-              className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600"
-              data-testid="preview-error"
-            >
+            <Callout tone="danger" className="text-xs" data-testid="preview-error">
               Could not load the review preview: {previewQ.error?.message ?? "unknown error"}
-            </div>
+            </Callout>
           ) : (
             <>
               {step === "focus" && (
@@ -342,12 +339,9 @@ export function SecurityNewPage() {
               )}
 
               {create.isError && step === "review" && (
-                <div
-                  className="mt-4 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600"
-                  data-testid="create-error"
-                >
+                <Callout tone="danger" className="mt-4 text-xs" data-testid="create-error">
                   {create.error.message}
-                </div>
+                </Callout>
               )}
             </>
           )}
@@ -623,28 +617,23 @@ function ReviewStep({
       </div>
 
       {/* Authorization affirmation (INV-11). Required to enable Start. */}
-      <label
-        className={cn(
-          "flex items-start gap-2 rounded-md border p-3 text-xs",
-          authorizationConfirmed
-            ? "border-line bg-paper"
-            : "border-danger-500/40 bg-danger-500/5 text-danger-700",
-        )}
-      >
-        <input
-          type="checkbox"
-          checked={authorizationConfirmed}
-          onChange={(e) => onAuthorizationChange(e.target.checked)}
-          className="mt-0.5"
-          data-testid="launch-authorization"
-          aria-label="Confirm authorization"
-        />
-        <span>
-          {hasLivePersona
-            ? "I confirm I have authorization to test the hosts listed above."
-            : "I confirm I have authorization to scan this repository."}
-        </span>
-      </label>
+      <Callout asChild tone={authorizationConfirmed ? "neutral" : "danger"} className="flex items-start gap-2 p-3 text-xs">
+        <label>
+          <input
+            type="checkbox"
+            checked={authorizationConfirmed}
+            onChange={(e) => onAuthorizationChange(e.target.checked)}
+            className="mt-0.5"
+            data-testid="launch-authorization"
+            aria-label="Confirm authorization"
+          />
+          <span>
+            {hasLivePersona
+              ? "I confirm I have authorization to test the hosts listed above."
+              : "I confirm I have authorization to scan this repository."}
+          </span>
+        </label>
+      </Callout>
     </div>
   );
 }

@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, ConfirmDialog, Select, Spinner, StatusDot } from "~/components/primitives";
+import { Button, Callout, ConfirmDialog, Select, Spinner, StatusDot } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -185,9 +185,9 @@ export function EngagementPanel({
           />
         )}
         {rescan.isError && (
-          <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+          <Callout tone="danger" className="mx-4 mt-2 text-xs">
             {apiErrorText(rescan.error)}
-          </div>
+          </Callout>
         )}
         <div className="border-b border-line px-4 py-2 text-xs text-muted flex flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
