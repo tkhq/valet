@@ -39,7 +39,7 @@ import { bootTestApi, type TestApi } from "./_setup.js";
 const ORG = "local-org";
 const USER = "local-user";
 const DAY = 24 * 60 * 60 * 1000;
-const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
+const PIN_UNAVAILABLE = "Pick another thread in Presence.";
 const PLUGINS = [slackPlugin, githubPlugin, linearPlugin];
 
 let api: TestApi | undefined;

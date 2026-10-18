@@ -68,7 +68,16 @@ export type DeliveryDestination =
   | { kind: "target"; sessionId: string; threadId: string; reason?: DestinationReason };
 
 /** The dead-letter text for an `existing` pin that cannot receive a delivery (spec Part B step 4). */
-export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread for this rule in Presence.";
+export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread in Presence.";
+
+/** The pin text before `PIN_UNAVAILABLE_MESSAGE`. Rows dead-lettered then
+ * keep it, so the problem query still matches it. Nothing writes it now. */
+export const PIN_UNAVAILABLE_LEGACY_MESSAGE = "Pick another thread for this rule in Presence.";
+
+/** Whether a stored dead-letter text is the pin text, current or legacy. */
+export function isPinUnavailableMessage(text: string | null): boolean {
+  return text === PIN_UNAVAILABLE_MESSAGE || text === PIN_UNAVAILABLE_LEGACY_MESSAGE;
+}
 
 /** The dead-letter text for a delivery that would hide a shared pinned thread from readers outside a private channel. */
 export function pinNarrowsMessage(channel: string): string {
@@ -239,7 +248,7 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
   const prior = result.rows[0]!;
   if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
-    throw new Error("The original event owner differs from this delivery. Inspect its subscription before retrying delivery.");
+    throw new Error("The original event owner differs from this delivery. Inspect its line before retrying delivery.");
   }
   const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
   if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {

@@ -1563,7 +1563,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const proposeTrigger = action(Type.Intersect([createTrigger.parameters, proposalKeySchema]))({
     id: "workflows.propose_trigger",
     name: "Propose workflow event trigger",
-    description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Events.",
+    description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on in Presence.",
     riskLevel: "low",
     execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -1582,7 +1582,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const proposeSchedule = action(Type.Intersect([createSchedule.parameters, proposalKeySchema]))({
     id: "workflows.propose_schedule",
     name: "Propose schedule",
-    description: "Save a disabled cron schedule for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Scheduled.",
+    description: "Save a disabled cron schedule for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on under On a schedule in Presence.",
     riskLevel: "low",
     execute: async ({ workflow_id, prompt, name, cron, timezone, input, proposal_key }, ctx) => {
       const owner = ownerFromContext(ctx);

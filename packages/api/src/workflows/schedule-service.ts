@@ -72,7 +72,7 @@ export function nextFireAt(
     // invalid tz strings; Intl throws, which is the behavior we want.
     new Intl.DateTimeFormat("en-US", { timeZone: timezone });
   } catch {
-    return { ok: false, error: `unknown timezone ${JSON.stringify(timezone)} — use an IANA name like "America/Denver"` };
+    return { ok: false, error: `Unknown timezone ${JSON.stringify(timezone)}. Use an IANA name like "America/Denver".` };
   }
   try {
     const interval = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: timezone });
@@ -171,10 +171,7 @@ export async function createWorkflowSchedule(
   const hasWorkflow = typeof input.workflowId === "string" && input.workflowId.length > 0;
   const hasPrompt = typeof input.prompt === "string" && input.prompt.trim().length > 0;
   if (hasWorkflow === hasPrompt) {
-    return {
-      ok: false,
-      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the workspace assistant)",
-    };
+    return { ok: false, error: "Give the routine a prompt, or pick a workflow for it to run." };
   }
 
   // The schedule row's own `ownerType`/`ownerId` (below) is unrelated to run

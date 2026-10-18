@@ -96,6 +96,15 @@ describe("workflowsActionPlugin", () => {
     ]);
   });
 
+  // The assistant repeats these words to the person, so they name the Presence UI.
+  it("sends the person to Presence to review a proposal", () => {
+    const description = (id: string) => workflowsActionPlugin(noDeps).actions.find(a => a.id === id)!.description;
+    expect(description("workflows.propose_trigger")).toContain("Ask the user to review and turn it on in Presence.");
+    expect(description("workflows.propose_schedule")).toContain("Ask the user to review and turn it on under On a schedule in Presence.");
+    expect(description("workflows.propose_trigger")).not.toMatch(/in Events|in Scheduled/);
+    expect(description("workflows.propose_schedule")).not.toMatch(/in Events|in Scheduled/);
+  });
+
   // The "end your turn" advice holds only when the run's signals reach the
   // approving conversation; elsewhere the assistant must read get_run.
   it("says a run reports to this thread only when this thread started it", () => {

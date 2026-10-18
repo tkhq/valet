@@ -163,6 +163,8 @@ describe("EventDispatcher", () => {
     const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe(expected);
+    // The skip names the cause without a dash; the web prefixes "skipped: ".
+    if (expected === "skipped") expect((await getDelivery(deliveryId)).lastError).toBe("The team already listens for this. This personal line is paused.");
     expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
     const [personal] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
     expect(personal!.enabled).toBe(expected !== "skipped");
@@ -217,7 +219,7 @@ describe("EventDispatcher", () => {
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
-    expect((await getDelivery(deliveryId)).status).toBe("skipped");
+    expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "The team already listens for this." });
     const [personal] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
     expect(personal!.enabled).toBe(true);
     await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "retry-rule"));
@@ -1153,7 +1155,7 @@ describe("EventDispatcher", () => {
         await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
         const recover = vi.fn(async () => true);
         await dispatcherWith(recover).pollOnce();
-        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "event or subscription vanished" });
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to deliver." });
         expect(recover).toHaveBeenCalledOnce();
         expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-inc" })]);
       });
@@ -1192,7 +1194,7 @@ describe("EventDispatcher", () => {
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
         deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED), recordDestination, recoverClaimedDigest: recover,
       }).pollOnce();
-      expect((await getDelivery(deliveryId)).status).toBe("skipped");
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", lastError: "This line is off. Turn it on to receive these events." });
       expect(recover).not.toHaveBeenCalled();
       expect(recordDestination).not.toHaveBeenCalled();
     });
@@ -1451,7 +1453,7 @@ describe("EventDispatcher", () => {
       await dispatcherWith(deliver).pollOnce();
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-pin", threadId: "thr-pin", reason: "policy_existing" });
-      expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence." });
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", attempts: 1, lastError: "Pick another thread in Presence." });
       expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
     });
 

@@ -3,9 +3,10 @@
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 5, Part D): a badge
  * for every list, and the page text with the thread picker inline.
  *
- * Today the one problem is a pinned thread that no longer accepts deliveries.
- * The api reports it as the pin text: a line's `problem`, a routine's
- * `disabledReason`.
+ * The problem with an inline fix is a pinned thread that no longer accepts
+ * deliveries. The api reports it as the pin text: a line's `problem`, a
+ * routine's `disabledReason`. Any other text, such as a routine the
+ * scheduler turned off for an empty prompt, shows as written.
  */
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { Badge } from "~/components/primitives";
@@ -13,8 +14,17 @@ import { ThreadPicker } from "./thread-picker";
 
 /** The dead-letter text the api stores when a pin cannot take a delivery.
  * The web compares against it and never shows it. */
+export const PIN_UNAVAILABLE = "Pick another thread in Presence.";
+
+/** The pin text the api stored before the current text. Rows dead-lettered
+ * then keep it, so the web still matches it. */
 // copy-lint: allow rule
-export const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
+export const PIN_UNAVAILABLE_LEGACY = "Pick another thread for this rule in Presence.";
+
+/** Whether a problem or reason is the pin text, current or legacy. */
+export function isPinProblem(text: string | null | undefined): boolean {
+  return text === PIN_UNAVAILABLE || text === PIN_UNAVAILABLE_LEGACY;
+}
 
 /** The problem line for an archived pin. Without a title it names `The pinned thread`. */
 export function pinProblemText(threadTitle?: string): string {
@@ -26,8 +36,8 @@ export function pinProblemText(threadTitle?: string): string {
 export function ProblemBadge({ problem }: { problem: string | null | undefined }) {
   if (problem === undefined || problem === null || problem.length === 0) return null;
   return (
-    <Badge variant="danger" title={problem === PIN_UNAVAILABLE ? pinProblemText() : problem}>
-      {problem === PIN_UNAVAILABLE ? "Thread archived" : "Problem"}
+    <Badge variant="danger" title={isPinProblem(problem) ? pinProblemText() : problem}>
+      {isPinProblem(problem) ? "Thread archived" : "Problem"}
     </Badge>
   );
 }
@@ -64,7 +74,7 @@ export function ThreadProblem({
    * row in a list, without the frame. */
   variant?: "box" | "inline";
 }) {
-  const pin = problem === PIN_UNAVAILABLE;
+  const pin = isPinProblem(problem);
   const text = pin ? pinProblemText(threadTitle) : problem;
   const body = (
     <>

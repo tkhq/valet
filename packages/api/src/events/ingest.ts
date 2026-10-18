@@ -202,7 +202,7 @@ async function logFilterExcludedDrop(
   reason = "filter_excluded",
 ): Promise<void> {
   if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
-  const message = detail ?? `A ${eventKey} event arrived, but every subscription in the organization for it excluded it by filter. Check the filters on the ${eventKey} subscriptions.`;
+  const message = detail ?? `A ${eventKey} event arrived, but the filters on every line for it in the organization excluded it. Check the filters on the ${eventKey} lines.`;
   try {
     await writeDropLog(db, {
       orgId,
@@ -406,7 +406,7 @@ export async function ingestEvent(
     }
     if (matched.length === 0) {
       await appendDigests(claims?.waiters);
-      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the subscription decisions." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the match decisions." });
       return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 

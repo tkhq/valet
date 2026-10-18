@@ -85,7 +85,7 @@ vi.mock("./thread-picker", () => ({
 
 import { RulePage } from "./rule-page";
 
-const PIN_TEXT = "Pick another thread for this rule in Presence.";
+const PIN_TEXT = "Pick another thread in Presence.";
 
 function listener(over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {

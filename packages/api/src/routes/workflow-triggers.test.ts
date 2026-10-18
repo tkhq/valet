@@ -229,9 +229,8 @@ describe("POST /api/workflows/schedules", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     // The service's exactly-one-of validation: workflow_id "" is treated as
-    // absent (falsy), and no prompt was given — so service returns the
-    // exactly-one-of error.
-    expect(body.error).toContain("exactly one of");
+    // absent (falsy), and no prompt was given, so the service names the fix.
+    expect(body.error).toBe("Give the routine a prompt, or pick a workflow for it to run.");
   });
 });
 
@@ -938,7 +937,7 @@ describe("GET /api/workflows/{triggers,runs}?ownerType=&ownerId=", () => {
 });
 
 describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
-  const NO_SUBJECT = "This rule's events have no subject to group by. Pick another thread option.";
+  const NO_SUBJECT = "These events have no natural thread. Pick Runs in: its own thread or a new thread.";
 
   async function createSchedule(a: TestApi, thread: unknown, target: unknown = { kind: "assistant", prompt: "Summarize the morning" }): Promise<Response> {
     return fetch(`${a.baseUrl}/api/workflows/schedules`, {
@@ -1137,7 +1136,7 @@ describe("Part H rename of the schedule target kind", () => {
 // Spec 2026-10-16 presence hub, Part D: a schedule the scheduler disabled for
 // a dead pin carries the reason, so the routine page can show its problem.
 describe("schedule disabledReason", () => {
-  const PIN_TEXT = "Pick another thread for this rule in Presence.";
+  const PIN_TEXT = "Pick another thread in Presence.";
 
   it("lists the reason in the trigger detail and clears it on enable", async () => {
     const a = await boot();

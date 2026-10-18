@@ -389,7 +389,7 @@ export class EventDispatcher {
       if (event) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
-        .set({ status: "dead", lastError: "event or subscription vanished" })
+        .set({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to deliver." })
         .where(eq(eventDeliveries.id, deliveryId));
       return;
     }
@@ -419,8 +419,8 @@ export class EventDispatcher {
         // dedupe keys. That duplication is accepted (spec Deviations).
         await this.recoverClaimedDigest(delivery.destination, event);
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
-          ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
-          : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+          ? `The team already listens for this.${paused ? " This personal line is paused." : ""}`
+          : "This line is off. Turn it on to receive these events." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
         return;
       }
 

@@ -98,7 +98,7 @@ import { place } from "~/components/presence/test-fixtures";
 
 const NOW = Date.now();
 /** The dead-letter text the api stores for an archived pin. */
-const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
+const PIN_UNAVAILABLE = "Pick another thread in Presence.";
 
 function line(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {

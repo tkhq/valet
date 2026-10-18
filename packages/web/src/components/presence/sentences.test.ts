@@ -464,6 +464,16 @@ describe("activitySentence outcomes", () => {
     );
   });
 
+  it("skipped: <reason> for team coverage, with no dash", () => {
+    expect(activitySentence(check, delivery({ status: "skipped", lastError: "The team already listens for this. This personal line is paused." }))).toBe(
+      "Completed check in acme/api → skipped: the team already listens for this. This personal line is paused",
+    );
+    // A row stored before the text changed drops its dash.
+    expect(activitySentence(check, delivery({ status: "skipped", lastError: "Skipped — matching team subscription." }))).toBe(
+      "Completed check in acme/api → skipped: matching team subscription",
+    );
+  });
+
   it("no one listening", () => {
     expect(activitySentence(check, null)).toBe("Completed check in acme/api → no one listening");
     expect(activitySentence(check, [])).toBe("Completed check in acme/api → no one listening");

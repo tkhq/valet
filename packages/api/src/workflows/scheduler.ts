@@ -35,6 +35,13 @@ import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
 import type { WorkflowOwner } from "./service.js";
 import { readScheduleTargetKind } from "../events/target-names.js";
 
+/** Reasons the poll loop records when it turns a schedule off. Each one
+ * names the fix, because the routine page shows it as written. A manual
+ * fire answers with the same text. */
+export const EMPTY_PROMPT_REASON = "Its prompt is empty. Edit the routine and add a prompt.";
+export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Edit the routine and pick another workflow.";
+export const BAD_CRON_REASON = "Its schedule does not parse. Edit the routine and fix the schedule.";
+
 const POLL_MS = 30_000;
 
 export interface WorkflowSchedulerDeps {
@@ -115,7 +122,7 @@ export class WorkflowScheduler {
 
     if (readScheduleTargetKind(schedule.targetKind) === "assistant") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
+        return { error: EMPTY_PROMPT_REASON };
       }
       // A schedule has no event, binding, or claim: its policy decides
       // (spec 2026-10-16: delivery threads, Part B). `new` keys on the slot,
@@ -161,7 +168,7 @@ export class WorkflowScheduler {
     }
 
     if (!schedule.workflowId) {
-      return { error: "workflow target without a workflow_id. Delete this schedule and recreate it against a workflow." };
+      return { error: WORKFLOW_DELETED_REASON };
     }
     const defRows = await db
       .select()
@@ -170,7 +177,7 @@ export class WorkflowScheduler {
       .limit(1);
     const def = defRows[0];
     if (!def) {
-      return { error: `workflow ${schedule.workflowId} is gone. Delete this schedule or recreate the workflow.` };
+      return { error: WORKFLOW_DELETED_REASON };
     }
 
     const runId = scheduledRunId(schedule.id, slotMs);
@@ -215,15 +222,17 @@ export class WorkflowScheduler {
     const next = nextFireAt(schedule.cron, schedule.timezone, now);
     if (!next.ok) {
       console.error(`workflow scheduler: disabling ${schedule.id} — ${next.error}`);
-      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      await db.update(workflowSchedules)
+        .set({ enabled: false, updatedAt: now, disabledReason: BAD_CRON_REASON })
+        .where(eq(workflowSchedules.id, schedule.id));
       return;
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (result !== "ok") {
       console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
-      // A dead pin records its reason, so the routine page can name the fix.
+      // Every disable records its reason, so the routine page can name the fix.
       const disabled = await db.update(workflowSchedules)
-        .set({ enabled: false, updatedAt: now, ...(result.pinUnavailable ? { disabledReason: result.error } : {}) })
+        .set({ enabled: false, updatedAt: now, disabledReason: result.error })
         .where(and(eq(workflowSchedules.id, schedule.id), eq(workflowSchedules.enabled, true)))
         .returning({ id: workflowSchedules.id });
       // The counter pages a person once per dead pin: only the fire that

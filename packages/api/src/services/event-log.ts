@@ -27,10 +27,17 @@ export function dropStatus(reason: string): EventLogStatus {
   return "failed";
 }
 
+/** A dead delivery that a later delivery for the same event and line settled,
+ * such as a redelivery. It no longer counts as a failure. */
+const SUPERSEDED = sql`EXISTS (SELECT 1 FROM event_deliveries later
+  WHERE later.event_id = d.event_id AND later.subscription_id = d.subscription_id
+    AND later.status = 'delivered' AND later.created_at > d.created_at)`;
+
 /** An event's status from this workspace's deliveries: a failure wins, then
- * work in flight, then a delivery. Only skipped deliveries read as skipped. */
+ * work in flight, then a delivery. A superseded dead delivery is no failure.
+ * Only skipped deliveries read as skipped. */
 const EVENT_STATUS = sql`CASE
-  WHEN BOOL_OR(d.status IN ('failed','dead')) THEN 'failed'
+  WHEN BOOL_OR(d.status = 'failed' OR (d.status = 'dead' AND NOT ${SUPERSEDED})) THEN 'failed'
   WHEN BOOL_OR(d.status = 'pending') THEN 'pending'
   WHEN BOOL_OR(d.status = 'delivered') THEN 'delivered'
   ELSE 'skipped' END`;
@@ -147,6 +154,35 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
 
   const merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return { items: merged.slice(0, limit), hasMore: merged.length > limit || moreEvents };
+}
+
+/** One delivery row as `supersedingDeliveries` reads it. */
+export interface SupersessionRow {
+  id: string;
+  eventId: string;
+  subscriptionId: string;
+  status: string;
+  createdAt: number;
+}
+
+/**
+ * For each dead delivery that a later delivery for the same event and line
+ * settled, the id of that later delivery. The earliest settling delivery
+ * wins. Matches `SUPERSEDED`, which decides the event's status.
+ */
+export function supersedingDeliveries(rows: readonly SupersessionRow[]): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const dead of rows) {
+    if (dead.status !== "dead") continue;
+    let settledBy: SupersessionRow | undefined;
+    for (const later of rows) {
+      if (later.status !== "delivered" || later.eventId !== dead.eventId || later.subscriptionId !== dead.subscriptionId) continue;
+      if (later.createdAt <= dead.createdAt) continue;
+      if (settledBy === undefined || later.createdAt < settledBy.createdAt) settledBy = later;
+    }
+    if (settledBy !== undefined) result.set(dead.id, settledBy.id);
+  }
+  return result;
 }
 
 /** When anything last reached ingest: a stored event or a visible problem. */

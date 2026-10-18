@@ -18,7 +18,7 @@ import { and, desc, eq, gte, inArray, ne, or, sql, type SQL } from "drizzle-orm"
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
-import { PIN_UNAVAILABLE_MESSAGE } from "../events/assistant-delivery.js";
+import { isPinUnavailableMessage } from "../events/assistant-delivery.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { claimedThreadId } from "../events/destination.js";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
@@ -63,7 +63,7 @@ import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_t
 import { slackEventChannel, storedThreadRef } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
-import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
+import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
 import { eventPlaceName } from "../services/presence-places.js";
 
 export const eventsRouter = new Hono<AppEnv>();
@@ -145,7 +145,7 @@ async function subscriptionProblems(db: AppDb, conditions: (SQL | undefined)[]):
     .orderBy(eventDeliveries.subscriptionId, desc(eventDeliveries.createdAt), desc(eventDeliveries.id));
   const problems = new Map<string, string>();
   for (const d of latest) {
-    if (d.status === "dead" && d.lastError === PIN_UNAVAILABLE_MESSAGE) problems.set(d.subscriptionId, d.lastError);
+    if (d.status === "dead" && d.lastError !== null && isPinUnavailableMessage(d.lastError)) problems.set(d.subscriptionId, d.lastError);
   }
   return problems;
 }
@@ -187,10 +187,10 @@ type NarrowedSubscriptionRow = Omit<
  */
 function staleReplacement(replaced: { name: string } | undefined): string {
   if (replaced === undefined) {
-    return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
+    return "This proposal replaces a line that was removed. Delete this proposal, then ask the assistant for a new one.";
   }
   return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions replying. ` +
-    "Delete this proposal. To change the subscription that replies now, ask the assistant for a new proposal that replaces it.";
+    "Delete this proposal. To change the version that replies now, ask the assistant for a new proposal that replaces it.";
 }
 
 /** Another enable turned the replaced version off first; rolls this enable back. */
@@ -254,7 +254,7 @@ function collisionsToWire(report: CollisionReport<NarrowedSubscriptionRow>): Eve
 function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>): string {
   const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
   return (
-    `This rule covers everything ${names} already ${report.blocking.length === 1 ? "handles" : "handle"} ` +
+    `This line covers everything ${names} already ${report.blocking.length === 1 ? "handles" : "handle"} ` +
     `on the same events, so both would fire together. Narrow its filters, or save again with ` +
     `"create anyway" to take over.`
   );
@@ -463,6 +463,7 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
       lastError: eventDeliveries.lastError,
       deliveredAt: eventDeliveries.deliveredAt,
       nextAttemptAt: eventDeliveries.nextAttemptAt,
+      createdAt: eventDeliveries.createdAt,
       destination: eventDeliveries.destination,
       target: eventSubscriptions.target,
     })
@@ -475,10 +476,13 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
     ))
     .orderBy(desc(eventDeliveries.createdAt), desc(eventDeliveries.id));
   const wire = await deliveriesToWire(c, deliveryRows);
+  // A dead row that a later delivery settled names it, so the web drops the fault.
+  const superseded = supersedingDeliveries(deliveryRows);
   const byEvent = new Map<string, EventDeliveryWire[]>();
   deliveryRows.forEach((row, index) => {
     const list = byEvent.get(row.eventId) ?? [];
-    list.push(wire[index]!);
+    const settledBy = superseded.get(row.id);
+    list.push(settledBy !== undefined ? { ...wire[index]!, supersededBy: settledBy } : wire[index]!);
     byEvent.set(row.eventId, list);
   });
   // A skipped row's detail is one of its deliveries' raw skip text. A claim
@@ -975,7 +979,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     );
     if (!rows?.[0]) {
       return c.json(
-        { error: "Team or subscription target is no longer available. Refresh and select an active target." },
+        { error: "The team or target is no longer available. Refresh and select an active target." },
         400,
       );
     }
@@ -1106,7 +1110,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // a missing one — same "cross-owner access is indistinguishable from
   // not-found" convention as workflows/teams routes.
   if (!row || !(await canMutateSubscription(db, row, user.id))) {
-    return c.json({ error: "subscription not found" }, 404);
+    return c.json({ error: "This line was not found. Refresh Presence and try again." }, 404);
   }
 
   let body: PatchEventSubscriptionRequest;
@@ -1122,7 +1126,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // `assistantId: null` clears a retired selection; a value selects one,
   // which a single-assistant workspace does not support.
   if ("assistantId" in body && (body as { assistantId?: unknown }).assistantId !== null) {
-    return c.json({ error: "Assistant selection is not supported. Choose the subscription workspace instead." }, 400);
+    return c.json({ error: "Assistant selection is not supported. Choose the personal or team workspace instead." }, 400);
   }
   // Drop a retired selection from a row the boot repair has not reached yet,
   // so the merged row below validates.
@@ -1141,7 +1145,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     patchedTarget = { ...patchedTarget, appearance };
   }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
-    if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
+    if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant." }, 400);
     patchedTarget = { ...patchedTarget,
       ...(body.deliveryPolicy !== undefined ? { deliveryPolicy: body.deliveryPolicy } : {}),
       ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),
@@ -1151,7 +1155,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // re-validation below checks a new policy's shape and subject mode.
   if (body.thread !== undefined) {
     if (patchedTarget.kind !== "assistant") {
-      return c.json({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." }, 400);
+      return c.json({ error: "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line." }, 400);
     }
     if (body.thread === null) {
       const { thread: _cleared, ...rest } = patchedTarget;
@@ -1331,7 +1335,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     throw err;
   }
 
-  if (!updated[0]) return c.json({ error: "This subscription changed while you were editing it. Refresh and try again." }, 409);
+  if (!updated[0]) return c.json({ error: "This line changed while you were editing it. Refresh and try again." }, 409);
 
   const resp: PatchEventSubscriptionResponse = {
     ...rowToSubscription(updated[0]),
@@ -1352,7 +1356,7 @@ eventsRouter.delete("/event-subscriptions/:id", async (c) => {
     .limit(1);
   const row = rows[0];
   if (!row || !(await canMutateSubscription(db, row, user.id))) {
-    return c.json({ error: "subscription not found" }, 404);
+    return c.json({ error: "This line was not found. Refresh Presence and try again." }, 404);
   }
 
   await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)));

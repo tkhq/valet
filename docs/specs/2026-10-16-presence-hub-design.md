@@ -294,9 +294,13 @@ Pass criterion: all steps, in one run, from a clean start.
 3. A routine is created through **Add** → `On a schedule`, or `+ New
    routine` on the group, both of which open the wizard (Part H) on the
    schedule step.
-4. `workflow_schedules` carries `disabled_reason`, set when the scheduler
-   disables a routine for an undeliverable pin and cleared on enable or a
-   pin change; the wire exposes `disabledReason` and the routine's owner.
+4. `workflow_schedules` carries `disabled_reason`, set each time the
+   scheduler disables a routine, and cleared on enable or a pin change;
+   the wire exposes `disabledReason` and the routine's owner. Each reason
+   names its fix: the pin text for an undeliverable pin, `Its prompt is
+   empty. Edit the routine and add a prompt.`, `Its workflow was deleted.
+   Edit the routine and pick another workflow.`, or `Its schedule does not
+   parse. Edit the routine and fix the schedule.`
 
 ## Part F: Activity
 
@@ -315,8 +319,11 @@ Pass criterion: all steps, in one run, from a clean start.
 4. The **Needs attention** banner lists the workspace's distinct faults:
    lines with a problem, routines with a `disabledReason`, and lines with
    a dead delivery in the last day. A dead delivery counts once per line,
-   and only when its line does not already list for its own problem and
-   was not edited after the delivery.
+   and only when its line does not already list for its own problem, was
+   not edited after the delivery, and no later delivery for the same event
+   and line was delivered. The Log marks such a dead delivery with
+   `supersededBy` and reads its event as delivered, so a redelivery clears
+   the fault at once.
 
 ## Part G: Workflows
 
@@ -446,7 +453,7 @@ Revision 1 deviations that still hold, with the revision 3 part numbers:
   latest settled delivery (`delivered` or `dead`) since the line's last edit
   dead-lettered with the pin text. A later delivery that lands, or any edit,
   clears it. A routine's problem is `disabledReason`, a column the scheduler
-  sets when a dead pin disables the schedule. Enabling the schedule or
+  sets each time it disables the schedule. Enabling the schedule or
   changing its pin clears it. The index `event_deliveries_subscription`
   serves the problem query.
 - **Activity rows carry their place and deliveries (Part F step 1).** Each

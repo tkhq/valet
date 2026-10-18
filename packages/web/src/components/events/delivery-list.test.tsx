@@ -67,7 +67,7 @@ describe("DeliveryList", () => {
   });
 
   it("shows the dead-letter text of a pin that cannot take the delivery", () => {
-    const text = "Pick another thread for this rule in Presence.";
+    const text = "Pick another thread in Presence.";
     const dead: EventDeliveryWire = { ...base, id: "d4", status: "dead", lastError: text };
     render(<DeliveryList deliveries={[dead]} now={1_723_200_000_000} />);
     expect(screen.getByText(text)).toBeTruthy();

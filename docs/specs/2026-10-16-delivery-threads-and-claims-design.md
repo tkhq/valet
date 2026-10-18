@@ -94,7 +94,7 @@ named in each step.
 | T4 | Create R3: `linear.issue.update` for team `ENG`, policy `own`, name `ENG triage`. Updates arrive on `ENG-42` and `ENG-43`. | One thread with key `sub:<R3>` and title `ENG triage` holds both deliveries. |
 | T5 | Create R4: `github.check_run.completed` with status `failure` on `acme/api`, policy `new`. Two failures arrive. The dispatcher retries the second delivery once. | Two threads exist, each titled by its event summary. The retry lands in the second thread. No third thread exists. |
 | T6 | `u-001` creates a thread titled `Platform CI` and patches R4 to `existing` with that thread. A failure arrives. | `Platform CI` holds the delivery. |
-| T7 | `u-001` archives `Platform CI`. A failure arrives. | The delivery dead-letters with `Pick another thread for this rule in Presence.` R4 reports the problem. No thread is created or reopened. |
+| T7 | `u-001` archives `Platform CI`. A failure arrives. | The delivery dead-letters with `Pick another thread in Presence.` R4 reports the problem. No thread is created or reopened. |
 | T8 | `u-001` archives the `ENG triage` thread. An update on `ENG-42` arrives. | The `ENG triage` thread reopens and holds the delivery. |
 | T9 | Create schedule S1 with a prompt, policy `own`, name `Morning summary`. It fires twice. | One thread with key `schedule:<S1>` and title `Morning summary` holds both prompts. |
 | T10 | Create R2: `slack.app_mention` in `C900`, policy `new`, `follow: true`. A mention arrives in a new Slack thread `X`. A reply arrives in `X`. | The mention opens one thread with key `sub:<R2>:<deliveryId>`, and a `followed_threads` row binds `X` to it. The reply lands in that thread through the binding. |
@@ -173,8 +173,8 @@ start.
    per delivery (`deliveryThreadPolicy`).
 4. `subject` MUST be refused for a schedule, and for an event subscription
    whose keys name no natural subject (Part D). The refusal MUST say
-   `This rule's events have no subject to group by. Pick another thread
-   option.`
+   `These events have no natural thread. Pick Runs in: its own thread or
+   a new thread.`
 5. `existing` MUST be validated at write time: the thread MUST exist, MUST
    belong to a live assistant or execution session of the rule's owner, and
    MUST NOT be archived. The person who writes the policy MUST be able to
@@ -243,7 +243,7 @@ Destination =
 4. An archived thread found by key (`own`, `subject`) MUST reopen on
    delivery. A `target` destination from `existing` whose thread is
    archived, deleted, or outside the owner's live runtime MUST dead-letter
-   with `Pick another thread for this rule in Presence.` and MUST NOT fall
+   with `Pick another thread in Presence.` and MUST NOT fall
    back to another mode.
 5. A `follow: true` rule MUST bind the Slack thread to whichever thread the
    delivery landed in, as today. The binding then wins step 1 for later
@@ -515,8 +515,8 @@ event wakeups spec Part A.
   binding, when it is a `slack.app_mention`, or when it is a Slack direct
   message (`channel_type: "im"`).
 - **Schedule pin.** A schedule whose `existing` pin cannot receive a
-  delivery is disabled with `Pick another thread for this rule in
-  Presence.`, the scheduler's existing handling for a broken schedule.
+  delivery is disabled with `Pick another thread in Presence.`, the
+  scheduler's existing handling for a broken schedule.
 - **Receipt lookup.** The `destination` stage is appended to the receipt
   whose `event_id` matches the delivery's event. `event_receipts` gains the
   index `event_receipts_event` on `(org_id, event_id)`.
@@ -645,6 +645,12 @@ event wakeups spec Part A.
   and drops the same posts: bot posts, subtypes, top-level messages, posts
   that address the bot, and unadmitted senders. A unit test runs both on
   the same raw Slack event.
+- **The pin text changed; the web matches both.** The pin text was
+  `Pick another thread for this rule in Presence.` It is now `Pick
+  another thread in Presence.`, because Presence copy does not use the
+  word "rule". Deliveries dead-lettered before the change keep the old
+  text, so the web treats both texts as the pin problem (`isPinProblem`).
+  The subject refusal (Part A step 4) changed for the same reason.
 
 ## Errata to other specs
 

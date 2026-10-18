@@ -13,7 +13,27 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
-import { PIN_UNAVAILABLE, ProblemBadge, ThreadProblem } from "./problem-badge";
+import { isPinProblem, PIN_UNAVAILABLE, PIN_UNAVAILABLE_LEGACY, ProblemBadge, ThreadProblem } from "./problem-badge";
+
+describe("isPinProblem", () => {
+  it("matches the pin text and the text older dead letters carry", () => {
+    expect(PIN_UNAVAILABLE).toBe("Pick another thread in Presence.");
+    expect(isPinProblem(PIN_UNAVAILABLE)).toBe(true);
+    expect(isPinProblem(PIN_UNAVAILABLE_LEGACY)).toBe(true);
+    expect(isPinProblem("Reconnect Slack in Integrations.")).toBe(false);
+    expect(isPinProblem(null)).toBe(false);
+    expect(isPinProblem(undefined)).toBe(false);
+  });
+
+  // Review Focus 1: rows dead-lettered before the text changed still offer the picker.
+  it("renders an old dead letter as a pin problem", () => {
+    render(<ProblemBadge problem={PIN_UNAVAILABLE_LEGACY} />);
+    expect(screen.getByText("Thread archived")).toBeTruthy();
+    render(<ThreadProblem problem={PIN_UNAVAILABLE_LEGACY} threadTitle="Platform CI" workspace="user" onPick={vi.fn()} />);
+    expect(screen.getByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Pick" })).toBeTruthy();
+  });
+});
 
 describe("ProblemBadge", () => {
   it("names an archived pin, and renders nothing without a problem", () => {

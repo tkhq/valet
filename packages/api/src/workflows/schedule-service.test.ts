@@ -103,6 +103,11 @@ describe("createWorkflowSchedule authorization", () => {
     });
   }
 
+  it("names the fix when a routine has neither a prompt nor a workflow", async () => {
+    const result = await createWorkflowSchedule(armDeps(), { userId: "u-1", orgId: "org-1" }, { name: "empty", cron: "0 * * * *" });
+    expect(result).toEqual({ ok: false, error: "Give the routine a prompt, or pick a workflow for it to run." });
+  });
+
   it("rejects scheduling a workflow owned by a different user in the SAME org", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
 

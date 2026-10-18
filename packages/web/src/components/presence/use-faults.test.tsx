@@ -15,7 +15,7 @@ import type {
   WorkflowTriggerItem,
 } from "@valet/api/wire";
 import { describe, expect, it, vi } from "vitest";
-import { PIN_UNAVAILABLE } from "./problem-badge";
+import { PIN_UNAVAILABLE, PIN_UNAVAILABLE_LEGACY } from "./problem-badge";
 import { line, routine } from "./test-fixtures";
 
 const NOW = Date.now();
@@ -124,6 +124,22 @@ describe("faultsOf", () => {
     const { faults } = faultsOf({ ...base, rules: [broken], log });
     expect(faults.map((fault) => fault.kind)).toEqual(["line"]);
     expect(faults[0]!.text).toBe("The pinned thread is archived. Pick another thread:");
+  });
+
+  // Review Focus 1: a dead letter stored before the pin text changed still reads as a pin problem.
+  it("renders a line with the old pin text as a pin problem", () => {
+    const broken = rule("R4", { problem: PIN_UNAVAILABLE_LEGACY, updatedAt: 1 });
+    const { faults } = faultsOf({ ...base, rules: [broken], log: [] });
+    expect(faults.map((fault) => fault.text)).toEqual(["The pinned thread is archived. Pick another thread:"]);
+  });
+
+  it("skips a dead delivery that a later delivery settled", () => {
+    const quiet = rule("R5", { updatedAt: 1 });
+    const settled: EventDeliveryWire = { ...delivery("dead", "R5"), supersededBy: "d-redo" };
+    const log = [logItem("ev-1", NOW - 60_000, [{ ...delivery("delivered", "R5"), id: "d-redo" }, settled])];
+    expect(faultsOf({ ...base, rules: [quiet], log })).toEqual({ faults: [], faultedPlaces: new Set() });
+    // The same dead row without supersededBy is a fault.
+    expect(faultsOf({ ...base, rules: [quiet], log: [logItem("ev-1", NOW - 60_000, [delivery("dead", "R5")])] }).faults).toHaveLength(1);
   });
 
   it("drops the fault when a pick fixes the line after its dead delivery", () => {

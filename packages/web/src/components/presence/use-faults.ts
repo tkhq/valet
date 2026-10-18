@@ -4,8 +4,8 @@
  * 4): the distinct faults of the active workspace. A line of presence with
  * an open problem is one fault, and so is a routine that the scheduler
  * turned off (`disabledReason`). A dead delivery in the last day is one
- * fault per line, and only when that line has no problem of its own and was
- * not edited after the delivery. So one fault shows once, and a fixed line
+ * fault per line, and only when that line has no problem of its own, was
+ * not edited after the delivery, and no later delivery settled it. So one fault shows once, and a fixed line
  * drops out at once.
  */
 import type { EventLogItem, EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
@@ -15,7 +15,7 @@ import { usePinnedThreadTitles } from "~/api/rule";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
 import { blockSubjectFor, faultLead } from "./overview-groups";
-import { PIN_UNAVAILABLE, pinProblemText } from "./problem-badge";
+import { isPinProblem, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routine-helpers";
 import { activitySentence, type ThreadTitles } from "./sentences";
 
@@ -37,7 +37,7 @@ export interface Faults {
 /** A line's problem as the reader sees it. */
 function lineFaultText(sub: EventSubscriptionWire, titles: ThreadTitles): string {
   const problem = sub.problem ?? "";
-  if (problem !== PIN_UNAVAILABLE) return problem;
+  if (!isPinProblem(problem)) return problem;
   const thread = sub.target.kind === "assistant" ? sub.target.thread : undefined;
   const title = thread?.mode === "existing" ? titles[thread.threadId]?.title ?? undefined : undefined;
   return pinProblemText(title);
@@ -75,7 +75,8 @@ export function faultsOf(input: {
   for (const item of input.log) {
     if (item.at < input.now - FAULT_WINDOW_MS) continue;
     for (const delivery of item.deliveries ?? []) {
-      if (delivery.status !== "dead" || listed.has(delivery.subscriptionId)) continue;
+      // A dead delivery that a later delivery settled (a redelivery) is no fault.
+      if (delivery.status !== "dead" || delivery.supersededBy !== undefined || listed.has(delivery.subscriptionId)) continue;
       const edited = editedAt.get(delivery.subscriptionId);
       if (edited !== undefined && edited >= (delivery.deliveredAt ?? item.at)) continue;
       listed.add(delivery.subscriptionId);

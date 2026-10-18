@@ -66,12 +66,12 @@ describe("thread policy (spec 2026-10-16: delivery threads, Part A)", () => {
 
   it("refuses subject when no selected event names a subject", () => {
     expect(validateSubscription([githubWithoutSubject], { ...body, target: { kind: "assistant", thread: { mode: "subject" } } }))
-      .toBe("This rule's events have no subject to group by. Pick another thread option.");
+      .toBe("These events have no natural thread. Pick Runs in: its own thread or a new thread.");
   });
 
   it("refuses a thread policy on a workflow target", () => {
     expect(validateSubscription([githubPlugin], { ...body, target: { kind: "workflow", workflowId: "wf", thread: { mode: "new" } } }))
-      .toBe("A thread policy applies only to an assistant target. Remove thread from this workflow rule.");
+      .toBe("A thread choice applies only when the assistant does the work. Remove the thread from this workflow line.");
   });
 
   it("allows subject per plugin, from the plugin that owns the keys", () => {

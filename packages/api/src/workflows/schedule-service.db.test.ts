@@ -117,7 +117,7 @@ describe("updateWorkflowSchedule", () => {
   // dead pin (spec 2026-10-16: presence hub, Part D). The person's fix, a new
   // pin or a re-enable, clears it.
   describe("disabledReason", () => {
-    const PIN_TEXT = "Pick another thread for this rule in Presence.";
+    const PIN_TEXT = "Pick another thread in Presence.";
     async function disabledByPin(): Promise<string> {
       const created = await createWorkflowSchedule(armDeps(), OWNER, { prompt: "p", name: "pin", cron: "0 9 * * *" }, NOW);
       if (!created.ok) throw new Error(created.error);
@@ -136,6 +136,20 @@ describe("updateWorkflowSchedule", () => {
 
     it("clears the reason when the schedule is enabled", async () => {
       const id = await disabledByPin();
+      const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { enabled: true }, NOW);
+      if (!updated.ok) throw new Error(updated.error);
+      expect(updated.schedule.disabledReason).toBeUndefined();
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      expect(row?.disabledReason).toBeNull();
+    });
+
+    it.each([
+      "Its prompt is empty. Edit the routine and add a prompt.",
+      "Its workflow was deleted. Edit the routine and pick another workflow.",
+      "Its schedule does not parse. Edit the routine and fix the schedule.",
+    ])("clears the scheduler reason %s when the schedule is enabled", async (reason) => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: reason }).where(eq(workflowSchedules.id, id));
       const updated = await updateWorkflowSchedule(armDeps(), OWNER, id, { enabled: true }, NOW);
       if (!updated.ok) throw new Error(updated.error);
       expect(updated.schedule.disabledReason).toBeUndefined();

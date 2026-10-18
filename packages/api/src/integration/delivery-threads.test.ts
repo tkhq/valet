@@ -58,7 +58,7 @@ const ORG = "local-org";
 const USER = "local-user";
 const OTHER_USER = "test-member";
 
-const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
+const PIN_UNAVAILABLE = "Pick another thread in Presence.";
 const CROSS_OWNER = "This thread belongs to another owner. Pick a thread in your workspace.";
 
 // GitHub universe.

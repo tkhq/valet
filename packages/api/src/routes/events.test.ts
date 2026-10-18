@@ -613,7 +613,7 @@ describe("GET /api/event-subscriptions", () => {
 // Spec 2026-10-16 presence hub, Part C step 5: a rule whose pinned thread no
 // longer accepts deliveries carries a problem, read from its deliveries.
 describe("GET /api/event-subscriptions problem", () => {
-  const PIN_TEXT = "Pick another thread for this rule in Presence.";
+  const PIN_TEXT = "Pick another thread in Presence.";
 
   async function seedDelivery(
     a: TestApi,
@@ -641,6 +641,16 @@ describe("GET /api/event-subscriptions problem", () => {
     await seedDelivery(a, "d_old_ok", "sub_pin", { status: "delivered", createdAt: later });
     await seedDelivery(a, "d_pin", "sub_pin", { status: "dead", lastError: PIN_TEXT, createdAt: later + 1 });
     expect((await problems(a)).sub_pin).toBe(PIN_TEXT);
+  });
+
+  // A delivery dead-lettered before the pin text changed keeps the old text.
+  it("sets the problem for a dead-letter with the old pin text", async () => {
+    const a = await boot();
+    const later = Date.now() + 60_000;
+    const legacy = "Pick another thread for this rule in Presence.";
+    await seedSubscriptionRow(a, "sub_legacy", "local-org");
+    await seedDelivery(a, "d_legacy", "sub_legacy", { status: "dead", lastError: legacy, createdAt: later });
+    expect((await problems(a)).sub_legacy).toBe(legacy);
   });
 
   it("leaves the problem absent for other dead-letters, a later delivery, and an edit after it", async () => {
@@ -681,7 +691,7 @@ describe("GET /api/event-subscriptions/:id/deliveries", () => {
     await seedEventRow(a, { id: "ev_b", receivedAt: 2_000 });
     await a.providers.db.insert(eventDeliveries).values([
       { id: "d_a", eventId: "ev_a", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 1_000, deliveredAt: 1_100, createdAt: 1_000 },
-      { id: "d_b", eventId: "ev_b", subscriptionId: "sub_mine", status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence.", nextAttemptAt: 2_000, createdAt: 2_000 },
+      { id: "d_b", eventId: "ev_b", subscriptionId: "sub_mine", status: "dead", attempts: 1, lastError: "Pick another thread in Presence.", nextAttemptAt: 2_000, createdAt: 2_000 },
       { id: "d_other", eventId: "ev_a", subscriptionId: "sub_other", status: "delivered", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000 },
     ]);
 
@@ -692,7 +702,7 @@ describe("GET /api/event-subscriptions/:id/deliveries", () => {
       ["d_b", "ev_b", "event ev_b"],
       ["d_a", "ev_a", "event ev_a"],
     ]);
-    expect(body.deliveries[0]).toMatchObject({ status: "dead", lastError: "Pick another thread for this rule in Presence.", nextAttemptAt: null });
+    expect(body.deliveries[0]).toMatchObject({ status: "dead", lastError: "Pick another thread in Presence.", nextAttemptAt: null });
   });
 
   it("404s a rule in another org and 400s a bad limit", async () => {
@@ -1991,7 +2001,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, target, audience: "organization" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe(
-      "Only a team assistant mention rule has an invocation audience. Point the rule at a team assistant, or remove the audience.",
+      "Only a mention line for a team assistant has an invocation audience. Point the line at a team assistant, or remove the audience.",
     );
   });
 
@@ -2081,7 +2091,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: [] });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("at least one channel");
+    expect(body.error).toMatch(/^A mention line needs at least one channel filter/);
   });
 
   it("a prefix channel filter does not satisfy the channel requirement", async () => {
@@ -2850,7 +2860,7 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     });
     const res = await patchSubscription(a.baseUrl, "sub_wf", { thread: { mode: "new" } });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." });
+    expect(await res.json()).toEqual({ error: "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line." });
   });
 });
 

@@ -88,7 +88,7 @@ import { routineWhen } from "./routine-helpers";
 import { RoutinePage, routineReadOnly } from "./routine-page";
 import { routine } from "./test-fixtures";
 
-const PIN_TEXT = "Pick another thread for this rule in Presence.";
+const PIN_TEXT = "Pick another thread in Presence.";
 
 
 const S1 = routine("S1");

@@ -486,8 +486,9 @@ function asTail(line: string): string {
 }
 
 function skipReason(delivery: EventDeliveryWire): string {
-  // Reuse the delivery list's wording, without its leading "Skipped".
-  const line = deliveryStatusLine(delivery, 0).replace(/^skipped(,| by)?\s*/i, "");
+  // Reuse the delivery list's wording, without its leading "Skipped" and
+  // the dash that older skip text carries after it.
+  const line = deliveryStatusLine(delivery, 0).replace(/^skipped(,| by)?\s*(\u2014\s*)?/i, "");
   return asTail(line.length > 0 ? line : "delivery preferences");
 }
 

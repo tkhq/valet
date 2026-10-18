@@ -142,7 +142,7 @@ export function validateSubscription(
   // it with `validateExistingThread` once the owner is known.
   if (target.thread !== undefined) {
     if (target.kind !== "assistant") {
-      return "A thread policy applies only to an assistant target. Remove thread from this workflow rule.";
+      return "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line.";
     }
     const error = validateThreadPolicy(target.thread);
     if (error) return error;
@@ -154,7 +154,7 @@ export function validateSubscription(
     return "workflow target requires workflowId";
   }
   if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
-    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Delivery preferences apply only to personal assistant subscriptions.";
+    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant.";
     if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown delivery policy.";
     if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
   }
@@ -242,7 +242,7 @@ export async function validateSubscriptionWrite(
   const error = validateSubscription(plugins, body);
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
-      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to personal assistant subscriptions." };
+      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant." };
   const filters = body.filters as SubscriptionFilter[];
   // The audience is read on every write, including one that changes nothing
   // about the match: a patch may set it alone.

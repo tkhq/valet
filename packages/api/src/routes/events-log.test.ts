@@ -82,11 +82,11 @@ it("counts only this workspace's deliveries, and shows why a skipped event was s
   await api.providers.db.insert(eventDeliveries).values([
     // Another workspace's dead delivery of an event this workspace received.
     { id: "d3", eventId: "ev_ok", subscriptionId: "sub_theirs", status: "dead", attempts: 5, nextAttemptAt: 0, createdAt: now },
-    { id: "d4", eventId: "ev_skip", subscriptionId: "sub_mine", status: "skipped", lastError: "Skipped — matching team subscription.", attempts: 0, nextAttemptAt: 0, createdAt: now },
+    { id: "d4", eventId: "ev_skip", subscriptionId: "sub_mine", status: "skipped", lastError: "The team already listens for this.", attempts: 0, nextAttemptAt: 0, createdAt: now },
   ]);
   const body = await log(api);
   expect(body.items.find((item) => item.id === "ev_ok")).toMatchObject({ status: "delivered", deliveryCount: 1 });
-  expect(body.items.find((item) => item.id === "ev_skip")).toMatchObject({ status: "skipped", detail: "Skipped — matching team subscription." });
+  expect(body.items.find((item) => item.id === "ev_skip")).toMatchObject({ status: "skipped", detail: "The team already listens for this." });
   expect((await log(api, "&problems=1")).items.map((item) => item.id)).not.toContain("ev_ok");
 });
 
@@ -214,4 +214,41 @@ it("lists each stored event's deliveries to this workspace's rules, newest first
     ["d_skip", "skipped", "Mine"], ["d1", "delivered", "Mine"],
   ]);
   expect(ok?.deliveries?.[0]?.lastError).toBe("Skipped by delivery preferences");
+});
+
+// A redelivery settles a dead delivery for the same line, so the event reads
+// delivered and the dead row names the delivery that settled it.
+it("marks a dead delivery superseded when a later delivery for the same line was delivered", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_two", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Two",
+    eventKeys: ["github.push"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  await api.providers.db.insert(eventDeliveries).values([
+    // ev_bad's dead d2 (sub_mine) gets a later delivered redelivery.
+    { id: "d2_redo", eventId: "ev_bad", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now + 10 },
+  ]);
+  const body = await log(api);
+  const bad = body.items.find((item) => item.id === "ev_bad");
+  expect(bad?.status).toBe("delivered");
+  expect(bad?.deliveries?.find((d) => d.id === "d2")).toMatchObject({ status: "dead", supersededBy: "d2_redo" });
+  expect(bad?.deliveries?.find((d) => d.id === "d2_redo")?.supersededBy).toBeUndefined();
+  expect((await log(api, "&problems=1")).items.map((item) => item.id)).not.toContain("ev_bad");
+
+  // A delivered row for another line, or an earlier one, settles nothing.
+  await api.providers.db.insert(events).values({
+    id: "ev_mixed", orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: "ev_mixed", refs: {}, summary: "push ev_mixed",
+    payload: {}, occurredAt: now - 200, receivedAt: now - 200,
+  });
+  await api.providers.db.insert(eventDeliveries).values([
+    { id: "m_early", eventId: "ev_mixed", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now - 100 },
+    { id: "m_dead", eventId: "ev_mixed", subscriptionId: "sub_mine", status: "dead", attempts: 4, nextAttemptAt: 0, createdAt: now },
+    { id: "m_other", eventId: "ev_mixed", subscriptionId: "sub_two", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now + 10 },
+  ]);
+  const mixed = (await log(api)).items.find((item) => item.id === "ev_mixed");
+  expect(mixed?.status).toBe("failed");
+  expect(mixed?.deliveries?.find((d) => d.id === "m_dead")?.supersededBy).toBeUndefined();
+  expect((await log(api, "&problems=1")).items.map((item) => item.id)).toContain("ev_mixed");
 });

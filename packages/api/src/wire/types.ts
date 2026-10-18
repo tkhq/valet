@@ -2922,9 +2922,11 @@ export interface WorkflowScheduleTriggerDetail {
   input?: unknown;
   nextFireAt: number;
   lastFiredAt: number | null;
-  /** Why the scheduler disabled this schedule: the pin text when its
-   * `existing` thread cannot receive deliveries. Absent when it recorded
-   * none. Enabling the schedule or changing its pin clears it. */
+  /** Why the scheduler disabled this schedule, as a sentence that names the
+   * fix: the pin text when its `existing` thread cannot receive deliveries,
+   * or an empty prompt, a deleted workflow, or a schedule that does not
+   * parse. Absent when it recorded none. Enabling the schedule or changing
+   * its pin clears it. */
   disabledReason?: string;
   /** The workspace the schedule belongs to. For an assistant-prompt
    * schedule, its thread picker lists this workspace's threads. */
@@ -5264,6 +5266,11 @@ export interface EventDeliveryWire {
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;
+  /** On a `dead` delivery, the id of a later delivery for the same event and
+   * the same subscription that was delivered, such as a redelivery. The dead
+   * row is then settled and is not a fault. Only `GET /api/events/log` sets
+   * it; absent everywhere else. */
+  supersededBy?: string;
 }
 
 /** `GET /api/event-subscriptions/:id/deliveries`: one listener's latest
