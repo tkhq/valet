@@ -331,7 +331,7 @@ export async function ingestEvent(
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
-      detail: `${subs.length} enabled subscriptions checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 matching-key subscriptions.`,
+      detail: `${subs.length} enabled lines of presence checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 lines that name this key.`,
     }, { subscriptions: decisions });
     // Event waiters evaluate before the early return for an unmatched event,
     // and claims resolve before the deliveries are inserted (spec

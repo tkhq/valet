@@ -64,7 +64,7 @@ import { slackEventChannel, storedThreadRef } from "../services/thread-access.js
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
-import { eventPlaceName } from "../services/presence-places.js";
+import { eventInPlace, eventPlace, eventPlaceName, isPlaceKey } from "../services/presence-places.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -397,7 +397,8 @@ eventsRouter.get("/events/filter-options", async (c) => {
 /**
  * `GET /api/events/log` — a workspace's stored events and the organization's
  * recorded problems in one timeline. `problems=1` keeps failed events and
- * problems only. Registered before `/events/:id` so the literal path wins.
+ * problems only. `place=<key>` keeps the events whose place is that key or
+ * inside it, and no problems. Registered before `/events/:id` so the literal path wins.
  */
 eventsRouter.get("/events/log", async (c) => {
   const { db } = c.var.providers;
@@ -411,7 +412,11 @@ eventsRouter.get("/events/log", async (c) => {
   const diagnostics = c.req.query("diagnostics") === "1";
   const q = c.req.query("q")?.trim() || undefined;
   if (q && q.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
-  const scopeKey = JSON.stringify([owner, problemsOnly, diagnostics, q ?? null]);
+  const place = c.req.query("place")?.trim() || undefined;
+  if (place && !isPlaceKey(place)) {
+    return c.json({ error: "place must be a place key, such as slack:T1/C1 or github:acme/api. Open the place in Presence and choose View all." }, 400);
+  }
+  const scopeKey = JSON.stringify([owner, problemsOnly, diagnostics, q ?? null, place ?? null]);
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
@@ -420,8 +425,17 @@ eventsRouter.get("/events/log", async (c) => {
   if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor no longer matches these filters. Load the Log again from the top." }, 400);
 
   const admin = await isOrgAdminUser(c);
+  const keepEvents = place
+    ? async (ids: readonly string[]): Promise<ReadonlySet<string>> => {
+      if (ids.length === 0) return new Set();
+      const rows = await db.select().from(events).where(and(eq(events.orgId, user.orgId), inArray(events.id, [...ids])));
+      return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, row, place)).map((row) => row.id));
+    }
+    : undefined;
   const { items, hasMore } = await listEventLog(db, {
-    orgId: user.orgId, owner, admin, limit, problemsOnly, diagnostics, ...(q ? { q } : {}), ...(before ? { before } : {}),
+    // A problem names no place, so a place filter keeps events only.
+    orgId: user.orgId, owner, admin, limit, problemsOnly, diagnostics: diagnostics && !place,
+    ...(q ? { q } : {}), ...(before ? { before } : {}), ...(keepEvents ? { keepEvents } : {}),
     channelVisible: channelsVisibleTo(c),
   });
   const last = items.at(-1);
@@ -447,9 +461,9 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
   const { db, plugins } = c.var.providers;
   const orgId = c.var.user.orgId;
   const eventRows = await db.select().from(events).where(and(eq(events.orgId, orgId), inArray(events.id, ids)));
-  const places = new Map<string, string>();
+  const places = new Map<string, { key: string; label: string }>();
   for (const row of eventRows) {
-    const place = eventPlaceName(plugins, row);
+    const place = eventPlace(plugins, row);
     if (place !== null) places.set(row.id, place);
   }
   const deliveryRows = await db
@@ -497,7 +511,9 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
     const place = places.get(item.id);
     const detail = item.detail === null ? null
       : shownDetail.get(`${item.id}\n${item.detail}`) ?? (CLAIM_DETAIL.test(item.detail) ? CLAIMED_ELSEWHERE : item.detail);
-    return { ...item, detail, ...(place !== undefined ? { place } : {}), deliveries: byEvent.get(item.id) ?? [] };
+    return {
+      ...item, detail, ...(place !== undefined ? { place: place.label, placeKey: place.key } : {}), deliveries: byEvent.get(item.id) ?? [],
+    };
   });
 }
 
@@ -1060,7 +1076,7 @@ eventsRouter.get("/event-subscriptions/:id/deliveries", async (c) => {
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
     .limit(1);
-  if (subs.length === 0) return c.json({ error: "Listener not found. Open Presence and pick a listener." }, 404);
+  if (subs.length === 0) return c.json({ error: "This line of presence does not exist. Open Presence and pick one from the list." }, 404);
 
   const rows = await db
     .select({

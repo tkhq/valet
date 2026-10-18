@@ -70,7 +70,7 @@ describe("resolveDestination's throw paths", () => {
       binding: null,
       claim: null,
     };
-    expect(() => resolveDestination(input)).toThrow("A subscription rule's new-mode destination needs the event.");
+    expect(() => resolveDestination(input)).toThrow("A new-mode destination for an event needs the event.");
   });
 
   it("throws for a new-mode schedule rule with no fireAt", () => {
@@ -79,6 +79,6 @@ describe("resolveDestination's throw paths", () => {
       binding: null,
       claim: null,
     };
-    expect(() => resolveDestination(input)).toThrow("A schedule rule's new-mode destination needs fireAt.");
+    expect(() => resolveDestination(input)).toThrow("A new-mode destination for a schedule needs fireAt.");
   });
 });

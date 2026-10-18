@@ -100,8 +100,8 @@ const SUBJECT_FILTER_DESCRIPTOR = {
   field: SUBJECT_FILTER_FIELD,
   path: "",
   description:
-    "The event's normalized subject (e.g. github:acme/lean-proofs#42). " +
-    "Matches with eq (a subject equals the value) or prefix (a subject starts with the value).",
+    "The key of the event's place or thread (for example github:acme/lean-proofs#42). " +
+    "Matches with eq (a key equals the value) or prefix (a key starts with the value).",
 };
 
 /**

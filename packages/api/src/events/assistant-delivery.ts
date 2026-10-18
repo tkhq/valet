@@ -72,6 +72,8 @@ export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread in Presence.";
 
 /** The pin text before `PIN_UNAVAILABLE_MESSAGE`. Rows dead-lettered then
  * keep it, so the problem query still matches it. Nothing writes it now. */
+// Stored text: the problem query matches it, so its words stay as written.
+// copy-lint: allow rule
 export const PIN_UNAVAILABLE_LEGACY_MESSAGE = "Pick another thread for this rule in Presence.";
 
 /** Whether a stored dead-letter text is the pin text, current or legacy. */

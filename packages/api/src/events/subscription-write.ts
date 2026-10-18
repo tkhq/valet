@@ -73,7 +73,7 @@ export function validateSubscription(
     // glob that also covers a derived key keeps only its plain entries.
     const matches = subscribableEntries(covered);
     if (matches.length === 0 && covered.length > 0) {
-      return `${pattern} is a derived event key, and subscriptions do not accept derived keys. Use wait_for_event in a session to wait for it.`;
+      return `${pattern} is a derived event key, and Presence does not listen for derived keys. Use wait_for_event in a session to wait for it.`;
     }
     if (matches.length === 0) return `unknown event key: ${pattern}`;
     selectedEntries.push(...matches);

@@ -58,6 +58,10 @@ export interface EventLogQuery {
   /** Whether the viewer may see a Slack channel (`slack:<id>`). A Slack event
    * from a channel they may not see stays out of their Log, as its page does. */
   channelVisible?: (channelKey: string) => Promise<boolean>;
+  /** The ids of the events to keep from one scanned batch, such as the events
+   * in one place. Rows it drops do not count toward the page, like hidden
+   * channels. Absent keeps every event. */
+  keepEvents?: (ids: readonly string[]) => Promise<ReadonlySet<string>>;
 }
 
 function escapeLike(value: string): string {
@@ -107,7 +111,9 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
           received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
           slack_channel: string | null;
         }> };
+      const kept = query.keepEvents ? await query.keepEvents(result.rows.map((row) => row.id)) : undefined;
       for (const row of result.rows) {
+        if (kept && !kept.has(row.id)) continue;
         if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
         const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
         eventRows.push({

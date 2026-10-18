@@ -189,12 +189,42 @@ it("names each stored event's place from its natural subject (presence hub Part 
   await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "C900", isPrivate: false, checkedAt: Date.now() });
   const items = new Map((await log(api)).items.map((item) => [item.id, item]));
   expect(items.get("ev_mention")?.place).toBe("#incidents");
+  expect(items.get("ev_mention")?.placeKey).toBe("slack:T1/C900");
   expect(items.get("ev_pr")?.place).toBe("acme/api#12");
+  expect(items.get("ev_pr")?.placeKey).toBe("github:acme/api#12");
   // An event whose subjects name no place carries none.
   expect(items.get("ev_ok")).not.toHaveProperty("place");
+  expect(items.get("ev_ok")).not.toHaveProperty("placeKey");
   // A problem row is not an event and carries neither.
   expect(items.get("drop_filter")).not.toHaveProperty("place");
   expect(items.get("drop_filter")).not.toHaveProperty("deliveries");
+});
+
+it("keeps only the events in a place, or inside it, when the Log reads place= (presence hub Part E)", async () => {
+  api = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+  await seed(api);
+  const now = Date.now();
+  const githubEvent = (id: string, subjects: string[], at: number) => ({
+    id, orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: id,
+    refs: {}, subjects, summary: id, payload: {}, occurredAt: at, receivedAt: at,
+  });
+  await api.providers.db.insert(events).values([
+    githubEvent("ev_repo", ["github:acme/api"], now - 100),
+    githubEvent("ev_pull", ["github:acme/api", "github:acme/api#12"], now - 200),
+    githubEvent("ev_other", ["github:acme/web"], now - 300),
+  ]);
+  await api.providers.db.insert(eventDeliveries).values(["ev_repo", "ev_pull", "ev_other"].map((eventId) => ({
+    id: `d_${eventId}`, eventId, subscriptionId: "sub_mine", status: "delivered" as const, attempts: 1, nextAttemptAt: 0, createdAt: now,
+  })));
+  const ids = async (place: string) =>
+    (await log(api!, `&place=${encodeURIComponent(place)}`)).items.map((item) => item.id);
+  // The repository covers its pull request; problems name no place and stay out.
+  expect(await ids("github:acme/api")).toEqual(["ev_repo", "ev_pull"]);
+  expect(await ids("github:acme/api#12")).toEqual(["ev_pull"]);
+  // The service-wide place covers every repository.
+  expect(await ids("github:*")).toEqual(["ev_repo", "ev_pull", "ev_other"]);
+  const bad = await fetch(`${api.baseUrl}/api/events/log?${MINE}&place=nowhere`);
+  expect(bad.status).toBe(400);
 });
 
 it("lists each stored event's deliveries to this workspace's rules, newest first", async () => {

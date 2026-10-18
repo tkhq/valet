@@ -155,13 +155,22 @@ export function listenerPlaces(rule: { eventKeys: unknown; filters: unknown }, s
   });
 }
 
-/** A place's concrete name. `names` maps Slack channel ids to names. */
+/** The one name of each service-wide place: its label, its scope label,
+ * and its page title (spec Part B step 3). */
+const SERVICE_WIDE_NAMES: Readonly<Record<PresencePlaceService, string>> = {
+  slack: "Everywhere in Slack",
+  github: "Across GitHub",
+  linear: "Across Linear",
+};
+
+/** A place's concrete name. `names` maps Slack channel ids to names. A
+ * service-wide place has one name everywhere (`SERVICE_WIDE_NAMES`). */
 export function placeLabel(place: string, names: ReadonlyMap<string, string>): string {
-  if (place === GITHUB_ROOT) return "GitHub";
-  if (place === LINEAR_ROOT) return "Linear";
+  if (place === GITHUB_ROOT) return SERVICE_WIDE_NAMES.github;
+  if (place === LINEAR_ROOT) return SERVICE_WIDE_NAMES.linear;
   const slack = SLACK_RE.exec(place);
   if (slack) {
-    if (!slack[2]) return "Slack";
+    if (!slack[2]) return SERVICE_WIDE_NAMES.slack;
     const name = names.get(slack[2]);
     return name ? `#${name.replace(/^#/, "")}` : slack[2];
   }
@@ -179,13 +188,36 @@ export function placeLabel(place: string, names: ReadonlyMap<string, string>): s
  * thread names its channel.
  */
 export function eventPlaceName(plugins: PresenceDeps["plugins"], row: EventRow): string | null {
+  return eventPlace(plugins, row)?.label ?? null;
+}
+
+/** The place an event happened in, as its key (`slack:T1/C900`) and its
+ * concrete name, or null. See `eventPlaceName`. */
+export function eventPlace(plugins: PresenceDeps["plugins"], row: EventRow): { key: string; label: string } | null {
   const natural = eventNaturalSubject(plugins, row);
   const place = natural ? placeOfSubject(natural.subject) : null;
   if (!natural || !place) return null;
   const channelId = slackChannelOf(place);
   const names = new Map<string, string>();
   if (channelId && natural.label.startsWith("#")) names.set(channelId, natural.label.slice(1));
-  return placeLabel(place, names);
+  return { key: place, label: placeLabel(place, names) };
+}
+
+/** Whether `place` is a place key as Presence lists it (`slack:T1/C1`,
+ * `github:acme/api`, `github:*`), not a thread or a commit inside one. */
+export function isPlaceKey(place: string): boolean {
+  return placeOfSubject(place) === place;
+}
+
+/**
+ * Whether an event happened in `place` or inside it: its natural subject's
+ * place is `place`, or `place` covers it (`placeCovers`). An event whose
+ * plugin names no place is in no place. The Activity place filter reads this.
+ */
+export function eventInPlace(plugins: PresenceDeps["plugins"], row: EventRow, place: string): boolean {
+  const natural = eventNaturalSubject(plugins, row);
+  const own = natural ? placeOfSubject(natural.subject) : null;
+  return own !== null && placeCovers(place, own);
 }
 
 /**
@@ -194,10 +226,10 @@ export function eventPlaceName(plugins: PresenceDeps["plugins"], row: EventRow):
  * no parent: a channel, a pull request or issue, a Linear issue.
  */
 export function placeScopeLabel(place: string): string | undefined {
-  if (place === GITHUB_ROOT) return "Everywhere in GitHub";
-  if (place === LINEAR_ROOT) return "Everywhere in Linear";
+  if (place === GITHUB_ROOT) return SERVICE_WIDE_NAMES.github;
+  if (place === LINEAR_ROOT) return SERVICE_WIDE_NAMES.linear;
   const slack = SLACK_RE.exec(place);
-  if (slack) return slack[2] ? undefined : "Everywhere in Slack";
+  if (slack) return slack[2] ? undefined : SERVICE_WIDE_NAMES.slack;
   const github = GITHUB_RE.exec(place);
   if (github) return github[3] ? undefined : `Across ${github[1]}/${github[2]}`;
   const team = LINEAR_TEAM_RE.exec(place);

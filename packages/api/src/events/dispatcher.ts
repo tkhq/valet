@@ -400,7 +400,7 @@ export class EventDispatcher {
       // is Record<string, string>). Same narrowing convention as ingest.ts.
       const target = readStoredTarget(sub.target) as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
-      if (event.orgId !== sub.orgId) throw new Error("Event and subscription organizations differ.");
+      if (event.orgId !== sub.orgId) throw new Error("The event and the line of presence belong to different organizations.");
       const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
       if (!sub.enabled || covered) {
         let paused = false;

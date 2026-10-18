@@ -82,13 +82,13 @@ describe("placeLabel", () => {
   it("names the concrete place", () => {
     expect(placeLabel("slack:T1/C900", new Map([["C900", "incidents"]]))).toBe("#incidents");
     expect(placeLabel("slack:T1/C900", new Map())).toBe("C900");
-    expect(placeLabel("slack:T1", new Map())).toBe("Slack");
+    expect(placeLabel("slack:T1", new Map())).toBe("Everywhere in Slack");
     expect(placeLabel("github:acme/api#12", new Map())).toBe("acme/api#12");
     expect(placeLabel("github:acme/api", new Map())).toBe("acme/api");
-    expect(placeLabel("github:*", new Map())).toBe("GitHub");
+    expect(placeLabel("github:*", new Map())).toBe("Across GitHub");
     expect(placeLabel("linear:ENG-42", new Map())).toBe("ENG-42");
     expect(placeLabel("linear:team/ENG", new Map())).toBe("ENG");
-    expect(placeLabel("linear:*", new Map())).toBe("Linear");
+    expect(placeLabel("linear:*", new Map())).toBe("Across Linear");
   });
 });
 
@@ -96,9 +96,9 @@ describe("placeScopeLabel", () => {
   it("names a parent row's reach, and nothing for any other row", () => {
     expect(placeScopeLabel("slack:T1")).toBe("Everywhere in Slack");
     expect(placeScopeLabel("github:acme/api")).toBe("Across acme/api");
-    expect(placeScopeLabel("github:*")).toBe("Everywhere in GitHub");
+    expect(placeScopeLabel("github:*")).toBe("Across GitHub");
     expect(placeScopeLabel("linear:team/ENG")).toBe("Across ENG");
-    expect(placeScopeLabel("linear:*")).toBe("Everywhere in Linear");
+    expect(placeScopeLabel("linear:*")).toBe("Across Linear");
     expect(placeScopeLabel("slack:T1/C900")).toBeUndefined();
     expect(placeScopeLabel("github:acme/api#12")).toBeUndefined();
     expect(placeScopeLabel("linear:ENG-42")).toBeUndefined();

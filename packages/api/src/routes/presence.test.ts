@@ -128,7 +128,7 @@ it("lists the workspace's places by service, with parents, counts, and the 30-da
   ]);
   expect(map.get("slack:T1/C900")?.scopeLabel).toBeUndefined();
   expect(map.get("slack:T1/C900")).toMatchObject({ label: "#incidents", service: "slack", parent: "slack:T1", listenerCount: 1, activeThreadCount: 1 });
-  expect(map.get("slack:T1")).toMatchObject({ label: "Slack", scopeLabel: "Everywhere in Slack", parent: null, listenerCount: 1, activeThreadCount: 0 });
+  expect(map.get("slack:T1")).toMatchObject({ label: "Everywhere in Slack", scopeLabel: "Everywhere in Slack", parent: null, listenerCount: 1, activeThreadCount: 0 });
   expect(map.get("slack:T1/C902")).toMatchObject({ parent: "slack:T1", listenerCount: 0, lastActivityAt: 5_000 });
   expect(map.get("github:acme/api")).toMatchObject({ label: "acme/api", scopeLabel: "Across acme/api", parent: null, listenerCount: 1 });
   expect(map.get("github:acme/api#12")).toMatchObject({ label: "acme/api#12", parent: "github:acme/api", listenerCount: 0 });
@@ -387,6 +387,6 @@ it("lists a follow's channel only when its bound thread is visible, and keeps a 
   expect(map.has("slack:T1/CPUB2")).toBe(false);
   expect(map.get("slack:T1/COLD")).toMatchObject({ lastActivityAt: 5_000, listenerCount: 0 });
   // The synthesized Slack parent has no listeners, so it carries no reach.
-  expect(map.get("slack:T1")).toMatchObject({ label: "Slack", listenerCount: 0 });
+  expect(map.get("slack:T1")).toMatchObject({ label: "Everywhere in Slack", listenerCount: 0 });
   expect(map.get("slack:T1")?.scopeLabel).toBeUndefined();
 });

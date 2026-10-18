@@ -188,7 +188,7 @@ export async function createWorkflowTrigger(
       },
     );
     if (!rows?.[0]) {
-      return { ok: false, error: "Team or trigger target is no longer available. Refresh and select an active target." };
+      return { ok: false, error: "The team or the target is no longer available. Refresh and select an active target." };
     }
     insertedRow = rows[0];
   } else {

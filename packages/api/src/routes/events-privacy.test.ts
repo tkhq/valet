@@ -175,5 +175,5 @@ it("leaves a private Slack channel's events out of a non-member's listener deliv
   expect(await deliveries("test-member")).toEqual(["deliv-public"]);
   const missing = await fetch(`${api.baseUrl}/api/event-subscriptions/no-such-rule/deliveries`);
   expect(missing.status).toBe(404);
-  expect(await missing.json()).toEqual({ error: "Listener not found. Open Presence and pick a listener." });
+  expect(await missing.json()).toEqual({ error: "This line of presence does not exist. Open Presence and pick one from the list." });
 });

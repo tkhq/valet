@@ -585,7 +585,7 @@ describe("DB-backed actions", () => {
     await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
       params: { input: { data: { key: "slack.message" } }, ...(origin ? { origin } : {}) }, ownerType: "team", ownerId: "team", createdAt: 1, updatedAt: 1 });
     await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "team:team", principal: { type: "team", id: "team" } },
-      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("channel audience can be preserved");
+      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("cannot keep the channel audience in a chained run");
   });
 
   it("uses the execution owner for org-owned workflow parents", async () => {

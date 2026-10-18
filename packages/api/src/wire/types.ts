@@ -5316,12 +5316,20 @@ export interface EventLogItem {
   /** A stored event's place, by its concrete name (`#incidents`,
    * `acme/api#12`). Absent when the event's plugin names no place. */
   place?: string;
+  /** The key of `place` (`slack:T1/C900`, `github:acme/api#12`), so a row can
+   * link the place's page. Present exactly when `place` is. */
+  placeKey?: string;
   /** A stored event's deliveries to this workspace's rules (and the org's),
    * newest first, as the event page lists them. Absent on a problem. */
   deliveries?: EventDeliveryWire[];
 }
 
-/** `GET /api/events/log`. */
+/** `GET /api/events/log`. Query: `ownerType` and `ownerId` name the
+ * workspace; `problems=1` keeps failed events and problems; `diagnostics=1`
+ * adds the org's recorded problems; `q` searches; `place=<key>` keeps the
+ * events whose place is that key or inside it (`github:acme/api` keeps its
+ * pull requests; `github:*` keeps every repository), and no problems;
+ * `cursor` and `limit` page. */
 export interface EventLogResponse {
   items: EventLogItem[];
   nextCursor: string | null;
