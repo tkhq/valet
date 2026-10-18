@@ -13,6 +13,8 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ch
   children: ReactNode;
 }) {
   const tabId = useId();
+  // A run with no conversation has only details: no tab bar to choose from.
+  if (conversations.length === 0) return <div className="flex min-h-0 flex-1 flex-col">{children}</div>;
   const selected = conversations.find(item => item.threadId === conversationId) ?? conversations[0];
   const showChat = view !== "details" && !!selected;
   return <div className="flex min-h-0 flex-1 flex-col">

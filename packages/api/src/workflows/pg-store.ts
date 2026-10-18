@@ -93,6 +93,7 @@ interface WorkflowCheckpointRow {
   effects: unknown;
   error: string | null;
   createdAt: number;
+  startedAt: number | null;
 }
 
 interface WorkflowSignalRow {
@@ -173,6 +174,7 @@ function rawToCheckpointRow(raw: Record<string, unknown>): WorkflowCheckpointRow
     effects: raw.effects,
     error: asStringOrNull(raw.error, 'error'),
     createdAt: toNum(raw.created_at, 'created_at'),
+    startedAt: toNumOrNull(raw.started_at, 'started_at'),
   };
 }
 
@@ -248,6 +250,7 @@ function rowToCheckpoint(row: WorkflowCheckpointRow): NodeCheckpoint {
     effects: fromJsonbColumn<Record<string, unknown>>(row.effects),
     attempt: row.attempt,
     createdAt: row.createdAt,
+    ...(row.startedAt !== null ? { startedAt: row.startedAt } : {}),
   };
 }
 
@@ -618,7 +621,10 @@ export class PgWorkflowStore implements WorkflowStore {
          result = EXCLUDED.result,
          effects = EXCLUDED.effects,
          error = EXCLUDED.error,
-         created_at = EXCLUDED.created_at`,
+         created_at = EXCLUDED.created_at,
+         -- The intent row's time is when the step began; keep it.
+         started_at = CASE WHEN workflow_checkpoints.status = 'intent'
+           THEN workflow_checkpoints.created_at ELSE workflow_checkpoints.started_at END`,
       [
         terminal.runId,
         terminal.nodeId,

@@ -27,6 +27,13 @@ export interface NodeCheckpoint {
   effects?: Record<string, unknown>;
   attempt: number; // the attempt that wrote the current status
   createdAt: number;
+  /**
+   * When the step began: the `createdAt` of the intent row that a terminal
+   * write replaced. Absent on an intent row (its `createdAt` is its start),
+   * on a terminal row written without an intent, and on rows written
+   * before stores kept it.
+   */
+  startedAt?: number;
 }
 
 /** What a parked run is waiting for. */
