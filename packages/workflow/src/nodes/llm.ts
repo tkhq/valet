@@ -44,6 +44,7 @@ import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { LlmNode } from '../dag/nodes.js';
 import type { NodeCheckpoint } from '../store.js';
 import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
+import { withOutputSchemaPrompt } from './submission-node.js';
 import type { WorkflowLlmUsage } from '../engine-deps.js';
 
 const MAX_OUTPUT_TOKENS_CEILING = 16_384;
@@ -142,7 +143,10 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
     });
   }
 
-  const promptText = renderText(node.prompt, templateContext);
+  // The first call states the output contract, as session and orchestrator
+  // steps do. Without it the model answered in prose and nearly every
+  // structured step paid for a second, repair call.
+  const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
   const systemText = node.system !== undefined ? renderText(node.system, templateContext) : undefined;
   const maxOutputTokens = clampMaxOutputTokens(node.maxOutputTokens);
 
