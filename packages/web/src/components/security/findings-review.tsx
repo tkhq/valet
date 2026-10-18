@@ -47,6 +47,7 @@ import {
   SelectMenu,
   Spinner,
   Textarea,
+  Time,
 } from "~/components/primitives";
 import { ServiceIcon } from "~/components/service-icon";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
@@ -904,7 +905,7 @@ function FindingDetail({
             {cell ? `${cell.dir} (${cell.persona})` : finding.cellId}
           </dd>
           <dt className="text-muted">Reported</dt>
-          <dd>{new Date(finding.createdAt).toLocaleString()}</dd>
+          <dd><Time ts={finding.createdAt} format="absolute" /></dd>
           <dt className="text-muted">Fingerprint</dt>
           <dd className="min-w-0 break-all font-mono">{finding.fingerprint}</dd>
           {finding.statusActor && (

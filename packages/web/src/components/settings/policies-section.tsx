@@ -8,7 +8,7 @@ import type {
   PolicyAppliesInWire,
   RiskLevelWire,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Label, Select, Switch } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Label, Select, Switch, Time } from "~/components/primitives";
 import { ServiceActionCombobox } from "./service-action-combobox";
 import { Section } from "~/components/settings/section";
 import { usePlugins } from "~/api/integrations";
@@ -177,7 +177,7 @@ function PolicyRow({
         {showConditions && (policy.paramMatchers?.length ?? 0) > 0 && <pre className="mt-2 whitespace-pre-wrap break-all text-xs text-muted">{JSON.stringify(policy.paramMatchers, null, 2)}</pre>}
         {policy.expiresAt !== null && (
           <p className="mt-0.5 text-xs text-muted">
-            Expires {new Date(policy.expiresAt).toLocaleString()}
+            Expires <Time ts={policy.expiresAt} format="absolute" />
           </p>
         )}
         {error && <p className="mt-1 text-xs text-danger-500">{error}</p>}

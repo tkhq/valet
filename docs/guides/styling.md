@@ -99,6 +99,7 @@ Use these primitives instead of hand-written classes:
 - `Callout` is a tinted notice box. Set `tone` to `neutral`, `warning`, `danger`, or `success`. If the notice can appear after the first paint, add `role="alert"` or `role="status"`. Use `asChild` to put its classes on a `label` or a `ul`.
 - `PageHeader` is the top of a page: the `h1` title, an optional `clause` such as `WorkspaceClause`, the `actions` on the right, and an optional `description`. Pass one element as `actions`, and wrap two or more actions in a `div`.
 - `BackLink` is a "← label" link to the parent page. It takes the props of `Link`, so the route and its params stay typed. Pass it to `PageHeader` as `back`, or use it alone in a toolbar.
+- `Time` shows a timestamp in a `<time>` element. The text is relative by default, or absolute with `format="absolute"`. The `title` always shows the full date. Do not show `toLocaleString()` output directly.
 
 ### Accepting `className` for composition
 

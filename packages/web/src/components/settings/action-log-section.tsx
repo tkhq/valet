@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { ActionLogEntryWire, ApprovalModeWire } from "@valet/api/wire";
-import { Badge, Button, Input, Select } from "~/components/primitives";
+import { Badge, Button, Input, Select, Time } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useActionLog } from "~/api/policies";
 
@@ -218,7 +218,7 @@ function LogRow({
           aria-label={`Toggle details for ${entry.invocationId}`}
           className="flex min-h-11 min-w-0 flex-wrap items-center gap-2 text-left sm:min-h-0"
         >
-          <span className="text-xs text-muted">{new Date(entry.createdAt).toLocaleString()}</span>
+          <Time ts={entry.createdAt} format="absolute" className="text-xs text-muted" />
           <span className="min-w-0 break-all text-sm font-medium text-[--fg]">
             {entry.service ?? "—"}
             {entry.actionId ? ` / ${entry.actionId}` : ""}

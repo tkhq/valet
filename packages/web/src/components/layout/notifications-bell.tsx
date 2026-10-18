@@ -3,10 +3,10 @@ import { ArrowUpRight, Bell, X } from "lucide-react";
 import type { NotificationSummary } from "@valet/api/wire";
 import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications, useNotificationDecisions } from "~/api/queries";
 import { useWorkflowActionRequired } from "~/api/workflows";
-import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } from "~/components/primitives";
+import { Badge, Button, LoadingRow, Popover, PopoverContent, PopoverTrigger, StatusDot, Time, textLinkClass } from "~/components/primitives";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
-import { relativeTime } from "~/lib/relative-time";
+import { cn } from "~/lib/cn";
 import { listedKeys } from "./bulk-answers";
 import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
 
@@ -81,12 +81,12 @@ export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boole
         <section aria-label="Needs action" className="space-y-3 p-4">
           <NeedsActionHeader pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
             decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor} run={bulkRun} />
-          {loading && <p className="text-sm text-muted">Loading approvals…</p>}
-          {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button className="underline" onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
+          {loading && <LoadingRow label="Loading approvals…" className="py-0" />}
+          {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button type="button" className={textLinkClass} onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
           {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}
           <ul className="space-y-3">{workflows.data?.items.map(item => <WorkflowApprovalItem key={item.id} item={item} />)}</ul>
-          {decisionCursor && <button className="text-sm underline" onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
-          {moreDecisions && <button className="text-sm underline" onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
+          {decisionCursor && <button type="button" className={cn(textLinkClass, "text-sm")} onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
+          {moreDecisions && <button type="button" className={cn(textLinkClass, "text-sm")} onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
           {decisions.data?.items.map(item => <article key={item.gate.id} className="min-w-0 rounded-lg border border-line bg-paper">
             <div className="flex min-w-0 items-start justify-between gap-3 px-4 pt-3">
               <span className="min-w-0 break-words text-xs text-muted [overflow-wrap:anywhere]">{item.title}</span>
@@ -99,14 +99,14 @@ export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boole
         </section>
         <section aria-label="Updates" className="border-t border-line p-4 space-y-3">
           <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Updates</h3>
-            {unread > 0 && <button className="text-xs text-muted underline" onClick={() => markAllRead.mutate()}>Mark all read</button>}
+            {unread > 0 && <button type="button" className={cn(textLinkClass, "text-xs")} onClick={() => markAllRead.mutate()}>Mark all read</button>}
           </div>
-          {notifications.isError && <p role="alert" className="text-sm text-danger-500">Could not load updates. <button className="underline" onClick={() => void notifications.refetch()}>Retry</button></p>}
+          {notifications.isError && <p role="alert" className="text-sm text-danger-500">Could not load updates. <button type="button" className={textLinkClass} onClick={() => void notifications.refetch()}>Retry</button></p>}
           {!notifications.isError && updates.length === 0 && <p className="text-sm text-muted">No new updates.</p>}
-          {updates.map(group => <button key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash">
-            <span className="flex items-center gap-2"><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-500" /><span className="min-w-0 truncate text-sm font-medium">{group.latest.title}</span>
+          {updates.map(group => <button type="button" key={group.latest.id} onClick={() => void openUpdate(group)} className="block w-full rounded-md p-2 text-left hover:bg-ink-wash">
+            <span className="flex items-center gap-2"><StatusDot tone="info" size="sm" /><span className="min-w-0 truncate text-sm font-medium" title={group.latest.title}>{group.latest.title}</span>
               {group.ids.length > 1 && <Badge variant="neutral">{group.ids.length}</Badge>}</span>
-            <span className="text-xs text-muted">{relativeTime(group.latest.createdAt)}</span>
+            <Time ts={group.latest.createdAt} className="text-xs text-muted" />
           </button>)}
         </section>
       </PopoverContent>

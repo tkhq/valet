@@ -5,7 +5,7 @@ import {
   type SecurityReportFormat,
 } from "~/api/security";
 import { Markdown } from "~/components/markdown";
-import { Button } from "~/components/primitives";
+import { Button, Time } from "~/components/primitives";
 
 /**
  * The report section (M-P3, spec §Report generation): renders the report
@@ -54,7 +54,7 @@ export function ReportSection({
         <span className="font-semibold text-ink">Report</span>
         {report && (
           <span className="text-muted tabular-nums">
-            generated {new Date(report.generatedAt).toLocaleString()}
+            generated <Time ts={report.generatedAt} format="absolute" />
           </span>
         )}
       </div>

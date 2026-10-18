@@ -21,6 +21,7 @@ import {
   ConfirmDialog,
   Input,
   Spinner,
+  Time,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
@@ -226,7 +227,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         <div className="space-y-1">
           {gate.timeoutAt != null && (
             <div className="text-[11px] text-muted">
-              Gate times out {new Date(gate.timeoutAt).toLocaleString()}.
+              Gate times out <Time ts={gate.timeoutAt} format="absolute" />.
             </div>
           )}
           {is409AlreadyResolved && (
