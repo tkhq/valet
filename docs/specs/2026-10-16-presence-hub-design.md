@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: revision 2 implemented; revision 3 proposed.
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 3).
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -92,12 +92,12 @@ pin.
 | Step | Action | Expected observation |
 |---|---|---|
 | P1 | Open the app. | The nav shows **Presence** and **Workflows**, and no "Events" or "Automation" entry. |
-| P2 | Open `/presence`. | The page shows **Add**, a **Needs attention** banner with one item (`Platform CI is archived. Pick another thread:` and a picker), then the group `GitHub` with the block `acme/api` (an active mark, R1 and R4 as sentences with switches, R4's problem line under its row) and the group `On a schedule` with S1 as a sentence, `Next <date and time>`, and **Fire now**. No rail, no tabs, no pull request row, no card borders. The header shows **Activity** and **Add**. |
+| P2 | Open `/presence`. | The header shows **Activity** and **Add**. A **Needs attention** section holds one item: `In acme/api, Platform CI is archived. Pick another thread:` and a picker. The group `GitHub` holds the `acme/api` row: an active mark with `1 active thread`, R1 and R4 as sentences without the place clause (`When a check completes, work in the Platform CI thread.`), each with a switch, and R4's danger mark and fix under its row. The group `On a schedule` holds S1: `Every day at 9:00` and `Next <date and time>` in the place column, `Morning summary: work in its own thread.`, and **Fire now**. No rail, no tabs, no pull request row, no card borders. |
 | P3 | Select `acme/api`. | The place page header reads `acme/api` with `GitHub`. Under **Valet here**, R1 reads `When a pull request review or a check completes on acme/api, work in one thread per pull request.` and R4 reads `When a check completes on acme/api, work in the Platform CI thread.` with its inline problem line. **Threads** lists `One thread per pull request: acme/api#12, acme/api#13`. |
 | P4 | Switch to the `sre` workspace and select `#incidents`. | The place page lists M and P as sentences, **Appears as** `Ops Bot`, **Threads** with `Active now: t-inc` and `Following: 1 Slack thread`, and **Recent activity** with the C2 mention. |
-| P5 | Click **Listen for…** on the `#incidents` block of the overview. | The wizard opens fixed on `#incidents`. The When step offers only Slack choices. The preview reads `When someone mentions Valet in #incidents, reply in a new thread.` Create stores a rule with policy `{ mode: "new" }`. |
-| P6 | Click **Add**, choose `On a schedule`, set weekdays at 9:00, a prompt, and a name. | The When step offers all four choices. The preview reads `Every weekday at 9:00, <name>: work in its own thread.` The row appears under `On a schedule` with `Next <date and time>` and **Fire now**. |
-| P7 | Open R4 from its row. | The page shows a breadcrumb `acme/api › CI failures`, the sentence as the title, a fact strip (When, Do, Runs in, Appears as) with **Edit**, the problem line with the picker, then deliveries as sentences. |
+| P5 | Click **+ Listen for…** on the `#incidents` row of the overview. | The wizard opens fixed on `#incidents`. The When step offers only Slack choices. The preview reads `When someone mentions Valet in #incidents, reply in a new thread.` Create stores a rule with policy `{ mode: "new" }`, and the `#incidents` row lists it. |
+| P6 | Click **Add**, choose `On a schedule`, set weekdays at 9:00, a prompt, and a name. | The When step offers all four choices. The preview reads `Every weekday at 9:00, <name>: work in its own thread.` The row appears under `On a schedule` with `Every weekday at 9:00`, `Next <date and time>`, and **Fire now**. |
+| P7 | Open R4 from its row. | The page shows a breadcrumb `Presence › acme/api › CI failures`, the sentence as the title, a fact strip (When, Do, Runs in, Appears as) with **Edit**, the problem line with the picker, then deliveries as sentences. |
 | P8 | Pick a new thread in the picker, then return to `/presence`. | The problem line is gone, the sentence ends with the new thread's title, and the **Needs attention** banner is gone. |
 | P9 | Click **Activity** in the header, choose the `Problems` chip. | `/presence/activity` lists the dead-lettered delivery as `Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver`. With the chip off, the C2 mention appears as `Mention in #incidents → replied in t-inc`. The breadcrumb reads `Presence › Activity`. |
 | P10 | Open `/workflows`. | The Workflows page shows the workflow list and a Runs view at its own URL. The editor's panel lists this workflow's presence lines and routines as sentences, and its **Add** opens the wizard fixed on the workflow. |
@@ -158,7 +158,7 @@ Pass criterion: all steps, in one run, from a clean start.
    the place (`In acme/api,`), states the fault, and carries its fix inline
    (an archived pin shows the thread picker; a disabled routine shows its
    reason and an `Edit` link; a dead delivery links its event). The banner
-   never shows a bare count. Danger color appears nowhere else on the page.
+   never shows a bare count.
 3. Groups, in order: `Slack`, `GitHub`, `Linear`, `On a schedule`. A group
    heading is a small muted label on a hairline rule, with the group's
    count at the right (`2 places`, `1 routine`). A group renders only when
@@ -194,7 +194,8 @@ Pass criterion: all steps, in one run, from a clean start.
    the schedule step.
 7. Color: the brand accent appears only on **Add**, links, and the active
    mark. Switches are the small variant, accent when on and line when off.
-   Hover on a sentence row is the ink wash. No other decoration.
+   Hover on a sentence row is the ink wash. Danger color appears only on
+   faults and errors. No other decoration.
 8. Scale: with more than ten places, each group collapses to its heading
    with its count, a filter box `Filter places` appears above the groups
    and filters places by name, and a group with a fault stays open. Places
@@ -557,19 +558,14 @@ Revision 2 deviations that still hold:
   personal or org mention rule (`packages/api/src/events/mention-scope.ts`).
   That filter is the rule's scope, so the sentence shows no `from
   <sender>` for it. A labeled `user` filter still reads as a sender.
-- **A routine row's switch is not gated (Part E step 1).** The row does
-  not check `routineReadOnly` before it enables the switch. If the viewer
-  may not change the routine, the server refuses, and the row shows the
-  refusal, which names the fix. The routine page still reads its
-  read-only state first.
 - **Needs attention follows the switcher (Part F step 4).** The banner
   lists the faults of the active workspace only: its lines, its routines,
   and its Activity rows. The banner changes when the reader switches
   workspace.
 - **The breadcrumb separator is decoration (Part D step 1).** The `›`
   between crumbs is a hidden list item with padding. The breadcrumb's text
-  is `acme/api›CI failures`, and each crumb is its own link or the
-  current page.
+  is `Presence›acme/api›CI failures`, and each crumb is its own link or
+  the current page.
 - **A dead delivery reads its status line (acceptance P9).** Part F step 1
   reads a dead delivery as its status line, so the P9 row reads `gave up
   after 3 attempts. To send it again, press Redeliver`. The lead follows
@@ -605,20 +601,76 @@ Revision 2 deviations that still hold:
   overview shows the empty state only when the workspace has no place
   row and no routine. A workspace with a routine is not empty: Valet
   already does something there on a schedule. The empty state shows only
-  after both reads load. Activity shows the same empty state with its own
-  **Add**, because Activity has no header pair.
-- **One appearance, said once (Part B step 5).** When a line appears as
-  the name and avatar that the place's `Appears as` line shows, its
-  sentence drops `, as <appearance>`. A line with another appearance keeps
-  the clause, so no line hides who it appears as.
-- **The schedule group collapses too (Part B step 8).** Past ten places,
-  `On a schedule` collapses with the other groups and stays open while a
-  routine is off with a reason. The filter reads place names, so it never
-  hides the schedule group.
+  after both reads load.
 - **The thread card says `wait` (INV-H2).** The background section of the
   thread context card names an event wakeup a `wait`, because `active`
   reads as a state and not a thing to count. The card is outside Presence,
   so the copy lint does not read it.
+
+Revision 3 deviations:
+
+- **One appearance, said once (Part B step 5).** On the overview, when a
+  line appears as the name and avatar that the place's `Appears as` line
+  shows, its sentence drops `, as <appearance>`. A line with another
+  appearance keeps the clause, so no line hides who it appears as. The
+  place page keeps the clause on every line.
+- **A service-wide row keeps the place clause for a line that names places
+  (Part B step 4).** A line with `channel in [C1, C2]` names no single
+  place, so it sits on `Everywhere in Slack`. Its sentence keeps `in #a or
+  #b`, because `When someone mentions Valet, ...` would be false. A line
+  with no place filter drops `in any channel`.
+- **The schedule group does not count toward the threshold (Part B step
+  8).** The threshold counts places only. Past ten places, `On a schedule`
+  collapses with the other groups and stays open while a routine is off
+  with a reason. The filter reads place names, so it never hides the
+  schedule group, and filter text does not open it.
+- **A line with no known service gets no row (Part B step 4).** A line
+  whose event keys name no Slack, GitHub, or Linear key has no place and no
+  service row. It shows on Activity and on its own page only.
+- **Groups open on their own and never close on their own (Part B step
+  8).** A collapsed group opens when it gains a fault, when the filter has
+  text, or when a Create marks a row in it. It does not close when the
+  fault clears or the filter empties, so a fix in progress or an open
+  dialog stays in view. The reader's own toggle wins while the overview
+  stays open.
+- **A routine fault leads with the routine's name (Part B step 2).** A
+  routine has no place, so its banner item reads `<name> is off: <reason>`
+  with an `Edit` link. A line fault leads with `In <place>,` or with its
+  service row's name (`Everywhere in Slack,`). A dead delivery leads with
+  its line's place, else with the event's place.
+- **Error alerts use danger color (Part B step 7).** A failed read
+  (`Could not load Presence. Reload the page to try again.`) and a refused
+  write show in danger color, because an error is a fault. Step 7 now says
+  so.
+- **A routine row leaves its schedule to the place column (Part B step
+  6).** The place column reads `Every weekday at 9:00`, the timezone when
+  it is not UTC, and `Next <date and time>`. So the sentence column reads
+  `<name>: <do>.`, with the prompt as a muted line under it. The routine
+  page and the Workflows panel keep the full Part E sentence.
+- **Activity offers Add only to an empty workspace (Part B step 9, Part F
+  step 2).** The overview owns the onboarding paragraphs. Activity always
+  shows its log. When the workspace has no place and no routine, Activity
+  also shows an **Add** above the log, because it has no header pair.
+- **The Create highlight goes through a module store (Part H step 9).**
+  The header's **Add** lives in the section layout, outside the overview,
+  so `created-highlight.ts` carries the new id from the wizard's
+  `onCreated` to the overview. The overview marks the row only after the
+  refetch lists the new id. A Create the overview never shows (a line with
+  no row, or a row the filter hides) stays in the store until the next
+  Create replaces it.
+- **The `On a schedule` crumb may land at the top (Part E step 2).** The
+  crumb links `/presence#schedule`. If the overview's lists are not cached,
+  the anchor does not exist when the router scrolls, and the page opens at
+  the top.
+- **The section title shows on the overview only (Part A step 2).** The
+  layout renders the `Presence` title, the workspace clause, the subtitle,
+  and the action pair on `/presence` only. A detail page shows its
+  breadcrumb, whose first crumb is `Presence`, and its own title as the
+  page heading.
+- **The banner's line item leads with its place (acceptance P2).** The
+  item reads `In acme/api, Platform CI is archived. Pick another thread:`
+  and does not name the line. The line's own row, under its place, carries
+  its sentence and the same fix.
 
 Revision 1 deviations that revision 2 retired: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the
@@ -628,5 +680,6 @@ Revision 2 deviations that revision 3 retires: the rail's filter box and
 collapse rules (replaced by Part B step 8), the plain group header for a
 service without a service-wide row (a service block exists only when lines
 name no place), the Activity landing, the `Activity` and `Routines` rail
-counts (replaced by the banner), and the `/presence/routines?routine=<id>`
-page (now `/presence/routines/<id>`).
+counts (replaced by the banner), the `/presence/routines?routine=<id>`
+page (now `/presence/routines/<id>`), and the ungated routine row switch
+(the roster row reads `routineReadOnly`).
