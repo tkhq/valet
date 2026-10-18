@@ -49,13 +49,18 @@ async function setup(extraPlugins: ValetPlugin[] = []) {
   return { p, team, deps, owner, baseUrl: api.baseUrl };
 }
 
-it("reuses a creator's saved account consent across scheduled runs only for that workflow", async () => {
+it("reuses explicitly allowed account consent across scheduled runs only for that workflow", async () => {
   const { p, team, baseUrl } = await setup();
   const response = await fetch(`${baseUrl}/api/workflows`, { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "Account automation", definition, teamId: team.id }) });
   expect(response.status).toBe(201);
   const saved = await response.json();
   if (!saved || typeof saved !== "object" || !("id" in saved) || typeof saved.id !== "string") throw new Error("Missing workflow ID");
+  // A save allows nothing, so the person allows the reviewed steps once.
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  const allowed = await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+  expect(allowed.status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId: saved.id, memberId: "local-user", service: "fixture_account" }]);
   const scope = { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`, service: "fixture_account", memberId: "local-user" };
   for (const runId of ["schedule-one", "schedule-two"]) {
@@ -125,15 +130,21 @@ it("lets a team member review only their own accounts without granting tool acti
 });
 
 
-it("saves account consent for dynamic tools inside foreach steps", async () => {
+it("allows account consent for dynamic tools inside foreach steps", async () => {
   const { p, team, deps, owner } = await setup();
   const dynamic = { ...definition, nodes: definition.nodes.map(node => node.id === "read" ? {
     id: "read", type: "foreach", items: "{{ start.data.items }}",
     body: { id: "each", type: "tool", service: "fixture", action: "discovered_read", params: {} },
   } : node) };
   const saved = await createWorkflowDefinition(deps, owner, { name: "Dynamic account", definition: dynamic, teamId: team.id });
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  const { allowWorkflowPermissions, analyzeWorkflowPermissions } = await import("../workflows/permissions.js");
+  const review = await analyzeWorkflowPermissions(deps, owner, saved.id);
+  expect(review?.accountConsent?.pending).toEqual(["fixture_account"]);
+  expect((await allowWorkflowPermissions(deps, owner, saved.id, [], review?.definitionToken ?? ""))?.ok).toBe(true);
   expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId: saved.id, service: "fixture_account", memberId: "local-user" }]);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+  expect((await analyzeWorkflowPermissions(deps, owner, saved.id))?.accountConsent?.pending).toEqual([]);
   await p.workflowStore.createRun("dynamic-run", { workflowId: saved.id, definitionVersionId: "v1" }, dynamic, "v1",
     { ownerType: "team", ownerId: team.id, actorUserId: `team:${team.id}` });
   expect(await canBorrowCredential(p.db, { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`,
@@ -165,6 +176,7 @@ it("lets a member revoke only their own workflow account consent", async () => {
   await p.engineCredentials.save({ type: "user", id: "test-member" }, "fixture_account", { type: "api_key", apiKey: "test-fixture" });
   await shareCredential(p.db, { teamId: team.id, service: "fixture_account", userId: "test-member", createdAt: 2 });
   const saved = await createWorkflowDefinition(deps, owner, { name: "Revocable accounts", definition, teamId: team.id });
+  expect((await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", body: JSON.stringify({}) })).status).toBe(200);
   const headers = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
   expect((await reviewedApproval(`${baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST", headers, body: JSON.stringify({ actionIds: [] }) })).status).toBe(200);
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(2);
@@ -178,9 +190,10 @@ it("lets a member revoke only their own workflow account consent", async () => {
   expect((await fetch(`${baseUrl}/api/workflows/${saved.id}/permissions/accounts`, { method: "DELETE", headers: { "x-valet-test-user-id": "test-admin" } })).status).toBe(404);
 });
 
-it.each([false, true])("authorizes human workflow copies at creation (team=%s)", async (teamCopy) => {
+it.each([false, true])("gives a copy no grants, even from an allowed source (team=%s)", async (teamCopy) => {
   const { p, team, deps, owner, baseUrl } = await setup();
-  const source = await createWorkflowDefinition(deps, { ...owner, agentEditor: true }, { name: "Source draft", definition });
+  const source = await createWorkflowDefinition(deps, owner, { name: "Source", definition });
+  expect((await reviewedApproval(`${baseUrl}/api/workflows/${source.id}/permissions/allow`, { method: "POST", body: JSON.stringify({}) })).status).toBe(200);
   const response = await fetch(`${baseUrl}/api/workflows/${source.id}/${teamCopy ? "copy-to-team" : "copy"}`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: teamCopy ? JSON.stringify({ teamId: team.id, name: "Copied automation" }) : undefined,
@@ -188,12 +201,9 @@ it.each([false, true])("authorizes human workflow copies at creation (team=%s)",
   expect(response.status).toBe(201);
   const copy = await response.json();
   if (!copy || typeof copy !== "object" || !("id" in copy) || typeof copy.id !== "string") throw new Error("Missing copy ID");
-  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId: copy.id, actionId: "fixture.read" }]);
-  const accounts = await p.db.select().from(workflowAccountGrants);
-  expect(accounts).toHaveLength(teamCopy ? 1 : 0);
-  if (teamCopy) expect(accounts[0]).toMatchObject({ workflowId: copy.id, memberId: "local-user" });
+  expect((await p.db.select().from(workflowActionGrants)).filter((row) => row.workflowId === copy.id)).toHaveLength(0);
+  expect((await p.db.select().from(workflowAccountGrants)).filter((row) => row.workflowId === copy.id)).toHaveLength(0);
 });
-
 
 it("rejects a stale permissions review before authorizing newly added shared accounts or actions", async () => {
   const lowRiskPlugin: ValetPlugin = { name: "new-account", version: "1", actions: [{ service: "new-account", actions: [{
@@ -276,10 +286,25 @@ function assistantTurn(teamId: string, overrides: Partial<PluginActionContext> =
   };
 }
 
-it("grants an assistant save made on the person's own prompt and nothing for automated turns", async () => {
+it("allows nothing on an assistant save; allow_permissions asks the person once for the saved steps", async () => {
   const { p, team, deps } = await setup();
-  const save = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.save_workflow");
-  if (!save) throw new Error("save_workflow missing");
+  const plugin = workflowsActionPlugin(() => deps);
+  const save = plugin.actions.find((action) => action.id === "workflows.save_workflow");
+  const allow = plugin.actions.find((action) => action.id === "workflows.allow_permissions");
+  if (!save || !allow) throw new Error("workflow actions missing");
+  // A prompt that read untrusted content can make the assistant save any
+  // steps, so the save itself allows nothing and names what needs a person.
+  const saved = await save.execute({ name: "Requested in chat", definition }, assistantTurn(team.id));
+  expect(saved).toMatchObject({ success: true, data: { needsApproval: ["fixture.read", "fixture_account shared account"] } });
+  const workflowId = saved.data && typeof saved.data === "object" && "workflowId" in saved.data ? saved.data.workflowId : undefined;
+  if (typeof workflowId !== "string") throw new Error("Missing workflow ID");
+  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+
+  const card: { title?: string; body?: string }[] = [];
+  const answer = (actionId: string, resolvedBy = "local-user") => ({
+    requestDecision: async (req: { title: string; body?: string }) => { card.push(req); return { actionId, resolvedBy, resolvedAt: 1 }; },
+  });
   const automated: [string, Partial<PluginActionContext>][] = [
     ["event or signal turn", { interactiveActor: undefined }],
     ["delegated child work", { sessionPurpose: "child" }],
@@ -287,18 +312,24 @@ it("grants an assistant save made on the person's own prompt and nothing for aut
     ["another person's prompt", { interactiveActor: { id: "test-member" } }],
   ];
   for (const [label, overrides] of automated) {
-    expect(await save.execute({ name: label, definition }, assistantTurn(team.id, overrides)), label).toMatchObject({ success: true });
+    expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, { ...answer("approve"), ...overrides })), label).toMatchObject({ success: false });
   }
-  expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(card).toHaveLength(0);
+  expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("cancel")))).toMatchObject({ success: false });
+  expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("approve", "test-member")))).toMatchObject({ success: false });
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
 
-  const saved = await save.execute({ name: "Requested in chat", definition }, assistantTurn(team.id));
-  const workflowId = saved.data && typeof saved.data === "object" && "workflowId" in saved.data ? saved.data.workflowId : undefined;
-  if (typeof workflowId !== "string") throw new Error("Missing workflow ID");
-  expect(await p.db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId, memberId: "local-user", service: "fixture_account" }]);
-  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId, ownerType: "team", ownerId: team.id }]);
+  expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("approve")))).toMatchObject({
+    success: true, data: { allowed: ["fixture.read"], accounts: ["fixture_account"] },
+  });
+  expect(card.at(-1)?.body).toContain("- fixture.read");
+  expect(card.at(-1)?.body).toContain("fixture_account");
+  expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId, ownerType: "team", ownerId: team.id, grantedBy: "local-user" }]);
   const scope = { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`, service: "fixture_account", memberId: "local-user" };
   await p.workflowStore.createRun("scheduled", { workflowId, definitionVersionId: "v1" }, definition, "v1",
     { ownerType: "team", ownerId: team.id, actorUserId: scope.actorId });
   expect(await canBorrowCredential(p.db, { ...scope, sessionId: "wf:scheduled" })).toBe(true);
+  // Nothing is left to allow, so a second call asks nothing.
+  expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("approve")))).toMatchObject({ success: true, data: { allowed: [] } });
+  expect(card).toHaveLength(3);
 });

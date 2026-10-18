@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
+import { pendingWorkflowAccountConsent, saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
@@ -108,8 +108,8 @@ export async function analyzeWorkflowPermissions(
   if (summary.ownerType === "team") {
     const [team] = await deps.db.select({ name: teams.name }).from(teams)
       .where(and(eq(teams.id, summary.ownerId), eq(teams.orgId, owner.orgId))).limit(1);
-    if (team) result.accountConsent = { teamId: summary.ownerId, teamName: team.name,
-      services };
+    if (team) result.accountConsent = { teamId: summary.ownerId, teamName: team.name, services,
+      pending: await pendingWorkflowAccountConsent(deps.db, { orgId: owner.orgId, workflowId: summary.id, teamId: summary.ownerId, userId: owner.userId, services }) };
   }
   return result;
 }

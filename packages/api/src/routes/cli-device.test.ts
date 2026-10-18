@@ -285,7 +285,7 @@ describe("valet login device sign-in", () => {
     expect(await preview.text()).not.toContain("Agent credentials");
   });
 
-  it("refuses a CLI token's workflow edit, keeps the person's grant, and revokes grants on an agent edit through the service", async () => {
+  it("refuses a CLI token's workflow edit, keeps the grant, and revokes grants on any step change", async () => {
     const { testApi, base, cookie } = await setup({ plugins: [widgetsPlugin()] });
     const cliToken = (await signIn(base, cookie).run).access_token;
     const created = await fetch(`${base}/api/workflows`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ name: "Deploy", definition: deployWorkflow("staging") }) });
@@ -304,9 +304,13 @@ describe("valet login device sign-in", () => {
     expect(agentEdit.status).toBe(403);
     expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
 
-    // A person who can grant keeps the approval when they edit.
+    // Any step change ends the approval, a person's too: they allow the new steps again.
     const personEdit = await fetch(`${base}/api/workflows/${id}`, { method: "PUT", headers: json(cookie, base), body: JSON.stringify({ definition: deployWorkflow("canary") }) });
     expect(personEdit.status).toBe(200);
+    expect(await grants()).toEqual([]);
+    const canaryReview: unknown = await (await fetch(`${base}/api/workflows/${id}/permissions`, { headers: json(cookie, base) })).json();
+    if (!canaryReview || typeof canaryReview !== "object" || !("definitionToken" in canaryReview)) throw new Error("Missing reviewed definition token.");
+    expect((await fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ definitionToken: canaryReview.definitionToken }) })).status).toBe(200);
     expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
 
     // Valet's assistant is an agent too: its step change revokes the grant.

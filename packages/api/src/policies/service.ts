@@ -38,6 +38,7 @@ import type {
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { shareGeneration, canBorrowCredential, isUnattendedTeamSession, writeBorrowGrant } from "../services/credential-borrow.js";
+import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -282,11 +283,16 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }
 
   let workflowId = scope.workflowId;
-  if (!workflowId && scope.workflowExecutionId) {
-    const [run] = await db.select({ workflowId: workflowRuns.workflowId }).from(workflowRuns)
+  if (scope.workflowExecutionId) {
+    const [run] = await db.select({ workflowId: workflowRuns.workflowId, runDefinition: workflowRuns.definition, definition: workflowDefinitions.definition })
+      .from(workflowRuns)
       .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowRuns.workflowId), eq(workflowDefinitions.orgId, scope.orgId)))
       .where(eq(workflowRuns.id, scope.workflowExecutionId)).limit(1);
-    workflowId = run?.workflowId;
+    // A workflow grant covers the saved steps a person reviewed, and every
+    // step change revokes it. A run that started on other steps, such as a
+    // snapshot from before an edit, does not use it.
+    workflowId = run && (!workflowId || workflowId === run.workflowId) && sameWorkflowSteps(run.definition, run.runDefinition)
+      ? run.workflowId : undefined;
   }
   const workflowGrants = workflowId ? await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
     .from(workflowActionGrants)

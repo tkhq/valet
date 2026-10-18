@@ -363,37 +363,40 @@ describe("template install authorization", () => {
     return body.workflowId;
   }
 
-  it("authorizes declared high-risk tool actions during a human HTTP install", async () => {
+  async function allowReviewed(baseUrl: string, id: string): Promise<Response> {
+    const review: unknown = await (await fetch(`${baseUrl}/api/workflows/${id}/permissions`)).json();
+    if (!review || typeof review !== "object" || !("definitionToken" in review)) throw new Error("Missing reviewed definition token.");
+    return fetch(`${baseUrl}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definitionToken: review.definitionToken }) });
+  }
+
+  it("allows nothing during a human HTTP install; a review allows the declared actions", async () => {
     const a = await bootConsent();
     const id = await installedWorkflowId(await install(a.baseUrl, "install-consent"));
+    expect(await a.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+    const preview = await fetch(`${a.baseUrl}/api/workflows/${id}/permissions`);
+    expect(await preview.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "send", mode: "require_approval" })] });
+    expect((await allowReviewed(a.baseUrl, id)).status).toBe(200);
     expect(await a.providers.db.select().from(workflowActionGrants)).toMatchObject([
       { workflowId: id, actionId: "install-fixture.send", grantedBy: "local-user", ownerType: "user", ownerId: "local-user" },
     ]);
   });
 
-  it("authorizes a team admin's actions and own shared account before enabling the installed schedule", async () => {
+  it("installs a scheduled team template without grants; a team admin's review allows actions and only their own account", async () => {
     const a = await bootConsent();
     const db = a.providers.db;
     const team = await createTeam(db, { orgId: "local-org", name: "Install team", creatorUserId: "local-user" });
     await addMember(db, { teamId: team.id, userId: "test-member", role: "member" });
     await a.providers.engineCredentials.save({ type: "user", id: "test-member" }, "install-fixture", { type: "api_key", apiKey: "other-fixture" });
     for (const userId of ["local-user", "test-member"]) await shareCredential(db, { teamId: team.id, userId, service: "install-fixture", createdAt: 1 });
-    await db.execute(sql`CREATE FUNCTION require_installed_template_consent() RETURNS trigger AS $$
-      BEGIN
-        IF NEW.enabled AND (NOT EXISTS (SELECT 1 FROM workflow_action_grants WHERE workflow_id = NEW.workflow_id)
-          OR NOT EXISTS (SELECT 1 FROM workflow_account_grants WHERE workflow_id = NEW.workflow_id AND member_id = 'local-user')) THEN
-          RAISE EXCEPTION 'Template consent must precede the enabled schedule';
-        END IF;
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql`);
-    await db.execute(sql`CREATE TRIGGER require_installed_template_consent BEFORE INSERT ON workflow_schedules
-      FOR EACH ROW EXECUTE FUNCTION require_installed_template_consent()`);
     const id = await installedWorkflowId(await install(a.baseUrl, "install-consent-scheduled", { teamId: team.id }));
+    expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
+    expect(await db.select().from(workflowAccountGrants)).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules).where(eq(workflowSchedules.workflowId, id))).toMatchObject([{ enabled: true }]);
+    expect((await allowReviewed(a.baseUrl, id)).status).toBe(200);
     expect(await db.select().from(workflowActionGrants)).toMatchObject([{ workflowId: id, ownerType: "team", ownerId: team.id, actionId: "install-fixture.send" }]);
     expect(await db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId: id, memberId: "local-user", service: "install-fixture" }]);
     expect(await db.select().from(workflowAccountGrants)).toHaveLength(1);
-    expect(await db.select().from(workflowSchedules).where(eq(workflowSchedules.workflowId, id))).toMatchObject([{ enabled: true }]);
   });
 
   it.each([false, true])("does not auto-authorize a service or agent install (agent=%s)", async agentEditor => {

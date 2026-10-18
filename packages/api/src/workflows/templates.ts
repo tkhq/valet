@@ -73,7 +73,7 @@ import { toolNodesOf, workflowCallsOf } from "./tool-nodes.js";
 // `trigger-service.ts` set the precedent for importing it from a service.
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import type { SubscriptionFilter } from "../events/match.js";
-import { authorizeHumanWorkflowSave, newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
+import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
 import type {
   WorkflowTemplateInput,
   WorkflowTemplateRequirement,
@@ -1364,7 +1364,6 @@ export async function installWorkflowTemplate(
       definition,
       createdAt: now,
     });
-    await authorizeHumanWorkflowSave({ db: tx, actionPluginByService: deps.actionPluginByService }, owner, workflowId);
 
     if (schedule && fireAt !== undefined) {
       scheduleId = randomUUID();

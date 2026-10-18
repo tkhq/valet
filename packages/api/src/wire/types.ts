@@ -2305,7 +2305,8 @@ export interface GetWorkflowPermissionsResponse {
   /** Identity of the definition and ownership displayed by this review. */
   definitionToken: string;
   /** Complete direct-tool account scope shown alongside the reviewed graph. */
-  accountConsent?: { teamId: string; teamName: string; services: string[] };
+  /** `pending`: the viewer's own shared accounts among `services` that they have not allowed for this workflow. */
+  accountConsent?: { teamId: string; teamName: string; services: string[]; pending: string[] };
   nodes: WorkflowNodePermissionWire[];
 }
 

@@ -19,6 +19,7 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
     "Otherwise, build it and list what you assumed.",
     "Use patch_workflow to build its steps incrementally so the person can review the canvas.",
     "Use propose_trigger or propose_schedule for automation so the person can review the saved configuration before enabling it.",
+    "A save allows nothing. When the workflow is built and a save result lists needsApproval, call allow_permissions once, so the person allows those steps and their shared accounts in one card and runs never stop to ask.",
     "Do not run it or enable schedules or event subscriptions unless the person explicitly asks.",
     "If the person asks you to test it, first state 2 to 4 concrete checks that the result must pass.",
     "Then call preview_workflow to find template and structure errors. A preview has no side effects.",

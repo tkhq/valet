@@ -1,5 +1,5 @@
 import { loadAssistantBySessionId } from "../assistants/service.js";
-import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions, workflowCredentialServices, type WorkflowPermissionDeps } from "./permissions.js";
+import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
@@ -123,10 +123,6 @@ export interface WorkflowOwner {
   /** Tool-origin deletion provenance. HTTP deletion uses its authenticated
    * request principal. Tool calls must never inherit a creator's admin role. */
   deletionAuthority?: { type: "interactive"; userId: string } | { type: "automated" };
-  /** The person whose own signed-in prompt made this assistant save. Set only
-   * from `ToolContext.interactiveActor`, never for events, signals, schedules,
-   * workflow steps or delegated work (`workflows/actions.ts#saverFromContext`). */
-  interactiveSaver?: string;
 }
 
 /** The owner types `workflow_definitions.owner_type` holds. Read off the
@@ -664,7 +660,6 @@ export async function createWorkflowDefinition(
         const scopedDeps = { ...deps, db: tx };
         await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
         await snapshotVersion(scopedDeps, id, 1, input.name, input.definition, now);
-        await authorizeHumanWorkflowSave(scopedDeps, owner, id);
         return true;
       },
     );
@@ -674,42 +669,12 @@ export async function createWorkflowDefinition(
   } else {
     rejectAssistantRouting(input.definition);
     await deps.db.transaction(async (tx) => {
-      const scopedDeps = { ...deps, db: tx };
       await tx.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
-      await snapshotVersion(scopedDeps, id, 1, input.name, input.definition, now);
-      await authorizeHumanWorkflowSave(scopedDeps, owner, id);
+      await snapshotVersion({ ...deps, db: tx }, id, 1, input.name, input.definition, now);
     });
   }
 
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
-}
-
-/** A person's save is their authorization for this saved graph only: a browser
- * save, or an assistant save made on that person's own signed-in prompt. */
-export async function authorizeHumanWorkflowSave(deps: WorkflowPermissionDeps, saver: WorkflowOwner, workflowId: string): Promise<void> {
-  const owner = savingPerson(saver);
-  if (!owner) return;
-  const summary = await getWorkflowDefinition(deps, owner, workflowId);
-  if (!summary) return;
-  if (await canGrantWorkflowPermissions(deps, owner, summary)) {
-    const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, undefined);
-    if (prepared?.ok) await persistWorkflowPermissions(deps.db, prepared.grants);
-  }
-  if (summary.ownerType === "team") {
-    await saveWorkflowAccountConsent(deps.db, { orgId: owner.orgId, workflowId, teamId: summary.ownerId,
-      userId: owner.userId, services: workflowCredentialServices(deps, summary.definition) });
-  }
-}
-
-/** The person a save authorizes, or null for an agent acting on its own. An
- * interactive assistant save grants with that person's own reach, as their
- * browser save would, never with the assistant's team principal. */
-function savingPerson(saver: WorkflowOwner): WorkflowOwner | null {
-  if (saver.interactiveSaver !== undefined) {
-    if (saver.interactiveSaver !== saver.userId) return null;
-    return { userId: saver.userId, orgId: saver.orgId, principal: { type: "user", id: saver.userId }, humanAccountConsent: true };
-  }
-  return saver.humanAccountConsent && !saver.agentEditor && saver.principal?.type === "user" ? saver : null;
 }
 
 /** Definitions use workspace ownership rather than assistant routing. */
@@ -828,11 +793,11 @@ async function updateLockedWorkflowDefinition(
     rejectAssistantRouting(input.definition);
   }
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
-  // Agent and non-admin edits retire action grants. Every step edit retires
-  // account consent, then a human can authorize only their own current shares.
-  const revokeGrants = stepsChange && (owner.agentEditor === true || !(await canGrantWorkflowPermissions(deps, owner, row)));
-  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
-  else if (stepsChange) await revokeWorkflowAccountConsent(deps.db, row.orgId, id);
+  // A grant covers the steps a person reviewed. Any step change ends it, so
+  // a person allows the new steps again: in the Pre-approve dialog or the
+  // assistant's approval card (`workflows.allow_permissions`). A save itself
+  // allows nothing, because the saved steps can come from untrusted content.
+  if (stepsChange) await revokeWorkflowGrants(deps.db, row.orgId, id);
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -844,7 +809,6 @@ async function updateLockedWorkflowDefinition(
       updatedAt: now,
     })
     .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId)));
-  if (stepsChange) await authorizeHumanWorkflowSave(deps, owner, id);
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
@@ -1145,8 +1109,8 @@ export async function copyWorkflowDefinition(
     });
   }
 
-  // A copy is a new personal workflow, with the same human-save authorization
-  // and atomic version snapshot as creation. Source triggers remain separate.
+  // A copy is a new personal workflow with the same atomic version snapshot
+  // as creation. It carries no grants and no triggers from its source.
   return createWorkflowDefinition(deps, owner, { name: `${row.name} (copy)`, definition: row.definition });
 }
 
@@ -2174,7 +2138,9 @@ export async function resolveWorkflowApproval(
         if (!approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
         if (run.owner?.ownerType !== "team") throw new Error("The team is unavailable. Request account approval again.");
         await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, consentScope: input.scope === "team_account" ? "team" : undefined, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
-        if (accountForWorkflow) await saveWorkflowAccountConsent(tx, { orgId, workflowId: run.params.workflowId, teamId: run.owner.ownerId, userId: approver.userId, services: [service] });
+        // The generation this gate approved, not the current one: a revoke and
+        // re-share since the card was shown is a new share nobody approved.
+        if (accountForWorkflow) await saveWorkflowAccountConsent(tx, { orgId, workflowId: run.params.workflowId, teamId: run.owner.ownerId, userId: approver.userId, services: [service], shareGeneration: approver.shareGeneration });
       }
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";

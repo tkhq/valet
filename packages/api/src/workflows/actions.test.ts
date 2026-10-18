@@ -58,6 +58,7 @@ describe("workflowsActionPlugin", () => {
     expect(plugin.service).toBe("workflows");
     expect(plugin.actions.map((a) => a.id).sort()).toEqual([
       "workflows.add_aggregate",
+      "workflows.allow_permissions",
       "workflows.cancel_run",
       "workflows.copy_to_team",
       "workflows.create_schedule",
@@ -158,6 +159,8 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.list_runs")).toBe("low");
     expect(byId.get("workflows.cancel_run")).toBe("medium");
     expect(byId.get("workflows.retry_run")).toBe("medium");
+    // Low: the action itself always shows the person an approval card.
+    expect(byId.get("workflows.allow_permissions")).toBe("low");
     // Medium → the action asks a person itself on every call, so the
     // catalog's card would only repeat the question.
     expect(byId.get("workflows.resolve_approval")).toBe("medium");

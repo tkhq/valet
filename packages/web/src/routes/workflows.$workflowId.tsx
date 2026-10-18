@@ -292,6 +292,7 @@ function WorkflowEditorPane({
     }
     return [...seen.values()];
   }, [permissions]);
+  const pendingAccounts = permissions?.accountConsent?.pending ?? [];
 
   // Unsaved work is only in memory: the rename lives here and the definition
   // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
@@ -471,7 +472,7 @@ function WorkflowEditorPane({
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
-            <p>Saving step changes authorizes the actions you can approve and your shared accounts for direct tool steps. Other members approve their own accounts.</p>
+            <p>A save allows nothing. Allow these steps once here, or approve the assistant's card. Any step change asks again. Other members approve their own accounts.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
               {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
@@ -484,6 +485,16 @@ function WorkflowEditorPane({
           </>}
         </div>
       </details>
+
+      {/* The build-time confirmation: until a person allows them, runs stop
+          at these steps. Shown open, not inside the Permissions row. */}
+      {!mirrored && !definitionDirty && (gatingActions.length > 0 || pendingAccounts.length > 0) && (
+        <div role="status" data-testid="approval-needed-banner"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-warning-wash px-3 py-2 text-sm text-ink lg:px-6">
+          <span>{approvalNeededText(gatingActions.length, pendingAccounts)} Runs stop at these steps until you allow them.</span>
+          <Button size="sm" onClick={() => setPreapproveDialog(true)}>Review and allow</Button>
+        </div>
+      )}
 
       {mirrored && (
         <div
@@ -533,7 +544,7 @@ function WorkflowEditorPane({
         <DialogContent
           title="Pre-approve actions"
           description={
-            "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
+            "Allow these actions for every run of the current steps. A change to the steps asks again. Other workflows and chats keep their permissions. " +
             (reviewedAccountConsent ? "Also allow direct tool steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
@@ -859,4 +870,14 @@ function HistoryDrawer({
       )}
     </DrawerShell>
   );
+}
+
+/** What the approval banner names: the actions, then the viewer's own shared accounts. */
+export function approvalNeededText(actions: number, accounts: readonly string[]): string {
+  const parts = [
+    ...(actions > 0 ? [`${actions} ${actions === 1 ? "action needs" : "actions need"} your approval`] : []),
+    ...(accounts.length > 0 ? [`${actions > 0 ? "your" : "Your"} shared ${accounts.join(", ")} ${accounts.length === 1 ? "account needs" : "accounts need"} your permission`] : []),
+  ];
+  const text = parts.join(", and ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 }

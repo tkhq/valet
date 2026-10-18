@@ -11,7 +11,7 @@ import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { actionPolicies, actionPolicyOverrides, workflowActionGrants, workflowRuns, workflowDefinitions, workflowVersions } from "../schema/index.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { resolveActionPolicy } from "../policies/service.js";
+import { loadPolicyRows, resolveActionPolicy } from "../policies/service.js";
 import { isRiskLevel } from "../policies/admin.js";
 import type {
   AllowWorkflowPermissionsResponse,
@@ -243,7 +243,7 @@ describe("team workflow permissions", () => {
 });
 
 describe("workflow grants after a definition change", () => {
-  it("survive an approver's edit and are revoked by a member's edit", async () => {
+  it("end on any step edit, the approver's too, and survive a move on the map", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Grant team", creatorUserId: "local-user" });
     await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
@@ -255,24 +255,41 @@ describe("workflow grants after a definition change", () => {
         edges: ["trigger", ...ids, "stop"].slice(1).map((to, index) => ({ from: ["trigger", ...ids][index]!, to })) };
     };
     const wfId = await insertWorkflow(api, { ownerType: "team", ownerId: team.id, definition: ships(1) });
-    expect((await reviewedApproval(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    const allow = () => reviewedApproval(`${api!.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
+    expect((await allow()).status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
     const edit = (count: number, headers: Record<string, string> = {}) => fetch(`${api!.baseUrl}/api/workflows/${wfId}`, {
       method: "PUT", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ definition: ships(count) }),
     });
-    // The admin who granted it edits the steps: the approval stands.
-    expect((await edit(2)).status).toBe(200);
-    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
     // A member only moves a step on the map: the steps are the same, so the approval stands.
     const moved = await fetch(`${api.baseUrl}/api/workflows/${wfId}`, {
       method: "PUT", headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
-      body: JSON.stringify({ definition: { ...ships(2), ui: { nodes: { ship0: { position: { x: 512, y: 96 } } } } } }),
+      body: JSON.stringify({ definition: { ...ships(1), ui: { nodes: { ship0: { position: { x: 512, y: 96 } } } } } }),
     });
     expect(moved.status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(1);
-    // A member adds another use of the approved action: the grants go, so an approver must look again.
+    // The approver adds another use of the approved action: the grant covered
+    // the steps as reviewed, so it ends and a person allows the new steps.
+    expect((await edit(2)).status).toBe(200);
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+    expect((await allow()).status).toBe(200);
     expect((await edit(3, { "x-valet-test-user-id": "test-member" })).status).toBe(200);
     expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+
+  it("do not cover a run that started on other steps", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const reviewed = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "ship", type: "tool", service: "widgets", action: "deploy", params: { target: "staging" } }, { id: "stop", type: "stop" }],
+      edges: [{ from: "trigger", to: "ship" }, { from: "ship", to: "stop" }] };
+    const older = { ...reviewed, nodes: reviewed.nodes.map((node) => node.id === "ship" ? { ...node, params: { target: "attacker" } } : node) };
+    const wfId = await insertWorkflow(api, { definition: reviewed });
+    expect((await reviewedApproval(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    const owner = { ownerType: "user", ownerId: "local-user" };
+    await api.providers.workflowStore.createRun("run-reviewed", { workflowId: wfId, definitionVersionId: "v2" }, reviewed, "v2", owner);
+    await api.providers.workflowStore.createRun("run-older", { workflowId: wfId, definitionVersionId: "v1" }, older, "v1", owner);
+    const rows = (runId: string) => loadPolicyRows(api!.providers.db, { orgId: "local-org", userId: "local-user", workflowExecutionId: runId });
+    expect((await rows("run-reviewed")).workflowGrants).toMatchObject([{ actionId: "widgets.deploy" }]);
+    expect((await rows("run-older")).workflowGrants).toEqual([]);
   });
 
   it("are removed with the workflow", async () => {
@@ -404,7 +421,7 @@ describe("workflow grant isolation", () => {
 });
 
 
-describe("human workflow saves authorize declared actions", () => {
+describe("a workflow save allows nothing", () => {
   const definition = {
     version: "dag/v1",
     nodes: [
@@ -415,7 +432,7 @@ describe("human workflow saves authorize declared actions", () => {
     edges: [{ from: "trigger", to: "ship" }, { from: "ship", to: "stop" }],
   };
 
-  it.each([false, true])("grants personal or team workflow actions on creation (team=%s)", async (teamOwned) => {
+  it.each([false, true])("allows nothing on creation until a person allows the steps (team=%s)", async (teamOwned) => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const team = teamOwned ? await createTeam(api.providers.db, { orgId: "local-org", name: "Save permissions", creatorUserId: "local-user" }) : undefined;
     const response = await fetch(`${api.baseUrl}/api/workflows`, {
@@ -425,20 +442,22 @@ describe("human workflow saves authorize declared actions", () => {
     expect(response.status).toBe(201);
     const saved = await response.json();
     if (!saved || typeof saved !== "object" || !("id" in saved) || typeof saved.id !== "string") throw new Error("Missing workflow ID");
-    const permissions = await fetch(`${api.baseUrl}/api/workflows/${saved.id}/permissions`);
-    expect(await permissions.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "allow", provenance: "workflow_grant" })] });
-    const grants = await api.providers.db.select().from(workflowActionGrants);
-    expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({ workflowId: saved.id, ownerId: team?.id ?? "local-user", grantedBy: "local-user" });
+    const permissions = () => fetch(`${api!.baseUrl}/api/workflows/${saved.id}/permissions`).then((res) => res.json());
+    expect(await permissions()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "require_approval" })] });
+    expect(await api.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+    expect((await reviewedApproval(`${api.baseUrl}/api/workflows/${saved.id}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect(await permissions()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "allow", provenance: "workflow_grant" })] });
+    expect(await api.providers.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId: saved.id, ownerId: team?.id ?? "local-user", grantedBy: "local-user" }]);
     // The grant never quiets the same action in an unrelated workflow.
     const other = await insertWorkflow(api, { definition });
     const unrelated = await fetch(`${api.baseUrl}/api/workflows/${other}/permissions`);
     expect(await unrelated.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "ship", mode: "require_approval" })] });
   });
 
-  it("authorizes a newly added action on a human save, but keeps explicit restrictions", async () => {
+  it("asks again after a save adds a step, and a review keeps explicit restrictions", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const id = await insertWorkflow(api, { definition });
+    expect((await reviewedApproval(`${api.baseUrl}/api/workflows/${id}/permissions/allow`, { method: "POST" })).status).toBe(200);
     await api.providers.db.insert(actionPolicies).values({
       id: "save-org-gate", orgId: "local-org", principalType: "org", principalId: "local-org",
       actionId: "widgets.purge", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "admin", createdAt: 1, updatedAt: 1,
@@ -449,8 +468,10 @@ describe("human workflow saves authorize declared actions", () => {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ definition: next }),
     });
     expect(saved.status).toBe(200);
-    const permissions = await fetch(`${api.baseUrl}/api/workflows/${id}/permissions`);
-    expect(await permissions.json()).toMatchObject({ nodes: expect.arrayContaining([
+    const permissions = () => fetch(`${api!.baseUrl}/api/workflows/${id}/permissions`).then((res) => res.json());
+    expect(await permissions()).toMatchObject({ nodes: expect.arrayContaining([expect.objectContaining({ nodeId: "ship", mode: "require_approval" })]) });
+    expect((await reviewedApproval(`${api.baseUrl}/api/workflows/${id}/permissions/allow`, { method: "POST" })).status).toBe(200);
+    expect(await permissions()).toMatchObject({ nodes: expect.arrayContaining([
       expect.objectContaining({ nodeId: "ship", mode: "allow" }),
       expect.objectContaining({ nodeId: "purge", mode: "require_approval", provenance: "org_policy" }),
     ]) });

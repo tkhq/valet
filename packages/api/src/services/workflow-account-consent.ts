@@ -8,9 +8,11 @@ export interface WorkflowAccountConsent {
   teamId: string;
   userId: string;
   services: readonly string[];
+  /** Write only for this share generation: the one a person approved. */
+  shareGeneration?: string;
 }
 
-/** A human save authorizes only that person's current accounts for this workflow. */
+/** A person's explicit approval allows only their own current shares for this workflow. */
 export async function saveWorkflowAccountConsent(db: AppQueryable, scope: WorkflowAccountConsent): Promise<void> {
   const services = [...new Set(scope.services)].filter(service => service !== "github");
   if (services.length === 0) return;
@@ -24,9 +26,25 @@ export async function saveWorkflowAccountConsent(db: AppQueryable, scope: Workfl
       AND d.owner_type = 'team' AND d.owner_id = t.id
     JOIN credentials c ON c.owner_type = 'user' AND c.owner_id = s.user_id AND c.service = s.service
     WHERE s.team_id = ${scope.teamId} AND s.user_id = ${scope.userId}
+      ${scope.shareGeneration === undefined ? sql`` : sql`AND s.generation = ${scope.shareGeneration}`}
       AND s.service IN (${sql.join(services.map(service => sql`${service}`), sql`, `)})
     ON CONFLICT (org_id, workflow_id, team_id, service, member_id) DO UPDATE
       SET share_generation = EXCLUDED.share_generation, created_at = EXCLUDED.created_at`);
+}
+
+/** The services in `scope.services` that this person shares with the team
+ * and has not allowed for this workflow's current share generation. */
+export async function pendingWorkflowAccountConsent(db: AppQueryable, scope: WorkflowAccountConsent): Promise<string[]> {
+  const services = [...new Set(scope.services)].filter(service => service !== "github");
+  if (services.length === 0) return [];
+  const result = await db.execute(sql`SELECT DISTINCT s.service FROM credential_shares s
+    JOIN team_members m ON m.team_id = s.team_id AND m.user_id = s.user_id
+    JOIN credentials c ON c.owner_type = 'user' AND c.owner_id = s.user_id AND c.service = s.service
+    LEFT JOIN workflow_account_grants g ON g.org_id = ${scope.orgId} AND g.workflow_id = ${scope.workflowId}
+      AND g.team_id = s.team_id AND g.service = s.service AND g.member_id = s.user_id AND g.share_generation = s.generation
+    WHERE s.team_id = ${scope.teamId} AND s.user_id = ${scope.userId} AND g.workflow_id IS NULL
+      AND s.service IN (${sql.join(services.map(service => sql`${service}`), sql`, `)})`) as { rows: Array<{ service: string }> };
+  return result.rows.map(row => row.service).sort();
 }
 
 /** Removes saved account consent for this workflow. */

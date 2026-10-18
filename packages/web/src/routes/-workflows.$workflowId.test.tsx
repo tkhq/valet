@@ -45,7 +45,7 @@ const allowMutateAsync = vi.fn().mockResolvedValue({ allowed: ["widgets.deploy"]
  * badge stays absent everywhere it is not the subject. */
 let permissionsData: {
   definitionToken: string;
-  accountConsent?: { teamId: string; teamName: string; services: string[] };
+  accountConsent?: { teamId: string; teamName: string; services: string[]; pending?: string[] };
   nodes: Array<{
     nodeId: string;
     service: string;
@@ -582,6 +582,27 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
     const badge = screen.getByTestId("workflow-gate-badge");
     expect(badge.textContent).toContain("Review permissions");
+  });
+
+  it("asks for approval up front in a banner that opens the review", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    const banner = screen.getByTestId("approval-needed-banner");
+    expect(banner.textContent).toContain("1 action needs your approval. Runs stop at these steps until you allow them.");
+    fireEvent.click(within(banner).getByRole("button", { name: "Review and allow" }));
+    expect(await screen.findByTestId("preapprove-actions")).toBeTruthy();
+  });
+
+  it("names only the viewer's own shared accounts when no action needs approval", () => {
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"], pending: ["widgets"] },
+      nodes: [{ nodeId: "read", service: "widgets", action: "list", actionId: "widgets.list", mode: "allow", sharedAccount: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByTestId("approval-needed-banner").textContent).toContain("Your shared widgets account needs your permission.");
+  });
+
+  it("shows no approval banner when nothing waits for the viewer", () => {
+    permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"], pending: [] }, nodes: [] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.queryByTestId("approval-needed-banner")).toBeNull();
   });
 
   it("hides the badge when nothing gates", () => {

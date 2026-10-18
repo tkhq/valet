@@ -216,3 +216,15 @@ it("revokes only the selected member's saved workflow account consent", async ()
   expect(await canBorrowCredential(db, { ...scope, memberId: "test-member" })).toBe(true);
   expect((await db.select().from(workflowAccountGrants)).map(grant => grant.memberId)).toEqual(["test-member"]);
 });
+
+it("writes a lender's consent only for the share generation their approval saw", async () => {
+  const { db, consent, scope } = await fixture();
+  const approved = await shareGeneration(db, "account-team", "demo", "local-user");
+  if (!approved) throw new Error("Expected a share generation.");
+  // The lender revokes and shares again between the card and the write.
+  await revokeShare(db, { teamId: "account-team", service: "demo", userId: "local-user" });
+  await shareCredential(db, { teamId: "account-team", service: "demo", userId: "local-user", createdAt: 2 });
+  await saveWorkflowAccountConsent(db, { ...consent, shareGeneration: approved });
+  expect(await db.select().from(workflowAccountGrants)).toHaveLength(0);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+});
