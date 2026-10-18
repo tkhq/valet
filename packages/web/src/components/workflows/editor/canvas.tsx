@@ -501,8 +501,7 @@ export function Canvas({
               // tone picked to disappear against paper, and this frame has
               // to hold in every palette and both polarities. It is the
               // same call `styles/react-flow.css` makes for the dot grid.
-              // `bg-ink-wash` is the pre-mixed token — an opacity suffix on
-              // a raw `oklch()` token emits no rule at all here.
+              // `bg-ink-wash` is the pre-mixed hover token.
               className="pointer-events-none absolute left-0 top-0 rounded-lg border border-dashed border-muted bg-ink-wash"
               style={{
                 transform: `translate(${band.x}px, ${band.y}px)`,
