@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 3).
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 3); UX fixes 2026-10-18.
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -103,6 +103,11 @@ pin.
 | P10 | Open `/workflows`. | The Workflows page shows the workflow list and a Runs view at its own URL. The editor's panel lists this workflow's presence lines and routines as sentences, and its **Add** opens the wizard fixed on the workflow. |
 | P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names its place, `acme/api#12`. |
 | P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/routines`, `/presence/routines?routine=<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, `/presence/routines` to `/presence`, `/presence/routines?routine=<id>` to `/presence/routines/<id>`, the last two to `/workflows`. No URL returns a 404. |
+| P13 | Open a proposal from its `Proposed` row and press **Turn on**. | The page shows `Proposed by the assistant.` and, when the proposal replaces a line, `Turning it on turns off <name>.` **Turn on** opens the edit dialog in review mode. After the reader confirms, the line is on, its row reads its sentence without `Proposed`, and the line it replaces is off. |
+| P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | The line carries the `Team` mark. The switch, **Edit**, **Delete**, and the thread picker are disabled, and the page reads `Only members of sre can change this.` |
+| P15 | Delete the workflow of a routine that runs a workflow, then let the routine fire. | The routine is off. The **Needs attention** banner reads `<name> is off: Its workflow was deleted. Edit the routine and pick another workflow.` with an `Edit` link to `/presence/routines/<id>`. |
+| P16 | With Slack, GitHub, and Linear all not connected, click **Add**. | The When step opens on `On a schedule`. `Something happens in Slack`, `Something happens on GitHub`, and `Something happens in Linear` are disabled, each with `Connect Slack first`, `Connect GitHub first`, or `Connect Linear first` linking to Integrations. |
+| P17 | On the `acme/api` place page, click **View all** under **Recent activity**. | Activity opens with the removable chip `In acme/api` and lists only events whose place is `acme/api` or inside it. Removing the chip lists every event again. |
 
 Pass criterion: all steps, in one run, from a clean start.
 
@@ -134,8 +139,12 @@ Pass criterion: all steps, in one run, from a clean start.
    to `/presence`, `/presence/routines?routine=<id>` to
    `/presence/routines/<id>`, `/presence/workflows*` to `/workflows*`,
    `/presence/runs*` to `/workflows/runs*`, and the old `/workflows?tab=`
-   values as the Deviations list them. Redirects carry their search params
-   and live in one table.
+   values: `tab=triggers` to `/presence`, `tab=triggers&review=<id>` to
+   `/presence/rules/<id>`, `tab=scheduled` to `/presence`,
+   `tab=scheduled&review=<id>` to `/presence/routines/<id>`, and `tab=runs`
+   to `/workflows/runs`. The two tabs held different objects, so each
+   `review` id opens its own kind of page. Redirects carry their search
+   params and live in one table.
 5. `/presence` MUST land on the overview. It never lands on a place or on
    Activity.
 6. The overview MUST read well at one column on a phone: blocks stack, the
@@ -154,14 +163,17 @@ Pass criterion: all steps, in one run, from a clean start.
    page has no other link to Activity.
 2. **Needs attention** (Part F step 4): a ruled section under the header
    with a danger mark and the heading `Needs attention`, shown only when
-   the workspace has at least one fault. Each item is one line that names
-   the place (`In acme/api,`), states the fault, and carries its fix inline
-   (an archived pin shows the thread picker; a disabled routine shows its
-   reason and an `Edit` link; a dead delivery links its event). The banner
+   the workspace has at least one fault. Each item is one sentence that
+   names the place (`In acme/api,`), states the fault, and carries its fix
+   inline (an archived pin shows the thread picker open; a dead delivery
+   links its event). A routine item reads `<name> is off: <reason>` with an
+   `Edit` link to the routine's page. Each item renders through `Sentence`
+   (Part K), so its place, thread, and workflow read as tokens. The banner
    never shows a bare count.
 3. Groups, in order: `Slack`, `GitHub`, `Linear`, `On a schedule`. A group
-   heading is a small muted label on a hairline rule, with the group's
-   count at the right (`2 places`, `1 routine`). A group renders only when
+   heading is a small muted label on a hairline rule, led by the service's
+   `ServiceMark size="md"` (Part K; the clock for `On a schedule`), with
+   the group's count at the right (`2 places`, `1 routine`). A group renders only when
    it has at least one place.
 4. The overview is a roster. Each place is one row of
    a two-column grid: the **place column** (the concrete name linking to
@@ -174,28 +186,41 @@ Pass criterion: all steps, in one run, from a clean start.
    of presence. A pull request or issue MUST NOT appear. Lines whose
    filters name no single place form one place per service named
    `Everywhere in Slack`, `Across GitHub`, or `Across Linear`, which links
-   to the service page (Part C).
+   to the service page (Part C). These three names are the only names of
+   the service-wide places: the row, the page title, and the Activity chip
+   use them. In a team workspace, the Slack service-wide row and each Slack
+   place row's overflow menu offer `Choose channels`, which opens the team
+   channel dialog.
 5. A **sentence row** is the Part C step 2 sentence without its `<in|on>
    <place>` clause (the place column names it), set as the largest running
    text on the page and linked to the line's page, with the line's name
    under it in small muted text, and at the right a small on/off switch
-   and the overflow menu (Edit, Appears as, Delete) from Part C step 2. An
-   off line renders its sentence muted with `Off` under it. A faulted line
-   carries the danger mark before its sentence and its fix (Part C step 3)
-   under the row. The paused line (Part C step 3) renders under the row.
+   and the overflow menu (Edit, Appears as, Delete) from Part C step 2. The
+   sentence renders through `Sentence` (Part K); a row carries no service
+   mark, because its group heading has one. A team or org line carries a
+   `Team` or `Org` badge under the sentence. An off line renders its
+   sentence muted with `Off` under it; a proposal (Part D step 1) reads
+   `Proposed` in place of `Off`. A faulted line carries the danger mark
+   before its sentence and a **Pick another thread** button under it, which
+   reveals the fix (Part C step 3); a viewer who may not change the line,
+   or a fault with no picker, sees the fix text directly. A paused line
+   reads `Paused: <team name> already listens for this.` with **Keep both**
+   under the row.
    When any line of the place sets an appearance, one `Appears as <name>`
    line with the avatar follows the sentences. The sentence column ends
    with a quiet `+ Listen for…` that opens the wizard fixed on that place.
 6. The `On a schedule` group uses the same grid: the schedule in words in
-   the place column (`Every weekday at 9:00`, then the timezone when it is
-   not UTC, then `Next <time>` or `Off`), and in the sentence column the
+   the place column (`Every weekday at 9:00`, then the timezone's long
+   name (`Pacific Daylight Time`) when it is not UTC, then `Next <time>` or `Off`), and in the sentence column the
    Part E step 1 routine sentence with **Fire now**, the switch, and the
    overflow menu, ending with `+ New routine`, which opens the wizard on
    the schedule step.
 7. Color: the brand accent appears only on **Add**, links, and the active
    mark. Switches are the small variant, accent when on and line when off.
    Hover on a sentence row is the ink wash. Danger color appears only on
-   faults and errors. No other decoration.
+   faults and errors. Service marks and reference tokens carry their own
+   brand washes (Part K); those washes are not accent and not danger. No
+   other decoration.
 8. Scale: with more than ten places, each group collapses to its heading
    with its count, a filter box `Filter places` appears above the groups
    and filters places by name, and a group with a fault stays open. Places
@@ -221,7 +246,8 @@ Pass criterion: all steps, in one run, from a clean start.
 
 *Depends on: delivery threads spec Parts A and B. Conformance: web, api.*
 
-1. Header: a breadcrumb `Presence › <name>`, the concrete name, the
+1. Header: a breadcrumb `Presence › <name>`, the service's
+   `ServiceMark size="lg"` (Part K) before the concrete name, the
    service, and an outbound link to the place in its tool when the api
    knows it. The header never shows the place key; loading reads
    `Loading…`; a failed read reads `Not available`.
@@ -246,6 +272,24 @@ Pass criterion: all steps, in one run, from a clean start.
 
    Conversational keys are Slack mentions, Slack messages, and GitHub
    comment keys (a key-level approximation; see Deviations).
+
+   For a Slack mention, `<event in words>` names who mentions Valet. The
+   api scopes a personal, org, or workflow mention line to its creator
+   with an unlabeled `user` filter (see Deviations), and the sentence reads
+   that scope:
+
+   | Target and creator filter | `<event in words>` |
+   |---|---|
+   | personal assistant | `you mention Valet` |
+   | org assistant or workflow, creator is the viewer | `you mention Valet` |
+   | org assistant or workflow, creator is another member | `<creator> mentions Valet` |
+   | org assistant or workflow, creator unknown to the directory | `the person who set this up mentions Valet` |
+   | team assistant, or no creator filter | `someone mentions Valet` |
+
+   Every other GitHub and Linear key reads in words from one table
+   (`EVENT_WORDS`), never as its raw key. The sentence renders through
+   `Sentence` (Part K): places, threads, workflows, and people render as
+   tokens, and the rest is text.
 3. A problem renders inline under its row, never as a badge alone. For an
    archived pin, the row shows the danger mark and **Pick another thread**,
    which opens `<thread title> is archived. Pick another thread:` with the
@@ -267,7 +311,8 @@ Pass criterion: all steps, in one run, from a clean start.
    link.
 6. **Appears as**: shown when any line here sets one.
 7. **Recent activity**: the last ten rows for this place (Part F grammar)
-   and `View all` into Activity filtered to the place.
+   and `View all`, which opens Activity with `place=<place key>` (Part F
+   step 2).
 8. Empty state: a place that exists only because events or threads touched
    it reads `Nothing is set up here yet.` with **Listen for…**.
 
@@ -287,7 +332,11 @@ Pass criterion: all steps, in one run, from a clean start.
    A proposal (off, and carrying `replaces` or an untouched `proposal-` id)
    opens with `Proposed by the assistant.`, then `Turning it on turns off
    <name>.` when it replaces a line, **Turn on** (the edit dialog in review
-   mode) and **Delete**, in place of the switch.
+   mode) and **Delete**, in place of the switch. The page follows the Part
+   C step 3 gate: for a viewer who may not change the line, the switch,
+   **Edit**, **Delete**, and the picker are disabled, and the page reads
+   `Only members of <team name> can change this.` or `Only its owner can
+   change this.`
 2. `EventSubscriptionWire` carries `problem?: string` (the pin text when
    the latest settled delivery since the line's last edit dead-lettered on
    its pin). The api offers `GET /api/event-subscriptions/:id/deliveries`
@@ -330,7 +379,12 @@ Pass criterion: all steps, in one run, from a clean start.
    by <thread>`, `started <workflow> run`, `skipped: <reason>`, `no one
    listening`, or the delivery's status line when pending, failed, or dead.
 2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
-   filter the list: `All`, `Problems`, one per service, and a place search.
+   filter the list: `All`, `Problems`, and one per service, each service
+   chip led by its `ServiceMark size="sm"` (Part K). A text box labeled
+   `Search` sends `q`. The search param `place=<place key>` asks `GET
+   /api/events/log?place=` for the events whose natural subject's place is
+   that key or lies inside it, and shows a removable chip `In <place
+   name>`. Rows render through `Sentence` (Part K).
    Receipt stages and diagnostics sit under disclosures for admins. The
    event page keeps payload and redeliver. Its title is `<event in words>
    in <place>`, with the event's summary as a muted line under it, and each
@@ -344,7 +398,9 @@ Pass criterion: all steps, in one run, from a clean start.
    not edited after the delivery, and no later delivery for the same event
    and line was delivered. The Log marks such a dead delivery with
    `supersededBy` and reads its event as delivered, so a redelivery clears
-   the fault at once.
+   the fault at once. A superseded dead delivery is not a fault. A routine
+   item shows its `disabledReason` (Part E step 4), and each reason names
+   its fix.
 
 ## Part G: Workflows
 
@@ -364,15 +420,29 @@ Pass criterion: all steps, in one run, from a clean start.
 
 1. The wizard reads the configuration back as the sentence the lists use,
    in a preview line at its top that updates with every choice.
-2. Step **When**: `Someone mentions Valet in Slack`, `Something happens on
-   GitHub`, `Something happens in Linear`, `On a schedule`. Launched from
-   **Add**, all four show. Launched from a place, the place is fixed and
-   only its service's choices show. Launched from `+ New routine`, the
-   schedule step opens first. Launched from a workflow, the Do step is
-   fixed on that workflow.
-3. Step **What**: the event picker for the chosen service, with filters.
+2. Step **When**: `Something happens in Slack`, `Something happens on
+   GitHub`, `Something happens in Linear`, `On a schedule`, each led by its
+   `ServiceMark size="lg"` (Part K). Launched from **Add**, all four show.
+   A service that is not connected shows its choice disabled, with
+   `Connect <service> first` linking to Integrations. The wizard opens on
+   the first connected service in the order Slack, GitHub, Linear, and on
+   `On a schedule` when none is connected. While the connection read is
+   loading or has failed, no choice is disabled. Launched from a place,
+   the place is fixed and only its service's choices show. Launched from
+   `+ New routine`, the schedule step opens first. Launched from a
+   workflow, the Do step is fixed on that workflow. Every event flow has
+   four steps, and the header counts them (`Step 2 of 4`). A Reply flow
+   reads When, Reply, Runs in, Review.
+3. Step **What**: the event picker for the chosen service, headed `Which
+   events?`, with filters. The service's common events come first under
+   `Common`; the rest sit under a disclosure `More events (<n>)`. Each
+   event reads in words. Raw event keys show only under `Advanced`. When
+   the service is not connected, the step reads `Connect <service> to
+   receive these events.` with an `Open Integrations` link.
 4. Step **Do**: `Reply`, `Work on it`, `Run a workflow`. A non-Slack place
-   never offers `Reply` or a Slack channel picker.
+   never offers `Reply` or a Slack channel picker. The assistant choice
+   reads `Your assistant`, `<team>'s assistant`, or `The organization's
+   assistant`.
 5. **Runs in** shows its default as a sentence with a `Change` link; the
    defaults are the thread policy spec's: mention → `new`; a notification
    or a workflow with a natural subject → `subject`; else `own`.
@@ -382,13 +452,28 @@ Pass criterion: all steps, in one run, from a clean start.
    reader removed stays removed.
 9. After Create, the overview MUST show the new row, and SHOULD scroll to
    and highlight its block.
+10. The schedule step asks for days and a time: day toggles Monday to
+    Sunday (weekdays by default), a time field (09:00 by default), and a
+    time zone list that shows long names (`Pacific Daylight Time`), offers
+    the browser's zone, and always offers UTC. A cron field sits under
+    `Advanced`. When the reader types a cron, it wins and the day and time
+    fields are disabled; the zone stays editable. The prompt is required:
+    Next and Create stay disabled until it has text.
+11. Review reads in words. The preview line at the top leads it, and the
+    step lists When, Do, Runs in, and Appears as as facts, with no event
+    keys, cron, or filters. The edit dialog opens with the line's sentence
+    at the top. It hides the creator filter (Part C step 2) from the filter
+    editor and shows it as `Only your own mentions`, or `Only mentions by
+    <name>` when the viewer is not the creator. Save keeps the hidden
+    filter.
 
 ## Part I: Threads
 
 *Conformance: web.*
 
 1. The thread context card's background section (event wakeups spec Part H)
-   shows `Fed by: <names>` with links, for every thread that a line or
+   shows `Fed by: <names>`, each name a `Ref` token (Part K) with its
+   link, for every thread that a line or
    routine feeds (its `own` thread, an `existing` pin, or a place's thread),
    whether or not the thread holds a waiter.
 2. A place's thread header names its place and links to it.
@@ -417,6 +502,43 @@ Pass criterion: all steps, in one run, from a clean start.
    separate sweep. CLAUDE.md names `assistant` as the only word for new
    code.
 
+## Part K: Marks and references
+
+*Conformance: web.*
+
+1. A **service mark** (`ServiceMark`) is a tinted tile with the service's
+   glyph: the Slack hash, the GitHub mark, the Linear mark, and a clock for
+   `On a schedule`. Each tile carries its service's brand wash, an alpha
+   color over the page, so one value holds in light and dark themes. The
+   sizes are:
+
+   | Size | Tile | Glyph | Use |
+   |---|---|---|---|
+   | `sm` | 16px | 10px | Activity service chips, event picker group headings |
+   | `md` | 24px | 14px | overview group headings |
+   | `lg` | 28px | 16px | the place page header, the wizard's When choices |
+
+   A mark is decoration: it is hidden from assistive technology unless it
+   carries a label.
+2. A **reference token** (`Ref`) names one thing inside a sentence: a
+   place, a thread, a workflow, or a person (the proposal section also
+   names a line). The token sits in the line of text at the text's size,
+   in medium weight, on the ink wash, after a 12px mark for its kind. A
+   place's mark is its service glyph in the service's hue, with no tile.
+   A token is a link only when the thing has a page the viewer can open;
+   otherwise it is plain text on its wash.
+3. `Sentence` renders a list of sentence parts: text parts and token
+   parts. The sentence functions (`presenceSentenceParts`,
+   `routineSentenceParts`) return the parts, and the string functions
+   (`presenceSentence`, `routineSentence`) return `partsText` of those parts. So a
+   test, a title, or an accessible name that reads the string reads the
+   same words the page shows (INV-H7).
+4. Marks appear on the overview group headings, the place page header, the
+   wizard's When choices, and the Activity service chips. Marks do not
+   appear on place rows, because the group heading carries the mark, or on
+   routine names, because a routine is not a workflow and has no token
+   kind of its own.
+
 ## Invariants
 
 - **INV-H1 Every old URL redirects.** Mechanism: one redirect table, and a
@@ -438,6 +560,10 @@ Pass criterion: all steps, in one run, from a clean start.
 - **INV-H6 Every fault is fixable where it is shown.** Mechanism: the
   banner item and the sentence row render the same inline fix component;
   a test asserts a pick from the banner patches the line.
+- **INV-H7 A sentence's string equals its joined parts.** Mechanism: each
+  string function is defined as the join of its parts function, so the two
+  cannot differ. Vector: a test that renders fixture lines and routines
+  through `Sentence` and compares the text with the string function.
 
 ## Testing
 
@@ -561,7 +687,8 @@ Revision 1 deviations that still hold, with the revision 3 part numbers:
 - **The service chips filter in the browser (Part F step 2).** The log
   route has no service filter. A service chip keeps the loaded rows whose
   event key starts with `<service>.`, so a page can show fewer rows than it
-  loaded. The place search sends `q`, which the server matches.
+  loaded. The `Search` box sends `q`, which the server matches; the place
+  filter is the server's `place` param (Part F step 2).
 - **Receipts leave the chips (Part F step 2).** Admins open receipts under
   a `Receipts` disclosure beside the list. The old `status=receipts` value
   and the `/events?tab=receipts` redirect open the whole Log.
@@ -611,15 +738,8 @@ Revision 2 deviations that still hold:
   renderer, so the preview equals the stored sentence.
 - **Old Workflows tabs redirect from the live page (Part A step 4).**
   `/workflows` serves the Workflows list and is also a legacy route.
-  `/workflows?tab=scheduled` and `?tab=triggers` redirect to `/presence`.
-  With `&review=<id>`, they redirect to `/presence/routines/<id>`.
-  `/workflows?tab=runs` redirects to `/workflows/runs`. Each `/workflows`
-  row has a match condition, so a URL that no row takes serves the list.
-- **View all searches a Slack place by its channel id (Part C step 7).**
-  The server matches `q` against an event's summary and key, and a Slack
-  summary carries the channel id (`app mentioned in C900 by U1`). So `View
-  all` on a Slack channel sends the channel id from its key
-  (`slack:<team>/<channel>`). Every other place sends its label.
+  Part A step 4 lists its `tab` rows. Each `/workflows` row has a match
+  condition, so a URL that no row takes serves the list.
 - **Needs attention lists each fault once (Part F step 4).** A dead
   delivery names its line by `subscriptionId`. The banner adds that line
   only when the line has no `problem` and its `updatedAt` is before the
@@ -630,10 +750,6 @@ Revision 2 deviations that still hold:
   row and no routine. A workspace with a routine is not empty: Valet
   already does something there on a schedule. The empty state shows only
   after both reads load.
-- **The thread card says `wait` (INV-H2).** The background section of the
-  thread context card names an event wakeup a `wait`, because `active`
-  reads as a state and not a thing to count. The card is outside Presence,
-  so the copy lint does not read it.
 
 Revision 3 deviations:
 
@@ -706,6 +822,53 @@ Revision 3 deviations:
   item reads `In acme/api, Platform CI is archived. Pick another thread:`
   and does not name the line. The line's own row, under its place, carries
   its sentence and the same fix.
+
+UX fixes (2026-10-18):
+
+- **The web matches the old pin text too (Part C step 3).** The pin text is
+  now `Pick another thread in Presence.` Lines dead-lettered before the
+  change carry the old text, so the api's problem read and the web's
+  `isPinProblem` match both texts.
+- **Any org member may change an org line (Part C step 3).** The web
+  mirrors the server's `canMutateSubscription`, which checks no admin role
+  and no creator for an org line. A stricter rule must change the server
+  first.
+- **The paused team is a guess (Part C step 3).** The server does not
+  record which team paused a line. The web looks for enabled team lines in
+  the viewer's teams that share an event key, and names the team only when
+  exactly one matches; otherwise it reads `the team`.
+- **A proposal that replaces nothing is known only until edited (Part D
+  step 1).** Without `replaces`, the web reads a `proposal-` id as a
+  proposal only while `updatedAt` equals `createdAt`. An edit before Turn
+  on makes the page read it as a plain off line.
+- **Tokens inside dialogs are not links (Part K step 2).** The wizard
+  preview and the edit dialog render `Sentence` without links, because a
+  link would close the dialog and drop the draft.
+- **The preview leads the review (Part H step 11).** The Review step does
+  not repeat the sentence. The preview line at the top of the dialog is
+  the sentence, and the step lists the facts under it.
+- **A routine name has no glyph (Part K step 4).** A routine is not a
+  workflow, and no routine token kind exists, so its name is plain text.
+- **An Advanced cron reads as typed (Part H step 10).** A cron outside the
+  common shapes reads `On the schedule <cron>` in the preview and the
+  Review step. The reader typed it, so the wizard shows it back unchanged.
+- **Names come from the org directory (Part C step 2).** The sentences read
+  member names from `useOrgDirectory`, which every member may read.
+  `useOrgMembers` answers only org admins, so a member would get 403.
+- **The team Slack setup counts three steps (Part H step 2).** The team
+  setup fixes the When step, so its header reads `Step n of 3`: Reply,
+  Runs in, Review.
+- **Supersession needs a later millisecond (Part F step 4).** A delivered
+  row supersedes a dead row only when its `created_at` is strictly later.
+  Two rows from the same millisecond keep the fault in view, which errs
+  toward showing a fault.
+- **The thread card says `active` (INV-H2).** The background section of the
+  thread context card reads `1 active` and `Active: <name>`, and no longer
+  says `wait` or `Event waiter`. This retires the revision 2 deviation that
+  kept `wait`.
+- **View all filters by place on the server (Part C step 7).** `View all`
+  sends `place` and no longer searches a Slack channel by its id through
+  `q`. This retires the revision 2 deviation for that search.
 
 Revision 1 deviations that revision 2 retired: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the
