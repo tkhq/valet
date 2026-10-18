@@ -13,7 +13,10 @@ export const MAX_STEP_MODEL_CALLS = 500;
 
 /** The model call limit a dispatched agent step carries. */
 export function stepModelCallLimit(node: { maxModelCalls?: number }): number {
-  return node.maxModelCalls ?? DEFAULT_STEP_MODEL_CALLS;
+  // A stored value that skipped validation falls back to the default, never to no limit.
+  const value = node.maxModelCalls;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= MAX_STEP_MODEL_CALLS
+    ? value : DEFAULT_STEP_MODEL_CALLS;
 }
 
 /** A plural work item next to "every", "each" or "all": one agent handles a whole list. */

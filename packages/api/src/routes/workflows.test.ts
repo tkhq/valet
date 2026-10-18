@@ -1633,6 +1633,8 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       expect(result).toMatchObject({ success: true, data: { next: RESOLVED_GATE_NEXT_ELSEWHERE } });
       expect(asked).toHaveLength(1);
       expect(asked[0]?.title).toBe("Approve widgets.nuke on this workflow run?");
+      // Only the person who asked can answer, so a team API key cannot act as its admin.
+      expect(asked[0]?.context).toEqual({ approver: { userId: "local-user" } });
       const signals = await localApi.providers.workflowStore.listSignals(runId);
       expect(signals.find((sig) => sig.signalType === "approval:gate")?.payload)
         .toMatchObject({ approved: true, resolvedBy: "local-user", resolvedVia: "thread" });

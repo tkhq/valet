@@ -22,6 +22,8 @@ describe('step budget', () => {
   it('defaults the limit and accepts a step limit up to the maximum', () => {
     expect(stepModelCallLimit({})).toBe(DEFAULT_STEP_MODEL_CALLS);
     expect(stepModelCallLimit({ maxModelCalls: 40 })).toBe(40);
+    // A stored value that skipped validation never turns the limit off.
+    for (const bad of [0, -1, 2.5, 501]) expect(stepModelCallLimit({ maxModelCalls: bad })).toBe(DEFAULT_STEP_MODEL_CALLS);
     const definition = (maxModelCalls: unknown) => ({
       version: 'dag/v1' as const,
       nodes: [{ id: 'start', type: 'trigger' as const }, session('Do one thing.', { maxModelCalls }), { id: 'stop', type: 'stop' as const }],

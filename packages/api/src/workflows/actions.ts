@@ -174,6 +174,26 @@ function isDirectActor(ctx: PluginActionContext, owner: WorkflowOwner): boolean 
     && ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
 }
 
+/** Rules a person cannot override from a workflow's review. */
+const POLICY_HELD = new Set(["org_policy", "team_policy", "override"]);
+
+/** Text on one line, control characters removed, cut to `max` characters. */
+function oneLine(text: string, max: number): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** A tool step's stored parameters: a top-level tool node, or a foreach's tool body. */
+function stepParams(definition: unknown, nodeId: string): unknown {
+  const nodes = definition && typeof definition === "object" ? (definition as { nodes?: unknown }).nodes : undefined;
+  if (!Array.isArray(nodes)) return undefined;
+  const node: unknown = nodes.find((item: unknown) => !!item && typeof item === "object" && (item as { id?: unknown }).id === nodeId);
+  if (!node || typeof node !== "object") return undefined;
+  const record = node as Record<string, unknown>;
+  const tool = record.type === "foreach" && record.body && typeof record.body === "object" ? record.body as Record<string, unknown> : record;
+  return tool.params;
+}
+
 /** The distinct actions a workflow's steps wait on for approval. */
 function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
   return [...new Set(review.nodes.flatMap((node) => node.mode === "require_approval" && node.actionId ? [node.actionId] : []))];
@@ -479,25 +499,36 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const review = summary ? await analyzeWorkflowPermissions(deps, person, workflow_id) : null;
       if (!summary || !review) return { success: false, error: `workflow not found: ${workflow_id}` };
       const canGrant = await canGrantWorkflowPermissions(deps, person, summary);
-      const actions = canGrant ? gatingActionIds(review) : [];
+      // An explicit policy keeps its own question; only the rest can be allowed here.
+      const gating = review.nodes.filter((node) => node.mode === "require_approval" && node.actionId);
+      const grantable = canGrant ? gating.filter((node) => !POLICY_HELD.has(node.provenance ?? "")) : [];
+      const held = gating.filter((node) => POLICY_HELD.has(node.provenance ?? ""));
+      const actions = [...new Set(grantable.flatMap((node) => node.actionId ? [node.actionId] : []))];
       const accounts = review.accountConsent?.pending ?? [];
       if (actions.length === 0 && accounts.length === 0) {
-        return { success: true, data: { workflowId: workflow_id, allowed: [], accounts: [], next: canGrant || gatingActionIds(review).length === 0
-          ? "Nothing needs approval. Runs of the saved steps do not stop to ask."
+        return { success: true, data: { workflowId: workflow_id, allowed: [], accounts: [], next: canGrant || gating.length === held.length
+          ? "Nothing more can be allowed here. Steps that an explicit policy holds still ask on every run."
           : "Only the workflow owner or a team admin can allow its actions. Ask one of them to review permissions on the workflow page." } };
       }
+      // The card shows each step with its exact parameters, so the person
+      // reads what will run, not only an action name the assistant chose.
+      const name = oneLine(summary.name, 80);
       const lines = [
-        `Runs of ${summary.name} will do these without asking:`,
-        ...actions.map((id) => `- ${id}`),
-        ...(accounts.length ? [`They may use your accounts shared with ${review.accountConsent?.teamName ?? "the team"}: ${accounts.join(", ")}.`] : []),
-        "A change to the steps asks again. Explicit organization and team policies still apply.",
+        `Runs of "${name}" will run these steps without asking:`,
+        ...grantable.map((node) => `- ${node.nodeId}: ${node.actionId} ${oneLine(JSON.stringify(stepParams(summary.definition, node.nodeId) ?? {}), 240)}`),
+        ...(accounts.length ? [`They may use your accounts shared with ${oneLine(review.accountConsent?.teamName ?? "the team", 80)}: ${accounts.join(", ")}.`] : []),
+        ...(held.length ? [`These still ask on every run, because a policy requires it: ${[...new Set(held.map((node) => node.actionId))].join(", ")}.`] : []),
+        "A change to the steps asks again.",
       ];
       const decision = await ctx.requestDecision({
         type: "approval",
-        title: `Allow ${summary.name} to run without asking?`,
+        title: `Allow "${name}" to run without asking?`,
         body: lines.join("\n"),
         actions: [{ id: "approve", label: "Allow", style: "primary" }, { id: "cancel", label: "Not now" }],
         resumeKey: `workflow-permissions:${workflow_id}:${review.definitionToken}`,
+        // Only this person answers: not a teammate, and not a team API key
+        // that records its minting admin as the resolver (`answersGate`).
+        context: { approver: { userId: owner.userId } },
       });
       if (decision.actionId !== "approve") return { success: false, error: "The person did not allow the permissions, so runs still stop at those steps." };
       // The thread owner answers approvals, so this is the same person.
@@ -900,6 +931,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           { id: "cancel", label: "Cancel" },
         ],
         resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}${gateId ? `:${gateId}` : ""}`,
+        // The person who asked answers. A team API key records its minting
+        // admin as the resolver, so an open card would let it act as that admin.
+        context: { approver: { userId: owner.userId } },
       });
       if (decision.actionId !== "approve") {
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };

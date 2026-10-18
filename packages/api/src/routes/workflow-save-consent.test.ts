@@ -301,9 +301,9 @@ it("allows nothing on an assistant save; allow_permissions asks the person once 
   expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
   expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
 
-  const card: { title?: string; body?: string }[] = [];
+  const card: { title?: string; body?: string; context?: Record<string, unknown> }[] = [];
   const answer = (actionId: string, resolvedBy = "local-user") => ({
-    requestDecision: async (req: { title: string; body?: string }) => { card.push(req); return { actionId, resolvedBy, resolvedAt: 1 }; },
+    requestDecision: async (req: { title: string; body?: string; context?: Record<string, unknown> }) => { card.push(req); return { actionId, resolvedBy, resolvedAt: 1 }; },
   });
   const automated: [string, Partial<PluginActionContext>][] = [
     ["event or signal turn", { interactiveActor: undefined }],
@@ -322,8 +322,10 @@ it("allows nothing on an assistant save; allow_permissions asks the person once 
   expect(await allow.execute({ workflow_id: workflowId }, assistantTurn(team.id, answer("approve")))).toMatchObject({
     success: true, data: { allowed: ["fixture.read"], accounts: ["fixture_account"] },
   });
-  expect(card.at(-1)?.body).toContain("- fixture.read");
+  // The card shows each step with its exact parameters and answers only to this person.
+  expect(card.at(-1)?.body).toContain("- read: fixture.read {}");
   expect(card.at(-1)?.body).toContain("fixture_account");
+  expect(card.at(-1)?.context).toEqual({ approver: { userId: "local-user" } });
   expect(await p.db.select().from(workflowActionGrants)).toMatchObject([{ workflowId, ownerType: "team", ownerId: team.id, grantedBy: "local-user" }]);
   const scope = { orgId: "local-org", teamId: team.id, actorId: `team:${team.id}`, service: "fixture_account", memberId: "local-user" };
   await p.workflowStore.createRun("scheduled", { workflowId, definitionVersionId: "v1" }, definition, "v1",

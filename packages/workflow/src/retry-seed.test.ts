@@ -58,6 +58,24 @@ describe('retrySeedCheckpoints', () => {
     expect(ids(retrySeedCheckpoints(chain(), chain(), run))).toEqual(['trigger#0', 'list#0']);
   });
 
+  it('asks for an approval again when a step after it changed, and keeps it when nothing after it did', () => {
+    const guarded = (to: string, extra = false): WorkflowDefinition => ({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'ok', type: 'approval', prompt: 'Send the digest?' },
+        { id: 'send', type: 'tool', service: 'gmail', action: 'send', params: { to } },
+        ...(extra ? [{ id: 'send2', type: 'tool' as const, service: 'gmail', action: 'send', params: { to } }] : []),
+        { id: 'stop', type: 'stop' },
+      ],
+      edges: [{ from: 'trigger', to: 'ok' }, { from: 'ok', to: 'send' }, ...(extra ? [{ from: 'ok', to: 'send2' }] : []), { from: 'send', to: 'stop' }],
+    });
+    const run = [cp('trigger', 'completed'), cp('ok', 'completed'), cp('send', 'failed')];
+    expect(ids(retrySeedCheckpoints(guarded('me@corp.test'), guarded('me@corp.test'), run))).toEqual(['trigger#0', 'ok#0']);
+    expect(ids(retrySeedCheckpoints(guarded('me@corp.test'), guarded('attacker@evil.test'), run))).toEqual(['trigger#0']);
+    expect(ids(retrySeedCheckpoints(guarded('me@corp.test'), guarded('me@corp.test', true), run))).toEqual(['trigger#0']);
+  });
+
   it('treats a key-order difference from a database read as the same step', () => {
     const previous = chain();
     const reordered: WorkflowDefinition = {

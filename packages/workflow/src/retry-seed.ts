@@ -6,7 +6,8 @@
  *
  * A step runs again when it failed, when it never finished (in flight or
  * not started), when its definition or incoming edges changed since the old
- * run, or when it is downstream of any of those. A foreach that failed keeps
+ * run, or when it is downstream of any of those. An approval step runs again
+ * when any step after it changed, because the person approved the old steps. A foreach that failed keeps
  * its finished items, so only the failed and unstarted items run again,
  * unless the foreach itself changed.
  */
@@ -78,7 +79,11 @@ export function retrySeedCheckpoints(
   // Top-level steps only. A foreach that stops on a failed item fails its
   // own checkpoint too; one that skips or collects failed items completed.
   const failed = new Set(checkpoints.filter((cp) => cp.status === 'failed' && topLevel.has(cp.nodeId)).map((cp) => cp.nodeId));
-  const roots = new Set([...changed, ...failed]);
+  // An approval step answered for the old steps after it. When any of those
+  // changed, a person approves again, so the approval runs again too.
+  const reapprove = current.nodes.filter((node: WorkflowNode) => node.type === 'approval'
+    && [...descendants(current, [node.id])].some((id) => changed.has(id))).map((node) => node.id);
+  const roots = new Set([...changed, ...failed, ...reapprove]);
   const downstream = descendants(current, roots);
   const rerun = new Set([...roots, ...downstream]);
 
