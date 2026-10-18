@@ -240,3 +240,20 @@ it("preserves JSON integer precision in expanded results", async () => {
   await waitFor(() => expect(screen.getByRole("button", { name: "Copy code" })).toBeTruthy());
   expect(disclosure?.querySelector("code")?.textContent).toBe(raw);
 });
+
+describe("MessageItem continuation", () => {
+  it("drops the repeated author line but keeps the copy action", () => {
+    render(
+      <TooltipProvider>
+        <MessageItem continuation message={msg({ model: "gpt-6-luna", parts: [{ kind: "text", text: "Done." }] })} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByText("Assistant")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeTruthy();
+  });
+
+  it("shows the author line on the first message of a turn", () => {
+    renderItem(msg({ parts: [{ kind: "text", text: "Done." }] }));
+    expect(screen.getByText("Assistant")).toBeTruthy();
+  });
+});

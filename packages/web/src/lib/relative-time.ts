@@ -23,3 +23,15 @@ export function relativeTime(ts: number, now: number = Date.now()): string {
   const d = Math.floor(diff / DAY);
   return `${d}d ago`;
 }
+
+/** A future time as "in 14h", for next runs and expiries. A time that has
+ * passed is "due now". */
+export function timeUntil(ts: number, now: number = Date.now()): string {
+  const delta = ts - now;
+  if (delta <= 0) return "due now";
+  const minutes = Math.round(delta / MINUTE);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}

@@ -8,6 +8,7 @@ import { useArtifacts } from "~/api/artifacts";
 import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection, WorkList } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
+import { stripMarkdown } from "~/lib/strip-markdown";
 
 const CONVERSATION_PAGE_SIZE = 10;
 
@@ -168,7 +169,10 @@ function ActiveRow({ row }: { row: WorkspaceActiveWorkItem }) {
     badge={<RunStateBadge state={row.state} />} time={row.updatedAt} />;
 }
 function WaitingRow({ row, onDone }: { row: WaitingThread; onDone: () => void }) {
-  const detail = row.question ?? row.preview;
+  // A preview is the reply's opening text: show it as prose, not raw
+  // Markdown list markers and asterisks.
+  const raw = row.question ?? row.preview;
+  const detail = raw ? stripMarkdown(raw) : raw;
   return <WorkRow
     title={<Link to="/threads/$threadId" params={{ threadId: row.threadId }}>{row.title}</Link>}
     time={row.lastAgentActivityAt}
@@ -183,7 +187,7 @@ function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: strin
   const failed = !row.needsApproval && row.outcome === "failed";
   const label = row.needsApproval ? "Approval needed" : failed ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
   return <WorkRow title={<Link to="/workflows/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
-    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
+    badge={<Badge variant={failed ? "danger" : runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
     actions={failed ? <Button variant="ghost" size="sm" disabled={dismiss.isPending} onClick={() => dismiss.mutate(row.runId)}>Dismiss</Button> : undefined} />;
 }
 function ResultGroupRow({ group }: { group: ResultItem[] }) {
