@@ -462,6 +462,16 @@ describe("TeamsPanel — deleting a team", () => {
   });
 });
 
+describe("TeamsPanel — Slack", () => {
+  it("opens Presence in this team's workspace", () => {
+    openTeam();
+    const link = screen.getByRole("link", { name: "Open Presence" });
+    const url = new URL(link.getAttribute("href") ?? "", "http://x");
+    expect(url.pathname).toBe("/presence");
+    expect(url.searchParams.get("workspace")).toBe(teamsData().teams[0]!.id);
+  });
+});
+
 describe("TeamsPanel — 1Password connection", () => {
   it("leaves the team token to the team's Integrations page", () => {
     callerRole = "admin";

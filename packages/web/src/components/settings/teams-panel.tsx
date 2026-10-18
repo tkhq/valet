@@ -744,7 +744,7 @@ function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean 
         )}
       </FieldRow>
       <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
-        <Link to="/presence" className={textLinkClass}>Open Presence</Link>
+        <Link to="/presence" search={{ workspace: team.id }} className={textLinkClass}>Open Presence</Link>
         <Link to="/settings/notifications" className={textLinkClass}>My DM preferences</Link>
       </div>
       {replySetup && <AutomationWizard key={team.id} open onOpenChange={setReplySetup} replyTeam={{ id: team.id, name: team.name }} />}

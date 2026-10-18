@@ -14,19 +14,38 @@ import { usePresencePlaces } from "~/api/presence";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
-import { blockSubjectFor, faultLead } from "./overview-groups";
+import { blockSubjectFor, faultLeadParts, placeLeadParts, type OverviewService } from "./overview-groups";
 import { isPinProblem, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routine-helpers";
-import { activitySentence, type ThreadTitles } from "./sentences";
+import { activitySentence, partsText, text, type SentencePart, type ThreadTitles } from "./sentences";
 
 /** How far back a dead delivery counts. */
 export const FAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export type Fault =
-  /** `lead` names the line's place before the fault: `In acme/api,` or `Everywhere in Slack,`. */
-  | { kind: "line"; sub: EventSubscriptionWire; text: string; lead?: string }
+  /** `lead` names the line's place before the fault: `In acme/api,` or
+   * `Everywhere in Slack,`. `leadParts` is the same lead with the place as a token. */
+  | { kind: "line"; sub: EventSubscriptionWire; text: string; lead?: string; leadParts?: readonly SentencePart[] }
   | { kind: "routine"; routine: Routine; text: string }
-  | { kind: "delivery"; eventId: string; subscriptionId: string; text: string; lead?: string };
+  | { kind: "delivery"; eventId: string; subscriptionId: string; text: string; lead?: string; leadParts?: readonly SentencePart[] };
+
+/** A lead's string and parts, or nothing. */
+function leadFields(parts: SentencePart[] | null): { lead?: string; leadParts?: SentencePart[] } {
+  return parts === null ? {} : { lead: partsText(parts), leadParts: parts };
+}
+
+/** A Log row's place as a lead: a token when the row names its key. */
+function eventLeadParts(item: EventLogItem): SentencePart[] | null {
+  if (item.place === undefined) return null;
+  const service = item.placeKey !== undefined ? serviceOf(item.placeKey) : null;
+  if (item.placeKey === undefined || service === null) return [text(`In ${item.place},`)];
+  return placeLeadParts(item.place, service, item.placeKey);
+}
+
+function serviceOf(key: string): OverviewService | null {
+  const prefix = key.split(":", 1)[0];
+  return prefix === "slack" || prefix === "github" || prefix === "linear" ? prefix : null;
+}
 
 export interface Faults {
   faults: Fault[];
@@ -60,10 +79,9 @@ export function faultsOf(input: {
   // The lines whose fault marks their place row, so a collapsed group with a fault stays open.
   const faultedLines: EventSubscriptionWire[] = [...broken];
   const faults: Fault[] = [
-    ...broken.map((sub): Fault => {
-      const lead = faultLead(sub, input.places);
-      return { kind: "line", sub, text: lineFaultText(sub, input.titles), ...(lead !== null ? { lead } : {}) };
-    }),
+    ...broken.map((sub): Fault => (
+      { kind: "line", sub, text: lineFaultText(sub, input.titles), ...leadFields(faultLeadParts(sub, input.places)) }
+    )),
     ...offRoutines.map((routine): Fault => ({
       kind: "routine", routine, text: `${routine.name} is off: ${routine.detail.disabledReason ?? ""}`,
     })),
@@ -83,13 +101,13 @@ export function faultsOf(input: {
       const line = byId.get(delivery.subscriptionId);
       if (line !== undefined) faultedLines.push(line);
       // The line's place leads; a line this list does not hold falls back to the event's place.
-      const lead = line !== undefined ? faultLead(line, input.places) : item.place !== undefined ? `In ${item.place},` : null;
+      const lead = line !== undefined ? faultLeadParts(line, input.places) : eventLeadParts(item);
       faults.push({
         kind: "delivery",
         eventId: item.id,
         subscriptionId: delivery.subscriptionId,
         text: activitySentence({ eventKey: item.eventKey }, delivery, item.place !== undefined ? { place: item.place } : {}),
-        ...(lead !== null ? { lead } : {}),
+        ...leadFields(lead),
       });
     }
   }

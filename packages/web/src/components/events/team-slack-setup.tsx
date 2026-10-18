@@ -12,9 +12,9 @@ import { AutomationWizard } from "./automation-wizard";
 
 /**
  * The dashboard's setup prompt, shown only until the team listens somewhere.
- * Once it does, the Events page's Channels tab carries the listening state and
- * the button to change it. Mount by team ID so a workspace change discards
- * selections.
+ * Once it does, Presence carries the listening state, and each Slack row's
+ * `Choose channels` opens the same dialog. Mount by team ID so a workspace
+ * change discards selections.
  */
 export function TeamSlackSetupCard({ teamId }: { teamId: string }) {
   const subscriptionsQ = useEventSubscriptions();
@@ -71,6 +71,11 @@ export function ListenButton({ teamId, children, ...props }: { teamId: string; c
   );
 }
 
+/**
+ * The team's Slack channel dialog: setup notices, the channel picker, or
+ * the advanced wizard. `ListenButton` and a Presence Slack row's `Choose
+ * channels` both open it.
+ */
 export function TeamSlackSetupModal({
   teamId,
   onOpenChange,

@@ -18,14 +18,15 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
-import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
+import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { OwnerBadge } from "./presence-rows";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
 import {
-  isRoutine, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineSentence, type Routine,
+  isRoutine, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineSentenceParts, type Routine,
 } from "./routine-helpers";
 import { DeleteRoutineDialog } from "./routine-row";
-import { routineAction, runsInLabel, scheduleInWords, type WorkflowNames } from "./sentences";
+import { Sentence } from "./sentence";
+import { partsText, routineAction, runsInLabel, scheduleInWords, type WorkflowNames } from "./sentences";
 
 /** The run id prefix the scheduler gives a schedule's runs
  * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
@@ -39,20 +40,19 @@ export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
   const triggersQ = useWorkflowTriggers();
   const routine = (triggersQ.data?.triggers ?? []).filter(isRoutine).find((r) => r.id === id);
-  const sentenceFor = useRoutineSentence(routine === undefined ? [] : [routine]);
+  const sentenceFor = useRoutineSentenceParts(routine === undefined ? [] : [routine]);
   const name = routine?.name ?? "Routine";
   return (
     <PresenceDetailPage
       crumbs={[PRESENCE_CRUMB, { label: "On a schedule", to: "/presence", hash: "schedule" }, { label: name }]}
-      title={routine === undefined ? name : sentenceFor(routine)}
+      title={routine === undefined ? name : partsText(sentenceFor(routine))}
+      {...(routine !== undefined ? { titleContent: <Sentence parts={sentenceFor(routine)} /> } : {})}
     >
       {triggersQ.isPending && <LoadingRow />}
       {triggersQ.isError && (
         <ErrorRow>{errorText(triggersQ.error, "Could not load this routine. Reload the page to try again.")}</ErrorRow>
       )}
-      {triggersQ.isSuccess && routine === undefined && (
-        <EmptyRow>This routine does not exist, or you cannot see it. Open Presence and pick a routine.</EmptyRow>
-      )}
+      {triggersQ.isSuccess && routine === undefined && <MissingPage />}
       {routine !== undefined && <RoutineBody routine={routine} />}
     </PresenceDetailPage>
   );

@@ -6,7 +6,8 @@
  * `Everywhere in Slack,`). An archived pin shows the thread picker, which is
  * the same `ThreadProblem` the sentence row opens from `Pick another
  * thread`, shown open here; a routine that is off shows its
- * reason and an `Edit` link; a dead delivery links its event. The banner
+ * reason and an `Edit` link; a dead delivery links its event. The place in
+ * a lead and an archived pin's thread read as reference tokens (`Ref`). The banner
  * never shows a bare count, and it shows nothing when there is no fault.
  */
 import { useState } from "react";
@@ -17,6 +18,8 @@ import { usePinnedThreadTitle } from "~/api/rule";
 import { textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { ThreadProblem } from "./problem-badge";
+import { Sentence } from "./sentence";
+import type { SentencePart } from "./sentences";
 import { lineWorkspace, pinnedTitle, storedPolicy, useLineAccess } from "./presence-rows";
 import type { Fault } from "./use-faults";
 
@@ -46,8 +49,14 @@ export function AttentionBanner({ faults }: { faults: Fault[] }) {
   );
 }
 
+/** A fault's lead: its parts with the place as a token, else its words. */
+function Lead({ lead, parts }: { lead: string | undefined; parts: readonly SentencePart[] | undefined }) {
+  if (parts !== undefined) return <span className="text-muted"><Sentence parts={parts} />{" "}</span>;
+  return lead !== undefined ? <span className="text-muted">{`${lead} `}</span> : null;
+}
+
 function FaultItem({ fault }: { fault: Fault }) {
-  if (fault.kind === "line") return <LineFault sub={fault.sub} lead={fault.lead} />;
+  if (fault.kind === "line") return <LineFault sub={fault.sub} lead={fault.lead} leadParts={fault.leadParts} />;
   if (fault.kind === "routine") {
     return (
       <p className="flex flex-wrap items-baseline gap-x-2 [overflow-wrap:anywhere]">
@@ -58,7 +67,7 @@ function FaultItem({ fault }: { fault: Fault }) {
   }
   return (
     <p className="[overflow-wrap:anywhere]">
-      {fault.lead !== undefined && <span className="text-muted">{`${fault.lead} `}</span>}
+      <Lead lead={fault.lead} parts={fault.leadParts} />
       <Link to="/presence/events/$eventId" params={{ eventId: fault.eventId }} className="text-danger-600 hover:underline dark:text-danger-500">
         {fault.text}
       </Link>
@@ -67,15 +76,22 @@ function FaultItem({ fault }: { fault: Fault }) {
 }
 
 /** A line with a problem: the problem text and its fix, as under the line's row. */
-function LineFault({ sub, lead }: { sub: EventSubscriptionWire; lead: string | undefined }) {
+function LineFault({ sub, lead, leadParts }: {
+  sub: EventSubscriptionWire;
+  lead: string | undefined;
+  leadParts: readonly SentencePart[] | undefined;
+}) {
   const { readOnly, readOnlyText } = useLineAccess(sub);
   const patch = usePatchEventSubscription();
-  const titles = usePinnedThreadTitle(storedPolicy(sub));
+  const pin = storedPolicy(sub);
+  const titles = usePinnedThreadTitle(pin);
   const [error, setError] = useState<string | null>(null);
   return (
     <ThreadProblem
       variant="inline"
       lead={lead}
+      {...(leadParts !== undefined ? { leadParts } : {})}
+      {...(pin?.mode === "existing" ? { threadId: pin.threadId } : {})}
       problem={sub.problem ?? ""}
       threadTitle={pinnedTitle(sub, titles)}
       workspace={lineWorkspace(sub)}

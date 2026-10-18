@@ -11,7 +11,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
 import { ProblemBadge } from "./problem-badge";
-import { presenceSentence, type PresenceSentenceOptions, type ThreadTitles } from "./sentences";
+import { partsText, presenceSentenceParts, type PresenceSentenceOptions, type SentencePart, type ThreadTitles } from "./sentences";
 import { useSentenceNames } from "./use-sentence-names";
 
 /**
@@ -25,13 +25,23 @@ export function usePresenceSentence(
   subs: readonly EventSubscriptionWire[],
   knownThreads: ThreadTitles = {},
 ): (sub: EventSubscriptionWire, options?: PresenceSentenceOptions) => string {
+  const parts = usePresenceSentenceParts(subs, knownThreads);
+  return (sub, options) => partsText(parts(sub, options));
+}
+
+/** The sentence for each line of presence as parts, for a row that shows
+ * its places, threads, workflows, and people as tokens. See `usePresenceSentence`. */
+export function usePresenceSentenceParts(
+  subs: readonly EventSubscriptionWire[],
+  knownThreads: ThreadTitles = {},
+): (sub: EventSubscriptionWire, options?: PresenceSentenceOptions) => SentencePart[] {
   const catalog = useTriggerCatalog();
   const workflows = useWorkflows();
   const pinned = usePinnedThreadTitles(subs.map((sub) => (sub.target.kind === "assistant" ? sub.target.thread : undefined)));
   const threads: ThreadTitles = { ...knownThreads, ...pinned };
   const names = useSentenceNames();
   const workflowNames = workflows.data?.workflows ?? [];
-  return (sub, options) => presenceSentence(sub, catalog.data?.catalog, workflowNames, threads, names, options);
+  return (sub, options) => presenceSentenceParts(sub, catalog.data?.catalog, workflowNames, threads, names, options);
 }
 
 /** The teams fields the gates and owner names read. A team the viewer

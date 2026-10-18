@@ -16,6 +16,7 @@ import type {
   GetWorkflowTriggerCatalogResponse,
 } from "@valet/api/wire";
 import { deliveryStatusLine } from "~/components/events/delivery-copy";
+import { zoneLongName } from "~/lib/time-zones";
 import {
   displayThreadPolicy,
   ownOptionLabel,
@@ -773,9 +774,11 @@ export function routineDoes(routine: RoutineLike, workflows: WorkflowNames, thre
   return partsText(routineDoesParts(routine, workflows, threads));
 }
 
-/** The timezone a schedule names, or undefined when it is UTC or absent. */
+/** The timezone a schedule names, as its long name (`Pacific Daylight
+ * Time`, or the IANA name when the browser has none), or undefined when it
+ * is UTC or absent. */
 export function scheduleZone(timezone: string | undefined): string | undefined {
-  return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? undefined : timezone;
+  return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? undefined : zoneLongName(timezone);
 }
 
 /** The schedule in words, with the timezone in parentheses when it is not UTC. */
@@ -815,6 +818,8 @@ export interface ActivityNames {
   workflowsByListener?: Readonly<Record<string, string>>;
   /** The place, when the caller knows a better name than the event's refs give. */
   place?: string;
+  /** The key of `place` (`github:acme/api#12`). With it, the place reads as a token that links its page. */
+  placeKey?: string;
 }
 
 /** A thread an outcome names, with the words a reader sees for it. */
@@ -898,6 +903,41 @@ export function outcomeText(outcome: ActivityOutcome): string {
   return outcome.thread ? `${outcome.words} ${outcome.thread.label}` : outcome.words;
 }
 
+/** The service a place key names, or null. */
+function placeKeyService(key: string): SentenceService | null {
+  const prefix = key.split(":", 1)[0];
+  return prefix === "slack" || prefix === "github" || prefix === "linear" ? prefix : null;
+}
+
+/**
+ * The lead of an activity row as parts: the event in words, then ` in `
+ * and the place. With `placeKey` the place is a token; without it the
+ * place stays words. The parts read as `activityLead`.
+ */
+export function activityLeadParts(event: ActivityEvent, names: ActivityNames = {}): SentencePart[] {
+  const place = names.place ?? eventPlace(event.refs);
+  const service = names.placeKey !== undefined ? placeKeyService(names.placeKey) : null;
+  if (place === null || names.placeKey === undefined || service === null) return [text(activityLead(event, names))];
+  return tidy([
+    text(`${eventInWords(event.eventKey)} in `),
+    { kind: "place", text: place, service, subject: names.placeKey },
+  ]);
+}
+
+/**
+ * One outcome as parts: its words, then its thread as a token. An archived
+ * thread keeps its name and drops its id, so the token does not link a
+ * thread that no longer takes deliveries. The parts read as `outcomeText`.
+ */
+export function outcomeParts(outcome: ActivityOutcome): SentencePart[] {
+  const thread = outcome.thread;
+  if (thread === undefined) return [text(outcome.words)];
+  const token: SentencePart = thread.ref.archived
+    ? { kind: "thread", text: thread.label }
+    : { kind: "thread", text: thread.label, sessionId: thread.ref.sessionId, threadId: thread.ref.threadId };
+  return [text(`${outcome.words} `), token];
+}
+
 /**
  * An activity row as one sentence: `<event in words> in <place> → <outcome>`.
  * The outcome is `replied in <thread>`, `delivered to <thread>`, `claimed by
@@ -910,4 +950,18 @@ export function activitySentence(
   names: ActivityNames = {},
 ): string {
   return `${activityLead(event, names)} → ${activityOutcomes(event, delivery, names).map(outcomeText).join(", ")}`;
+}
+
+/** An activity row as parts. The parts read as `activitySentence`. */
+export function activitySentenceParts(
+  event: ActivityEvent,
+  delivery: EventDeliveryWire | readonly EventDeliveryWire[] | null,
+  names: ActivityNames = {},
+): SentencePart[] {
+  const outcomes = activityOutcomes(event, delivery, names);
+  return tidy([
+    ...activityLeadParts(event, names),
+    text(" → "),
+    ...outcomes.flatMap((outcome, i) => [...(i > 0 ? [text(", ")] : []), ...outcomeParts(outcome)]),
+  ]);
 }

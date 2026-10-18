@@ -112,9 +112,28 @@ describe("AttentionBanner", () => {
 
   it("names the place before a line's fault", async () => {
     renderBanner(FAULTS.slice(0, 1));
-    const problem = await screen.findByText("Platform CI is archived. Pick another thread:");
+    // The archived pin's title reads as a thread token once it loads.
+    await screen.findByRole("link", { name: "Platform CI" });
+    const problem = screen.getByRole("alert");
     expect(problem.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     expect(within(problem).getByText("In acme/api,").className).toContain("text-muted");
+  });
+
+  it("reads a line's place and its archived thread as tokens (frame 1)", async () => {
+    renderBanner([{
+      kind: "line", sub: R4, text: "Platform CI is archived. Pick another thread:", lead: "In acme/api,",
+      leadParts: [
+        { kind: "text", text: "In " },
+        { kind: "place", text: "acme/api", service: "github", subject: "github:acme/api" },
+        { kind: "text", text: "," },
+      ],
+    }]);
+    const item = within(screen.getByRole("region", { name: "Needs attention" })).getByRole("listitem");
+    const place = within(item).getByRole("link", { name: "acme/api" });
+    expect(place.getAttribute("href")).toBe("/presence/places/github:acme/api");
+    const thread = await within(item).findByRole("link", { name: "Platform CI" });
+    expect(thread.getAttribute("href")).toBe("/threads/t-ci");
+    expect(within(item).getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
   });
 
   it("leads a service-wide line with its service row, and a dead delivery with its place", async () => {
@@ -145,7 +164,8 @@ describe("AttentionBanner", () => {
     const items = within(banner).getAllByRole("listitem");
     expect(items).toHaveLength(3);
     // The line: the same inline problem the sentence row shows, with the picker.
-    expect(await within(items[0]!).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    expect(await within(items[0]!).findByRole("link", { name: "Platform CI" })).toBeTruthy();
+    expect(within(items[0]!).getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     expect(within(items[0]!).getByRole("group", { name: "Problem" })).toBeTruthy();
     expect(within(items[0]!).getByRole("button", { name: "Pick Platform Ops from user" })).toBeTruthy();
     // The routine: its reason and an Edit link to its page.

@@ -94,6 +94,7 @@ vi.mock("./thread-picker", () => ({
 import { routineWhen } from "./routine-helpers";
 import { RoutinePage, routineReadOnly } from "./routine-page";
 import { routine } from "./test-fixtures";
+import { zoneLongName } from "~/lib/time-zones";
 
 const PIN_TEXT = "Pick another thread in Presence.";
 
@@ -137,7 +138,7 @@ function factsOf(strip: HTMLElement): string[][] {
 describe("RoutinePage", () => {
   it("shows the sentence and offers fire now, edit, and disable", async () => {
     wrap(<RoutinePage id="S1" />);
-    expect(await screen.findByText("Every day at 9:00, Morning summary: work in its own thread.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Fire now" }));
     await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
     expect(await screen.findByText("Fired. The routine runs now.")).toBeTruthy();
@@ -162,7 +163,7 @@ describe("RoutinePage", () => {
     wrap(<RoutinePage id="S2" />);
     const strip = await screen.findByLabelText("Facts");
     expect(factsOf(strip)).toEqual([
-      ["When", "Every weekday at 8:30 (America/Denver)"],
+      ["When", `Every weekday at 8:30 (${zoneLongName("America/Denver")})`],
       ["Do", "work on it"],
       ["Runs in", "A new thread each time"],
     ]);
@@ -185,7 +186,7 @@ describe("RoutinePage", () => {
       threads: opts?.archived ? [{ id: "t-ci", sessionId: "s-ws", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1, archivedAt: 2 }] : [],
     }));
     wrap(<RoutinePage id="S1" />);
-    expect(await screen.findByText("Every day at 9:00, Morning summary: work in the Platform CI thread.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in the Platform CI thread." })).toBeTruthy();
   });
 
   it("shows the problem with the picker inline; a pick repins and turns the routine on", async () => {
@@ -322,6 +323,7 @@ describe("RoutinePage", () => {
 
   it("names the fix for a routine that is not in the list", async () => {
     wrap(<RoutinePage id="gone" />);
-    expect(await screen.findByText("This routine does not exist, or you cannot see it. Open Presence and pick a routine.")).toBeTruthy();
+    expect(await screen.findByText("This page does not exist, or you cannot see it.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to Presence" }).getAttribute("href")).toBe("/presence");
   });
 });

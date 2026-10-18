@@ -82,8 +82,11 @@ describe("qkEvents", () => {
     ]);
     expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", true)).not.toEqual(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", false));
     expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack")).toEqual([
-      "events", "log", "user", "u1", "problems", "slack", false,
+      "events", "log", "user", "u1", "problems", "slack", false, "",
     ]);
+    // The place filter keys its own pages.
+    expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, false, undefined, false, "github:acme/api"))
+      .not.toEqual(qkEvents.log({ ownerType: "user", ownerId: "u1" }, false));
   });
 
   // The three subscription mutations invalidate the bare prefix (small-fixes

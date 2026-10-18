@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppearanceSettings } from "./appearance-settings";
+
+afterEach(cleanup);
 
 describe("AppearanceSettings", () => {
   it("labels the identity Appears as and reports field edits", () => {
@@ -12,6 +14,12 @@ describe("AppearanceSettings", () => {
     expect(screen.queryByText(/subscription/i)).toBeNull();
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Release helper" } });
     expect(onChange).toHaveBeenCalledWith({ displayName: "Release helper" });
+  });
+
+  it("says a tool call that names an identity wins", () => {
+    render(<AppearanceSettings value={{}} onChange={() => {}} />);
+    expect(screen.getByText(/A tool call that names an identity wins\.$/)).toBeTruthy();
+    expect(screen.queryByText(/Explicit identity arguments/)).toBeNull();
   });
 
   it("shows the validation error for an invalid avatar URL", () => {

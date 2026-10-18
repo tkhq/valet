@@ -55,6 +55,9 @@ vi.mock("~/components/events/automation-wizard", () => ({
 vi.mock("~/components/events/edit-subscription-dialog", () => ({
   EditSubscriptionDialog: ({ sub, focus }: { sub: EventSubscriptionWire; focus?: string }) => <p>Editing {sub.name}{focus ? ` at ${focus}` : ""}</p>,
 }));
+vi.mock("~/components/events/team-slack-setup", () => ({
+  TeamSlackSetupModal: ({ teamId }: { teamId: string }) => <p>Channel dialog for {teamId}</p>,
+}));
 vi.mock("./thread-picker", () => ({
   ThreadPicker: ({ workspace, onPick }: {
     workspace: string;
@@ -66,6 +69,7 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
+import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 import { PlaceRow } from "./place-row";
 import { PIN_UNAVAILABLE } from "./problem-badge";
 import { PLATFORM_CI, line } from "./test-fixtures";
@@ -160,12 +164,18 @@ describe("PlaceRow", () => {
     expect(active.parentElement?.className).toContain("tabular-nums");
   });
 
-  it("reads one active thread, and No active thread when none waits", () => {
+  it("reads one active thread, and says nothing about threads when none waits", () => {
     renderRow(block({ activeThreadCount: 1 }));
     expect(screen.getByText("1 active thread")).toBeTruthy();
     cleanup();
     renderRow(block({ activeThreadCount: 0 }));
-    expect(screen.getByText("No active thread")).toBeTruthy();
+    expect(screen.queryByText(/active thread/)).toBeNull();
+    expect(screen.getByText("5m ago")).toBeTruthy();
+  });
+
+  it("does not repeat the service mark: the group heading carries it", () => {
+    renderRow(block({}));
+    expect(screen.getByRole("region", { name: "acme/api" }).querySelector("[data-service]")).toBeNull();
   });
 
   it("reads each line without its place clause, with the small switch and the overflow menu", async () => {
@@ -258,5 +268,40 @@ describe("PlaceRow", () => {
     expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
       preselectedPlace: { subject: "slack:*", service: "slack", label: "Slack" },
     }));
+  });
+});
+
+describe("PlaceRow in a team workspace (Choose channels)", () => {
+  function renderTeamRow(data: PlaceBlockData) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <PinnedWorkspaceScope teamId="sre"><PlaceRow block={data} /></PinnedWorkspaceScope>
+      </QueryClientProvider>,
+    );
+  }
+  const slackRow = (over: Partial<PlaceBlockData>) => block({
+    subject: "slack:T1/C900", label: "#incidents", service: "slack", lines: [], hasFault: false, ...over,
+  });
+
+  it("offers Choose channels in a Slack row's overflow, and it opens the team's channel dialog", async () => {
+    renderTeamRow(slackRow({}));
+    await userEvent.click(screen.getByRole("button", { name: "More for #incidents" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Choose channels" }));
+    expect(screen.getByText("Channel dialog for sre")).toBeTruthy();
+  });
+
+  it("offers Choose channels on the Slack service-wide row too", async () => {
+    renderTeamRow(slackRow({ subject: "slack:T1", label: "Everywhere in Slack", serviceWide: true }));
+    await userEvent.click(screen.getByRole("button", { name: "More for Everywhere in Slack" }));
+    expect(screen.getByRole("menuitem", { name: "Choose channels" })).toBeTruthy();
+  });
+
+  it("has no overflow on a GitHub row, or on a Slack row in the personal workspace", () => {
+    renderTeamRow(block({}));
+    expect(screen.queryByRole("button", { name: "More for acme/api" })).toBeNull();
+    cleanup();
+    renderRow(slackRow({}));
+    expect(screen.queryByRole("button", { name: "More for #incidents" })).toBeNull();
   });
 });

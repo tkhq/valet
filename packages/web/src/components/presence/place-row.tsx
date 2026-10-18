@@ -2,8 +2,10 @@
  * A place row of the overview roster
  * (docs/specs/2026-10-16-presence-hub-design.md Part B steps 4, 5, and 11):
  * one row of a two-column grid. The place column holds the place's name as
- * a link to its page, then on separate lines the active threads and the
- * time of the last activity. The sentence column holds one sentence row per
+ * a link to its page, then on separate lines the active threads (when any
+ * wait) and the time of the last activity. In a team workspace, a Slack
+ * row's overflow menu offers `Choose channels`, which opens the team's
+ * channel dialog (`TeamSlackSetupModal`, the dialog `ListenButton` opens). The sentence column holds one sentence row per
  * line of presence, one `Appears as` line when a line sets an appearance,
  * and a quiet `+ Listen for…` that opens the wizard fixed on the place. At
  * phone width the place column stacks above the sentence column. The row
@@ -11,15 +13,20 @@
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { Avatar, AvatarFallback, AvatarImage, Button } from "~/components/primitives";
+import { TeamSlackSetupModal } from "~/components/events/team-slack-setup";
+import {
+  Avatar, AvatarFallback, AvatarImage, Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { announceCreated } from "./created-highlight";
 import type { PlaceBlockData } from "./overview-groups";
 import { PresenceLine } from "./presence-line";
-import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
+import { appearanceName, hasAppearance, usePresenceSentenceParts } from "./presence-rows";
 import { SERVICE_NAMES } from "./places";
 import { SENTENCE_PLACE_FIELD_SET } from "./sentences";
 
@@ -55,9 +62,9 @@ function hasPage(block: PlaceBlockData): boolean {
   return block.subject !== "slack:*";
 }
 
-/** `1 active thread`, `2 active threads`, or `No active thread`. */
-export function activeThreadsText(count: number): string {
-  if (count <= 0) return "No active thread";
+/** `1 active thread` or `2 active threads`. A place with none says nothing. */
+export function activeThreadsText(count: number): string | null {
+  if (count <= 0) return null;
   return count === 1 ? "1 active thread" : `${count} active threads`;
 }
 
@@ -67,7 +74,12 @@ export function PlaceRow({ block, highlighted = false }: {
   highlighted?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
-  const sentence = usePresenceSentence(block.lines);
+  const [choosing, setChoosing] = useState(false);
+  const { teamId } = useWorkspaceScope();
+  // A team picks its Slack channels from any Slack row (spec Part B step 11).
+  const choosesChannels = teamId !== undefined && block.service === "slack";
+  const sentence = usePresenceSentenceParts(block.lines);
+  const active = activeThreadsText(block.activeThreadCount);
   const wizardLabel = block.serviceWide ? SERVICE_NAMES[block.service] : block.label;
   const appearing = block.lines.find(hasAppearance);
   return (
@@ -77,20 +89,38 @@ export function PlaceRow({ block, highlighted = false }: {
       className={cn(ROSTER_ROW_CLASS, "transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS)}
     >
       <div className="min-w-0 pt-0.5">
-        {hasPage(block)
-          ? (
-            <Link to="/presence/places/$subject" params={{ subject: block.subject }} className={`${PLACE_NAME_CLASS} hover:underline`}>
-              {block.label}
-            </Link>
-          )
-          : <span className={PLACE_NAME_CLASS}>{block.label}</span>}
-        <div className={PLACE_META_CLASS}>
-          <span className="inline-flex items-center gap-1.5">
-            {block.activeThreadCount > 0 && <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-moss" />}
-            {activeThreadsText(block.activeThreadCount)}
-          </span>
-          {block.lastActivityAt !== null && <span>{relativeTime(block.lastActivityAt)}</span>}
+        <div className="flex items-start justify-between gap-2">
+          {hasPage(block)
+            ? (
+              <Link to="/presence/places/$subject" params={{ subject: block.subject }} className={`${PLACE_NAME_CLASS} hover:underline`}>
+                {block.label}
+              </Link>
+            )
+            : <span className={PLACE_NAME_CLASS}>{block.label}</span>}
+          {choosesChannels && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="icon" className="-mt-1 h-7 w-7 shrink-0" aria-label={`More for ${block.label}`}>
+                  <MoreHorizontal className="h-4 w-4" aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setChoosing(true)}>Choose channels</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
+        {(active !== null || block.lastActivityAt !== null) && (
+          <div className={PLACE_META_CLASS}>
+            {active !== null && (
+              <span className="inline-flex items-center gap-1.5">
+                <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full bg-moss" />
+                {active}
+              </span>
+            )}
+            {block.lastActivityAt !== null && <span>{relativeTime(block.lastActivityAt)}</span>}
+          </div>
+        )}
       </div>
       <div className="grid min-w-0 gap-0.5">
         {block.lines.map((line) => (
@@ -105,6 +135,7 @@ export function PlaceRow({ block, highlighted = false }: {
           + Listen for…
         </Button>
       </div>
+      {choosing && teamId !== undefined && <TeamSlackSetupModal key={teamId} teamId={teamId} onOpenChange={setChoosing} />}
       {adding && (
         <AutomationWizard
           open

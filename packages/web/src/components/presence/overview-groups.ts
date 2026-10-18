@@ -7,6 +7,7 @@
  */
 import type { EventSubscriptionWire, PresencePlaceWire } from "@valet/api/wire";
 import { isMidGrain, isServiceRoot } from "./places";
+import { partsText, text, type SentencePart } from "./sentences";
 
 export type OverviewService = "slack" | "github" | "linear";
 
@@ -103,10 +104,24 @@ export function namedPlaceLabel(line: Pick<EventSubscriptionWire, "filters">, pl
  * name (`Everywhere in Slack,`). A line with no known service has none.
  */
 export function faultLead(line: Pick<EventSubscriptionWire, "eventKeys" | "filters">, places: readonly PresencePlaceWire[]): string | null {
-  const named = namedPlaceLabel(line, places);
-  if (named !== null) return `In ${named},`;
+  const parts = faultLeadParts(line, places);
+  return parts === null ? null : partsText(parts);
+}
+
+/** `faultLead` as parts: the named place is a token that links its page. */
+export function faultLeadParts(
+  line: Pick<EventSubscriptionWire, "eventKeys" | "filters">,
+  places: readonly PresencePlaceWire[],
+): SentencePart[] | null {
+  const named = namedPlace(line, places);
+  if (named !== null) return placeLeadParts(named.label, named.service, named.subject);
   const service = lineService(line);
-  return service === null ? null : `${SERVICE_BLOCK_LABELS[service]},`;
+  return service === null ? null : [text(`${SERVICE_BLOCK_LABELS[service]},`)];
+}
+
+/** `In <place>,` with the place as a token. */
+export function placeLeadParts(label: string, service: OverviewService, subject: string): SentencePart[] {
+  return [text("In "), { kind: "place", text: label, service, subject }, text(",")];
 }
 
 /** The service root row of the places list, if it has one. */

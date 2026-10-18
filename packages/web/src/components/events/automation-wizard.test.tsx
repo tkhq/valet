@@ -137,6 +137,9 @@ let teamsData: { teams: { id: string; name: string; memberCount: number }[] } = 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  // The collision notice names people through the org directory.
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
 }));
 
 // Drive the active workspace: default personal, a team when `scopeTeamId` set.

@@ -271,6 +271,12 @@ describe("Presence overview", () => {
     await screen.findByRole("heading", { level: 2, name: "On a schedule" });
     expect(groupNames()).toEqual(["Slack", "GitHub", "Linear", "On a schedule"]);
     expect(groupCounts()).toEqual(["1 place", "1 place", "1 place", "1 routine"]);
+    // Each heading leads with its service's mark; the schedule group's mark is the clock.
+    const marks = screen.getAllByRole("heading", { level: 2 })
+      .filter((heading) => heading.id !== "presence-attention")
+      .map((heading) => heading.querySelector("[data-service]"))
+      .map((mark) => [mark?.getAttribute("data-service"), mark?.getAttribute("data-size")]);
+    expect(marks).toEqual([["slack", "md"], ["github", "md"], ["linear", "md"], ["schedule", "md"]]);
 
     const acme = screen.getByRole("region", { name: "acme/api" });
     expect(within(acme).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
@@ -358,8 +364,10 @@ describe("Presence overview", () => {
   it("fixes a line from the banner: the item and the row's problem line go (Review Focus 3, INV-H6)", async () => {
     mountOverview();
     const banner = await screen.findByRole("region", { name: "Needs attention" });
-    const lead = await within(banner).findByText("Platform CI is archived. Pick another thread:");
-    expect(lead.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
+    await within(banner).findByRole("link", { name: "Platform CI" });
+    expect(within(banner).getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
+    // The lead's place is a token that links its page.
+    expect(within(banner).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
     const acme = screen.getByRole("region", { name: "acme/api" });
     // The row offers the same fix behind one button.
     await userEvent.click(await within(acme).findByRole("button", { name: "Pick another thread" }));
@@ -460,7 +468,7 @@ describe("Presence overview", () => {
     mountOverview();
     await screen.findByRole("searchbox", { name: "Filter places" });
     const banner = await screen.findByRole("region", { name: "Needs attention" });
-    expect(within(banner).getByText("In acme/api,")).toBeTruthy();
+    expect(within(banner).getByRole("listitem").textContent).toMatch(/^In acme\/api, /);
     await waitFor(() => expect(detailsOf(screen.getByRole("heading", { level: 2, name: "GitHub" })).open).toBe(true));
     expect(detailsOf(screen.getByRole("heading", { level: 2, name: "Slack" })).open).toBe(false);
   });

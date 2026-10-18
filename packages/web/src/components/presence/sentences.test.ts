@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { zoneLongName } from "~/lib/time-zones";
 import type {
   EventDeliveryWire,
   EventSubscriptionTargetWire,
@@ -8,7 +9,9 @@ import type {
   GetWorkflowTriggerCatalogResponse,
 } from "@valet/api/wire";
 import {
+  activityLeadParts,
   activitySentence,
+  activitySentenceParts,
   cronInWords,
   derivedClause,
   eventInWords,
@@ -20,6 +23,7 @@ import {
   routineSentence,
   routineSentenceParts,
   runsInLabel,
+  scheduleZone,
   type RoutineLike,
 } from "./sentences";
 
@@ -374,6 +378,14 @@ function routine(over: Partial<RoutineLike["detail"]>, workflowId?: string): Rou
   };
 }
 
+describe("scheduleZone", () => {
+  it("names a zone by its long name, and UTC by nothing", () => {
+    expect(scheduleZone("America/Los_Angeles")).toMatch(/^Pacific (Daylight|Standard) Time$/);
+    expect(scheduleZone("UTC")).toBeUndefined();
+    expect(scheduleZone(undefined)).toBeUndefined();
+  });
+});
+
 describe("routineSentence", () => {
   it("own: work in its own thread", () => {
     expect(routineSentence(routine({ thread: { mode: "own" } }), workflows, threads)).toBe(
@@ -409,8 +421,9 @@ describe("routineSentence", () => {
   });
 
   it("names a timezone other than UTC after the schedule words", () => {
+    // The zone reads by its long name, which follows daylight saving time.
     expect(routineSentence(routine({ timezone: "America/Denver" }), workflows, threads)).toBe(
-      "Every day at 9:00 (America/Denver), Morning summary: work in its own thread.",
+      `Every day at 9:00 (${zoneLongName("America/Denver")}), Morning summary: work in its own thread.`,
     );
     expect(routineSentence(routine({ timezone: "UTC" }), workflows, threads)).toBe(
       "Every day at 9:00, Morning summary: work in its own thread.",
@@ -518,6 +531,39 @@ describe("activitySentence outcomes", () => {
         { threads, workflowName: "Triage failures" },
       ),
     ).toBe("Mention in #incidents → replied in t-inc, started Triage failures run");
+  });
+});
+
+describe("activitySentenceParts", () => {
+  const cases: Array<[string, Parameters<typeof activitySentence>]> = [
+    ["a reply", [mention, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
+    ["a run and a reply", [mention, [delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), delivery({ id: "d-2", runId: "r" })], { threads, workflowName: "Triage failures" }]],
+    ["a claim", [message, delivery({ status: "skipped", lastError: "Skipped, claimed by thread t-inc", claimedBy: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
+    ["no one listening", [check, null]],
+    ["a known place key", [check, null, { place: "acme/api#12", placeKey: "github:acme/api#12" }]],
+    ["no place", [{ eventKey: "slack.team_join" }, null]],
+  ];
+
+  it.each(cases)("reads as the same string as activitySentence: %s", (_name, args) => {
+    expect(partsText(activitySentenceParts(...args))).toBe(activitySentence(...args));
+  });
+
+  it("names the place as a token when the row knows its key, and the thread as a token with its id", () => {
+    const parts = activitySentenceParts(check, delivery({ thread: { sessionId: "s", threadId: "t-ci" } }), {
+      threads, place: "acme/api#12", placeKey: "github:acme/api#12",
+    });
+    expect(parts).toEqual([
+      { kind: "text", text: "Completed check in " },
+      { kind: "place", text: "acme/api#12", service: "github", subject: "github:acme/api#12" },
+      { kind: "text", text: " → delivered to " },
+      { kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" },
+    ]);
+  });
+
+  it("keeps the place as words when the row has no key, and an archived thread unlinked", () => {
+    expect(activityLeadParts(check)).toEqual([{ kind: "text", text: "Completed check in acme/api" }]);
+    const parts = activitySentenceParts(mention, delivery({ thread: { sessionId: "s", threadId: "t-inc", archived: true } }), { threads });
+    expect(parts.at(-1)).toEqual({ kind: "thread", text: "t-inc" });
   });
 });
 

@@ -38,6 +38,7 @@ const HUB_DIALOGS = [
   "lib/event-log-labels.ts",
   "components/session/tool-renderers/automation-proposal.tsx",
   "components/settings/teams-panel.tsx",
+  "components/session/background-work.tsx",
 ] as const;
 const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
@@ -201,6 +202,10 @@ describe("Presence copy lint (INV-H2)", () => {
       "components/presence/onboarding.tsx",
       "components/presence/created-highlight.ts",
       "routes/presence.routines.$id.tsx",
+      "components/session/background-work.tsx",
+      "components/events/team-slack-setup.tsx",
+      "components/settings/teams-panel.tsx",
+      "components/events/delivery-preferences.tsx",
     ]) {
       expect(read.has(file), file).toBe(true);
     }

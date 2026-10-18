@@ -197,6 +197,13 @@ beforeEach(() => {
   });
 });
 
+/** A sentence with reference tokens spans several elements; this matches the
+ * innermost element whose whole text is the sentence. */
+function sentenceText(sentence: string) {
+  return (_content: string, element: Element | null) =>
+    element?.textContent === sentence && ![...element.children].some((child) => child.textContent === sentence);
+}
+
 function sectionsInOrder(names: readonly string[]) {
   const sections = names.map((name) => screen.getByRole("region", { name }));
   for (let i = 1; i < sections.length; i++) {
@@ -235,10 +242,11 @@ describe("PlacePage", () => {
 
     const [here, threadsSection, activity] = sectionsInOrder(["Valet here", "Threads", "Recent activity"]);
     expect(heading.compareDocumentPosition(here!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(here!).getByRole("link", {
-      name: "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
-    }).getAttribute("href")).toBe("/presence/rules/R1");
-    expect(await within(here!).findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
+    const r1 = within(here!).getByText(sentenceText("When a pull request review or a check completes on acme/api, work in one thread per pull request."));
+    expect(r1.closest("a")?.getAttribute("href")).toBe("/presence/rules/R1");
+    // The place and the pinned thread read as tokens inside the line's link.
+    expect(r1.querySelector('[data-ref="place"]')?.textContent).toBe("acme/api");
+    expect(await within(here!).findByText(sentenceText("When a check completes on acme/api, work in the Platform CI thread."))).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
 
     const subjectThreads = within(threadsSection!).getByRole("list", { name: "One thread per pull request" });
@@ -246,7 +254,10 @@ describe("PlacePage", () => {
     expect(within(subjectThreads).getByRole("link", { name: "acme/api#13" })).toBeTruthy();
 
     expect(within(activity!).getByRole("link", { name: "Completed check in acme/api" }).getAttribute("href")).toBe("/presence/events/ev-1");
-    expect(within(activity!).getByRole("link", { name: "View all" }).getAttribute("href")).toBe("/presence/activity?q=acme%2Fapi");
+    // View all opens Activity filtered to this place by its key.
+    expect(within(activity!).getByRole("link", { name: "View all" }).getAttribute("href")).toBe("/presence/activity?place=github%3Aacme%2Fapi");
+    // The header carries the service's large mark.
+    expect(heading.parentElement?.querySelector('[data-service="github"][data-size="lg"]')).not.toBeNull();
 
     // No line here sets an appearance, so that section is absent.
     expect(screen.queryByRole("region", { name: "Appears as" })).toBeNull();
@@ -271,6 +282,20 @@ describe("PlacePage", () => {
     expect(within(activity).getAllByRole("link", { name: "Completed check in acme/api" })).toHaveLength(10);
   });
 
+  it("names a recent event by this page's place, not the event's channel id", async () => {
+    getPresencePlace.mockResolvedValue({
+      ...INCIDENTS,
+      activity: [{
+        id: "ev-m", service: "slack", eventKey: "slack.app_mention", summary: "app mentioned in C900 by U1",
+        refs: { channel: "C900" }, actor: null, occurredAt: 1_000, receivedAt: 1_000,
+      }],
+    });
+    renderPage("slack:T1/C900");
+    const activity = await screen.findByRole("region", { name: "Recent activity" });
+    expect(within(activity).getByRole("link", { name: "Mention in #incidents" })).toBeTruthy();
+    expect(within(activity).queryByText(/in C900$/)).toBeNull();
+  });
+
   it("names an archived pinned thread, as the line's page does", async () => {
     // The open list leaves the archived thread out; the archived list has it.
     listThreads.mockImplementation(async (_sessionId, opts) => ({
@@ -281,7 +306,7 @@ describe("PlacePage", () => {
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
     const here = await screen.findByRole("region", { name: "Valet here" });
-    expect(await within(here).findByText("When a check completes on acme/api, work in the Old CI thread.")).toBeTruthy();
+    expect(await within(here).findByText(sentenceText("When a check completes on acme/api, work in the Old CI thread."))).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
 
@@ -293,8 +318,8 @@ describe("PlacePage", () => {
     expect(getPresencePlace).toHaveBeenCalledWith("sre", "slack:T1/C900");
 
     const [here, , appearsAs] = sectionsInOrder(["Valet here", "Threads", "Appears as", "Recent activity"]);
-    expect(within(here!).getByText("When someone mentions Valet in #incidents, reply in a new thread, as SRE Bot.")).toBeTruthy();
-    expect(within(here!).getByText("When someone posts a message in #incidents, work in the t-inc thread.")).toBeTruthy();
+    expect(within(here!).getByText(sentenceText("When someone mentions Valet in #incidents, reply in a new thread, as SRE Bot."))).toBeTruthy();
+    expect(within(here!).getByText(sentenceText("When someone posts a message in #incidents, work in the t-inc thread."))).toBeTruthy();
 
     expect(within(appearsAs!).getByText("SRE Bot")).toBeTruthy();
     expect(within(appearsAs!).getByRole("link", { name: "M" }).getAttribute("href")).toBe("/presence/rules/M");

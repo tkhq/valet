@@ -36,7 +36,8 @@ import { COLLAPSE_THRESHOLD, countText, overviewGroups, type OverviewGroup } fro
 import { CREATED_HIGHLIGHT_CLASS, PlaceRow, QUIET_ADD_CLASS } from "./place-row";
 import { SERVICE_NAMES } from "./places";
 import { RoutineRosterRow } from "./routine-row";
-import { isRoutine, useRoutineDoes, type Routine } from "./routine-helpers";
+import { ServiceMark, type MarkService } from "./service-mark";
+import { isRoutine, useRoutineRowParts, type Routine } from "./routine-helpers";
 import { useFaults } from "./use-faults";
 
 /** The reads refresh at this interval (spec Part B step 10). */
@@ -197,6 +198,7 @@ function OverviewBody({ groups, routines }: {
         <Group
           key={group.service}
           id={`presence-group-${group.service}`}
+          mark={group.service}
           name={SERVICE_NAMES[group.service]}
           count={countText(group.blocks.length, "place")}
           collapsing={collapsing}
@@ -208,6 +210,7 @@ function OverviewBody({ groups, routines }: {
       {routines.length > 0 && (
         <Group
           id={SCHEDULE_ANCHOR}
+          mark="schedule"
           name="On a schedule"
           count={countText(routines.length, "routine")}
           collapsing={collapsing}
@@ -221,11 +224,14 @@ function OverviewBody({ groups, routines }: {
   );
 }
 
-/** A group heading: a small muted label on a hairline rule, with the count at the right. */
-function GroupHeading({ id, name, count }: { id: string; name: string; count: string }) {
+/** A group heading: the group's mark and a small muted label on a hairline rule, with the count at the right. */
+function GroupHeading({ id, mark, name, count }: { id: string; mark: MarkService; name: string; count: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-4 border-b border-line pb-2 text-xs font-medium text-muted">
-      <h2 id={id} className="text-xs font-medium text-muted">{name}</h2>
+    <div className="flex items-center justify-between gap-4 border-b border-line pb-2 text-xs font-medium text-muted">
+      <h2 id={id} className="flex items-center gap-2 text-xs font-medium text-muted">
+        <ServiceMark service={mark} size="md" />
+        {name}
+      </h2>
       <span className="tabular-nums">{count}</span>
     </div>
   );
@@ -238,8 +244,10 @@ function GroupHeading({ id, name, count }: { id: string; name: string; count: st
  * when `open` turns true, until the reader toggles it. It never closes on
  * its own: a fix inside it, or a dialog it holds, must not vanish.
  */
-function Group({ id, name, count, collapsing, open, highlighted = false, children }: {
+function Group({ id, mark, name, count, collapsing, open, highlighted = false, children }: {
   id: string;
+  /** The service mark before the name; the schedule group's is the clock. */
+  mark: MarkService;
   name: string;
   count: string;
   collapsing: boolean;
@@ -253,17 +261,17 @@ function Group({ id, name, count, collapsing, open, highlighted = false, childre
   useEffect(() => {
     if (open && !userTouched.current) setShown(true);
   }, [open]);
-  const mark = { "data-highlight": highlighted ? "true" : undefined, className: cn("transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS) };
+  const highlight = { "data-highlight": highlighted ? "true" : undefined, className: cn("transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS) };
   if (!collapsing) {
     return (
-      <section aria-labelledby={id} {...mark}>
-        <GroupHeading id={id} name={name} count={count} />
+      <section aria-labelledby={id} {...highlight}>
+        <GroupHeading id={id} mark={mark} name={name} count={count} />
         <div>{children}</div>
       </section>
     );
   }
   return (
-    <section aria-labelledby={id} {...mark}>
+    <section aria-labelledby={id} {...highlight}>
       <details
         open={shown}
         onToggle={(event) => {
@@ -275,7 +283,7 @@ function Group({ id, name, count, collapsing, open, highlighted = false, childre
         }}
       >
         <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-          <GroupHeading id={id} name={name} count={count} />
+          <GroupHeading id={id} mark={mark} name={name} count={count} />
         </summary>
         <div>{children}</div>
       </details>
@@ -286,12 +294,12 @@ function Group({ id, name, count, collapsing, open, highlighted = false, childre
 /** The `On a schedule` rows: one per routine, with `+ New routine` closing the last (spec Part B step 6). */
 function ScheduleRows({ routines }: { routines: Routine[] }) {
   const [creating, setCreating] = useState(false);
-  const does = useRoutineDoes(routines);
+  const sentence = useRoutineRowParts(routines);
   const last = routines.at(-1)?.id;
   return (
     <>
       {routines.map((routine) => (
-        <RoutineRosterRow key={routine.id} routine={routine} sentence={`${routine.name}: ${does(routine)}.`}>
+        <RoutineRosterRow key={routine.id} routine={routine} sentence={sentence(routine)}>
           {routine.id === last && (
             <Button size="sm" variant="ghost" className={QUIET_ADD_CLASS} onClick={() => setCreating(true)}>
               + New routine

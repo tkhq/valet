@@ -14,7 +14,7 @@ export function DeliveryPreferences({ value, onChange }: {
         const deliveryPolicy = event.target.value;
         if (deliveryPolicy === "always" || deliveryPolicy === "ignoreIfMyTeamSubscribed" || deliveryPolicy === "ignoreIfAnyTeamSubscribed") onChange({ ...value, deliveryPolicy });
       }}>
-      <option value="always">Deliver to my personal agent too</option>
+      <option value="always">Deliver to your assistant too</option>
       <option value="ignoreIfMyTeamSubscribed">Skip if one of my teams matches</option>
       <option value="ignoreIfAnyTeamSubscribed">Skip if any team in my organization matches</option>
     </select>
@@ -22,7 +22,7 @@ export function DeliveryPreferences({ value, onChange }: {
       <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={value.pauseOnOverlap}
         onChange={(event) => onChange({ ...value, pauseOnOverlap: event.target.checked })} />Pause this when an overlap occurs</label>
       <p className="text-xs leading-5 text-muted">{value.pauseOnOverlap
-        ? "All deliveries stop until you turn this back on. To receive overlapping events after you turn it on, choose ‘Deliver to my personal agent too’."
+        ? "All deliveries stop until you turn this back on. To receive overlapping events after you turn it on, choose ‘Deliver to your assistant too’."
         : "Only matching events are skipped. Other events continue to arrive."} Team presence that is off does not count. Activity explains each skipped delivery.</p>
     </>}
   </fieldset>;

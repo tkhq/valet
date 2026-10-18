@@ -1,11 +1,11 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { Link } from "@tanstack/react-router";
 import { Bell, Clock, Eye, Lock, Terminal, Timer, type LucideIcon } from "lucide-react";
 import type { LeaseSummary, ListSessionWakeupsResponse, ListThreadFeedersResponse, WakeupSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
 import { useThreadFeeders } from "~/api/presence-feeders";
 import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger, Tooltip } from "~/components/primitives";
+import { Ref } from "~/components/presence/ref";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
 
@@ -120,7 +120,8 @@ const KIND_NOUN: Record<BackgroundItem["kind"], [singular: string, plural: strin
   process: ["process", "processes"],
   watch: ["watch", "watches"],
   timer: ["timer", "timers"],
-  event: ["wait", "waits"],
+  // The Terminology word for a thread waiting on a place (presence hub spec).
+  event: ["active", "active"],
   hold: ["hold", "holds"],
 };
 
@@ -196,7 +197,7 @@ const KIND_LABEL: Record<BackgroundItem["kind"], string> = {
   process: "Process",
   watch: "Watch",
   timer: "Timer",
-  event: "Event waiter",
+  event: "Active",
   hold: "Hold",
 };
 
@@ -273,7 +274,8 @@ export function feederLinks(feeders: ListThreadFeedersResponse | undefined): Fee
 }
 
 /** The "Fed by" line: the listeners and routines that deliver into this
- * thread, each linking to its own page. Renders nothing for an empty list. */
+ * thread, each a reference token that links its own page. Renders nothing
+ * for an empty list. */
 function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefined }) {
   const links = feederLinks(feeders);
   if (links.length === 0) return null;
@@ -283,15 +285,9 @@ function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefine
       {links.map((link, index) => (
         <Fragment key={`${link.kind}-${link.id}`}>
           {index > 0 && ", "}
-          {link.kind === "listener" ? (
-            <Link to="/presence/rules/$id" params={{ id: link.id }} className="text-moss hover:underline">
-              {link.name}
-            </Link>
-          ) : (
-            <Link to="/presence/routines/$id" params={{ id: link.id }} className="text-moss hover:underline">
-              {link.name}
-            </Link>
-          )}
+          {link.kind === "listener"
+            ? <Ref kind="line" text={link.name} to="/presence/rules/$id" params={{ id: link.id }} />
+            : <Ref kind="line" text={link.name} to="/presence/routines/$id" params={{ id: link.id }} />}
         </Fragment>
       ))}
     </p>
@@ -565,6 +561,7 @@ export function BackgroundWorkSection({
                 {event ? (
                   <>
                     <p className="text-xs" title={itemTimeTitle(item)}>
+                      {"Active: "}
                       {item.subjectUrl ? (
                         <a href={item.subjectUrl} target="_blank" rel="noreferrer" className="text-moss hover:underline">{event.label}</a>
                       ) : (

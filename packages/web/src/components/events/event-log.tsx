@@ -3,7 +3,7 @@
  * activity sentence (`~/components/presence/activity-row`). The chips are
  * `All`, `Problems`, and one per service (spec 2026-10-16 presence hub,
  * Part F step 2); receipts sit under a disclosure for admins. */
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { EventLogItem } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
 import { useMe } from "~/api/settings";
@@ -13,6 +13,7 @@ import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
 import { problemStage, reasonLabel } from "~/lib/event-log-labels";
 import { ActivityRow, LOG_STATUS_META, useWorkflowsByListener } from "~/components/presence/activity-row";
+import { ServiceMark } from "~/components/presence/service-mark";
 import { ReceiptsPanel } from "./receipts-panel";
 
 /** A service the Activity chips filter by. */
@@ -21,12 +22,17 @@ export type LogService = "slack" | "github" | "linear";
 /** One chip: the whole Log, its problems, or one service's rows. */
 export type LogFilter = "all" | "problems" | LogService;
 
-const FILTERS: readonly { value: LogFilter; label: string }[] = [
+/** A service chip: the service's small mark, then its name. */
+function serviceChip(service: LogService, name: string): ReactNode {
+  return <><ServiceMark service={service} size="sm" />{name}</>;
+}
+
+const FILTERS: readonly { value: LogFilter; label: ReactNode }[] = [
   { value: "all", label: "All" },
   { value: "problems", label: "Problems" },
-  { value: "slack", label: "Slack" },
-  { value: "github", label: "GitHub" },
-  { value: "linear", label: "Linear" },
+  { value: "slack", label: serviceChip("slack", "Slack") },
+  { value: "github", label: serviceChip("github", "GitHub") },
+  { value: "linear", label: serviceChip("linear", "Linear") },
 ];
 
 /** The rows a service chip keeps: those whose event key starts with `<service>.`.
@@ -36,19 +42,23 @@ export function itemsForFilter(items: readonly EventLogItem[], filter: LogFilter
   return items.filter((item) => item.eventKey?.startsWith(`${filter}.`) ?? false);
 }
 
-export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
+export function EventLog({ filter, onFilterChange, query, onQueryChange, place }: {
   filter: LogFilter;
   onFilterChange: (next: LogFilter) => void;
-  /** The place search; the server matches it against the stored events. */
+  /** The search text; the server matches it against the stored events. */
   query: string;
   onQueryChange: (next: string) => void;
+  /** A place key: the server keeps the events in that place or inside it. */
+  place?: string;
 }) {
   const me = useMe();
   const admin = !me.error && me.data?.orgRole === "admin";
   const owner = useListOwner();
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const log = useEventLog({ owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}) });
+  const log = useEventLog({
+    owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}), ...(place ? { place } : {}),
+  });
   const items = itemsForFilter(log.data?.pages.flatMap((page) => page.items) ?? [], filter);
   const first = log.data?.pages[0];
   const workflowsByListener = useWorkflowsByListener();
@@ -60,8 +70,8 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
       <SearchInput
         value={query}
         onSettled={onQueryChange}
-        placeholder="Place"
-        aria-label="Place"
+        placeholder="Search activity"
+        aria-label="Search"
         maxLength={200}
       />
       {admin && (
@@ -82,7 +92,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange }: {
       {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
       {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
       {log.data && items.length === 0 && (
-        <EmptyRow>{query || filter !== "all" ? "Nothing matches. Choose All or clear Place." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
+        <EmptyRow>{query || filter !== "all" ? "Nothing matches. Choose All, clear Search, or remove the place." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
       )}
       {items.length > 0 && (
         <WorkList>

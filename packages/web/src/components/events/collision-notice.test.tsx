@@ -46,4 +46,29 @@ describe("CollisionNotice", () => {
     expect(screen.queryByText(/fire together/)).toBeNull();
     expect(screen.getByText("To turn the replaced line off, save it anyway.")).toBeTruthy();
   });
+
+  it("names workflows and people from what its caller passes", () => {
+    const digest = line("Digest", {
+      eventKeys: ["github.check_run.completed"], target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    const jack = line("Jack mentions", {
+      ownerType: "org", ownerId: "org-1", createdBy: "u-jack", eventKeys: ["slack.app_mention"],
+      // The server's creator scope: an unlabeled user filter on an org mention line.
+      filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }, { field: "user", op: "eq", value: "UJACK" }],
+      target: { kind: "workflow", workflowId: "wf-2" },
+    });
+    render(
+      <CollisionNotice
+        report={{ blocking: [], overlapping: [
+          { subscription: digest, relation: "partial", sharedKeys: ["github.check_run.completed"] },
+          { subscription: jack, relation: "partial", sharedKeys: ["slack.app_mention"] },
+        ] }}
+        committed
+        workflows={[{ id: "wf-1", name: "Nightly digest" }]}
+        names={{ members: { "u-jack": "Jack" }, me: "u-001" }}
+      />,
+    );
+    expect(screen.getByText(/, run Nightly digest\.$/)).toBeTruthy();
+    expect(screen.getByText(/^When Jack mentions Valet/)).toBeTruthy();
+  });
 });

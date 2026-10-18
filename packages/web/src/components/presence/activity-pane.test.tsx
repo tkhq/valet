@@ -22,6 +22,7 @@ const ONE_PLACE: PresencePlaceWire = {
 let places: PresencePlaceWire[] | undefined = [ONE_PLACE];
 let triggers: WorkflowTriggerItem[] | undefined = [];
 const receiptsQuery = vi.fn();
+const logQuery = vi.fn();
 
 const workflowListener: EventSubscriptionWire = {
   id: "sub-wf", name: "Run triage", ownerType: "user", ownerId: "u1", eventKeys: ["github.check_run.completed"], filters: [],
@@ -29,7 +30,7 @@ const workflowListener: EventSubscriptionWire = {
 };
 
 vi.mock("~/api/events", () => ({
-  useEventLog: () => ({
+  useEventLog: (params: unknown) => (logQuery(params), {
     data: { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: 30 }] },
     isPending: false, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
   }),
@@ -75,6 +76,7 @@ afterEach(() => {
   places = [ONE_PLACE];
   triggers = [];
   receiptsQuery.mockClear();
+  logQuery.mockClear();
 });
 
 function delivery(over: Partial<EventDeliveryWire>): EventDeliveryWire {
@@ -229,12 +231,61 @@ describe("ActivityPane search", () => {
     expect(screen.getByRole("link", { name: "Completed check in acme/api" })).toBeTruthy();
   });
 
-  it("the Place box writes q and keeps the chip", async () => {
-    const { onSearchChange } = renderTab({ service: "github" });
-    const box = screen.getByRole("searchbox", { name: "Place" });
-    expect(box.getAttribute("placeholder")).toBe("Place");
-    fireEvent.change(box, { target: { value: "acme/api" } });
-    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ service: "github", q: "acme/api" }));
+  it("the Search box writes q and keeps the chip and the place", async () => {
+    const { onSearchChange } = renderTab({ service: "github", place: "github:acme/api" });
+    const box = screen.getByRole("searchbox", { name: "Search" });
+    expect(box.getAttribute("placeholder")).toBe("Search activity");
+    fireEvent.change(box, { target: { value: "deploy" } });
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ service: "github", place: "github:acme/api", q: "deploy" }));
+  });
+});
+
+describe("ActivityPane place filter (spec Part C step 7)", () => {
+  const incidents: PresencePlaceWire = {
+    subject: "slack:T1/C900", label: "#incidents", service: "slack", parent: "slack:T1", listenerCount: 1, activeThreadCount: 0, lastActivityAt: null,
+  };
+
+  it("reads place from the search, and drops a blank one", () => {
+    expect(readActivitySearch({ place: "slack:T1/C900", q: "x" })).toEqual({ place: "slack:T1/C900", q: "x" });
+    expect(readActivitySearch({ place: "" })).toEqual({});
+  });
+
+  it("asks the Log for the place's events", () => {
+    renderTab({ place: "slack:T1/C900" });
+    expect(logQuery).toHaveBeenLastCalledWith(expect.objectContaining({ place: "slack:T1/C900" }));
+  });
+
+  it("shows a removable chip that names the place, and Remove clears only the place", () => {
+    places = [incidents];
+    const { onSearchChange } = renderTab({ place: "slack:T1/C900", service: "slack", q: "boom" });
+    expect(screen.getByText("In #incidents")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove the place filter In #incidents" }));
+    expect(onSearchChange).toHaveBeenCalledWith({ service: "slack", q: "boom" });
+  });
+
+  it("names a place the list does not hold by the last part of its key", () => {
+    places = [];
+    renderTab({ place: "github:acme/api" });
+    expect(screen.getByText("In api")).toBeTruthy();
+  });
+
+  it("names a service-wide place by its own name", () => {
+    places = [{ ...incidents, subject: "github:*", label: "Across GitHub", service: "github", parent: null }];
+    renderTab({ place: "github:*" });
+    expect(screen.getByText("Across GitHub")).toBeTruthy();
+  });
+
+  it("keeps the place when a chip changes", () => {
+    const { onSearchChange } = renderTab({ place: "slack:T1/C900" });
+    fireEvent.click(screen.getByRole("button", { name: "Problems" }));
+    expect(onSearchChange).toHaveBeenCalledWith({ status: "problems", place: "slack:T1/C900" });
+  });
+
+  it("puts the service mark on each service chip", () => {
+    renderTab();
+    const slack = screen.getByRole("button", { name: "Slack" });
+    expect(slack.querySelector('[data-service="slack"][data-size="sm"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "All" }).querySelector("[data-service]")).toBeNull();
   });
 });
 

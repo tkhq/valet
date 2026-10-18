@@ -142,10 +142,18 @@ describe("presence redirect table", () => {
       });
     });
 
-    it.each(["scheduled", "triggers"])("tab=%s with a review opens that routine's page", (tab) => {
-      expect(target("/workflows", {}, { tab, review: "sched-1", workspace: "t1" })).toEqual({
+    it("tab=scheduled with a review opens that routine's page", () => {
+      expect(target("/workflows", {}, { tab: "scheduled", review: "sched-1", workspace: "t1" })).toEqual({
         to: "/presence/routines/$id",
         params: { id: "sched-1" },
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("tab=triggers with a review opens that rule's page, because the tab held event rules", () => {
+      expect(target("/workflows", {}, { tab: "triggers", review: "sub-1", workspace: "t1" })).toEqual({
+        to: "/presence/rules/$id",
+        params: { id: "sub-1" },
         search: { workspace: "t1" },
       });
     });
@@ -175,6 +183,14 @@ describe("presence redirect table", () => {
     expect(target("/workflows", {}, { tab: "scheduled", review: "sch-1" })).toEqual({
       to: "/presence/routines/$id",
       params: { id: "sch-1" },
+      search: {},
+    });
+  });
+
+  it("sends an old Triggers review link to the rule page, not a routine page (Review Focus 5)", () => {
+    expect(target("/workflows", {}, { tab: "triggers", review: "sub-1" })).toEqual({
+      to: "/presence/rules/$id",
+      params: { id: "sub-1" },
       search: {},
     });
   });

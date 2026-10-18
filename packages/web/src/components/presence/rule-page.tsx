@@ -30,14 +30,17 @@ import {
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
-import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
+import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
 import { DeleteLineDialog, PausedLine } from "./presence-line";
 import { ThreadProblem } from "./problem-badge";
 import {
   OwnerBadge, isProposal, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel, useLineAccess,
 } from "./presence-rows";
 import { Ref } from "./ref";
-import { eventInWords, presenceAction, presenceSentence, runsInLabel, type ThreadTitles, type WorkflowNames } from "./sentences";
+import { Sentence } from "./sentence";
+import {
+  eventInWords, partsText, presenceAction, presenceSentenceParts, runsInLabel, type SentencePart, type ThreadTitles, type WorkflowNames,
+} from "./sentences";
 import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
 import { useSentenceNames } from "./use-sentence-names";
 
@@ -59,6 +62,13 @@ export function linePlace(sub: EventSubscriptionWire): { label: string; key: str
   return null;
 }
 
+/** The parts with the line's own place token pointed at the resolved place
+ * key, because a Slack channel filter names no Slack workspace. */
+function withPlaceKey(parts: readonly SentencePart[], filterKey: string | undefined, resolved: string): SentencePart[] {
+  if (filterKey === undefined || resolved === "") return [...parts];
+  return parts.map((part) => (part.kind === "place" && part.subject === filterKey ? { ...part, subject: resolved } : part));
+}
+
 export function RulePage({ id }: { id: string }) {
   const subsQ = useEventSubscriptions();
   const sub = subsQ.data?.subscriptions.find((s) => s.id === id);
@@ -70,9 +80,7 @@ export function RulePage({ id }: { id: string }) {
       {subsQ.isError && (
         <ErrorRow>{errorText(subsQ.error, "Could not load this page. Reload the page to try again.")}</ErrorRow>
       )}
-      {subsQ.isSuccess && (
-        <EmptyRow>This page does not exist, or you cannot see it. Open Presence and pick the place again.</EmptyRow>
-      )}
+      {subsQ.isSuccess && <MissingPage />}
     </PresenceDetailPage>
   );
 }
@@ -117,7 +125,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const [error, setError] = useState<string | null>(null);
 
   const workflowNames = workflows.data?.workflows ?? [];
-  const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitles, names);
+  const sentenceParts = presenceSentenceParts(sub, catalog.data?.catalog, workflowNames, pinTitles, names);
+  const sentence = partsText(sentenceParts);
   const proposal = isProposal(sub);
   const replacesId = sub.target.kind === "assistant" ? sub.target.replaces : undefined;
   const replaced = replacesId === undefined ? undefined : subs.find((other) => other.id === replacesId);
@@ -134,7 +143,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   }
 
   return (
-    <PresenceDetailPage crumbs={crumbs} title={sentence}>
+    <PresenceDetailPage crumbs={crumbs} title={sentence} titleContent={<Sentence parts={withPlaceKey(sentenceParts, place?.key, placeKey)} />}>
       <div className="space-y-8">
         {proposal && (
           <section aria-label="Proposal" className="space-y-2 rounded-md border border-line px-3 py-2.5">

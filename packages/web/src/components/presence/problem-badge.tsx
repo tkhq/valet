@@ -11,6 +11,9 @@
 import type { ReactNode } from "react";
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { Badge } from "~/components/primitives";
+import { Ref } from "./ref";
+import { Sentence } from "./sentence";
+import type { SentencePart } from "./sentences";
 import { ThreadPicker } from "./thread-picker";
 
 /** The dead-letter text the api stores when a pin cannot take a delivery.
@@ -27,10 +30,16 @@ export function isPinProblem(text: string | null | undefined): boolean {
   return text === PIN_UNAVAILABLE || text === PIN_UNAVAILABLE_LEGACY;
 }
 
+/** The words after the thread's name in the pin problem line. */
+const pinProblemTail = " is archived. Pick another thread:";
+
+function hasTitle(title: string | undefined): title is string {
+  return title !== undefined && title.trim().length > 0;
+}
+
 /** The problem line for an archived pin. Without a title it names `The pinned thread`. */
 export function pinProblemText(threadTitle?: string): string {
-  const title = threadTitle !== undefined && threadTitle.trim().length > 0 ? threadTitle : "The pinned thread";
-  return `${title} is archived. Pick another thread:`;
+  return `${hasTitle(threadTitle) ? threadTitle : "The pinned thread"}${pinProblemTail}`;
 }
 
 /** The badge a list row shows for a rule with a problem. Nothing otherwise. */
@@ -59,11 +68,17 @@ export function ThreadProblem({
   readOnlyText = "Only its owner can change this.",
   variant = "box",
   lead,
+  leadParts,
+  threadId,
   action,
 }: {
   problem: string;
   /** Muted words before the problem text, such as `In acme/api,`. */
   lead?: string;
+  /** `lead` as parts, with the place as a token. Wins over `lead`. */
+  leadParts?: readonly SentencePart[];
+  /** The archived pin's id. With it and a title, the title reads as a thread token. */
+  threadId?: string;
   /** The archived pin's title, when the caller knows it. */
   threadTitle?: string;
   /** The viewer may not change the rule: no picker, and the text names who can. */
@@ -86,8 +101,12 @@ export function ThreadProblem({
   const body = (
     <>
       <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">
-        {lead !== undefined && <span className="text-muted">{`${lead} `}</span>}
-        {text}
+        {leadParts !== undefined
+          ? <span className="text-muted"><Sentence parts={leadParts} />{" "}</span>
+          : lead !== undefined && <span className="text-muted">{`${lead} `}</span>}
+        {pin && threadId !== undefined && hasTitle(threadTitle)
+          ? <><Ref kind="thread" text={threadTitle} to="/threads/$threadId" params={{ threadId }} />{pinProblemTail}</>
+          : text}
       </p>
       {pin && readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}

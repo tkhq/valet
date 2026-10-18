@@ -86,6 +86,7 @@ vi.mock("~/api/workflows", () => ({ useWorkflowTriggers: () => ({ data: { trigge
 vi.mock("~/api/presence", () => ({ usePresencePlaces: () => ({ data: { places: PLACES }, isPending: false }) }));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({ "t-ci": { title: "Platform CI" } }) }));
 
+import { partsText } from "./sentences";
 import { faultsOf, useFaults } from "./use-faults";
 
 describe("useFaults", () => {
@@ -106,6 +107,15 @@ describe("useFaults", () => {
     expect(result.current.faults.map((fault) => (fault.kind === "routine" ? null : fault.lead))).toEqual([
       "In #incidents,", "Everywhere in Slack,", null, "In acme/api,",
     ]);
+    // The lead's parts read as the lead, with the place as a token that names its key.
+    for (const fault of result.current.faults) {
+      if (fault.kind === "routine") continue;
+      expect(partsText(fault.leadParts ?? [])).toBe(fault.lead);
+    }
+    const first = result.current.faults[0];
+    expect(first?.kind === "line" ? first.leadParts?.[1] : undefined).toEqual({
+      kind: "place", text: "#incidents", service: "slack", subject: "slack:T1/C900",
+    });
     expect(result.current.isPending).toBe(false);
     expect(logCalls.at(-1)?.problems).toBe(true);
   });

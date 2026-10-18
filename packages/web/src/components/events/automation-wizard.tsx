@@ -5,6 +5,7 @@ import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { placeFilter, type PreselectedPlace } from "~/components/presence/place-filter";
 import { runsInLabel, type SentencePart } from "~/components/presence/sentences";
 import { Sentence } from "~/components/presence/sentence";
+import { useSentenceNames } from "~/components/presence/use-sentence-names";
 import { SentenceReview, type ReviewFact } from "./automation-review";
 import { wizardDraft, wizardSentenceParts, wizardWhenParts, type WhenService } from "./wizard-preview";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-preset";
@@ -206,6 +207,7 @@ export function AutomationWizard({
   // outcome do not read it.
   const [service, setService] = useState<WhenService>(preselectedPlace?.service ?? "slack");
   const workflowsQ = useWorkflows();
+  const sentenceNames = useSentenceNames();
   const createSubscription = useCreateEventSubscription();
   const createSchedule = useCreateSchedule();
   const ws = useActiveWorkspace();
@@ -778,7 +780,12 @@ export function AutomationWizard({
           )}
 
           {collisions !== null && (
-            <CollisionNotice report={collisions.report} committed={collisions.committed} />
+            <CollisionNotice
+              report={collisions.report}
+              committed={collisions.committed}
+              workflows={workflowsQ.data?.workflows ?? []}
+              names={sentenceNames}
+            />
           )}
           {replyTeam && collisions && !collisions.committed && <p className="text-sm text-muted">Valet already listens for this. <Link to="/presence" className="underline">Open Presence</Link> to manage it.</p>}
           {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}

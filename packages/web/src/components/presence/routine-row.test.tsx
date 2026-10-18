@@ -52,6 +52,7 @@ import { routineWhen, type Routine } from "./routine-helpers";
 import { RoutineRosterRow } from "./routine-row";
 import { routine } from "./test-fixtures";
 import { formatDateTime } from "~/lib/format-when";
+import { zoneLongName } from "~/lib/time-zones";
 
 const NEXT = Date.UTC(2026, 9, 19, 16, 0);
 
@@ -91,7 +92,8 @@ describe("RoutineRosterRow", () => {
     expect(row.classList.contains("grid-cols-[200px_minmax(0,1fr)]")).toBe(true);
     const name = within(row).getByText("Every weekday at 9:00");
     expect(name.className).toContain("text-[15px]");
-    const zone = within(row).getByText("America/Los_Angeles");
+    const zone = within(row).getByText(zoneLongName("America/Los_Angeles"));
+    expect(zone.textContent).toMatch(/^Pacific (Daylight|Standard) Time$/);
     const next = within(row).getByText(`Next ${formatDateTime(NEXT, { timeZone: "America/Los_Angeles" })}`);
     expect(zone.parentElement).toBe(next.parentElement);
   });

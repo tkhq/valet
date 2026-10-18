@@ -116,18 +116,30 @@ function activitySearch(search: Search): Search {
 
 const dropTab = (search: Search): Search => without(search, "tab");
 
-/** The pre-revision-1 Workflows tabs that listed schedules. */
+/** The pre-revision-1 Workflows tabs: `scheduled` listed schedules and
+ * `triggers` listed event rules. */
 const SCHEDULE_TABS = ["scheduled", "triggers"] as const;
 
 export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
   {
     from: "/workflows",
-    when: "a Scheduled or Triggers review link",
-    matches: (search) => tabIs(...SCHEDULE_TABS)(search) && text(search, "review") !== undefined,
+    when: "a Scheduled review link",
+    matches: (search) => tabIs("scheduled")(search) && text(search, "review") !== undefined,
     to: "/presence/routines/$id",
     mapParams: (_params, search) => ({ id: text(search, "review") ?? "" }),
     mapSearch: (search) => without(search, "tab", "review"),
-    example: { params: {}, search: { tab: "triggers", review: "sched-1" } },
+    example: { params: {}, search: { tab: "scheduled", review: "sched-1" } },
+  },
+  {
+    // The Triggers tab listed event rules, not schedules, so its review id
+    // names a rule.
+    from: "/workflows",
+    when: "a Triggers review link",
+    matches: (search) => tabIs("triggers")(search) && text(search, "review") !== undefined,
+    to: "/presence/rules/$id",
+    mapParams: (_params, search) => ({ id: text(search, "review") ?? "" }),
+    mapSearch: (search) => without(search, "tab", "review"),
+    example: { params: {}, search: { tab: "triggers", review: "sub-1" } },
   },
   {
     from: "/workflows",

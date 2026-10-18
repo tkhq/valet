@@ -1,7 +1,7 @@
 /**
  * One place, such as `#incidents` or `acme/api`
  * (docs/specs/2026-10-16-presence-hub-design.md Part C). The sections, in
- * order: the header (the concrete name and the service), **Valet here** with
+ * order: the header (the service mark, the concrete name, and the service), **Valet here** with
  * **Listen for…**, **Threads**, **Appears as** when a line here sets one,
  * and **Recent activity**.
  */
@@ -17,9 +17,10 @@ import { AutomationWizard } from "~/components/events/automation-wizard";
 import { errorText } from "~/lib/error-text";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
-import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
+import { appearanceName, hasAppearance, usePresenceSentenceParts } from "./presence-rows";
 import { PlaceThreads } from "./place-threads";
-import { placeSearchTerm, SERVICE_NAMES } from "./places";
+import { isServiceRoot, SERVICE_NAMES } from "./places";
+import { ServiceMark } from "./service-mark";
 import { eventInWords, eventPlace, type ThreadTitles } from "./sentences";
 
 export function PlacePage({ subject }: { subject: string }) {
@@ -29,8 +30,9 @@ export function PlacePage({ subject }: { subject: string }) {
   // The key is a system name (`slack:T1/C900`), so the title waits for the
   // place's concrete name.
   const title = place?.label ?? (detail.isError ? "Not available" : "Loading…");
+  const mark = place === undefined ? undefined : <ServiceMark service={place.service} size="lg" />;
   return (
-    <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title} subtitle={subtitle}>
+    <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title} mark={mark} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
         <ErrorRow>{errorText(detail.error, "Could not load this place. Open Presence and pick the place again.")}</ErrorRow>
@@ -55,7 +57,7 @@ const RECENT_ROWS = 10;
 export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
   const { place, listeners, threads, activity } = data;
   const [adding, setAdding] = useState(false);
-  const sentence = usePresenceSentence(listeners, knownThreadTitles(threads));
+  const sentence = usePresenceSentenceParts(listeners, knownThreadTitles(threads));
   const appearances = listeners.filter(hasAppearance);
   const recent = activity.slice(0, RECENT_ROWS);
   return (
@@ -97,11 +99,11 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
         title="Recent activity"
         count={recent.length}
         actions={activity.length > 0 && (
-          <Link to="/presence/activity" search={{ q: placeSearchTerm(place) }} className={textLinkClass}>View all</Link>
+          <Link to="/presence/activity" search={{ place: place.subject }} className={textLinkClass}>View all</Link>
         )}
       >
         {activity.length === 0 && <EmptyRow className="px-4 py-3">Nothing happened here in the last 30 days.</EmptyRow>}
-        {recent.map((event) => <ActivityRow key={event.id} event={event} placeLabel={place.label} />)}
+        {recent.map((event) => <ActivityRow key={event.id} event={event} placeLabel={place.label} serviceWide={isServiceRoot(place)} />)}
       </WorkSection>
     </div>
   );
@@ -126,12 +128,23 @@ function AppearanceRow({ sub }: { sub: EventSubscriptionWire }) {
   );
 }
 
-function ActivityRow({ event, placeLabel }: { event: EventSummaryWire; placeLabel: string }) {
+/**
+ * One recent event: `<event in words> in <place>`. The place is this page's
+ * label, not the event's refs, which can hold a raw channel id. An event in
+ * a pull request on a repository's page names the pull request (`acme/api#12`).
+ */
+function ActivityRow({ event, placeLabel, serviceWide }: { event: EventSummaryWire; placeLabel: string; serviceWide: boolean }) {
+  const inside = eventPlace(event.refs);
+  // A Slack ref holds the channel id when it lacks the name, so a channel
+  // page keeps its own label. A service-wide page names each event's own place.
+  const place = serviceWide
+    ? inside ?? placeLabel
+    : inside !== null && inside.startsWith(`${placeLabel}#`) ? inside : placeLabel;
   return (
     <WorkRow
       title={(
         <Link to="/presence/events/$eventId" params={{ eventId: event.id }}>
-          {eventInWords(event.eventKey)} in {eventPlace(event.refs) ?? placeLabel}
+          {eventInWords(event.eventKey)} in {place}
         </Link>
       )}
       time={event.occurredAt}

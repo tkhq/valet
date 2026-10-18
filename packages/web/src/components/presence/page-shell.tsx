@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import type { AppPath } from "~/components/primitives";
+import { EmptyRow, textLinkClass, type AppPath } from "~/components/primitives";
 
 /** One step of a detail page's breadcrumb. The last step names the page and
  * has no `to`. Every detail page's first step is `Presence`, a link to the
@@ -27,18 +27,33 @@ export const PRESENCE_CRUMB: PresenceCrumb = { label: "Presence", to: "/presence
 export function PresenceDetailPage({
   crumbs,
   title,
+  titleContent,
+  mark,
   subtitle,
   children,
 }: {
   crumbs: readonly PresenceCrumb[];
+  /** The title as text: the breadcrumb and the heading's name read it. */
   title: string;
+  /** The title as it shows, such as a sentence with tokens. Absent shows
+   * `title`. The heading keeps `title` as its accessible name. */
+  titleContent?: ReactNode;
+  /** A mark before the title, such as the place's service mark. */
+  mark?: ReactNode;
   subtitle?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="min-w-0">
       <Breadcrumb crumbs={crumbs} />
-      <h1 className="mt-2 break-words font-display text-2xl text-ink">{title}</h1>
+      {mark !== undefined
+        ? (
+          <div className="mt-2 flex items-center gap-2.5">
+            {mark}
+            <h1 aria-label={titleContent !== undefined ? title : undefined} className="min-w-0 break-words font-display text-2xl text-ink">{titleContent ?? title}</h1>
+          </div>
+        )
+        : <h1 aria-label={titleContent !== undefined ? title : undefined} className="mt-2 break-words font-display text-2xl text-ink">{titleContent ?? title}</h1>}
       {subtitle !== undefined && <p className="mt-1 text-sm text-muted">{subtitle}</p>}
       <div className="mt-6">{children}</div>
     </div>
@@ -71,5 +86,15 @@ export function Breadcrumb({ crumbs }: { crumbs: readonly PresenceCrumb[] }) {
         ))}
       </ol>
     </nav>
+  );
+}
+
+/** A line's or a routine's page when the list does not hold it. */
+export function MissingPage() {
+  return (
+    <EmptyRow>
+      This page does not exist, or you cannot see it.{" "}
+      <Link to="/presence" className={textLinkClass}>Back to Presence</Link>
+    </EmptyRow>
   );
 }

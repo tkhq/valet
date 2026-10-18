@@ -28,12 +28,13 @@ import { OwnerBadge, type TeamLike } from "./presence-rows";
 import {
   deleteRoutineDescription, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineActions, type Routine,
 } from "./routine-helpers";
-import { cronInWords, scheduleZone } from "./sentences";
+import { Sentence } from "./sentence";
+import { cronInWords, partsText, scheduleZone, type SentencePart } from "./sentences";
 
 export function RoutineRosterRow({ routine, sentence, now, children }: {
   routine: Routine;
-  /** `<name>: <do>.` */
-  sentence: string;
+  /** `<name>: <do>.` As parts, its threads and workflows read as tokens. */
+  sentence: string | readonly SentencePart[];
   /** The clock for `Next <time>`; tests pin it. */
   now?: number;
   /** Ends the sentence column, such as `+ New routine` on the group's last row. */
@@ -73,9 +74,11 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
               <Link
                 to="/presence/routines/$id"
                 params={{ id: routine.id }}
+                aria-label={typeof sentence === "string" ? undefined : partsText(sentence)}
                 className={cn("text-base hover:underline", routine.enabled ? "text-ink" : "text-muted")}
               >
-                {sentence}
+                {/* The tokens sit inside the routine's link, so they do not link on their own. */}
+                {typeof sentence === "string" ? sentence : <Sentence parts={sentence} links={false} />}
               </Link>
             </p>
             {prompt !== "" && <p className="mt-px line-clamp-2 text-xs text-muted [overflow-wrap:anywhere]">{prompt}</p>}

@@ -30,9 +30,15 @@ import {
   OwnerBadge, deleteLineDescription, isProposal, lineWorkspace, pausedByTeam, pausedByTeamText, pausingTeamId,
   pinnedTitle, storedPolicy, targetLabel, teamName, useLineAccess, type TeamLike,
 } from "./presence-rows";
+import { Sentence } from "./sentence";
+import { partsText, type SentencePart } from "./sentences";
 import { useSentenceNames } from "./use-sentence-names";
 
-export function PresenceLine({ sub, sentence }: { sub: EventSubscriptionWire; sentence: string }) {
+export function PresenceLine({ sub, sentence }: {
+  sub: EventSubscriptionWire;
+  /** The line's sentence. As parts, its places, threads, workflows, and people read as tokens. */
+  sentence: string | readonly SentencePart[];
+}) {
   const workflows = useWorkflows();
   const patch = usePatchEventSubscription();
   const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
@@ -65,8 +71,14 @@ export function PresenceLine({ sub, sentence }: { sub: EventSubscriptionWire; se
       <div className="min-w-0">
         <p className="text-base [overflow-wrap:anywhere]">
           {problem !== "" && <span aria-hidden="true" className="mr-2 inline-block h-2 w-2 rounded-full bg-danger-500 align-[2px]" />}
-          <Link to="/presence/rules/$id" params={{ id: sub.id }} className={cn("text-base hover:underline", sub.enabled ? "text-ink" : "text-muted")}>
-            {sentence}
+          <Link
+            to="/presence/rules/$id"
+            params={{ id: sub.id }}
+            aria-label={typeof sentence === "string" ? undefined : partsText(sentence)}
+            className={cn("text-base hover:underline", sub.enabled ? "text-ink" : "text-muted")}
+          >
+            {/* The tokens sit inside the line's link, so they do not link on their own. */}
+            {typeof sentence === "string" ? sentence : <Sentence parts={sentence} links={false} />}
           </Link>
         </p>
         <p className="mt-px text-xs text-muted [overflow-wrap:anywhere]">

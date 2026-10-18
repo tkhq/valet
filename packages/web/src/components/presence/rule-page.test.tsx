@@ -145,7 +145,7 @@ describe("RulePage", () => {
   it("reads the sentence with the pinned thread's title, from the archived list when the open list misses it", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    expect(await screen.findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci", archived: true });
   });
@@ -156,7 +156,7 @@ describe("RulePage", () => {
     });
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    expect(await screen.findByText("When a check completes on acme/api, work in the Platform CI thread.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
     expect(listThreads).toHaveBeenCalledTimes(1);
   });
 
@@ -187,6 +187,9 @@ describe("RulePage", () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
     const title = await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." });
+    // The title reads the place and the pinned thread as tokens; the place links its page.
+    expect(within(title).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github:acme/api");
+    expect(within(title).getByRole("link", { name: "Platform CI" }).getAttribute("href")).toBe("/threads/t-ci");
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›acme/api›Failed checks");
     expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
@@ -230,9 +233,13 @@ describe("RulePage", () => {
       })],
     });
     renderPage();
-    const link = await screen.findByRole("link", { name: "#incidents" });
+    const title = await screen.findByRole("heading", { level: 1, name: /#incidents/ });
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    const link = within(crumbs).getByRole("link", { name: "#incidents" });
     expect(link.getAttribute("href")).toBe("/presence/places/slack:C900");
-    expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("Presence›#incidents›Failed checks");
+    expect(crumbs.textContent).toBe("Presence›#incidents›Failed checks");
+    // The title's place token links the same page as the crumb.
+    expect(within(title).getByRole("link", { name: "#incidents" }).getAttribute("href")).toBe("/presence/places/slack:C900");
   });
 
   it("puts only Presence before the line for a line with no one place", async () => {
@@ -422,6 +429,7 @@ describe("RulePage", () => {
   it("names the fix when the listener is not in the list", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [] });
     renderPage("gone");
-    expect(await screen.findByText("This page does not exist, or you cannot see it. Open Presence and pick the place again.")).toBeTruthy();
+    expect(await screen.findByText("This page does not exist, or you cannot see it.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to Presence" }).getAttribute("href")).toBe("/presence");
   });
 });

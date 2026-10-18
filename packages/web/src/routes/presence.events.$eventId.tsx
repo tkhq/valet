@@ -7,7 +7,7 @@ import { EventReceiptStages } from "~/components/events/receipts-panel";
 import { RedeliverButton } from "~/components/events/redeliver-button";
 import { ActivitySentence, useWorkflowsByListener } from "~/components/presence/activity-row";
 import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "~/components/presence/page-shell";
-import { activityLead, activityOutcomes, eventInWords } from "~/components/presence/sentences";
+import { activityLead, activityLeadParts, activityOutcomes, eventInWords } from "~/components/presence/sentences";
 import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 
@@ -74,7 +74,7 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
     <div className="space-y-6">
       <div>
         <p className="text-sm font-medium text-ink [overflow-wrap:anywhere]">
-          <ActivitySentence eventId={event.id} lead={activityLead(event, names)} outcomes={activityOutcomes(event, deliveries, names)} />
+          <ActivitySentence eventId={event.id} lead={activityLeadParts(event, names)} outcomes={activityOutcomes(event, deliveries, names)} />
         </p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Badge variant="accent">{event.service}</Badge>

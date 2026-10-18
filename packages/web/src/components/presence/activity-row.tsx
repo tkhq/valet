@@ -1,8 +1,8 @@
 /**
  * One stored event on the Activity page, as one sentence
  * (docs/specs/2026-10-16-presence-hub-design.md Part E step 1):
- * `<event in words> in <place> → <outcome>`. A thread in the outcome links
- * to the thread, and a disclosure keeps the deliveries and the receipt
+ * `<event in words> in <place> → <outcome>`. The place and each thread read
+ * as reference tokens (`Ref`), a thread in the outcome links to the thread, and a disclosure keeps the deliveries and the receipt
  * stages (Part E step 2).
  */
 import { Fragment, useState } from "react";
@@ -14,7 +14,9 @@ import { DeliveryList } from "~/components/events/delivery-list";
 import { EventReceiptStages } from "~/components/events/receipts-panel";
 import { Badge, WorkRow, textLinkClass } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
-import { activityLead, activityOutcomes, type ActivityOutcome } from "./sentences";
+import { Ref } from "./ref";
+import { Sentence } from "./sentence";
+import { activityLeadParts, activityOutcomes, outcomeParts, type ActivityOutcome, type SentencePart } from "./sentences";
 
 /** The badge each Log status wears. Exported for the event-log problem rows. */
 export const LOG_STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent" }> = {
@@ -46,45 +48,55 @@ export function useWorkflowsByListener(): Readonly<Record<string, string>> {
 }
 
 /**
- * One outcome. A thread label links to the thread. An archived thread keeps
- * its name and a disabled link, because it no longer takes deliveries.
+ * One outcome. A thread reads as a thread token that links the thread. An
+ * archived thread keeps its token in a disabled link, because it no longer
+ * takes deliveries. A run outcome links the run.
  */
 function Outcome({ outcome }: { outcome: ActivityOutcome }) {
   if (outcome.runId !== undefined) {
     return <Link to="/workflows/runs/$runId" params={{ runId: outcome.runId }} className={textLinkClass}>{outcome.words}</Link>;
   }
   const thread = outcome.thread;
-  if (!thread) return <>{outcome.words}</>;
-  return (
-    <>
-      {outcome.words}{" "}
-      {thread.ref.archived ? (
-        <span role="link" aria-disabled="true" title="This thread is archived." className="text-muted">
-          {thread.label}
+  if (thread?.ref.archived) {
+    return (
+      <>
+        {outcome.words}{" "}
+        <span role="link" aria-disabled="true" title="This thread is archived." className="opacity-70">
+          <Ref kind="thread" text={thread.label} />
         </span>
-      ) : (
-        <Link to="/threads/$threadId" params={{ threadId: thread.ref.threadId }} className={textLinkClass}>
-          {thread.label}
-        </Link>
-      )}
-    </>
-  );
+      </>
+    );
+  }
+  return <Sentence parts={outcomeParts(outcome)} />;
 }
 
-/** An activity sentence with links: the lead opens the event page, and each thread opens its thread. */
-export function ActivitySentence({ eventId, lead, outcomes }: { eventId: string; lead: string; outcomes: readonly ActivityOutcome[] }) {
+/**
+ * An activity sentence with links: the lead opens the event page and names
+ * its place as a token, and each thread opens its thread. The place token
+ * sits inside the lead's link, so it does not link on its own.
+ */
+export function ActivitySentence({ eventId, lead, outcomes }: {
+  eventId: string;
+  lead: readonly SentencePart[];
+  outcomes: readonly ActivityOutcome[];
+}) {
   return (
     <span>
-      <Link to="/presence/events/$eventId" params={{ eventId }}>{lead}</Link>
-      {" → "}
+      <Link to="/presence/events/$eventId" params={{ eventId }}><Sentence parts={lead} links={false} /></Link>
+      {outcomes.length > 0 && " → "}
       {outcomes.map((outcome, index) => (
-        <Fragment key={index}>
+        <Fragment key={outcomeKey(outcome)}>
           {index > 0 && ", "}
           <Outcome outcome={outcome} />
         </Fragment>
       ))}
     </span>
   );
+}
+
+/** A stable key per outcome: its run, its thread, or its words. */
+function outcomeKey(outcome: ActivityOutcome): string {
+  return outcome.runId ?? (outcome.thread ? `${outcome.words}:${outcome.thread.ref.threadId}` : outcome.words);
 }
 
 /** The deliveries and the receipt stages of one event, behind a disclosure. */
@@ -107,16 +119,18 @@ function ReceiptDisclosure({ eventId, deliveries }: { eventId: string; deliverie
 export function ActivityRow({ item, workflowsByListener }: { item: EventLogItem; workflowsByListener: Readonly<Record<string, string>> }) {
   const meta = LOG_STATUS_META[item.status];
   const event = { eventKey: item.eventKey };
-  const names = { ...(item.place !== undefined ? { place: item.place } : {}), workflowsByListener };
+  const names = {
+    ...(item.place !== undefined ? { place: item.place } : {}),
+    ...(item.placeKey !== undefined ? { placeKey: item.placeKey } : {}),
+    workflowsByListener,
+  };
   const deliveries = item.deliveries ?? [];
   // An older server sends no deliveries; the row then names no outcome it cannot see.
   const outcomes = item.deliveries === undefined ? [] : activityOutcomes(event, deliveries, names);
   return (
     <div>
       <WorkRow
-        title={outcomes.length > 0
-          ? <ActivitySentence eventId={item.id} lead={activityLead(event, names)} outcomes={outcomes} />
-          : <Link to="/presence/events/$eventId" params={{ eventId: item.id }}>{activityLead(event, names)}</Link>}
+        title={<ActivitySentence eventId={item.id} lead={activityLeadParts(event, names)} outcomes={outcomes} />}
         badge={<Badge variant={meta.badge}>{meta.label}</Badge>}
         time={item.at}
         detail={[item.summary, item.actor].filter(Boolean).join(" · ")}

@@ -342,6 +342,8 @@ export function EditSubscriptionDialog({
               committed={collisions.committed}
               intent="save"
               replaces={sub.target.kind === "assistant" ? sub.target.replaces : undefined}
+              workflows={workflows}
+              names={names}
             />
           )}
           {error && <p className="text-xs text-danger-500">{error}</p>}

@@ -13,7 +13,7 @@ import type {
 } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { Badge } from "~/components/primitives";
-import { presenceSentence } from "~/components/presence/sentences";
+import { presenceSentence, type SentenceNames, type WorkflowNames } from "~/components/presence/sentences";
 
 /** The collision payload of a blocked (409) subscription write, or null when
  * the failure is not one. */
@@ -40,7 +40,12 @@ function ownerLabel(ownerType: "user" | "team" | "org"): string {
  * replaces (the proposal's `replaces` id, which the server turns off when
  * this one turns on). Every other line keeps firing: `Also fires`.
  */
-function CollisionRow({ collision, replaces }: { collision: EventSubscriptionCollisionWire; replaces: string | undefined }) {
+function CollisionRow({ collision, replaces, workflows, names }: {
+  collision: EventSubscriptionCollisionWire;
+  replaces: string | undefined;
+  workflows: WorkflowNames;
+  names: SentenceNames;
+}) {
   const sub = collision.subscription;
   const replaced = replaces !== undefined && sub.id === replaces;
   return (
@@ -56,7 +61,7 @@ function CollisionRow({ collision, replaces }: { collision: EventSubscriptionCol
           {ownerLabel(sub.ownerType)}
         </Badge>
       </div>
-      <p className="mt-0.5 text-xs text-muted">{presenceSentence(sub, undefined, [], {})}</p>
+      <p className="mt-0.5 text-xs text-muted">{presenceSentence(sub, undefined, workflows, {}, names)}</p>
     </li>
   );
 }
@@ -73,12 +78,18 @@ export function CollisionNotice({
   committed,
   intent = "create",
   replaces,
+  workflows = [],
+  names = {},
 }: {
   report: EventSubscriptionCollisionsWire;
   committed: boolean;
   intent?: "create" | "save";
   /** The id of the line this one replaces, from a proposal's `target.replaces`. */
   replaces?: string;
+  /** The workflows a sentence may name, so a row reads `run <workflow>`. */
+  workflows?: WorkflowNames;
+  /** The people a sentence may name, so a mention row reads `When <creator> mentions Valet`. */
+  names?: SentenceNames;
 }) {
   const blocked = report.blocking.length > 0 && !committed;
   const onlyReplaced = report.blocking.length > 0 && report.blocking.every((c) => c.subscription.id === replaces);
@@ -99,7 +110,7 @@ export function CollisionNotice({
       </p>
       <ul className="mt-1 divide-y divide-line/60">
         {[...report.blocking, ...report.overlapping].map((c) => (
-          <CollisionRow key={c.subscription.id} collision={c} replaces={replaces} />
+          <CollisionRow key={c.subscription.id} collision={c} replaces={replaces} workflows={workflows} names={names} />
         ))}
       </ul>
       {blocked && (

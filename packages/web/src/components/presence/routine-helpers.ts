@@ -1,6 +1,6 @@
 /**
- * What every routine surface shares: the `Routine` type, the sentence and
- * `<do>` hooks, `Next: <time>` or `Off`, and the Fire now and on/off
+ * What every routine surface shares: the `Routine` type, the sentence
+ * hooks, `Next: <time>` or `Off`, and the Fire now and on/off
  * actions (docs/specs/2026-10-16-presence-hub-design.md Part E). The
  * overview's `On a schedule` rows, the routine page, and the workflow
  * triggers drawer read them.
@@ -12,7 +12,7 @@ import { useRunScheduleNow, useUpdateSchedule, useWorkflows } from "~/api/workfl
 import { errorText } from "~/lib/error-text";
 import { formatDateTime } from "~/lib/format-when";
 import { teamName, type TeamLike } from "./presence-rows";
-import { routineDoes, routineSentence } from "./sentences";
+import { routineDoesParts, routineSentence, routineSentenceParts, text, tidy, type SentencePart } from "./sentences";
 
 /** A schedule row of the triggers list. */
 export type Routine = Extract<WorkflowTriggerItem, { kind: "schedule" }>;
@@ -30,12 +30,21 @@ export function useRoutineSentence(routines: readonly Routine[]): (routine: Rout
   return (routine) => routineSentence(routine, names, pinned);
 }
 
-/** The `<do>` of each routine. It reads the workflow names and the titles of pinned threads. */
-export function useRoutineDoes(routines: readonly Routine[]): (routine: Routine) => string {
+/** The sentence for each routine as parts, for a title with tokens. See `useRoutineSentence`. */
+export function useRoutineSentenceParts(routines: readonly Routine[]): (routine: Routine) => SentencePart[] {
   const workflows = useWorkflows();
   const pinned = usePinnedThreadTitles(routines.map((r) => r.detail.thread));
   const names = workflows.data?.workflows ?? [];
-  return (routine) => routineDoes(routine, names, pinned);
+  return (routine) => routineSentenceParts(routine, names, pinned);
+}
+
+/** The roster sentence of each routine as parts: `<name>: <do>.`, with the
+ * pinned thread or the workflow as a token. */
+export function useRoutineRowParts(routines: readonly Routine[]): (routine: Routine) => SentencePart[] {
+  const workflows = useWorkflows();
+  const pinned = usePinnedThreadTitles(routines.map((r) => r.detail.thread));
+  const names = workflows.data?.workflows ?? [];
+  return (routine) => tidy([text(`${routine.name}: `), ...routineDoesParts(routine, names, pinned), text(".")]);
 }
 
 /**

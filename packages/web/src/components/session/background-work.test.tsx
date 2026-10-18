@@ -170,6 +170,8 @@ describe("background work helpers", () => {
     expect(timer && itemDetail(timer, NOW)).toBe("Timer · fires in 2h");
     expect(hold && itemDetail(hold, NOW)).toBe("Hold · running under 1m · deadline in 3h");
     expect(proc && itemDetail({ ...proc, status: "pending" }, NOW)).toBe("Process · starting · deadline in 1d");
+    expect(itemDetail({ id: "e", threadId: "th-1", kind: "event", status: "running", reason: "r", createdAt: NOW }, NOW))
+      .toBe("Active · running under 1m");
     expect(timeSince(NOW - 49 * HOUR, NOW)).toBe("2d");
   });
 
@@ -400,6 +402,9 @@ describe("BackgroundWorkSection", () => {
     const section = within(await screen.findByRole("region", { name: "Background work" }));
     const link = section.getByRole("link", { name: "acme/lean-proofs#42" });
     expect(link.getAttribute("href")).toBe("https://github.com/acme/lean-proofs/issues/42");
+    // The waiter reads as `Active: <subject>`, in the Terminology words.
+    expect(link.parentElement?.textContent).toMatch(/^Active: acme\/lean-proofs#42 · /);
+    expect(document.body.textContent).not.toMatch(/event waiter/i);
     expect(section.getByText(/2 clauses/)).toBeTruthy();
     expect(section.getByText(/deadline in 20h/)).toBeTruthy();
   });
@@ -424,6 +429,8 @@ describe("BackgroundWorkSection", () => {
       expect(section.getByText(/Fed by:/)).toBeTruthy();
       const listener = section.getByRole("link", { name: "Per pull request" });
       expect(listener.getAttribute("href")).toBe("/presence/rules/r-1");
+      // Each name is a reference token for a line of presence.
+      expect(listener.getAttribute("data-ref")).toBe("line");
       const routine = section.getByRole("link", { name: "Morning summary" });
       expect(routine.getAttribute("href")).toBe("/presence/routines/s-1");
     });
