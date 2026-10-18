@@ -210,6 +210,7 @@ vi.mock("~/api/workflows", () => ({
   }),
   useWorkflowRuns: () => ({ data: { runs: [] }, isLoading: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useRetryRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useSetWorkflowEnabled: () => ({ mutate: setEnabledMutate, isPending: false, isError: false }),
   useCreateWorkflow: () => ({
     mutateAsync: createMutateAsync,

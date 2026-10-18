@@ -207,6 +207,7 @@ import type {
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   RevokeInviteResponse,
   SandboxJwtResponse,
@@ -983,8 +984,9 @@ export const api = {
       "GET",
       `/workflows/${encodeURIComponent(id)}/permissions`,
     ),
+  revokeOwnWorkflowAccounts: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/accounts`),
   revokeWorkflowPermissions: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/allow`),
-  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
+  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest) =>
     request<AllowWorkflowPermissionsResponse>(
       "POST",
       `/workflows/${encodeURIComponent(id)}/permissions/allow`,
@@ -1016,10 +1018,11 @@ export const api = {
     ),
   dismissWorkflowRun: (runId: string) =>
     request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
-  retryWorkflowRun: (runId: string) =>
+  retryWorkflowRun: (runId: string, body?: RetryWorkflowRunRequest) =>
     request<RetryWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
+      body,
     ),
 
   // events (event-system design): org feed, per-event detail with delivery

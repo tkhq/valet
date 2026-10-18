@@ -136,3 +136,43 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
   after the save (the detail invalidation refetches it).
 - `unknown` actions are excluded from both the badge and the bulk allow; a
   run that reaches one can still gate on its resolved risk level.
+
+
+## Explicit build-time approval (2026-10-18)
+
+A save allows nothing. This covers a browser save, an assistant save, a copy, a team copy and a template install. A review of the 2026-10-16 design showed why. An assistant turn that read untrusted content could save a workflow that sends mail to an attacker and then start it, and the save counted as the person's approval. One unrelated human save could also grant steps that someone else added.
+
+A person allows a workflow's steps explicitly, once, when it is built, in one of two ways:
+
+- The workflow page's Review permissions dialog. When any step needs approval, or the viewer has a shared account the workflow would use without their consent, a banner above the steps says so and opens the dialog.
+- `workflows.allow_permissions`, an editor-assistant action. It shows one approval card that lists each step that needs approval with its exact parameters, the viewer's shared accounts, and any action an explicit policy still holds. The workflow name appears on one line, cut to 80 characters. Only the person's own signed-in prompt can call it. The card names that person as its approver (`context.approver`), so `answersGate` refuses everyone else, including a team API key, which records its minting admin as the resolver. Agent credentials cannot answer an approval card. Save results (`save_workflow`, `patch_workflow`, `update_model`, `add_aggregate`) list `needsApproval` and tell the assistant to call it once. The `workflows.resolve_approval` card names its approver the same way.
+
+Both paths call `allowWorkflowPermissions` with the review token of the definition that was shown. Action grants need the workflow owner or a team admin. A member can allow only their own shared accounts.
+
+A grant covers the steps that were reviewed. Any step change revokes action grants and account consent, whoever makes it. A layout-only change keeps them. The policy lookup (`loadPolicyRows`) also refuses a workflow grant to a run whose steps differ from the saved steps, so a run that started before an edit does not use a grant made after it.
+
+For team workflows, an approval also allows the approving person's accounts already shared with that team for the declared direct tool services, excluding GitHub. This includes services with dynamic tools and foreach tool bodies. `workflow_account_grants` binds consent to the organization, workflow, team, member, service and share generation. It does not grant team-wide account consent. Another member approves their own account. Human review nodes remain explicit decisions. The review's `accountConsent.pending` lists the viewer's own shared services that still need consent.
+
+Saved workflow consent applies only to direct tool invocation contexts. Workflow agents and sandbox scripts keep their existing separate account approval paths.
+
+A run's account gate also offers the lender "Always allow for this workflow".
+It needs the lender's signed-in browser answer. It saves the same
+`workflow_account_grants` row for that one service, only while the run's steps
+match the saved definition, and only for the share generation the card showed.
+Otherwise it returns `stale_workflow` or writes nothing. "Always allow for this
+team" stays the wider choice.
+
+Borrowing checks the live run owner, actor, team membership, source account,
+share generation, and saved definition. A run with different steps cannot use
+this consent.
+
+Definition saves, snapshots, revocation, and new grants commit together under
+the definition lock. The Review permissions action also authorizes the person's
+shared accounts, including when no action needs a policy grant. Reset saved
+permissions removes both kinds of grant. A member can also stop use of their own shared accounts without resetting action permissions or another member's consent. Existing workflows are not silently
+backfilled, and parked approval gates are not answered during deployment.
+
+The application schema repair adds the grant table and lookup index without
+deleting existing folders, workflows, credentials, or approval history.
+
+Permission review returns a definition token for the exact stored graph, ownership, and credential-service scope shown. The dialog displays the named team and complete direct-tool service scope, including allowed and dynamic actions, and keeps that scope and token while open. Confirmation checks it under the definition lock before saving action or account grants. Missing tokens fail closed; changed definitions return a conflict and require a fresh review.

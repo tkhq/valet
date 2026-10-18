@@ -1,5 +1,5 @@
 import { loadAssistantBySessionId } from "../assistants/service.js";
-import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
+import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permissions.js";
 /**
  * Owner-scoped workflow definition/run operations, shared by the HTTP
  * routes (`routes/workflows.ts`) and the agent-facing action plugin
@@ -8,7 +8,8 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError, readToolScope } from "@valet/shared";
-import { matchesGateOccurrence, normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { matchesGateOccurrence, normalizeLegacyDefinition, retrySeedCheckpoints, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
   resolveTriggerInput,
@@ -608,7 +609,7 @@ export async function listWorkflowDefinitions(
 }
 
 export async function getWorkflowDefinition(
-  deps: WorkflowServiceDeps,
+  deps: Pick<WorkflowServiceDeps, "db">,
   owner: WorkflowOwner,
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
@@ -656,7 +657,9 @@ export async function createWorkflowDefinition(
       },
       async (tx) => {
         rejectAssistantRouting(input.definition);
+        const scopedDeps = { ...deps, db: tx };
         await tx.insert(workflowDefinitions).values({ ...values, ownerType: "team", ownerId: teamId });
+        await snapshotVersion(scopedDeps, id, 1, input.name, input.definition, now);
         return true;
       },
     );
@@ -665,10 +668,12 @@ export async function createWorkflowDefinition(
     ownerId = teamId;
   } else {
     rejectAssistantRouting(input.definition);
-    await deps.db.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
+    await deps.db.transaction(async (tx) => {
+      await tx.insert(workflowDefinitions).values({ ...values, ownerType: "user", ownerId: owner.userId });
+      await snapshotVersion({ ...deps, db: tx }, id, 1, input.name, input.definition, now);
+    });
   }
 
-  await snapshotVersion(deps, id, 1, input.name, input.definition, now);
   return { id, name: input.name, definition: input.definition, createdAt: now, updatedAt: now, ownerType, ownerId };
 }
 
@@ -764,6 +769,21 @@ export async function updateWorkflowDefinition(
   id: string,
   input: { name?: string; definition?: unknown },
 ): Promise<WorkflowDefinitionSummary | null> {
+  return deps.db.transaction(async (tx) => {
+    const depsForSave = { ...deps, db: tx };
+    return updateLockedWorkflowDefinition(depsForSave, owner, id, input);
+  });
+}
+
+async function updateLockedWorkflowDefinition(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+  input: { name?: string; definition?: unknown },
+): Promise<WorkflowDefinitionSummary | null> {
+  // Serialize edits with permission review so grants cover one saved definition.
+  await deps.db.select({ id: workflowDefinitions.id }).from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId))).for("update");
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
   await refuseRepoOwned(deps.db, row);
@@ -773,13 +793,11 @@ export async function updateWorkflowDefinition(
     rejectAssistantRouting(input.definition);
   }
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
-  // A grant approves the steps as they were. When an agent, or someone who
-  // could not have granted it, changes them, an approver must look again. Revoke before the
-  // write, so no run can start on the new steps under the old grant, and
-  // again after it: an approval that read the old steps can land between the
-  // two, and its grant must not outlive them.
-  const revokeGrants = stepsChange && (owner.agentEditor === true || !(await canGrantWorkflowPermissions(deps, owner, row)));
-  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
+  // A grant covers the steps a person reviewed. Any step change ends it, so
+  // a person allows the new steps again: in the Pre-approve dialog or the
+  // assistant's approval card (`workflows.allow_permissions`). A save itself
+  // allows nothing, because the saved steps can come from untrusted content.
+  if (stepsChange) await revokeWorkflowGrants(deps.db, row.orgId, id);
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the
   // definitions row here never reaches back into a running/parked run.
@@ -790,8 +808,7 @@ export async function updateWorkflowDefinition(
       definition: input.definition !== undefined ? input.definition : row.definition,
       updatedAt: now,
     })
-    .where(eq(workflowDefinitions.id, id));
-  if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
+    .where(and(eq(workflowDefinitions.id, id), eq(workflowDefinitions.orgId, owner.orgId)));
 
   // Version history: snapshot only when the definition actually changed —
   // a rename alone shouldn't mint a version.
@@ -1092,36 +1109,9 @@ export async function copyWorkflowDefinition(
     });
   }
 
-  const now = Date.now();
-  const copyId = newWorkflowId("wf");
-  const name = `${row.name} (copy)`;
-  rejectAssistantRouting(row.definition);
-  const definition = row.definition;
-  // Personal, whatever the original's owner was. A team-owned mirror copied
-  // into the team would be a second team workflow every member sees; the
-  // person who wants to change the graph gets it in their own workspace,
-  // and may move it from there.
-  await deps.db.insert(workflowDefinitions).values({
-    id: copyId,
-    orgId: owner.orgId,
-    ownerType: "user",
-    ownerId: owner.userId,
-    name,
-    definition,
-    origin: "local",
-    createdAt: now,
-    updatedAt: now,
-  });
-  await snapshotVersion(deps, copyId, 1, name, definition, now);
-  return {
-    id: copyId,
-    name,
-    definition,
-    createdAt: now,
-    updatedAt: now,
-    ownerType: "user",
-    ownerId: owner.userId,
-  };
+  // A copy is a new personal workflow with the same atomic version snapshot
+  // as creation. It carries no grants and no triggers from its source.
+  return createWorkflowDefinition(deps, owner, { name: `${row.name} (copy)`, definition: row.definition });
 }
 
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";
@@ -1218,6 +1208,7 @@ export async function disarmWorkflowTriggers(
  * they were; any change to them outside an approver's own edit ends it. */
 export async function revokeWorkflowGrants(db: AppQueryable, orgId: string, workflowId: string): Promise<void> {
   await db.delete(workflowActionGrants).where(and(eq(workflowActionGrants.orgId, orgId), eq(workflowActionGrants.workflowId, workflowId)));
+  await revokeWorkflowAccountConsent(db, orgId, workflowId);
 }
 
 export async function purgeWorkflowRows(
@@ -1410,6 +1401,7 @@ export async function startWorkflowRun(
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
   originToolScope?: import("@valet/shared").ToolScope,
+  retry?: { of: string; from: RetryFrom; seed: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]> },
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1441,6 +1433,7 @@ export async function startWorkflowRun(
     definitionVersionId: versionId,
     input: trigger,
     ...(validOrigin ? { origin: validOrigin } : {}),
+    ...(retry ? { retryOf: { runId: retry.of, from: retry.from } } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1448,11 +1441,14 @@ export async function startWorkflowRun(
   // any org member can read one, and stamping the org would let them run
   // with the org's stored credentials. Team keys act as the team, not their creator.
   const runAsCaller = row.ownerType === "org";
-  await deps.workflowRunHost.start(runId, params, definition, {
+  const hostOwner = {
     ownerType: runAsCaller ? "user" : row.ownerType,
     ownerId: runAsCaller ? owner.userId : row.ownerId,
     actorUserId: owner.userId,
-  });
+  };
+  const seed = retry ? await retry.seed({ definition }) : [];
+  if (seed.length > 0) await deps.workflowRunHost.start(runId, params, definition, hostOwner, { seed });
+  else await deps.workflowRunHost.start(runId, params, definition, hostOwner);
   return { runId };
 }
 
@@ -1925,7 +1921,21 @@ export type RetryWorkflowRunResult =
   | { invalidInput: TriggerInputError[] }
   | "not_found"
   | "not_retryable"
-  | "workflow_deleted";
+  | "workflow_deleted"
+  | "input_needs_start";
+
+/** Where a retry starts. `failed_step` reuses the finished steps before the
+ * failure (`retrySeedCheckpoints`); `start` runs every step again. */
+export type RetryFrom = "start" | "failed_step";
+
+/** A stored definition as dag/v1, or undefined when it is not one. */
+function dagDefinition(value: unknown): WorkflowDefinition | undefined {
+  const normalized = normalizeLegacyDefinition(value);
+  if (!normalized || typeof normalized !== "object") return undefined;
+  const { nodes, edges } = normalized as Record<string, unknown>;
+  // Saved definitions passed validation; the arrays are the part the seed reads.
+  return Array.isArray(nodes) && Array.isArray(edges) ? (normalized as WorkflowDefinition) : undefined;
+}
 
 /**
  * Starts a fresh run of the same workflow, reusing the failed run's trigger
@@ -1940,22 +1950,39 @@ export async function retryWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   runId: string,
+  opts: { from?: RetryFrom; input?: Record<string, unknown> } = {},
 ): Promise<RetryWorkflowRunResult> {
   const run = await ownedRun(deps, owner, runId);
   if (!run) return "not_found";
   if (run.status !== "settled" || run.outcome === "completed") return "not_retryable";
+  const from = opts.from ?? "start";
+  // Reused steps already used the original input.
+  if (from === "failed_step" && opts.input) return "input_needs_start";
+  const original = triggerData(run.params.input);
 
   const started = await startWorkflowRun(
     deps,
     owner,
     run.params.workflowId,
-    triggerData(run.params.input),
+    opts.input ? { ...original, ...opts.input } : original,
+    // The old run's origin, so the retry and the results it reuses stay
+    // with the same audience.
     run.params.origin,
     // Event provenance also carries the private-channel audience.
     typeof run.params.input === "object" && run.params.input !== null
       && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
     readToolScope(run.params.toolScope),
     readToolScope(run.params.originToolScope),
+    {
+      of: runId,
+      from,
+      seed: async (next) => {
+        if (from !== "failed_step") return [];
+        const previous = dagDefinition(run.definition);
+        const current = dagDefinition(next.definition);
+        return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
+      },
+    },
   );
   if (!started) return "workflow_deleted";
   return started;
@@ -2026,7 +2053,10 @@ export async function resolveWorkflowApproval(
     if (!owner.humanAccountConsent || input.via !== "web" || owner.agentEditor) return "human_only";
     if (!input.approved) input = { ...input, scope: undefined };
   }
-  if (approver && input.scope !== undefined && input.scope !== "once" && input.scope !== "team_account") input = { ...input, scope: undefined };
+  // The lender can keep their account for this workflow's current steps only.
+  const accountForWorkflow = approver !== undefined && input.approved && input.scope === "workflow";
+  if (accountForWorkflow && (!owner.humanAccountConsent || input.via !== "web" || owner.agentEditor)) return "human_only";
+  if (approver && !accountForWorkflow && input.scope !== undefined && input.scope !== "once" && input.scope !== "team_account") input = { ...input, scope: undefined };
 
   const orgId = await definitionOrgId(deps.db, run.params.workflowId);
   if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
@@ -2048,9 +2078,11 @@ export async function resolveWorkflowApproval(
     const [current] = await deps.db.select({ definition: workflowDefinitions.definition }).from(workflowDefinitions)
       .where(eq(workflowDefinitions.id, run.params.workflowId)).limit(1);
     if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
-    const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
-    workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
-    if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
+    if (!accountForWorkflow) {
+      const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+      workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
+      if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
+    }
   }
 
   // The signal's unique key selects one resolution winner. Only that caller
@@ -2086,7 +2118,7 @@ export async function resolveWorkflowApproval(
       // landed after the check above must not keep a grant for steps nobody
       // reviewed. An edit that comes after waits on this lock, and its
       // revoke-after-write then removes the grant.
-      if (prepared?.ok) {
+      if (prepared?.ok || accountForWorkflow) {
         const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions
           WHERE id = ${run.params.workflowId} FOR UPDATE`) as { rows: Array<{ definition: unknown }> };
         if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, run.definition)) throw new StaleWorkflowError();
@@ -2106,6 +2138,9 @@ export async function resolveWorkflowApproval(
         if (!approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
         if (run.owner?.ownerType !== "team") throw new Error("The team is unavailable. Request account approval again.");
         await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, consentScope: input.scope === "team_account" ? "team" : undefined, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
+        // The generation this gate approved, not the current one: a revoke and
+        // re-share since the card was shown is a new share nobody approved.
+        if (accountForWorkflow) await saveWorkflowAccountConsent(tx, { orgId, workflowId: run.params.workflowId, teamId: run.owner.ownerId, userId: approver.userId, services: [service], shareGeneration: approver.shareGeneration });
       }
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";

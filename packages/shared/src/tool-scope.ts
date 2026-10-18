@@ -8,6 +8,15 @@ export const TOOL_SCOPE_KEY = "toolScope";
 /** Last started task ceiling, retained after queue history is pruned. */
 export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
 export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
+/** Marks a workflow task that nobody watches. The engine refuses its decision requests before a gate opens. */
+export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
+/** The most model calls one submission may make. The engine stops before the next call and fails the submission. */
+export const MODEL_CALL_LIMIT_KEY = "modelCallLimit";
+
+/** A stored model call limit, or undefined when it is not a positive integer. */
+export function readModelCallLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
 const TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 const ACTION_NAME = /^[a-zA-Z0-9_-]+\.(?:[a-zA-Z0-9_.-]+|\*)$/;
 

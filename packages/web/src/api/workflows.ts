@@ -12,6 +12,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowRequest,
@@ -26,6 +27,7 @@ import type {
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
   ResolveWorkflowApprovalRequest,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   UpdateWorkflowEventTriggerRequest,
@@ -303,8 +305,8 @@ export function useWorkflowPermissions(
 /** Persist permissions for this workflow only. */
 export function useAllowWorkflowPermissions(id: string) {
   const qc = useQueryClient();
-  return useMutation<AllowWorkflowPermissionsResponse, Error, string[]>({
-    mutationFn: (actionIds) => api.allowWorkflowPermissions(id, { actionIds }),
+  return useMutation<AllowWorkflowPermissionsResponse, Error, AllowWorkflowPermissionsRequest>({
+    mutationFn: (body) => api.allowWorkflowPermissions(id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
     },
@@ -314,6 +316,13 @@ export function useAllowWorkflowPermissions(id: string) {
 export function useRevokeWorkflowPermissions(id: string) {
   const qc = useQueryClient();
   return useMutation({ mutationFn: () => api.revokeWorkflowPermissions(id), onSuccess: () => {
+    qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
+  } });
+}
+
+export function useRevokeOwnWorkflowAccounts(id: string) {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: () => api.revokeOwnWorkflowAccounts(id), onSuccess: () => {
     qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
   } });
 }
@@ -401,8 +410,8 @@ export function useResolveWorkflowApprovals() {
  */
 export function useRetryRun(runId: string) {
   const qc = useQueryClient();
-  return useMutation<RetryWorkflowRunResponse, Error, void>({
-    mutationFn: () => api.retryWorkflowRun(runId),
+  return useMutation<RetryWorkflowRunResponse, Error, RetryWorkflowRunRequest | void>({
+    mutationFn: (body) => api.retryWorkflowRun(runId, body ?? undefined),
     onSuccess: () => {
       const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
       if (detail) {

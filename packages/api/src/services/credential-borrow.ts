@@ -11,8 +11,9 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
+import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { actionInvocations, agentSessions, credentialShares, runtimeGrants, workflowRuns } from "../schema/index.js";
+import { actionInvocations, agentSessions, credentialShares, runtimeGrants, workflowAccountGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 
 /** Where a borrow approval applies: a session's thread, or a workflow run
  * (a `wf:<runId>:<node>` session). */
@@ -101,7 +102,7 @@ export async function canBorrowCredential(
   db: AppQueryable,
   scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
 ): Promise<boolean> {
-  if (!scope.actorId) return false;
+  if (!scope.actorId || scope.service === "github") return false;
   const runId = workflowRunOf(scope.sessionId);
   if (scope.sessionId.startsWith("wf:") && !runId) return false;
   const unattended = scope.actorId === `team:${scope.teamId}`;
@@ -109,6 +110,33 @@ export async function canBorrowCredential(
   const memberAuthorization = sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
     WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`;
   const runtimeAuthorization = unattended ? (runId ? unattendedWorkflowOwner(scope, runId) : unattendedRuntimeOwner(scope)) : undefined;
+  // Only the action invoker uses this run scope. Agent and script sessions need explicit consent.
+  if (runId && scope.sessionId === `wf:${runId}`) {
+    const [workflowConsent] = await db.select({ definition: workflowDefinitions.definition, runDefinition: workflowRuns.definition })
+      .from(workflowAccountGrants)
+      .innerJoin(workflowDefinitions, and(
+        eq(workflowDefinitions.id, workflowAccountGrants.workflowId),
+        eq(workflowDefinitions.orgId, workflowAccountGrants.orgId),
+        eq(workflowDefinitions.ownerType, "team"), eq(workflowDefinitions.ownerId, workflowAccountGrants.teamId),
+      ))
+      .innerJoin(workflowRuns, and(eq(workflowRuns.id, runId), eq(workflowRuns.workflowId, workflowDefinitions.id)))
+      .innerJoin(credentialShares, and(
+        eq(credentialShares.teamId, workflowAccountGrants.teamId), eq(credentialShares.service, workflowAccountGrants.service),
+        eq(credentialShares.userId, workflowAccountGrants.memberId), eq(credentialShares.generation, workflowAccountGrants.shareGeneration),
+      ))
+      .where(and(
+        eq(workflowAccountGrants.orgId, scope.orgId), eq(workflowAccountGrants.teamId, scope.teamId),
+        eq(workflowAccountGrants.service, scope.service), eq(workflowAccountGrants.memberId, scope.memberId),
+        eq(workflowRuns.ownerType, "team"), eq(workflowRuns.ownerId, scope.teamId), eq(workflowRuns.orgId, scope.orgId),
+        unattended ? sql`(${workflowRuns.actorUserId} IS NULL OR ${workflowRuns.actorUserId} = ${scope.actorId})`
+          : eq(workflowRuns.actorUserId, scope.actorId),
+        memberAuthorization,
+        sql`NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = ${scope.sessionId})`,
+        sql`EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.memberId})`,
+        sql`EXISTS (SELECT 1 FROM credentials c WHERE c.owner_type = 'user' AND c.owner_id = ${scope.memberId} AND c.service = ${scope.service})`,
+      )).limit(1);
+    if (workflowConsent && sameWorkflowSteps(workflowConsent.definition, workflowConsent.runDefinition)) return true;
+  }
   const [consent] = await db.select({ generation: credentialShares.generation }).from(credentialShares).where(and(
     eq(credentialShares.teamId, scope.teamId), eq(credentialShares.service, scope.service), eq(credentialShares.userId, scope.memberId),
     isNotNull(credentialShares.borrowConsentAt), memberAuthorization, runtimeAuthorization,

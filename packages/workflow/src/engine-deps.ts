@@ -28,6 +28,8 @@ export interface WorkflowPromptOptions {
   dispatchId: string;
   model?: string;
   queueMode?: QueueMode;
+  /** The most model calls the submission may make (`MODEL_CALL_LIMIT_KEY`). */
+  modelCallLimit?: number;
 }
 
 export interface WorkflowPromptReceipt {
@@ -92,6 +94,8 @@ export interface WorkflowPromptOrchestratorOptions {
    */
   queueMode: 'followup';
   ownerHint: { ownerType: string; ownerId: string };
+  /** The most model calls the submission may make (`MODEL_CALL_LIMIT_KEY`). */
+  modelCallLimit?: number;
 }
 
 export interface WorkflowPromptOrchestratorResult {

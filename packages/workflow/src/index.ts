@@ -56,6 +56,7 @@ export {
 export type { TriggerInputError, ResolvedTriggerInput } from './dag/trigger-input.js';
 
 export { validateWorkflowDefinition } from './dag/validate.js';
+export { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, stepModelCallLimit, unboundedWorkWarning } from './dag/step-budget.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
 export {
@@ -133,4 +134,5 @@ export { driveUntilPark } from './interpreter.js';
 export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interpreter.js';
 
 export { LocalRunHost } from './local-host.js';
-export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost } from './local-host.js';
+export { retrySeedCheckpoints } from './retry-seed.js';
+export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost, RunStartOptions } from './local-host.js';

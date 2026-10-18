@@ -1,4 +1,5 @@
 import type { ThreadNode } from "@valet/workflow";
+import { StepBudgetField } from "./step-budget-field";
 import { JsonTextarea, LabeledTextarea, SelectField } from "../fields";
 
 export function ThreadForm({
@@ -16,6 +17,7 @@ export function ThreadForm({
         value={node.outputSchema}
         onChange={(value) => onChange({ outputSchema: value })}
       />
+      <StepBudgetField node={node} onChange={onChange} />
       <SelectField
         label="Wait mode"
         value={node.wait?.mode ?? "until_idle"}

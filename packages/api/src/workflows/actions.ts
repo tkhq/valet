@@ -21,7 +21,7 @@ import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { previewWorkflow } from "../routes/workflow-preview.js";
-import type { PreviewWorkflowResponse, WorkflowPendingGate } from "../wire/types.js";
+import type { GetWorkflowPermissionsResponse, PreviewWorkflowResponse, WorkflowPendingGate } from "../wire/types.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -38,6 +38,7 @@ import {
   addAggregateNode,
   canReadWorkflowRun,
   cancelWorkflowRun,
+  retryWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
@@ -65,10 +66,11 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
-import { analyzeDefinitionPermissions } from "./permissions.js";
+import { allowWorkflowPermissions, analyzeDefinitionPermissions, analyzeWorkflowPermissions, canGrantWorkflowPermissions } from "./permissions.js";
 import { readNodeDiagnostics } from "./node-diagnostics.js";
 import { readRunFollowUp } from "./run-follow-up.js";
 import { readStepTranscript } from "./step-transcript.js";
+import { workflowRunProvenance } from "./run-provenance.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
@@ -163,6 +165,47 @@ export function formatEditLintErrors(blocking: string[], preExisting: string[], 
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
   const owner = ownerFromContextUnmarked(ctx);
   return owner ? { ...owner, agentEditor: true } : null;
+}
+
+/** The turn is this person's own signed-in prompt: never an event, a signal,
+ * a workflow step or delegated work (`ToolContext.interactiveActor`). */
+function isDirectActor(ctx: PluginActionContext, owner: WorkflowOwner): boolean {
+  return ctx.interactiveActor?.id === owner.userId && !ctx.externalSender
+    && ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+}
+
+/** Rules a person cannot override from a workflow's review. */
+const POLICY_HELD = new Set(["org_policy", "team_policy", "override"]);
+
+/** Text on one line, control characters removed, cut to `max` characters. */
+function oneLine(text: string, max: number): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** A tool step's stored parameters: a top-level tool node, or a foreach's tool body. */
+function stepParams(definition: unknown, nodeId: string): unknown {
+  const nodes = definition && typeof definition === "object" ? (definition as { nodes?: unknown }).nodes : undefined;
+  if (!Array.isArray(nodes)) return undefined;
+  const node: unknown = nodes.find((item: unknown) => !!item && typeof item === "object" && (item as { id?: unknown }).id === nodeId);
+  if (!node || typeof node !== "object") return undefined;
+  const record = node as Record<string, unknown>;
+  const tool = record.type === "foreach" && record.body && typeof record.body === "object" ? record.body as Record<string, unknown> : record;
+  return tool.params;
+}
+
+/** The distinct actions a workflow's steps wait on for approval. */
+function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
+  return [...new Set(review.nodes.flatMap((node) => node.mode === "require_approval" && node.actionId ? [node.actionId] : []))];
+}
+
+/** What a saved workflow still needs a person to allow, for a save result. */
+async function approvalNeeded(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<{ needsApproval?: string[]; next?: string }> {
+  const review = await analyzeWorkflowPermissions(deps, owner, workflowId);
+  if (!review) return {};
+  const needsApproval = [...gatingActionIds(review), ...(review.accountConsent?.pending ?? []).map((service) => `${service} shared account`)];
+  return needsApproval.length === 0 ? {} : { needsApproval,
+    next: "When the workflow is built, call workflows.allow_permissions once so the person allows these in one card. Until then runs stop at these steps." };
 }
 
 function ownerFromContextUnmarked(ctx: PluginActionContext): WorkflowOwner | null {
@@ -430,6 +473,73 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  // The one explicit build-time confirmation an assistant can ask for. A save
+  // allows nothing: the saved steps can come from untrusted content, so the
+  // person reads the actions in this card and allows them for these steps.
+  const allowPermissions = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.allow_permissions",
+    name: "Ask to allow workflow permissions",
+    description:
+      "Ask the person, in one approval card, to allow the saved workflow's steps that need approval and their own shared accounts " +
+      "for every later run of these steps, so runs never stop to ask. Call it once after the workflow is built, when save_workflow or " +
+      "patch_workflow lists `needsApproval`, and before a test run. Only the person can approve the card. Any later step change asks again. " +
+      "Explicit organization and team policies still apply.",
+    // The call always asks the person (below), so the catalog's own card would ask twice.
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      if (!isDirectActor(ctx, owner)) {
+        return { success: false, error: "Only the person can allow workflow permissions, in their own conversation or on the workflow page under Permissions, Review permissions." };
+      }
+      const deps = getDeps();
+      // The person decides with their own reach, never the assistant's team principal.
+      const person: WorkflowOwner = { userId: owner.userId, orgId: owner.orgId, principal: { type: "user", id: owner.userId }, humanAccountConsent: true };
+      const summary = await getWorkflowDefinition(deps, person, workflow_id);
+      const review = summary ? await analyzeWorkflowPermissions(deps, person, workflow_id) : null;
+      if (!summary || !review) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const canGrant = await canGrantWorkflowPermissions(deps, person, summary);
+      // An explicit policy keeps its own question; only the rest can be allowed here.
+      const gating = review.nodes.filter((node) => node.mode === "require_approval" && node.actionId);
+      const grantable = canGrant ? gating.filter((node) => !POLICY_HELD.has(node.provenance ?? "")) : [];
+      const held = gating.filter((node) => POLICY_HELD.has(node.provenance ?? ""));
+      const actions = [...new Set(grantable.flatMap((node) => node.actionId ? [node.actionId] : []))];
+      const accounts = review.accountConsent?.pending ?? [];
+      if (actions.length === 0 && accounts.length === 0) {
+        return { success: true, data: { workflowId: workflow_id, allowed: [], accounts: [], next: canGrant || gating.length === held.length
+          ? "Nothing more can be allowed here. Steps that an explicit policy holds still ask on every run."
+          : "Only the workflow owner or a team admin can allow its actions. Ask one of them to review permissions on the workflow page." } };
+      }
+      // The card shows each step with its exact parameters, so the person
+      // reads what will run, not only an action name the assistant chose.
+      const name = oneLine(summary.name, 80);
+      const lines = [
+        `Runs of "${name}" will run these steps without asking:`,
+        ...grantable.map((node) => `- ${node.nodeId}: ${node.actionId} ${oneLine(JSON.stringify(stepParams(summary.definition, node.nodeId) ?? {}), 240)}`),
+        ...(accounts.length ? [`They may use your accounts shared with ${oneLine(review.accountConsent?.teamName ?? "the team", 80)}: ${accounts.join(", ")}.`] : []),
+        ...(held.length ? [`These still ask on every run, because a policy requires it: ${[...new Set(held.map((node) => node.actionId))].join(", ")}.`] : []),
+        "A change to the steps asks again.",
+      ];
+      const decision = await ctx.requestDecision({
+        type: "approval",
+        title: `Allow "${name}" to run without asking?`,
+        body: lines.join("\n"),
+        actions: [{ id: "approve", label: "Allow", style: "primary" }, { id: "cancel", label: "Not now" }],
+        resumeKey: `workflow-permissions:${workflow_id}:${review.definitionToken}`,
+        // Only this person answers: not a teammate, and not a team API key
+        // that records its minting admin as the resolver (`answersGate`).
+        context: { approver: { userId: owner.userId } },
+      });
+      if (decision.actionId !== "approve") return { success: false, error: "The person did not allow the permissions, so runs still stop at those steps." };
+      // The thread owner answers approvals, so this is the same person.
+      if (decision.resolvedBy !== owner.userId) return { success: false, error: "Only the person who asked can allow these permissions. Ask them to approve the card." };
+      const outcome = await allowWorkflowPermissions(deps, person, workflow_id, canGrant ? actions : [], review.definitionToken);
+      if (!outcome) return { success: false, error: `workflow not found: ${workflow_id}` };
+      if (!outcome.ok) return { success: false, error: outcome.badRequest };
+      return { success: true, data: { workflowId: workflow_id, allowed: outcome.result.allowed, blocked: outcome.result.blocked, accounts } };
+    },
+  });
+
   const saveWorkflow = action(
     Type.Object({
       workflow_id: Type.Optional(Type.String()),
@@ -445,6 +555,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach|workflow. " +
       "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
+      "A save allows nothing. When the result lists `needsApproval`, call workflows.allow_permissions once so the person allows those steps in one card. " +
       "Returns { workflowId } — always surface it to the user.",
     riskLevel: "medium",
     execute: async ({ workflow_id, name, definition }, ctx) => {
@@ -479,7 +590,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
         return {
           success: true,
-          data: { workflowId: updated.id, name: updated.name, updatedAt: updated.updatedAt },
+          data: { workflowId: updated.id, name: updated.name, updatedAt: updated.updatedAt, ...(await approvalNeeded(getDeps(), owner, updated.id)) },
         };
       }
 
@@ -490,7 +601,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       });
       return {
         success: true,
-        data: { workflowId: created.id, name: created.name, updatedAt: created.updatedAt },
+        data: { workflowId: created.id, name: created.name, updatedAt: created.updatedAt, ...(await approvalNeeded(getDeps(), owner, created.id)) },
       };
     },
   });
@@ -550,8 +661,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const directActor = ctx.interactiveActor?.id === owner.userId &&
-        ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+      const directActor = isDirectActor(ctx, owner);
       let result;
       try {
         result = await deleteWorkflowDefinition(getDeps(), { ...owner, deletionAuthority: directActor ? { type: "interactive", userId: owner.userId } : { type: "automated" } }, workflow_id);
@@ -592,7 +702,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     execute: async ({ workflow_id, reason }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      if (ctx.interactiveActor?.id !== owner.userId || ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child") {
+      if (!isDirectActor(ctx, owner)) {
         return { success: false, error: "Open a deletion request from signed-in web chat or team settings. Automated turns cannot submit requests for a person." };
       }
       const deps = getDeps();
@@ -614,18 +724,23 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Fetch a run's status, outcome, per-node checkpoints, and what it is waiting on " +
       "(timers, signals, approvals). pendingGates lists each step that waits for approval and, " +
-      "for a step on a teammate's shared account, the teammate who must approve it.",
+      "for a step on a teammate's shared account, the teammate who must approve it. " +
+      "provenance names the server build that ran it, the server's build now, and the saved workflow version it used: " +
+      "check these first, because a fix that is not deployed or an edit made after the run explains many failures.",
     riskLevel: "low",
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
+      const deps = getDeps();
+      const detail = await getWorkflowRunDetail(deps, owner, run_id);
       if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const provenance = await workflowRunProvenance(deps.db, detail.run);
       return {
         success: true,
         data: {
           runId: detail.run.runId,
           workflowId: detail.run.workflowId,
+          provenance,
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
@@ -730,6 +845,41 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     },
   });
 
+  const retryRun = action(
+    Type.Object({
+      run_id: Type.String(),
+      from: Type.Union([Type.Literal("failed_step"), Type.Literal("start")]),
+      input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    }),
+  )({
+    id: "workflows.retry_run",
+    name: "Retry workflow run",
+    description:
+      "Run a failed or cancelled run again on the current saved workflow. " +
+      "from \"failed_step\" reuses every finished step before the failure, so only the failed step and the steps after it run; " +
+      "a foreach keeps its finished items. A step edited since the run, and every step after it, runs again. " +
+      "from \"start\" runs every step; with it, `input` replaces some trigger inputs, for example a shorter date range for a test run. " +
+      "The retry keeps the old run's audience and follow-up conversation. Returns { runId }; check the result with get_run.",
+    riskLevel: "medium",
+    execute: async ({ run_id, from, input }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot retry runs. Retry the run from the run page or an assistant conversation." };
+      }
+      const result = await retryWorkflowRun(getDeps(), owner, run_id, { from, input });
+      if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      if (result === "workflow_deleted") return { success: false, error: "This run's workflow was deleted. Create the workflow again, then start a new run." };
+      if (result === "not_retryable") return { success: false, error: "Only failed or cancelled runs can be retried. Wait for the run to settle, or cancel it first." };
+      if (result === "input_needs_start") return { success: false, error: "A retry from the failed step reuses the original input. To change the input, retry with from \"start\"." };
+      if ("invalidInput" in result) {
+        return { success: false, error: `run input is invalid: ${result.invalidInput.map((e) => e.message).join(" ")} Fix the listed inputs and retry again.` };
+      }
+      return { success: true, data: { runId: result.runId, retryOf: run_id, from } };
+    },
+  });
+
   const resolveApproval = action(
     Type.Object({
       run_id: Type.String(),
@@ -781,6 +931,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           { id: "cancel", label: "Cancel" },
         ],
         resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}${gateId ? `:${gateId}` : ""}`,
+        // The person who asked answers. A team API key records its minting
+        // admin as the resolver, so an open card would let it act as that admin.
+        context: { approver: { userId: owner.userId } },
       });
       if (decision.actionId !== "approve") {
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
@@ -938,6 +1091,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           name: updated.name,
           nodes: patched.definition.nodes.length,
           edges: patched.definition.edges.length,
+          ...(await approvalNeeded(deps, owner, updated.id)),
         },
       };
     },
@@ -988,7 +1142,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
       const updated = await updateWorkflowDefinition(deps, owner, workflow_id, { definition: patched.definition });
       if (!updated) return { success: false, error: `workflow not found: ${workflow_id}` };
-      return { success: true, data: { workflowId: updated.id, model, nodeIds: patched.nodeIds } };
+      return { success: true, data: { workflowId: updated.id, model, nodeIds: patched.nodeIds, ...(await approvalNeeded(deps, owner, updated.id)) } };
     },
   });
 
@@ -1050,6 +1204,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           nodeId: result.nodeId,
           sources: result.sources,
           updatedAt: result.definition.updatedAt,
+          ...(await approvalNeeded(getDeps(), owner, result.definition.id)),
         },
       };
     },
@@ -1665,6 +1820,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       previewWorkflowAction,
       listRuns,
       cancelRun,
+      retryRun,
+      allowPermissions,
       resolveApproval,
       listEventTypesAction,
       createTrigger,

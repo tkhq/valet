@@ -92,6 +92,7 @@ import type { Providers } from "./types.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
+import { valetBuildSha } from "../version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // packages/api/src/providers -> packages/api
@@ -722,6 +723,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
+    build: valetBuildSha(),
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
     // The thread that started the run hears about it too, once the run

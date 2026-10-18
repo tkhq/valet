@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { driveUntilPark } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionInvocations, actionPolicies, credentials, credentialShares, runtimeGrants, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { actionInvocations, actionPolicies, credentials, credentialShares, runtimeGrants, teamMembers, teams, workflowAccountGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { revokeShare, shareCredential } from "../services/credential-shares.js";
 import * as borrow from "../services/credential-borrow.js";
 import * as policy from "../policies/service.js";
@@ -142,6 +142,25 @@ it.each([false, true])("grants lasting account consent only for a verified perso
     expect((await p.workflowStore.listSignals("run-atomic"))[0]).toMatchObject({ signalId: `approval:step:account:${await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user")}:resolution`, payload: { scope: "team_account" } });
     expect((await p.db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run-atomic:step")))[0]).toMatchObject({ status: "pending", resolvedBy: null });
   }
+});
+
+it.each([false, true])("keeps the lender's account for this workflow's current steps (verified=%s)", async verified => {
+  const { p } = await setup();
+  await p.db.insert(credentials).values({ ownerType: "user", ownerId: "local-user", service: "demo", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore };
+  const person = { userId: "local-user", orgId: "local-org", humanAccountConsent: verified };
+  const answer = () => resolveWorkflowApproval(deps, person, { runId: "run-atomic", nodeId: "step", approved: true, scope: "workflow", via: "web" });
+  const [stored] = await p.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, "wf-atomic"));
+  if (verified) {
+    // Consent covers the steps this run shows. Changed steps grant nothing.
+    await p.db.update(workflowDefinitions).set({ definition: { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }], edges: [] } }).where(eq(workflowDefinitions.id, "wf-atomic"));
+    expect(await answer()).toBe("stale_workflow");
+    await p.db.update(workflowDefinitions).set({ definition: stored!.definition }).where(eq(workflowDefinitions.id, "wf-atomic"));
+  }
+  expect(await answer()).toBe(verified ? "ok" : "human_only");
+  expect(await p.db.select().from(workflowAccountGrants)).toMatchObject(verified ? [{ workflowId: "wf-atomic", memberId: "local-user", service: "demo" }] : []);
+  await p.workflowStore.createRun("run-scheduled", { workflowId: "wf-atomic", definitionVersionId: "v1" }, stored!.definition, "v1", { ownerType: "team", ownerId: "atomic-team", actorUserId: "team:atomic-team" });
+  expect(await borrow.canBorrowCredential(p.db, { orgId: "local-org", teamId: "atomic-team", actorId: "team:atomic-team", service: "demo", memberId: "local-user", sessionId: "wf:run-scheduled" })).toBe(verified);
 });
 
 it("rejects a lasting choice on an old account gate without changing its scope", async () => {

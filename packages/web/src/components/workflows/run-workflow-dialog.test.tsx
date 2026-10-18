@@ -11,9 +11,11 @@ import type { WorkflowInputDefinition } from "@valet/workflow";
 import { RunWorkflowDialog } from "./run-workflow-dialog";
 
 const mutateAsync = vi.fn();
+const retryMutateAsync = vi.fn();
 
 vi.mock("~/api/workflows", () => ({
   useStartRun: () => ({ mutateAsync, isPending: false }),
+  useRetryRun: () => ({ mutateAsync: retryMutateAsync, isPending: false }),
 }));
 
 const schema: Record<string, WorkflowInputDefinition> = {
@@ -40,6 +42,8 @@ function renderDialog(onStarted = vi.fn(), fields: Record<string, WorkflowInputD
 beforeEach(() => {
   mutateAsync.mockReset();
   mutateAsync.mockResolvedValue({ runId: "wfrun_test" });
+  retryMutateAsync.mockReset();
+  retryMutateAsync.mockResolvedValue({ runId: "wfrun_retry" });
 });
 
 describe("RunWorkflowDialog", () => {
@@ -99,5 +103,27 @@ describe("RunWorkflowDialog", () => {
       mode: "safe",
     });
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith("wfrun_test"));
+  });
+
+  it("retries from the start with the run's input, after the person changes one field", async () => {
+    const onStarted = vi.fn();
+    render(
+      <RunWorkflowDialog
+        workflowId="wf_1"
+        workflowName="Releases"
+        schema={{ days: { type: "number", label: "Days" }, repo: { type: "string", label: "Repo" } }}
+        open
+        onOpenChange={() => {}}
+        onStarted={onStarted}
+        retryOf={{ runId: "wfrun_old", input: { days: 7, repo: "mono" } }}
+      />,
+    );
+    const days = screen.getByLabelText("Days") as HTMLInputElement;
+    expect(days.value).toBe("7");
+    fireEvent.change(days, { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalledWith("wfrun_retry"));
+    expect(retryMutateAsync).toHaveBeenCalledWith({ from: "start", input: { days: 1, repo: "mono" } });
+    expect(mutateAsync).not.toHaveBeenCalled();
   });
 });

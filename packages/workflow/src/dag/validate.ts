@@ -47,6 +47,7 @@ import {
   type IfDataType,
 } from './if-operations.js';
 import { didYouMean } from './near-match.js';
+import { MAX_STEP_MODEL_CALLS } from './step-budget.js';
 import type { WorkflowDefinition } from './shape.js';
 import type { DagNodeType, ForeachNode, IfNode, WorkflowNode } from './nodes.js';
 
@@ -113,10 +114,10 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   if: ['id', 'type', 'combinator', 'conditions'],
   wait: ['id', 'type', 'mode', 'duration'],
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
-  session: ['toolScope', 'id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
+  session: ['toolScope', 'id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'maxModelCalls', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'reasoning', 'onError'],
-  orchestrator: ['toolScope', 'id', 'type', 'prompt', 'outputSchema', 'wait'],
+  orchestrator: ['toolScope', 'id', 'type', 'prompt', 'outputSchema', 'maxModelCalls', 'wait'],
   // A tool node carries BOTH policies, and they answer different questions.
   // `onError` decides what a node FAILURE does to the rest of the run;
   // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
@@ -527,6 +528,7 @@ function validateNodeFields(
         errors.push(`${label}: session wait.timeout is not implemented — omit it`);
       }
       checkModel(label, 'session.model', node.model, env, errors);
+      checkModelCalls(label, 'session', node.maxModelCalls, errors);
       break;
     case 'stop':
       if (node.outcome !== undefined && node.outcome !== 'success' && node.outcome !== 'failure') {
@@ -569,6 +571,7 @@ function validateNodeFields(
       } else {
         checkTemplate(label, 'prompt', node.prompt, refCtx, errors);
       }
+      checkModelCalls(label, 'orchestrator', node.maxModelCalls, errors);
       break;
     case 'tool':
       if (!isNonEmptyString(node.service)) {
@@ -1053,6 +1056,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isPositiveInteger(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n > 0;
+}
+
+function checkModelCalls(label: string, type: string, value: unknown, errors: string[]): void {
+  if (value === undefined) return;
+  if (!isPositiveInteger(value) || value > MAX_STEP_MODEL_CALLS) {
+    errors.push(
+      `${label}: ${type}.maxModelCalls must be an integer from 1 to ${MAX_STEP_MODEL_CALLS}. ` +
+        'For more work, use a foreach step that handles one item in each iteration.',
+    );
+  }
 }
 
 function hasKey(value: unknown, key: string): boolean {

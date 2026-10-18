@@ -1,10 +1,11 @@
 /** Permission preview and durable grants scoped to one workflow and its owner.
  * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
+import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { sameWorkflowSteps } from "./definition-version.js";
-import { credentials, workflowActionGrants } from "../schema/index.js";
+import { pendingWorkflowAccountConsent, saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
+import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
@@ -16,10 +17,14 @@ import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
   AllowWorkflowPermissionsResponse,
+  GetWorkflowPermissionsResponse,
   WorkflowNodePermissionWire,
   WorkflowDefinitionSummary,
 } from "../wire/types.js";
 import { getWorkflowDefinition, revokeWorkflowGrants, type WorkflowOwner, type WorkflowServiceDeps } from "./service.js";
+
+/** Permission operations need the app database and action catalog, not a running engine. */
+export type WorkflowPermissionDeps = Pick<WorkflowServiceDeps, "db" | "actionPluginByService">;
 
 /** A tool node's identity, narrowed from the stored definition JSON. The
  * definition was validated at save time, but tool-node rows can predate the
@@ -72,6 +77,18 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
   return { nodeId, service: n.service, action: n.action, params };
 }
 
+/** Credential services referenced by direct and foreach tool steps, including dynamic tools. */
+export function workflowCredentialServices(deps: WorkflowPermissionDeps, definition: unknown): string[] {
+  return [...new Set(toolNodeRefs(definition).map((ref) =>
+    deps.actionPluginByService?.get(ref.service)?.actionPlugin.credentialService ?? ref.service))].filter(service => service !== "github");
+}
+
+/** Identifies the reviewed definition, owner, and credential services. */
+export function workflowPermissionDefinitionToken(orgId: string, summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId" | "definition">, credentialServices: readonly string[]): string {
+  return createHash("sha256").update(JSON.stringify({ orgId, workflowId: summary.id,
+    ownerType: summary.ownerType, ownerId: summary.ownerId, definition: summary.definition, credentialServices: [...credentialServices].sort() })).digest("hex");
+}
+
 /** Predicts the policy resolution of every tool node for the stored owner.
  * Returns null when the workflow does not exist for this owner (the caller
  * 404s). Actions absent from the static plugin catalog (dynamic MCP
@@ -79,13 +96,22 @@ function toToolRef(nodeId: string, n: Record<string, unknown>): ToolNodeRef | nu
  * until discovery runs, and discovery touches credentials, which a read
  * endpoint must not do. */
 export async function analyzeWorkflowPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
-): Promise<WorkflowNodePermissionWire[] | null> {
+): Promise<GetWorkflowPermissionsResponse | null> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
-  return analyzeDefinitionPermissions(deps, owner, summary);
+  const services = workflowCredentialServices(deps, summary.definition);
+  const result: GetWorkflowPermissionsResponse = { definitionToken: workflowPermissionDefinitionToken(owner.orgId, summary, services),
+    nodes: await analyzeDefinitionPermissions(deps, owner, summary) };
+  if (summary.ownerType === "team") {
+    const [team] = await deps.db.select({ name: teams.name }).from(teams)
+      .where(and(eq(teams.id, summary.ownerId), eq(teams.orgId, owner.orgId))).limit(1);
+    if (team) result.accountConsent = { teamId: summary.ownerId, teamName: team.name, services,
+      pending: await pendingWorkflowAccountConsent(deps.db, { orgId: owner.orgId, workflowId: summary.id, teamId: summary.ownerId, userId: owner.userId, services }) };
+  }
+  return result;
 }
 
 /** The paths, as segments, of the parameters that are templates a run fills in. */
@@ -122,7 +148,7 @@ function dependsOnTemplates(
 }
 
 export async function analyzeDefinitionPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   summary: WorkflowDefinitionSummary,
 ): Promise<WorkflowNodePermissionWire[]> {
@@ -156,9 +182,22 @@ export async function analyzeDefinitionPermissions(
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
+    // The invoker uses a member's shared account only after the team's own
+    // connection, an organization-provided one, and a team 1Password item,
+    // never for GitHub, and asks that member. The preview reads no vault, so
+    // the flag says the run may ask.
+    const credentialService = entry?.actionPlugin.credentialService ?? ref.service;
+    let sharedAccount = false;
+    if (teamId !== undefined && teamOwn !== undefined && !teamOwn.has(credentialService) && credentialService !== "github"
+      && !findCredentialDeclaration(entry ? [entry.plugin] : [], credentialService)?.requires?.orgCredential) {
+      if (!sharedServices.has(credentialService)) {
+        sharedServices.set(credentialService, (await membersSharing(deps.db, teamId, credentialService)).length > 0);
+      }
+      sharedAccount = sharedServices.get(credentialService) === true;
+    }
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
     if (!entry || !action) {
-      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown" });
+      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: null, mode: "unknown", ...(sharedAccount ? { sharedAccount: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
@@ -179,19 +218,6 @@ export async function analyzeDefinitionPermissions(
     // The mode reads templates literally, as the workflow grant does; the
     // flag says when a rule keys on a value the run renders.
     const runtimeParams = dependsOnTemplates(rows, { service: ref.service, actionId }, templatedPaths(ref.params));
-    // The invoker uses a member's shared account only after the team's own
-    // connection, an organization-provided one, and a team 1Password item,
-    // never for GitHub, and asks that member. The preview reads no vault, so
-    // the flag says the run may ask.
-    const credentialService = entry.actionPlugin.credentialService ?? ref.service;
-    let sharedAccount = false;
-    if (teamId !== undefined && teamOwn !== undefined && !teamOwn.has(credentialService) && credentialService !== "github"
-      && !findCredentialDeclaration([entry.plugin], credentialService)?.requires?.orgCredential) {
-      if (!sharedServices.has(credentialService)) {
-        sharedServices.set(credentialService, (await membersSharing(deps.db, teamId, credentialService)).length > 0);
-      }
-      sharedAccount = sharedServices.get(credentialService) === true;
-    }
     nodes.push({
       nodeId: ref.nodeId,
       service: ref.service,
@@ -210,21 +236,24 @@ export async function analyzeDefinitionPermissions(
 export type AllowWorkflowPermissionsOutcome =
   /** `definition` is the one the grants were read from, so a write can check
    * the steps have not changed since. */
-  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown }
-  | { ok: false; badRequest: string }
+  | { ok: true; result: AllowWorkflowPermissionsResponse; grants: (typeof workflowActionGrants.$inferInsert)[]; definition: unknown; definitionToken: string; credentialServices: string[] }
+  | { ok: false; badRequest: string; stale?: true }
   | null;
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
 export async function prepareWorkflowPermissions(
-  deps: WorkflowServiceDeps,
+  deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
   actionIds: string[] | undefined,
 ): Promise<AllowWorkflowPermissionsOutcome> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
-  if (!(await canGrantWorkflowPermissions(deps, owner, summary))) {
-    return { ok: false, badRequest: "Only the workflow owner or a team admin can manage its permissions." };
+  const credentialServices = workflowCredentialServices(deps, summary.definition);
+  const ownAccountsOnly = actionIds?.length === 0 && summary.ownerType === "team"
+    && owner.humanAccountConsent === true && !owner.agentEditor && owner.principal?.type === "user";
+  if (!ownAccountsOnly && !(await canGrantWorkflowPermissions(deps, owner, summary))) {
+    return { ok: false, badRequest: "Only the workflow owner or a team admin can grant action permissions. To allow your accounts, choose Allow my shared accounts." };
   }
   const analysis = await analyzeDefinitionPermissions(deps, owner, summary);
 
@@ -270,41 +299,62 @@ export async function prepareWorkflowPermissions(
     });
     allowed.push(actionId);
   }
-  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition };
+  return { ok: true, result: { allowed, blocked }, grants, definition: summary.definition, definitionToken: workflowPermissionDefinitionToken(owner.orgId, summary, credentialServices), credentialServices };
 }
 
 /** Who may approve a workflow's actions for every later run: the owning user, or an admin of the owning team. */
-export async function canGrantWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
+export async function canGrantWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, summary: Pick<WorkflowDefinitionSummary, "ownerType" | "ownerId">) {
   if (owner.principal?.type === "team") return false;
   return summary.ownerType === "user" ? summary.ownerId === owner.userId
     : summary.ownerType === "team" && await canAdministerTeam(deps.db, summary.ownerId, owner.userId);
 }
 
-export async function revokeWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
-  const summary = await getWorkflowDefinition(deps, owner, workflowId);
-  if (!summary || !(await canGrantWorkflowPermissions(deps, owner, summary))) return false;
-  await revokeWorkflowGrants(deps.db, owner.orgId, workflowId);
-  return true;
+export async function revokeWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+  return deps.db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const scopedDeps = { ...deps, db: tx };
+    const summary = await getWorkflowDefinition(scopedDeps, owner, workflowId);
+    if (!summary || !(await canGrantWorkflowPermissions(scopedDeps, owner, summary))) return false;
+    await revokeWorkflowGrants(tx, owner.orgId, workflowId);
+    return true;
+  });
+}
+
+/** A member can withdraw their own account consent without resetting teammates or action permissions. */
+export async function revokeOwnWorkflowAccounts(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string): Promise<boolean> {
+  if (!owner.humanAccountConsent || owner.agentEditor || owner.principal?.type !== "user") return false;
+  return deps.db.transaction(async tx => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const summary = await getWorkflowDefinition({ ...deps, db: tx }, owner, workflowId);
+    if (summary?.ownerType !== "team") return false;
+    await revokeWorkflowAccountConsent(tx, owner.orgId, workflowId, owner.userId);
+    return true;
+  });
 }
 
 export async function persistWorkflowPermissions(db: AppQueryable, grants: (typeof workflowActionGrants.$inferInsert)[]) {
   if (grants.length) await db.insert(workflowActionGrants).values(grants).onConflictDoNothing();
 }
 
-export async function allowWorkflowPermissions(deps: WorkflowServiceDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined): Promise<AllowWorkflowPermissionsOutcome> {
-  const prepared = await prepareWorkflowPermissions(deps, owner, workflowId, actionIds);
-  if (!prepared?.ok) return prepared;
-  // Lock the definition and compare the steps again, as an approval for the
-  // whole workflow does: an edit that committed after the read above must not
-  // keep grants for steps nobody reviewed. A later edit waits on this lock,
-  // and its revoke-after-write removes the grants.
-  const current = await deps.db.transaction(async (tx) => {
-    const locked = await tx.execute(sql`SELECT definition FROM workflow_definitions WHERE id = ${workflowId} FOR UPDATE`) as {
-      rows: Array<{ definition: unknown }>;
-    };
-    if (!locked.rows[0] || !sameWorkflowSteps(locked.rows[0].definition, prepared.definition)) return false;
+export async function allowWorkflowPermissions(deps: WorkflowPermissionDeps, owner: WorkflowOwner, workflowId: string, actionIds: string[] | undefined, definitionToken: string): Promise<AllowWorkflowPermissionsOutcome> {
+  return deps.db.transaction(async tx => {
+    await tx.execute(sql`SELECT id FROM workflow_definitions WHERE id = ${workflowId} AND org_id = ${owner.orgId} FOR UPDATE`);
+    const scopedDeps = { ...deps, db: tx };
+    const summary = await getWorkflowDefinition(scopedDeps, owner, workflowId);
+    if (!summary) return null;
+    const stale: AllowWorkflowPermissionsOutcome = { ok: false, stale: true,
+      badRequest: "This workflow changed after you reviewed it. Refresh the review, then allow its permissions." };
+    if (workflowPermissionDefinitionToken(owner.orgId, summary, workflowCredentialServices(scopedDeps, summary.definition)) !== definitionToken) return stale;
+    const prepared = await prepareWorkflowPermissions(scopedDeps, owner, workflowId, actionIds);
+    if (!prepared?.ok) return prepared;
+    if (prepared.definitionToken !== definitionToken) return stale;
     await persistWorkflowPermissions(tx, prepared.grants);
-    return true;
+    if (owner.humanAccountConsent && !owner.agentEditor && owner.principal?.type === "user" && summary.ownerType === "team") {
+      await saveWorkflowAccountConsent(tx, {
+        orgId: owner.orgId, workflowId, teamId: summary.ownerId, userId: owner.userId,
+        services: prepared.credentialServices,
+      });
+    }
+    return prepared;
   });
-  return current ? prepared : { ok: false, badRequest: "This workflow's steps changed while you allowed them. Review the steps again, then allow them." };
 }

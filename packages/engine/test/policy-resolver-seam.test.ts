@@ -17,6 +17,7 @@ import {
   type Sandbox,
   type SessionEntry,
   type ToolContext,
+  UNATTENDED_WORKFLOW_DECISION,
 } from "../src/index.js";
 import { askApprovalTool } from "../src/builtin-tools/index.js";
 
@@ -488,6 +489,33 @@ describe("policyResolver seam: sender with no Valet account", () => {
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
     const result = await callTool.execute({ tool_id: "github.get_issue", params: { n: 1 }, summary: "s" }, makeCtx({ externalSender: true, policyResolver: resolver }));
     expect(result.text).not.toContain("denied");
+  });
+});
+
+describe("policyResolver seam: unattended workflow task", () => {
+  // `Thread.requestDecision` refuses before a gate opens; the mock returns that refusal.
+  const refused = async (): Promise<DecisionResolution> => ({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() });
+
+  it("denies an action that needs approval, audits it, and runs no host resolution", async () => {
+    let executed = false;
+    const { resolver, invocations, onResolutionCalls } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true }; } }))] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ unattendedWorkflow: true, policyResolver: resolver, requestDecision: refused }),
+    );
+    expect(result.text).toContain("no one can approve during an unattended workflow run");
+    expect(executed).toBe(false);
+    expect(onResolutionCalls).toEqual([]);
+    expect(invocations.map((r) => r.status)).toEqual(["denied"]);
+  });
+
+  it("gives ask_approval a fail-closed answer", async () => {
+    const result = await askApprovalTool.execute({ title: "Delete the branch?" }, makeCtx({ unattendedWorkflow: true, requestDecision: refused }));
+    expect(result.text).toContain("No one can approve during an unattended workflow run");
+    expect(result.text).toContain("Do not do this action");
   });
 });
 

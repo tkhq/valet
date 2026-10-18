@@ -93,6 +93,55 @@ describe("RunDetailBody", () => {
     expect(screen.getByRole("status").textContent).toContain("Waiting at: apply");
     expect(screen.queryByText("Running")).toBeNull();
   });
+  it("says a failed run used an older build and workflow version, and names both", () => {
+    const data = {
+      ...baseRun({ status: "settled", outcome: "failed" }),
+      provenance: { build: "1a40599aa", serverBuild: "fef21f62e", workflowVersion: 7, latestWorkflowVersion: 9 },
+    };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText(/^Since this run, Valet was updated \(build 1a40599aa to fef21f62e\) and the workflow was edited \(version 7 to 9\)\./)).toBeTruthy();
+    expect(screen.getByText(/Workflow version 7 · Valet build 1a40599aa/)).toBeTruthy();
+  });
+  it("shows no change notice when the run used the current build and version", () => {
+    const data = {
+      ...baseRun({ status: "settled", outcome: "failed" }),
+      provenance: { build: "fef21f62e", serverBuild: "fef21f62e", workflowVersion: 9, latestWorkflowVersion: 9 },
+    };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByText(/Since this run/)).toBeNull();
+  });
+  it("offers a retry from the failed step when a finished step can be reused", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      { nodeId: "list", iteration: 0, status: "completed", createdAt: 1 },
+      { nodeId: "report", iteration: 0, status: "failed", error: "boom", createdAt: 2 },
+    ];
+    const onRetry = vi.fn();
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={onRetry} retryPending={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed step" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry from start" }));
+    expect(onRetry.mock.calls).toEqual([["failed_step"], ["start"]]);
+  });
+  it("offers Explain this failure on the failed step of a settled run", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [
+      { nodeId: "list", iteration: 0, status: "completed", createdAt: 1 },
+      { nodeId: "qualify", iteration: 2, status: "failed", error: "boom", createdAt: 2 },
+    ];
+    const onExplainFailure = vi.fn();
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} onExplainFailure={onExplainFailure} />);
+    const buttons = screen.getAllByRole("button", { name: "Explain this failure" });
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0] as HTMLElement);
+    expect(onExplainFailure).toHaveBeenCalledWith("qualify", 2);
+  });
+  it("offers only a full retry when no step finished", () => {
+    const data = baseRun({ status: "settled", outcome: "failed" });
+    data.checkpoints = [{ nodeId: "report", iteration: 0, status: "failed", error: "boom", createdAt: 2 }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.queryByRole("button", { name: "Retry failed step" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
+  });
   it("shows the approval card when a pendingGate of kind approval exists", () => {
     const data = baseRun(
       {

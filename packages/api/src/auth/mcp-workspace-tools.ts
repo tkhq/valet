@@ -14,12 +14,14 @@ import { z } from "zod";
 import type {
   GetSkillResponse,
   GetWorkflowRunResponse,
+  WorkflowRunProvenance,
   ListArtifactsResponse,
   ListNotificationDecisionsResponse,
   ListSkillsResponse,
   ListWorkflowActionRequiredResponse,
   ListWorkflowsResponse,
   ShareArtifactResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   WorkflowRunOutcome,
@@ -94,6 +96,8 @@ type RunView = {
   status: WorkflowRunStatus;
   outcome?: WorkflowRunOutcome;
   pending_approvals?: Array<{ node_id: string; kind: string; summary?: string; action?: string; risk_level?: string }>;
+  /** The server build and saved workflow version the run used, and what is current now. */
+  provenance?: { build?: string; server_build?: string; workflow_version?: number; latest_workflow_version?: number };
   url: string;
 };
 
@@ -112,7 +116,17 @@ function runView(deps: McpToolDeps, detail: GetWorkflowRunResponse): RunView {
           ...(g.riskLevel ? { risk_level: g.riskLevel } : {}),
         })) }
       : {}),
+    ...(detail.provenance ? { provenance: provenanceView(detail.provenance) } : {}),
     url: `${deps.origin}/workflows/runs/${encodeURIComponent(r.runId)}`,
+  };
+}
+
+function provenanceView(p: WorkflowRunProvenance): NonNullable<RunView["provenance"]> {
+  return {
+    ...(p.build ? { build: p.build } : {}),
+    ...(p.serverBuild ? { server_build: p.serverBuild } : {}),
+    ...(p.workflowVersion !== undefined ? { workflow_version: p.workflowVersion } : {}),
+    ...(p.latestWorkflowVersion !== undefined ? { latest_workflow_version: p.latestWorkflowVersion } : {}),
   };
 }
 
@@ -397,15 +411,22 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
   server.registerTool(
     "retry_workflow_run",
     {
-      description: `Starts a failed or cancelled workflow run again with its original input, and by default waits for it. ${RUN_STATUSES}`,
+      description:
+        "Starts a failed or cancelled workflow run again on the current saved workflow, and by default waits for it. " +
+        "from \"failed_step\" reuses the finished steps before the failure, so only the failed step and later steps run. " +
+        "from \"start\" (default) runs every step; with it, input replaces some of the original inputs, for example a shorter date range. " +
+        RUN_STATUSES,
       inputSchema: {
         run_id: z.string().min(1).describe("Run id of a failed or cancelled run."),
+        from: z.enum(["start", "failed_step"]).optional().describe("Where the retry starts. Default: start."),
+        input: z.record(z.string(), z.unknown()).optional().describe("Trigger inputs that replace the original values. Only with from \"start\"."),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe(`Seconds to wait (0-${MAX_WAIT_SECONDS}). Default: ${DEFAULT_RUN_WAIT_SECONDS}.`),
       },
       annotations: { destructiveHint: true, openWorldHint: true },
     },
-    run(async ({ run_id, wait_seconds }: { run_id: string; wait_seconds?: number }) => {
-      const retried = await call<RetryWorkflowRunResponse>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/retry`, "Workflow run");
+    run(async ({ run_id, from, input, wait_seconds }: { run_id: string; from?: "start" | "failed_step"; input?: Record<string, unknown>; wait_seconds?: number }) => {
+      const body: RetryWorkflowRunRequest = { ...(from ? { from } : {}), ...(input ? { input } : {}) };
+      const retried = await call<RetryWorkflowRunResponse>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/retry`, "Workflow run", body);
       return waitForRun(deps, retried.runId, wait_seconds ?? DEFAULT_RUN_WAIT_SECONDS);
     }),
   );

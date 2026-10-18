@@ -69,10 +69,11 @@ import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workfl
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
 import { workflowRunStepCosts } from "../workflows/step-cost.js";
+import { workflowRunProvenance } from "../workflows/run-provenance.js";
 import { workflowRunModelChanges } from "../workflows/model-drift.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
-import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
+import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions, revokeOwnWorkflowAccounts } from "../workflows/permissions.js";
 import { parseRepoInput, ContentSourceInputError } from "../services/content-sources.js";
 import {
   GitHubSkillRepoReader,
@@ -103,6 +104,7 @@ import type {
   ListWorkflowsResponse,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunRequest,
   StartWorkflowRunResponse,
@@ -660,15 +662,22 @@ workflowsRouter.get("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/permissions", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
-  if (nodes === null) return c.json({ error: "workflow not found" }, 404);
-  const resp: GetWorkflowPermissionsResponse = { nodes };
+  const resp: GetWorkflowPermissionsResponse | null = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (resp === null) return c.json({ error: "workflow not found" }, 404);
   return c.json(resp);
 });
 
 workflowsRouter.delete("/:id/permissions/allow", async (c) => {
   const { deps, owner } = serviceCtx(c);
   if (!(await revokeWorkflowPermissions(deps, owner, c.req.param("id")))) return c.json({ error: "Workflow not found or permission management is not allowed." }, 404);
+  return c.json({ ok: true });
+});
+
+workflowsRouter.delete("/:id/permissions/accounts", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  if (!(await revokeOwnWorkflowAccounts(deps, owner, c.req.param("id")))) {
+    return c.json({ error: "Workflow not found or account consent cannot be changed here. Sign in and open a team workflow you can access." }, 404);
+  }
   return c.json({ ok: true });
 });
 
@@ -679,7 +688,7 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
   // and a bare array has no own `actionIds`, so it would silently take the
   // "omitted → pre-approve all" branch — a narrowing request must never
   // widen on a permissions-granting route.
-  let body: AllowWorkflowPermissionsRequest = {};
+  let body: Partial<AllowWorkflowPermissionsRequest> = {};
   try {
     const text = await c.req.text();
     if (text.length > 0) {
@@ -701,9 +710,12 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
     }
   }
 
-  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
+  if (typeof body.definitionToken !== "string" || !/^[a-f0-9]{64}$/.test(body.definitionToken)) {
+    return c.json({ error: "definitionToken must identify the reviewed workflow. Refresh the permissions review, then try again." }, 400);
+  }
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds, body.definitionToken);
   if (outcome === null) return c.json({ error: "workflow not found" }, 404);
-  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, outcome.stale ? 409 : 400);
 
   const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);
@@ -856,13 +868,14 @@ workflowsRouter.get("/runs/:runId", async (c) => {
   const runId = c.req.param("runId");
   const resp = await getWorkflowRunDetail(deps, owner, runId);
   if (!resp) return c.json({ error: "run not found" }, 404);
-  const [conversations, stepCosts] = await Promise.all([
+  const [conversations, stepCosts, provenance] = await Promise.all([
     workflowRunConversations(c, runId),
     workflowRunStepCosts(deps.db, deps.workflowStore, runId),
+    workflowRunProvenance(deps.db, resp.run),
   ]);
   const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts,
     (id) => canReadWorkflowRun(deps, owner, id));
-  return c.json({ ...resp, conversations, stepCosts, modelChanges });
+  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
@@ -943,8 +956,25 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const runId = c.req.param("runId");
 
-  const result = await retryWorkflowRun(deps, owner, runId);
+  let body: RetryWorkflowRunRequest = {};
+  try {
+    const text = await c.req.text();
+    if (text.length > 0) body = JSON.parse(text) as RetryWorkflowRunRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (body.from !== undefined && body.from !== "start" && body.from !== "failed_step") {
+    return c.json({ error: 'from must be "start" or "failed_step".' }, 400);
+  }
+  if (body.input !== undefined && (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))) {
+    return c.json({ error: "input must be an object of trigger input values." }, 400);
+  }
+
+  const result = await retryWorkflowRun(deps, owner, runId, { from: body.from, input: body.input });
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
+  if (result === "input_needs_start") {
+    return c.json({ error: "A retry from the failed step reuses the original input. To change the input, retry from the start." }, 400);
+  }
   if (result === "workflow_deleted") {
     return c.json(
       { error: "This run's workflow was deleted. Create the workflow again, then start a new run." },

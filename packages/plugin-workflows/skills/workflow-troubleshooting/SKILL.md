@@ -22,7 +22,12 @@ This returns summaries within inherited limits. It does not enable the actions.
 Before each action's first `call_tool`, use `detail: "schema"` with its exact ID unless its schema is already visible.
 Do not guess parameter names or an alternate patch format.
 
-Read `workflows.get_run`, then inspect the first failed or surprising step:
+Read `workflows.get_run` first, and check its `provenance` before other evidence:
+
+- If `build` differs from `serverBuild`, Valet was updated after the run. A fix may already be live. Say so.
+- If `workflowVersion` is lower than `latestWorkflowVersion`, the workflow was edited after the run. Diagnose the current version.
+
+Then inspect the first failed or surprising step:
 
 - `get_node_result`: the checkpoint value that templates read.
 - `get_node_transcript`: rendered instructions, replies, tool calls, results, and format repair.
@@ -71,6 +76,8 @@ Do not claim the import reconstructed behavior from logs alone.
 2. Inspect each step before testing. List the exact integration actions and native tools needed.
 3. Select validate focus with those `actions` and `tools`. The run and its descendants inherit the limit.
 4. Start a real run only when the person authorized it. Existing approval policies still apply.
+   To test a fix to a failed run, use `workflows.retry_run` with `from: "failed_step"`. It reuses the finished steps before the failure, and the edited step and later steps run again.
+   If the fix is upstream, use `from: "start"`. Pass a smaller `input`, for example a one-day window, when the trigger declares one.
 5. Follow `start_run.followUp.next`. End the turn when a completion signal will report here.
 6. On continuation, inspect the result and each success check. Verify delivery from its posting receipt.
 

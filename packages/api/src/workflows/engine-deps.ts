@@ -1,5 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
-import { actionInScope, scopeRefusal } from "@valet/shared";
+import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -38,6 +38,7 @@ import { runEventChannel, slackEventsThreadKey } from "../services/thread-access
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
+  isUnattendedWorkflowRefusal,
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
@@ -391,7 +392,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const receipt = await thread.submitPrompt(text, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
-        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(promptOpts.modelCallLimit ? { [MODEL_CALL_LIMIT_KEY]: promptOpts.modelCallLimit } : {}),
           ...(context.presence ? { presence: context.presence } : {}) },
         queueMode: promptOpts.queueMode,
       });
@@ -427,9 +429,23 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!thread) {
         throw new Error(`workflow engine-deps: thread not found: ${threadId} on session ${sessionId}`);
       }
-      return thread.awaitResult(queueItemId, {
+      const result = await thread.awaitResult(queueItemId, {
         resultSchema: awaitOpts?.resultSchema,
       });
+      if (result.outcome !== "completed") return result;
+      // A step whose approval was refused skipped that action, so the run must
+      // not report success. Failing the step notifies the run's owner.
+      const refused = (await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId))
+        .filter((gate) => gate.resolution !== undefined && isUnattendedWorkflowRefusal(gate.resolution));
+      if (refused.length === 0) return result;
+      return {
+        queueItemId,
+        outcome: "failed" as const,
+        error:
+          `This step needed approval nobody can give during a run: ${refused.map((gate) => `"${gate.title}"`).join(", ")}. ` +
+          "Before the next run, move the action to a tool step, which saving the workflow approves, " +
+          "ask a team admin to allow it by policy, or connect a team account for a teammate's shared account.",
+      };
     },
 
     async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {
@@ -639,7 +655,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
-        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(promptOpts.modelCallLimit ? { [MODEL_CALL_LIMIT_KEY]: promptOpts.modelCallLimit } : {}),
           ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,

@@ -9,10 +9,14 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { Type } from "typebox";
+import { eq, sql } from "drizzle-orm";
 import type { ActionPlugin, PluginAction, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { builtinWorkflowTemplates } from "../workflows/template-definitions.js";
-import { teamMembers, teams, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, teamMembers, teams, workflowAccountGrants, workflowActionGrants, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import { createTeam, addMember } from "../services/teams.js";
+import { shareCredential } from "../services/credential-shares.js";
+import { installWorkflowTemplate } from "../workflows/templates.js";
 import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
@@ -326,5 +330,93 @@ describe("a service that is not available yet", () => {
     }
     // And the gallery is not empty as a result — the fixture plugins remain.
     expect(ids).toContain("notes-echo");
+  });
+});
+
+
+describe("template install authorization", () => {
+  const consentDefinition = definition([
+    { id: "start", type: "trigger" },
+    { id: "send", type: "tool", service: "install-fixture", action: "send", params: {} },
+    { id: "stop", type: "stop" },
+  ], [{ from: "start", to: "send" }, { from: "send", to: "stop" }]);
+  const consentTemplate: WorkflowTemplate = {
+    id: "install-consent", name: "Install consent", description: "Sends a fixture message.",
+    category: "Tests", apps: ["install-fixture"], steps: ["Send"], definition: consentDefinition,
+  };
+  const consentPlugin: ValetPlugin = {
+    name: "install-fixture", version: "1", credentials: [{ type: "api_key", service: "install-fixture", configKeys: [] }],
+    actions: [{ service: "install-fixture", actions: [{ ...action("install-fixture.send"), riskLevel: "high" }] }],
+    templates: [consentTemplate, { ...consentTemplate, id: "install-consent-scheduled", schedule: { name: "Consent schedule", cron: "0 12 * * *", timezone: "UTC", description: "Every day" } }],
+  };
+
+  async function bootConsent() {
+    api = await bootTestApi({ plugins: [consentPlugin] });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "install-fixture", { type: "api_key", apiKey: "fixture" });
+    return api;
+  }
+
+  async function installedWorkflowId(response: Response): Promise<string> {
+    expect(response.status, await response.clone().text()).toBe(201);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || !("workflowId" in body) || typeof body.workflowId !== "string") throw new Error("Missing installed workflow ID.");
+    return body.workflowId;
+  }
+
+  async function allowReviewed(baseUrl: string, id: string): Promise<Response> {
+    const review: unknown = await (await fetch(`${baseUrl}/api/workflows/${id}/permissions`)).json();
+    if (!review || typeof review !== "object" || !("definitionToken" in review)) throw new Error("Missing reviewed definition token.");
+    return fetch(`${baseUrl}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definitionToken: review.definitionToken }) });
+  }
+
+  it("allows nothing during a human HTTP install; a review allows the declared actions", async () => {
+    const a = await bootConsent();
+    const id = await installedWorkflowId(await install(a.baseUrl, "install-consent"));
+    expect(await a.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+    const preview = await fetch(`${a.baseUrl}/api/workflows/${id}/permissions`);
+    expect(await preview.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "send", mode: "require_approval" })] });
+    expect((await allowReviewed(a.baseUrl, id)).status).toBe(200);
+    expect(await a.providers.db.select().from(workflowActionGrants)).toMatchObject([
+      { workflowId: id, actionId: "install-fixture.send", grantedBy: "local-user", ownerType: "user", ownerId: "local-user" },
+    ]);
+  });
+
+  it("installs a scheduled team template without grants; a team admin's review allows actions and only their own account", async () => {
+    const a = await bootConsent();
+    const db = a.providers.db;
+    const team = await createTeam(db, { orgId: "local-org", name: "Install team", creatorUserId: "local-user" });
+    await addMember(db, { teamId: team.id, userId: "test-member", role: "member" });
+    await a.providers.engineCredentials.save({ type: "user", id: "test-member" }, "install-fixture", { type: "api_key", apiKey: "other-fixture" });
+    for (const userId of ["local-user", "test-member"]) await shareCredential(db, { teamId: team.id, userId, service: "install-fixture", createdAt: 1 });
+    const id = await installedWorkflowId(await install(a.baseUrl, "install-consent-scheduled", { teamId: team.id }));
+    expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
+    expect(await db.select().from(workflowAccountGrants)).toHaveLength(0);
+    expect(await db.select().from(workflowSchedules).where(eq(workflowSchedules.workflowId, id))).toMatchObject([{ enabled: true }]);
+    expect((await allowReviewed(a.baseUrl, id)).status).toBe(200);
+    expect(await db.select().from(workflowActionGrants)).toMatchObject([{ workflowId: id, ownerType: "team", ownerId: team.id, actionId: "install-fixture.send" }]);
+    expect(await db.select().from(workflowAccountGrants)).toMatchObject([{ workflowId: id, memberId: "local-user", service: "install-fixture" }]);
+    expect(await db.select().from(workflowAccountGrants)).toHaveLength(1);
+  });
+
+  it.each([false, true])("does not auto-authorize a service or agent install (agent=%s)", async agentEditor => {
+    const a = await bootConsent();
+    const p = a.providers;
+    const result = await installWorkflowTemplate({ db: p.db, plugins: p.plugins, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials },
+      { userId: "local-user", orgId: "local-org", principal: { type: "user", id: "local-user" }, humanAccountConsent: agentEditor, agentEditor }, "install-consent");
+    expect(result.ok).toBe(true);
+    expect(await p.db.select().from(workflowActionGrants)).toHaveLength(0);
+    expect(await p.db.select().from(workflowAccountGrants)).toHaveLength(0);
+  });
+
+  it("preserves an organization's approval policy after a human install", async () => {
+    const a = await bootConsent();
+    await a.providers.db.insert(actionPolicies).values({ id: "install-org-gate", orgId: "local-org", principalType: "org", principalId: "local-org",
+      actionId: "install-fixture.send", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "settings", createdAt: 1, updatedAt: 1 });
+    const id = await installedWorkflowId(await install(a.baseUrl, "install-consent"));
+    expect(await a.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+    const preview = await fetch(`${a.baseUrl}/api/workflows/${id}/permissions`);
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ nodes: [expect.objectContaining({ nodeId: "send", mode: "require_approval", provenance: "org_policy" })] });
   });
 });

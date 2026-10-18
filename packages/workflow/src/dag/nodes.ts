@@ -81,6 +81,8 @@ export interface SessionNode {
   title?: string;
   model?: string;
   outputSchema?: Record<string, unknown>;
+  /** The most model calls this step may make. Default `DEFAULT_STEP_MODEL_CALLS`. */
+  maxModelCalls?: number;
   wait?: {
     mode: 'none' | 'until_idle';
     timeout?: string;
@@ -131,6 +133,8 @@ export interface ThreadNode {
   type: 'orchestrator';
   prompt: string;
   outputSchema?: Record<string, unknown>;
+  /** The most model calls this step may make. Default `DEFAULT_STEP_MODEL_CALLS`. */
+  maxModelCalls?: number;
   wait?: {
     mode: 'none' | 'until_idle';
   };

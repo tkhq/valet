@@ -41,6 +41,7 @@ import {
   renderTemplate,
   resolveTriggerInput,
   triggerDataSchema,
+  unboundedWorkWarning,
   type NodeCheckpoint,
   type TemplateContext,
   type TriggerInputError,
@@ -623,6 +624,8 @@ function collectWarnings(node: WorkflowNode, ctx: TemplateContext, sample: Sampl
       }
     }
   }
+  const unbounded = unboundedWorkWarning(node);
+  if (unbounded) warnings.push(unbounded);
   if ((node.type === "session" || node.type === "orchestrator") && node.wait?.mode === "none") {
     warnings.push(
       "wait.mode is 'none', so this node does not wait for the session. Downstream reads of `response` resolve to nothing.",

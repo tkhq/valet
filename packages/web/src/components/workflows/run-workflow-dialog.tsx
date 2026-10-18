@@ -11,7 +11,7 @@
 import { useId, useState } from "react";
 import { normalizeInputType, resolveTriggerInput, type WorkflowInputDefinition } from "@valet/workflow";
 import { Button, Dialog, DialogContent, DialogFooter, Label } from "~/components/primitives";
-import { useStartRun } from "~/api/workflows";
+import { useRetryRun, useStartRun } from "~/api/workflows";
 import { JsonTextarea, LabeledInput, NumberField, SelectField } from "./editor/fields";
 
 /** Initial form state: declared defaults, everything else absent. */
@@ -30,6 +30,7 @@ export function RunWorkflowDialog({
   open,
   onOpenChange,
   onStarted,
+  retryOf,
 }: {
   workflowId: string;
   workflowName: string;
@@ -37,9 +38,13 @@ export function RunWorkflowDialog({
   open: boolean;
   onOpenChange: (next: boolean) => void;
   onStarted: (runId: string) => void;
+  /** Retry this run from the start. The form starts from the run's input. */
+  retryOf?: { runId: string; input: Record<string, unknown> };
 }) {
   const startRun = useStartRun(workflowId);
-  const [values, setValues] = useState<Record<string, unknown>>(() => initialValues(schema));
+  const retryRun = useRetryRun(retryOf?.runId ?? "");
+  const pending = retryOf ? retryRun.isPending : startRun.isPending;
+  const [values, setValues] = useState<Record<string, unknown>>(() => retryOf ? { ...retryOf.input } : initialValues(schema));
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -61,7 +66,9 @@ export function RunWorkflowDialog({
     setFieldErrors({});
     setSubmitError(null);
     try {
-      const result = await startRun.mutateAsync(resolved.input);
+      const result = retryOf
+        ? await retryRun.mutateAsync({ from: "start", input: resolved.input })
+        : await startRun.mutateAsync(resolved.input);
       onOpenChange(false);
       onStarted(result.runId);
     } catch (err) {
@@ -73,8 +80,10 @@ export function RunWorkflowDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`Run ${workflowName}`}
-        description="This workflow's trigger declares inputs. Fill them in to start the run."
+        title={retryOf ? `Retry ${workflowName} from the start` : `Run ${workflowName}`}
+        description={retryOf
+          ? "Every step runs again with these inputs. To test a fix quickly, use a smaller input, for example a shorter date range."
+          : "This workflow's trigger declares inputs. Fill them in to start the run."}
       >
         <div className="grid gap-3">
           {Object.entries(schema).map(([field, def]) => (
@@ -96,11 +105,11 @@ export function RunWorkflowDialog({
         )}
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={startRun.isPending}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={pending}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={startRun.isPending}>
-            {startRun.isPending ? "Starting…" : "Run"}
+          <Button onClick={() => void submit()} disabled={pending}>
+            {pending ? "Starting…" : retryOf ? "Retry" : "Run"}
           </Button>
         </DialogFooter>
       </DialogContent>

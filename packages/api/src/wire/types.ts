@@ -2182,7 +2182,21 @@ export interface WorkflowModelChange {
   current: string[];
 }
 
+/** Which server build and saved workflow version a run used. */
+export interface WorkflowRunProvenance {
+  /** The source commit of the server that started the run. Absent for runs before builds were recorded. */
+  build?: string;
+  /** The source commit this server runs now. */
+  serverBuild?: string;
+  /** The saved version whose steps the run used, when one matches. */
+  workflowVersion?: number;
+  /** The newest saved version of the workflow. */
+  latestWorkflowVersion?: number;
+}
+
 export interface WorkflowRunDetail {
+  /** The server build and saved workflow version this run used. */
+  provenance?: WorkflowRunProvenance;
   /** Run-owned histories, excluding the human conversation that started the run. */
   conversations?: WorkflowRunConversation[];
   /** Model spend per step, from the usage projection. Steps with no model
@@ -2233,6 +2247,14 @@ export interface CancelWorkflowRunResponse {
   ok: true;
 }
 
+/** `POST /api/workflows/runs/:runId/retry`. An empty body retries from the start with the original input. */
+export interface RetryWorkflowRunRequest {
+  /** `failed_step` reuses the finished steps before the failure. Default `start`. */
+  from?: "start" | "failed_step";
+  /** Trigger input values that replace the original ones. Only with `from: "start"`. */
+  input?: Record<string, unknown>;
+}
+
 export interface RetryWorkflowRunResponse {
   runId: string;
 }
@@ -2280,10 +2302,17 @@ export interface WorkflowNodePermissionWire {
 }
 
 export interface GetWorkflowPermissionsResponse {
+  /** Identity of the definition and ownership displayed by this review. */
+  definitionToken: string;
+  /** Complete direct-tool account scope shown alongside the reviewed graph. */
+  /** `pending`: the viewer's own shared accounts among `services` that they have not allowed for this workflow. */
+  accountConsent?: { teamId: string; teamName: string; services: string[]; pending: string[] };
   nodes: WorkflowNodePermissionWire[];
 }
 
 export interface AllowWorkflowPermissionsRequest {
+  /** Token returned by the permission review. Stale reviews grant nothing. */
+  definitionToken: string;
   /** Qualified actionIds to pre-approve. Each must be one of the workflow's
    * gating actions (mode `require_approval`). Omit to pre-approve all of
    * them. The server re-derives the gating set from the stored definition —
@@ -5054,6 +5083,8 @@ export interface HealthResponse {
   service: string;
   ts: number;
   version?: string;
+  /** The source commit this server runs, when its deploy records one. */
+  build?: string;
   /** Resolved sandbox backend (`docker` | `local` | `kubernetes`) the server
    * is running. Append-only; existing consumers ignore it. */
   sandboxBackend?: string;
