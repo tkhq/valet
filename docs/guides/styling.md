@@ -91,6 +91,12 @@ Use `textLinkClass` for text links and `Button asChild` for links presented as b
 Delete superseded implementations. Preserve test seams and unique coverage for code that still runs.
 Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUnusedLocals`. Check export references with `rg`.
 
+### Shared page parts
+
+Use these primitives instead of hand-written classes:
+
+- `Select` is a native `<select>` with the field surface and focus ring of `Input`. Use `size="sm"` in a compact filter row. It has no default width, so pass `w-full` for a form field.
+
 ### Accepting `className` for composition
 
 A primitive takes `className`, merges it, and forwards its remaining props:

@@ -29,7 +29,7 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
-import { FilterChips, pageClass } from "~/components/primitives";
+import { FilterChips, Select, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatUsdPrecise } from "~/lib/format-usage";
 
@@ -495,19 +495,18 @@ export function UsagePage() {
             <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
               <label className="text-sm text-muted">
                 <span className="sr-only">CSV granularity</span>
-                <select
+                <Select
                   aria-label="CSV granularity"
                   value={exportGranularity}
                   onChange={(event) => {
                     const value = event.target.value;
                     if (value === "day" || value === "hour" || value === "turn") setExportGranularity(value);
                   }}
-                  className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0 sm:py-1"
                 >
                   <option value="day">Daily</option>
                   <option value="hour">Hourly</option>
                   <option value="turn">Itemized (per turn)</option>
-                </select>
+                </Select>
               </label>
               <button
                 type="button"

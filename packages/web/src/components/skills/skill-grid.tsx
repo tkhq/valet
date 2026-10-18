@@ -19,7 +19,7 @@
  */
 import type { SkillSummary } from "@valet/api/wire";
 import type { SkillListQuery } from "~/api/client";
-import { FilterChips } from "~/components/primitives";
+import { FilterChips, Select } from "~/components/primitives";
 import { SkillCard } from "~/components/skills/skill-card";
 import { type Scope } from "~/components/skills/scope-badge";
 import { SearchInput } from "~/components/search-input";
@@ -96,18 +96,18 @@ export function SkillGrid({
           />
 
           {showScopeFilter && (
-            <select
+            <Select
+              size="sm"
               aria-label="Filter by scope"
               value={filters.scope}
               onChange={(e) => onFiltersChange({ ...filters, scope: readScopeFilter(e.target.value) })}
-              className="max-sm:min-h-11 max-sm:text-base rounded-md border border-line bg-paper px-2 py-1 text-xs text-ink"
             >
               {SCOPE_OPTIONS.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
               ))}
-            </select>
+            </Select>
           )}
 
           <div className="ml-auto w-full sm:w-56">

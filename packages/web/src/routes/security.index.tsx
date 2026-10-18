@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Label, Spinner, cardClass } from "~/components/primitives";
+import { Badge, Button, Input, Label, Select, Spinner, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -311,15 +311,15 @@ function NewReviewCard() {
           </span>
         </div>
         <div className="rounded-lg border border-moss bg-moss-wash p-3 sm:hidden">
-          <select
+          <Select
             id="mobile-review-method"
             aria-label="Review method"
             value={preset}
             onChange={(event) => setPreset(event.target.value)}
-            className="h-11 w-full min-w-0 rounded-md border border-line bg-paper px-2 text-base font-medium text-ink"
+            className="w-full min-w-0 font-medium"
           >
             {SECURITY_PRESETS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-          </select>
+          </Select>
           <p className="mt-2 text-sm leading-5 text-ink">{selectedPreset.blurb}</p>
           <p className="mt-1 text-xs text-muted">{selectedPreset.phases.length} passes{includeReport ? " · Written report included" : ""}</p>
         </div>
@@ -402,11 +402,10 @@ function NewReviewCard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="grid gap-1.5">
             <Label htmlFor="review-model">Model</Label>
-            <select
+            <Select
               id="review-model"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="min-h-11 sm:min-h-0 sm:h-9 rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
             >
               {SECURITY_MODELS.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -414,7 +413,7 @@ function NewReviewCard() {
                   {m.note ? ` · ${m.note}` : ""}
                 </option>
               ))}
-            </select>
+            </Select>
             <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
           </div>
           <div className="grid gap-1.5">

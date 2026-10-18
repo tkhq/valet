@@ -5,7 +5,7 @@ import type { CreateSessionRequest } from "@valet/api/wire";
 import { useCreateSession } from "~/api/queries";
 import { useSecurityPreview } from "~/api/security";
 import { workspaceForRepo } from "~/components/repo-combobox";
-import { Button, Label, Spinner } from "~/components/primitives";
+import { Button, Label, Select, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import {
   ConfigForm,
@@ -302,11 +302,11 @@ export function SecurityNewPage() {
                 <div className="space-y-6">
                   <div className="grid gap-1.5">
                     <Label htmlFor="new-model">Model</Label>
-                    <select
+                    <Select
                       id="new-model"
                       value={model}
                       onChange={(e) => setModel(e.target.value)}
-                      className="min-h-11 sm:min-h-0 sm:h-9 w-full rounded-md border border-line bg-paper px-2 text-base sm:text-xs text-ink"
+                      className="w-full"
                     >
                       {!SECURITY_MODELS.some((m) => m.id === model) && (
                         <option value={model}>{model}</option>
@@ -317,7 +317,7 @@ export function SecurityNewPage() {
                           {m.note ? ` · ${m.note}` : ""}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
                   </div>
                   <ConfigForm value={config} onChange={setConfig} requireLiveScope={hasLivePersona} />

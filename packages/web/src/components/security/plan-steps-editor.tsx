@@ -1,5 +1,5 @@
 import type { SecurityPlanCellInput, SecurityPlanCellWire } from "@valet/api/wire";
-import { Button, Input, Label } from "~/components/primitives";
+import { Button, Input, Label, Select } from "~/components/primitives";
 
 /**
  * The controlled review-plan step editor (value + onChange, no data fetching or
@@ -320,7 +320,6 @@ function StepRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
-  const selectClass = "min-h-11 sm:min-h-0 sm:h-8 rounded border border-line bg-paper px-2 text-base sm:text-xs text-ink";
   return (
     <div className="rounded border border-line p-2" data-testid="plan-step">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -373,11 +372,11 @@ function StepRow({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <div className="grid gap-1">
             <Label htmlFor={`${step.key}-persona`}>Persona</Label>
-            <select
+            <Select
+              size="sm"
               id={`${step.key}-persona`}
               value={step.persona}
               onChange={(e) => onChange({ persona: e.target.value })}
-              className={selectClass}
             >
               {/* A repo-declared persona already on the step stays selectable
                   even though it is not in the bundled list. */}
@@ -402,15 +401,15 @@ function StepRow({
                   </optgroup>
                 );
               })}
-            </select>
+            </Select>
           </div>
           <div className="grid gap-1">
             <Label htmlFor={`${step.key}-playbook`}>Playbook (optional)</Label>
-            <select
+            <Select
+              size="sm"
               id={`${step.key}-playbook`}
               value={step.playbook}
               onChange={(e) => onChange({ playbook: e.target.value })}
-              className={selectClass}
             >
               <option value="">None</option>
               {KNOWN_PLAYBOOKS.map((id) => (
@@ -418,7 +417,7 @@ function StepRow({
                   {id}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         </div>
 

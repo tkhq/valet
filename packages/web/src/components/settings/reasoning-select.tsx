@@ -1,7 +1,6 @@
 import { useOrgReasoning } from "~/api/settings";
+import { Select } from "~/components/primitives";
 import { levelsUpTo, REASONING_LABELS } from "~/lib/reasoning";
-
-const SELECT_CLASS = "h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base text-[--fg] sm:h-9 sm:text-sm";
 
 /**
  * Small labeled `<select>` for a reasoning/thinking-level override: an
@@ -33,11 +32,11 @@ export function ReasoningSelect({
   const levels = levelsUpTo(orgReasoningQ.data?.max);
 
   return (
-    <select
+    <Select
       aria-label={ariaLabel}
       value={value ?? ""}
       onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
-      className={SELECT_CLASS}
+      className="w-full"
       disabled={disabled}
     >
       <option value="">{emptyLabel}</option>
@@ -46,6 +45,6 @@ export function ReasoningSelect({
           {REASONING_LABELS[level]}
         </option>
       ))}
-    </select>
+    </Select>
   );
 }

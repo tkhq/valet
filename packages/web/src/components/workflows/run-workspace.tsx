@@ -1,5 +1,6 @@
 import { useId, type ReactNode } from "react";
 import type { WorkflowRunDetail } from "@valet/api/wire";
+import { Select } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
 
 type Conversation = NonNullable<WorkflowRunDetail["conversations"]>[number];
@@ -37,13 +38,13 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ba
           className={`min-h-11 border-b-2 text-sm ${!showChat ? "border-moss text-ink" : "border-transparent text-muted"}`}
           onClick={() => onSelect("details", selected?.threadId)}>Run details</button>
       </div>
-      {showChat && conversations.length > 1 && <select aria-label="Run conversation"
-        className="my-1 min-h-10 min-w-0 max-w-full rounded border border-line bg-paper px-2 text-sm text-ink sm:ml-auto"
+      {showChat && conversations.length > 1 && <Select aria-label="Run conversation"
+        className="my-1 min-w-0 max-w-full sm:ml-auto"
         value={selected?.threadId} onChange={event => onSelect("conversation", event.target.value)}>
         {conversations.map((item, index) => <option key={`${item.sessionId}:${item.threadId}`} value={item.threadId}>
           {item.title || item.nodeId || `Conversation ${index + 1}`}
         </option>)}
-      </select>}
+      </Select>}
     </div>
     {selected && <div role="tabpanel" id={`${tabId}-conversation-panel`} aria-labelledby={`${tabId}-conversation`} hidden={!showChat}
       className={showChat ? "flex min-h-0 flex-1 flex-col" : "hidden"}>

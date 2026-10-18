@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, ConfirmDialog, Spinner, StatusDot } from "~/components/primitives";
+import { Button, ConfirmDialog, Select, Spinner, StatusDot } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -139,11 +139,11 @@ export function EngagementPanel({
     <div className="flex flex-1 flex-col min-h-0 min-w-0">
       <div className="sticky top-0 z-10 shrink-0 border-b border-line bg-paper px-3 py-2 md:hidden">
         <label htmlFor={`security-section-${sessionId}`} className="sr-only">Review section</label>
-        <select
+        <Select
           id={`security-section-${sessionId}`}
           value={section}
           onChange={(event) => setSection(event.target.value)}
-          className="h-11 w-full min-w-0 border-0 bg-paper px-1 text-base font-semibold text-ink"
+          className="w-full min-w-0 font-semibold"
         >
           <option value="overview">Overview</option>
           <option value="findings">Findings</option>
@@ -151,7 +151,7 @@ export function EngagementPanel({
           <option value="needs">Needs ({needs?.filter((need) => need.status === "open").length ?? 0} open)</option>
           <option value="coverage">Coverage</option>
           <option value="report">Report</option>
-        </select>
+        </Select>
         {needs && needs.some((need) => need.status === "open") && section !== "needs" && (
           <Button variant="ghost" className="mt-1 w-full text-warning-fg" onClick={() => setSection("needs")}>
             Review open needs ({needs.filter((need) => need.status === "open").length}) →

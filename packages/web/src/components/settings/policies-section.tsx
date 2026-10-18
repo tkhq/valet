@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { MODE_LABELS, RISK_LABELS, POLICY_SELECT_CLASS } from "./policy-presentation";
+import { MODE_LABELS, RISK_LABELS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
 import type {
   ApprovalModeWire,
@@ -8,7 +8,7 @@ import type {
   PolicyAppliesInWire,
   RiskLevelWire,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Label, Switch } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Label, Select, Switch } from "~/components/primitives";
 import { ServiceActionCombobox } from "./service-action-combobox";
 import { Section } from "~/components/settings/section";
 import { usePlugins } from "~/api/integrations";
@@ -208,14 +208,14 @@ function TeamPolicyMode({ teamId, id, mode, canEdit }: {
 }) {
   const patch = usePatchPolicy(teamId);
   return <div className="min-w-0 flex-1 sm:max-w-48">
-    <select className={POLICY_SELECT_CLASS}
+    <Select className="w-full min-w-0"
       aria-label={`Mode for policy ${id}`} value={mode} disabled={!canEdit || patch.isPending}
       onChange={(event) => {
         const mode = MODES.find((value) => value === event.target.value);
         if (mode) patch.mutate({ id, body: { mode } });
       }}>
       {MODES.map((mode) => <option key={mode} value={mode}>{MODE_LABELS[mode]}</option>)}
-    </select>
+    </Select>
     {patch.error && <p role="alert" className="text-sm text-danger-500">{apiErrorMessage(patch.error)}</p>}
   </div>;
 }
@@ -427,51 +427,51 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
         {targetKind === "riskLevel" && (
           <div>
             <Label htmlFor="policy-risk">Risk level</Label>
-            <select
+            <Select
               id="policy-risk"
               value={riskLevel}
               onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-              className={`mt-1 ${POLICY_SELECT_CLASS}`}
+              className="mt-1 w-full min-w-0"
             >
               {RISK_LEVELS.map((r) => (
                 <option key={r} value={r}>
                   {RISK_LABELS[r]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         )}
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <Label htmlFor="policy-mode">Mode</Label>
-            <select
+            <Select
               id="policy-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className={`mt-1 ${POLICY_SELECT_CLASS}`}
+              className="mt-1 w-full min-w-0"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>
                   {MODE_LABELS[m]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
           <div>
             <Label htmlFor="policy-applies-in">Applies in</Label>
-            <select
+            <Select
               id="policy-applies-in"
               value={appliesIn}
               onChange={(e) => setAppliesIn(e.target.value as PolicyAppliesInWire)}
-              className={`mt-1 ${POLICY_SELECT_CLASS}`}
+              className="mt-1 w-full min-w-0"
             >
               {APPLIES_IN.map((a) => (
                 <option key={a} value={a}>
                   {RUN_LABELS[a]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
         </div>
 
@@ -492,18 +492,18 @@ function NewPolicyForm({ plugins, teamId }: { plugins: PluginSummary[]; teamId?:
                 onChange={(e) => updateMatcherRow(m.key, { path: e.target.value })}
                 className="w-full min-w-0"
               />
-              <select
+              <Select
                 aria-label="Matcher operator"
                 value={m.op}
                 onChange={(e) => updateMatcherRow(m.key, { op: e.target.value as ParamMatcherWire["op"] })}
-                className={POLICY_SELECT_CLASS}
+                className="w-full min-w-0"
               >
                 {MATCHER_OPS.map((op) => (
                   <option key={op} value={op}>
                     {OP_LABELS[op]}
                   </option>
                 ))}
-              </select>
+              </Select>
               <Input
                 aria-label="Matcher value"
                 type={NUMERIC_MATCHER_OPS.has(m.op) ? "number" : "text"}
