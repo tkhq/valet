@@ -251,6 +251,24 @@ describe("SandboxAttachment", () => {
     expect(attachment.state).toBe("error");
   });
 
+  it("4d. a failed start is logged, and a waiter's timeout names it instead of a generic retry", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 100 });
+    const d = provider.nextDeferred();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const opPromise = wrapper.readFile("/x.txt");
+      setTimeout(() => d.reject(new Error("docker run failed (125): image not found")), 10);
+      const err = await opPromise.then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceProvisioningError);
+      expect((err as WorkspaceProvisioningError).message).toContain("The last start attempt failed: docker run failed (125): image not found");
+      expect(logged).toHaveBeenCalledWith("SandboxAttachment: sandbox start failed", expect.objectContaining({ message: expect.stringContaining("image not found") }));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it("4c. non-terminal create() failure (plain Error) keeps the swallow behavior: waiter is not force-rejected, it hits its OWN ensureReady timeout instead (pins docker/local semantics unchanged)", async () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});

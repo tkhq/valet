@@ -19,6 +19,7 @@ import {
   SandboxStartupError,
   SandboxUnavailableError,
   WorkspaceProvisioningError,
+  formatSandboxErrorCause,
   formatSandboxErrorLog,
 } from "../errors.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
@@ -160,6 +161,8 @@ export class SandboxAttachment {
   private pendingRelease: { sandbox: Sandbox; provider: SandboxProvider } | null = null;
   private releaseInFlight: Promise<void> | null = null;
   private pendingReadyEpoch: number | null = null;
+  /** Why the most recent start attempt failed; cleared once a sandbox is ready. */
+  private lastStartError: string | undefined;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider, private readonly lifecycle?: SandboxLifecycle) {
     this.provider = provider;
@@ -390,7 +393,7 @@ export class SandboxAttachment {
 
       const timer = setTimeout(() => {
         this.waiters.delete(waiter);
-        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs));
+        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs, this.lastStartError));
       }, opts.timeoutMs);
       timer.unref?.();
 
@@ -988,7 +991,7 @@ export class SandboxAttachment {
         if (ok) recordSandboxCreated();
         span.setAttribute("valet.sandbox.result_state", this._state);
         if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
-        if (!ok) markSpanError(span, `provision ended in state ${this._state}`);
+        if (!ok) markSpanError(span, this.lastStartError ?? `provision ended in state ${this._state}`);
       },
     );
   }
@@ -1114,6 +1117,10 @@ export class SandboxAttachment {
       if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
     } catch (err) {
       if (this.destroyed) return;
+      // The cause was dropped here before: waiters timed out with a generic
+      // "retry shortly" and nothing recorded why the start failed.
+      this.lastStartError = formatSandboxErrorCause(err);
+      console.error("SandboxAttachment: sandbox start failed", { epoch: startEpoch, ...formatSandboxErrorLog(err) });
       this._state = "error";
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
@@ -1143,6 +1150,7 @@ export class SandboxAttachment {
   }
 
   private publishReady(): void {
+    this.lastStartError = undefined;
     this._state = "ready";
     this.emitStatus();
     this.flushWaiters();
