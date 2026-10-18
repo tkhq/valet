@@ -9,7 +9,7 @@ const cell = (...elements: Record<string, unknown>[]) => ({
 const text = (value: string, style?: Record<string, boolean>) => (style ? { type: 'text', text: value, style } : { type: 'text', text: value });
 const link = (url: string, label: string, style?: Record<string, boolean>) => (style ? { type: 'link', url, text: label, style } : { type: 'link', url, text: label });
 const emoji = (name: string) => ({ type: 'emoji', name });
-const column = (align = 'left') => ({ align, is_wrapped: true });
+const column = (align = 'left', wrapped = false) => ({ align, is_wrapped: wrapped });
 const blank = cell(text(' '));
 
 describe('tablesToTableBlocks', () => {
@@ -116,6 +116,14 @@ describe('tablesToTableBlocks', () => {
     const source = '| **Mono**<br>PR | [Docs](https://x) |\n|-|-|\n| 1 | 2 |';
     expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
       rows: [[raw('Mono PR'), raw('Docs')], [cell(text('1')), cell(text('2'))]],
+    });
+  });
+
+  it('keeps rows on one line and wraps only a column with a <br> line break', () => {
+    // Slack scrolls an unwrapped table sideways, so a wide report stays flat.
+    const source = '| PR | Merged | Related |\n|-|-|-|\n| tkhq/mono#1: a long title | Oct 18 | #2<br>#3 |\n| tkhq/mono#4 | Oct 17 | #5 |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      column_settings: [column(), column(), column('left', true)],
     });
   });
 

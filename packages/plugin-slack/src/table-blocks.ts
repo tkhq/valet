@@ -12,6 +12,10 @@
  * message with `invalid_blocks`. Any table outside these limits keeps the
  * existing single `markdown` block.
  *
+ * A column wraps its text only when one of its cells holds a `<br>` line
+ * break. Every other column keeps one line per row, so a wide table stays
+ * flat and Slack scrolls it sideways.
+ *
  * Slack draws an emoji shortcode only from a `markdown` block or an `emoji`
  * element. Rich text shows `:smile:` as typed, so a cell's shortcodes become
  * `emoji` elements.
@@ -170,7 +174,7 @@ function inlineElements(cell: string): RichTextElement[] {
 }
 
 /** Each cell is parsed as CommonMark, so each cell must fit the parse budget. */
-function richTextCell(cell: string): { block: Block; characters: number } | undefined {
+function richTextCell(cell: string): { block: Block; characters: number; multiline: boolean } | undefined {
   if (!withinMarkdownParseBudget(cell)) return undefined;
   const elements = inlineElements(cell);
   // Slack rejects an empty section or a zero-length text element; a single
@@ -179,6 +183,7 @@ function richTextCell(cell: string): { block: Block; characters: number } | unde
   return {
     block: { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: content }] },
     characters: content.reduce((sum, element) => sum + (element.type === 'emoji' ? element.name.length + 2 : element.text.length), 0),
+    multiline: content.some(isLineBreak),
   };
 }
 
@@ -201,14 +206,21 @@ function tableBlock(table: MarkdownTable): { block: Block; characters: number } 
     return cell.block;
   };
   const columns = Array.from({ length: width }, (_, column) => column);
+  // A column wraps only when a cell in it holds a `<br>` line break. Other
+  // columns stay one line per row, and Slack scrolls a wide table sideways.
+  const wrapped = columns.map(() => false);
   const header = columns.map((column) => collect(headerCell(headers[column], column)));
-  const body = rows.map((row) => columns.map((column) => collect(richTextCell(row[column] ?? ''))));
+  const body = rows.map((row) => columns.map((column) => {
+    const cell = richTextCell(row[column] ?? '');
+    if (cell?.multiline) wrapped[column] = true;
+    return collect(cell);
+  }));
   // A cell over the parse budget keeps the whole table in its Markdown block.
   if ([header, ...body].some((row) => row.some((cell) => cell === undefined))) return undefined;
   return {
     block: {
       type: 'table',
-      column_settings: columns.map((column) => ({ align: alignments[column] ?? 'left', is_wrapped: true })),
+      column_settings: columns.map((column) => ({ align: alignments[column] ?? 'left', is_wrapped: wrapped[column] })),
       rows: [header, ...body],
     },
     characters,
