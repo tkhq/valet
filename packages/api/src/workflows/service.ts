@@ -8,7 +8,7 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError, readToolScope } from "@valet/shared";
-import { matchesGateOccurrence, normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { matchesGateOccurrence, normalizeLegacyDefinition, retrySeedCheckpoints, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
@@ -1437,6 +1437,7 @@ export async function startWorkflowRun(
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
   originToolScope?: import("@valet/shared").ToolScope,
+  retry?: { of: string; from: RetryFrom; seed: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]> },
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1468,6 +1469,7 @@ export async function startWorkflowRun(
     definitionVersionId: versionId,
     input: trigger,
     ...(validOrigin ? { origin: validOrigin } : {}),
+    ...(retry ? { retryOf: { runId: retry.of, from: retry.from } } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1475,11 +1477,14 @@ export async function startWorkflowRun(
   // any org member can read one, and stamping the org would let them run
   // with the org's stored credentials. Team keys act as the team, not their creator.
   const runAsCaller = row.ownerType === "org";
-  await deps.workflowRunHost.start(runId, params, definition, {
+  const hostOwner = {
     ownerType: runAsCaller ? "user" : row.ownerType,
     ownerId: runAsCaller ? owner.userId : row.ownerId,
     actorUserId: owner.userId,
-  });
+  };
+  const seed = retry ? await retry.seed({ definition }) : [];
+  if (seed.length > 0) await deps.workflowRunHost.start(runId, params, definition, hostOwner, { seed });
+  else await deps.workflowRunHost.start(runId, params, definition, hostOwner);
   return { runId };
 }
 
@@ -1952,7 +1957,21 @@ export type RetryWorkflowRunResult =
   | { invalidInput: TriggerInputError[] }
   | "not_found"
   | "not_retryable"
-  | "workflow_deleted";
+  | "workflow_deleted"
+  | "input_needs_start";
+
+/** Where a retry starts. `failed_step` reuses the finished steps before the
+ * failure (`retrySeedCheckpoints`); `start` runs every step again. */
+export type RetryFrom = "start" | "failed_step";
+
+/** A stored definition as dag/v1, or undefined when it is not one. */
+function dagDefinition(value: unknown): WorkflowDefinition | undefined {
+  const normalized = normalizeLegacyDefinition(value);
+  if (!normalized || typeof normalized !== "object") return undefined;
+  const { nodes, edges } = normalized as Record<string, unknown>;
+  // Saved definitions passed validation; the arrays are the part the seed reads.
+  return Array.isArray(nodes) && Array.isArray(edges) ? (normalized as WorkflowDefinition) : undefined;
+}
 
 /**
  * Starts a fresh run of the same workflow, reusing the failed run's trigger
@@ -1967,22 +1986,39 @@ export async function retryWorkflowRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   runId: string,
+  opts: { from?: RetryFrom; input?: Record<string, unknown> } = {},
 ): Promise<RetryWorkflowRunResult> {
   const run = await ownedRun(deps, owner, runId);
   if (!run) return "not_found";
   if (run.status !== "settled" || run.outcome === "completed") return "not_retryable";
+  const from = opts.from ?? "start";
+  // Reused steps already used the original input.
+  if (from === "failed_step" && opts.input) return "input_needs_start";
+  const original = triggerData(run.params.input);
 
   const started = await startWorkflowRun(
     deps,
     owner,
     run.params.workflowId,
-    triggerData(run.params.input),
+    opts.input ? { ...original, ...opts.input } : original,
+    // The old run's origin, so the retry and the results it reuses stay
+    // with the same audience.
     run.params.origin,
     // Event provenance also carries the private-channel audience.
     typeof run.params.input === "object" && run.params.input !== null
       && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
     readToolScope(run.params.toolScope),
     readToolScope(run.params.originToolScope),
+    {
+      of: runId,
+      from,
+      seed: async (next) => {
+        if (from !== "failed_step") return [];
+        const previous = dagDefinition(run.definition);
+        const current = dagDefinition(next.definition);
+        return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
+      },
+    },
   );
   if (!started) return "workflow_deleted";
   return started;

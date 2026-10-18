@@ -1,4 +1,5 @@
 import type { SessionNode } from "@valet/workflow";
+import { StepBudgetField } from "./step-budget-field";
 import { JsonTextarea, LabeledInput, LabeledTextarea, SelectField } from "../fields";
 import { Label } from "~/components/primitives";
 import { ModelCombobox } from "~/components/settings/model-combobox";
@@ -34,6 +35,7 @@ export function SessionForm({
         value={node.outputSchema}
         onChange={(value) => onChange({ outputSchema: value })}
       />
+      <StepBudgetField node={node} onChange={onChange} />
       <SelectField
         label="Wait mode"
         value={node.wait?.mode ?? "none"}

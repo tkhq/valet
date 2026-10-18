@@ -26,7 +26,7 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth 
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
-import { VALET_VERSION } from "./version.js";
+import { VALET_VERSION, valetBuildSha } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
@@ -243,6 +243,7 @@ export function createApp(
       service: "valet-api",
       ts: Date.now(),
       version: VALET_VERSION,
+      ...(valetBuildSha() ? { build: valetBuildSha() } : {}),
       sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
     };
     return c.json(body);

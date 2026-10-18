@@ -12,6 +12,7 @@ import { driveUntilPark } from '../interpreter.js';
 import { InMemoryWorkflowStore } from '../memory-store.js';
 import type { RunParams } from '../store.js';
 import { executeSession } from './session.js';
+import { DEFAULT_STEP_MODEL_CALLS } from '../dag/step-budget.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ function makeEngine(
       return { id: opts.id };
     },
     prompt: async (sessionId, text, opts) => {
-      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId });
+      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId, modelCallLimit: opts.modelCallLimit });
       let receipt = receiptsByDispatch.get(opts.dispatchId);
       if (!receipt) {
         receiptCounter += 1;
@@ -175,6 +176,8 @@ describe('executeSession: deterministic ids', () => {
     expect(createCall?.id).toBe('wf:run-2:s');
     expect(promptCall?.sessionId).toBe('wf:run-2:s');
     expect(promptCall?.dispatchId).toBe('workflow:run-2:s');
+    // No maxModelCalls on the step: the default budget travels with the submission.
+    expect(promptCall?.modelCallLimit).toBe(DEFAULT_STEP_MODEL_CALLS);
   });
 });
 

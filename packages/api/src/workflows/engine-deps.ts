@@ -1,5 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
-import { actionInScope, scopeRefusal, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
+import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -393,6 +393,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
         metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(promptOpts.modelCallLimit ? { [MODEL_CALL_LIMIT_KEY]: promptOpts.modelCallLimit } : {}),
           ...(context.presence ? { presence: context.presence } : {}) },
         queueMode: promptOpts.queueMode,
       });
@@ -655,6 +656,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       };
       const receipt = await thread.submitPrompt(content, {
         metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(promptOpts.modelCallLimit ? { [MODEL_CALL_LIMIT_KEY]: promptOpts.modelCallLimit } : {}),
           ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,

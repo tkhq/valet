@@ -4,7 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { formatRunOutput } from "./run-detail-helpers";
 import type { WorkflowModelChange, WorkflowStepCost } from "@valet/api/wire";
-import { Badge } from "~/components/primitives";
+import { Badge, Button } from "~/components/primitives";
 import { formatTokens, formatUsdPrecise } from "~/lib/format-usage";
 
 export interface CheckpointLike {
@@ -63,8 +63,11 @@ export function CheckpointList({
   nodeOrder = [],
   stepCosts = [],
   modelChanges = [],
+  onExplainFailure,
 }: {
   checkpoints: CheckpointLike[];
+  /** Shows "Explain this failure" on each failed step. */
+  onExplainFailure?: (nodeId: string, iteration: number) => void;
   /** Model spend per step; a step with no model calls has none. */
   stepCosts?: WorkflowStepCost[];
   /** Steps whose models changed since the previous run with the same steps. */
@@ -95,19 +98,21 @@ export function CheckpointList({
           number={(order.get(cp.nodeId) ?? index) + 1}
           promoted={cp.nodeId === promotedNodeId}
           waiting={cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting"}
+          onExplainFailure={onExplainFailure}
         />
       ))}
     </ol>
   );
 }
 
-function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting }: {
+function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting, onExplainFailure }: {
   checkpoint: CheckpointLike;
   cost?: WorkflowStepCost;
   modelChange?: WorkflowModelChange;
   number: number;
   promoted: boolean;
   waiting: boolean;
+  onExplainFailure?: (nodeId: string, iteration: number) => void;
 }) {
   const [showLogs, setShowLogs] = useState(false);
   const status = waiting ? "waiting" : toRunStatus(checkpoint.status);
@@ -173,6 +178,13 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
         </div>
       </details>
       {checkpoint.error != null && <p className="break-words px-4 pb-3 text-xs text-danger-500 sm:pl-16">{checkpoint.error}</p>}
+      {status === "failed" && onExplainFailure && (
+        <div className="px-4 pb-3 sm:pl-16">
+          <Button size="sm" variant="secondary" onClick={() => onExplainFailure(checkpoint.nodeId, checkpoint.iteration)}>
+            Explain this failure
+          </Button>
+        </div>
+      )}
     </li>
   );
 }

@@ -78,6 +78,10 @@ export interface RunParams {
   parentRunId?: string;
   parentNodeId?: string;
   parentIteration?: number;
+  /** The server build that started this run. A reader can check whether a fix was live for it. */
+  build?: string;
+  /** Set on a retry: the run it repeats, and whether it resumed at the failed step. */
+  retryOf?: { runId: string; from: 'start' | 'failed_step' };
 }
 
 /**

@@ -6,7 +6,7 @@
  * elsewhere) so these tests assert on the routes' own logic — request
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
-import type { RunHost, WorkflowDefinition } from "@valet/workflow";
+import type { RunHost, RunStartOptions, WorkflowDefinition } from "@valet/workflow";
 import type { DecisionGateRequest, PluginActionContext } from "@valet/engine";
 import { RESOLVED_GATE_NEXT_ELSEWHERE, resolvedGateStillWaiting, workflowsActionPlugin } from "../workflows/actions.js";
 import { eq } from "drizzle-orm";
@@ -69,7 +69,7 @@ const TEAM_ID_FILTER_ERROR =
 
 /** A `RunHost` stub that records every call instead of driving anything. */
 class StubRunHost implements RunHost {
-  started: Array<{ runId: string; params: unknown; owner?: { ownerType: string; ownerId: string } }> = [];
+  started: Array<{ runId: string; params: unknown; owner?: { ownerType: string; ownerId: string }; opts?: RunStartOptions }> = [];
   woken: string[] = [];
   terminated: string[] = [];
 
@@ -78,8 +78,9 @@ class StubRunHost implements RunHost {
     params: unknown,
     _definition: unknown,
     owner?: { ownerType: string; ownerId: string },
+    opts?: RunStartOptions,
   ): Promise<void> {
-    this.started.push({ runId, params, owner });
+    this.started.push({ runId, params, owner, ...(opts ? { opts } : {}) });
   }
   async wake(runId: string): Promise<void> {
     this.woken.push(runId);
@@ -947,6 +948,31 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(res.status).toBe(404);
   });
 
+  it("names the saved workflow version and build a run used, and the latest version now", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_provenance";
+    await api.providers.workflowStore.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1", build: "abc1234def" },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const edited = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        definition: { ...VALID_DEFINITION, nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "stop" }], edges: [{ from: "trigger", to: "done" }] },
+      }),
+    });
+    expect(edited.status).toBe(200);
+
+    const detail = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
+    expect(detail.provenance).toMatchObject({ build: "abc1234def", workflowVersion: 1, latestWorkflowVersion: 2 });
+  });
+
   it("retries a settled failed run with the original input; 409s while non-settled and after completion", async () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });
@@ -1027,6 +1053,68 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     await api.providers.workflowStore.settleRun(completedId, "completed");
     const completedRes = await fetch(`${api.baseUrl}/api/workflows/runs/${completedId}/retry`, { method: "POST" });
     expect(completedRes.status).toBe(409);
+  });
+
+  it("retries from the failed step with the finished steps copied, and from the start with a replaced input", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger", dataSchema: { days: { type: "number" }, repo: { type: "string" } } },
+        { id: "list", type: "set", values: { items: [1, 2] } },
+        { id: "report", type: "set", values: { done: true } },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "list" }, { from: "list", to: "report" }, { from: "report", to: "stop" }],
+    };
+    const res = await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "retry-from-step", definition }),
+    });
+    const created = (await res.json()) as CreateWorkflowResponse;
+    const store = api.providers.workflowStore;
+    const runId = "wfrun_retry_step";
+    await store.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1", input: { type: "manual", timestamp: "t", data: { days: 7, repo: "mono" }, metadata: {} } },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    for (const [nodeId, status] of [["trigger", "completed"], ["list", "completed"], ["report", "failed"]] as const) {
+      await store.putIntent({ runId, nodeId, iteration: 0, status: "intent", attempt: 0, createdAt: 1 });
+      await store.completeCheckpoint(runId, nodeId, 0, 0, { runId, nodeId, iteration: 0, status, attempt: 0, createdAt: 1, ...(status === "completed" ? { result: { ok: nodeId } } : { error: "boom" }) });
+    }
+    await store.settleRun(runId, "failed");
+
+    const step = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: "failed_step" }),
+    });
+    expect(step.status).toBe(201);
+    const stepRun = stub.started.at(-1);
+    expect(stepRun?.opts?.seed?.map((cp) => cp.nodeId)).toEqual(["trigger", "list"]);
+    expect((stepRun?.params as { retryOf?: unknown }).retryOf).toEqual({ runId, from: "failed_step" });
+
+    const withInput = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: "failed_step", input: { days: 1 } }),
+    });
+    expect(withInput.status).toBe(400);
+
+    const fromStart = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: "start", input: { days: 1 } }),
+    });
+    expect(fromStart.status).toBe(201);
+    const startRun = stub.started.at(-1);
+    expect(startRun?.opts).toBeUndefined();
+    expect((startRun?.params as { input?: { data?: unknown } }).input?.data).toEqual({ days: 1, repo: "mono" });
   });
 
   it("400s a retry when the current trigger schema no longer accepts the original input", async () => {

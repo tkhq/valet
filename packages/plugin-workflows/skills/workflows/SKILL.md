@@ -65,8 +65,8 @@ Node types:
 - `if` — conditional; outgoing edges use `"fromOutput": "true"` / `"false"`
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
-- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`). The app labels this step "Thread".
+- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `maxModelCalls`, `wait`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `maxModelCalls`, `wait`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
@@ -109,6 +109,8 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 `start_run` validates its `input` against the schema (defaults merge in, missing required fields and type mismatches are rejected with per-field errors), and the web UI's Run button opens a form generated from it. Declare a `dataSchema` whenever downstream nodes read `{{trigger.data.<field>}}` from manual runs — it turns a silent `null` render into a named validation error.
 
 **Rendering rules.** A field that is exactly one `{{...}}` keeps the value's type (objects/arrays/numbers survive). Mixed text stringifies each expression. A path that resolves to nothing renders as `null` in a single-template field and `""` in mixed text — the save-time linter and the run-time error messages both name bad paths, but a syntactically-valid path to a missing key only surfaces at run time. When a tool param fails validation ("must be string"), suspect a template that rendered null; the node error lists the unresolved paths.
+
+**Step budgets.** A `session` or `orchestrator` step stops after `maxModelCalls` model calls (default 150, at most 500) and fails with that reason. Do not raise the limit to fit a list of unknown size. List the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step. `preview_workflow` warns when a step asks one agent to handle every item in a list.
 
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
 

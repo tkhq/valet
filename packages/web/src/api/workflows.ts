@@ -27,6 +27,7 @@ import type {
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
   ResolveWorkflowApprovalRequest,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   UpdateWorkflowEventTriggerRequest,
@@ -409,8 +410,8 @@ export function useResolveWorkflowApprovals() {
  */
 export function useRetryRun(runId: string) {
   const qc = useQueryClient();
-  return useMutation<RetryWorkflowRunResponse, Error, void>({
-    mutationFn: () => api.retryWorkflowRun(runId),
+  return useMutation<RetryWorkflowRunResponse, Error, RetryWorkflowRunRequest | void>({
+    mutationFn: (body) => api.retryWorkflowRun(runId, body ?? undefined),
     onSuccess: () => {
       const detail = qc.getQueryData<GetWorkflowRunResponse>(qkWorkflows.run(runId));
       if (detail) {

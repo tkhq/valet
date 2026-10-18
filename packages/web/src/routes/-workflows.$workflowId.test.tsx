@@ -104,6 +104,7 @@ vi.mock("~/api/workflows", () => ({
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
+  useRetryRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useWorkflowPermissions: () => ({ data: permissionsData, isLoading: false, error: null }),
   useRevokeOwnWorkflowAccounts: () => ({ mutate: revokeAccountsMutate, isPending: false, error: null }),
   useRevokeWorkflowPermissions: () => ({ mutate: vi.fn(), isPending: false, error: null }),
@@ -169,6 +170,11 @@ vi.mock("~/components/session/session-view", () => ({
 vi.mock("~/hooks/use-workflow-patch-watch", () => ({
   useWorkflowPatchWatch: () => undefined,
 }));
+const sendPromptMutate = vi.fn();
+vi.mock("~/api/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/queries")>()),
+  useSendPrompt: () => ({ mutate: sendPromptMutate }),
+}));
 
 import { ApiError } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
@@ -195,6 +201,20 @@ describe("WorkflowEditorPage", () => {
     permissionsData = { definitionToken: "review-a", nodes: [] };
     delete (workflowData as { origin?: string }).origin;
     delete (workflowData as { upstream?: unknown }).upstream;
+  });
+
+  it("asks the assistant once to explain a failed step, then drops the request from the URL", () => {
+    sendPromptMutate.mockReset();
+    navigate.mockClear();
+    const { rerender } = render(<WorkflowEditorPage workflowId="wf_1" explain={{ runId: "wfrun_9", nodeId: "research" }} />);
+    rerender(<WorkflowEditorPage workflowId="wf_1" explain={{ runId: "wfrun_9", nodeId: "research" }} />);
+    expect(sendPromptMutate).toHaveBeenCalledTimes(1);
+    expect(sendPromptMutate.mock.calls[0]?.[0]).toMatchObject({
+      threadId: "workflow-thread",
+      queueMode: "followup",
+      text: expect.stringContaining('Explain why run wfrun_9 failed at step "research".'),
+    });
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: {}, replace: true }));
   });
 
   it("loads the fetched definition into the editor and the name field", () => {

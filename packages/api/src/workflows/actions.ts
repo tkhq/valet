@@ -38,6 +38,7 @@ import {
   addAggregateNode,
   canReadWorkflowRun,
   cancelWorkflowRun,
+  retryWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
@@ -69,6 +70,7 @@ import { analyzeDefinitionPermissions } from "./permissions.js";
 import { readNodeDiagnostics } from "./node-diagnostics.js";
 import { readRunFollowUp } from "./run-follow-up.js";
 import { readStepTranscript } from "./step-transcript.js";
+import { workflowRunProvenance } from "./run-provenance.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
@@ -629,18 +631,23 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Fetch a run's status, outcome, per-node checkpoints, and what it is waiting on " +
       "(timers, signals, approvals). pendingGates lists each step that waits for approval and, " +
-      "for a step on a teammate's shared account, the teammate who must approve it.",
+      "for a step on a teammate's shared account, the teammate who must approve it. " +
+      "provenance names the server build that ran it, the server's build now, and the saved workflow version it used: " +
+      "check these first, because a fix that is not deployed or an edit made after the run explains many failures.",
     riskLevel: "low",
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
+      const deps = getDeps();
+      const detail = await getWorkflowRunDetail(deps, owner, run_id);
       if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const provenance = await workflowRunProvenance(deps.db, detail.run);
       return {
         success: true,
         data: {
           runId: detail.run.runId,
           workflowId: detail.run.workflowId,
+          provenance,
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
@@ -742,6 +749,41 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await cancelWorkflowRun(getDeps(), owner, run_id);
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       return { success: true, data: { runId: run_id, cancelled: true } };
+    },
+  });
+
+  const retryRun = action(
+    Type.Object({
+      run_id: Type.String(),
+      from: Type.Union([Type.Literal("failed_step"), Type.Literal("start")]),
+      input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    }),
+  )({
+    id: "workflows.retry_run",
+    name: "Retry workflow run",
+    description:
+      "Run a failed or cancelled run again on the current saved workflow. " +
+      "from \"failed_step\" reuses every finished step before the failure, so only the failed step and the steps after it run; " +
+      "a foreach keeps its finished items. A step edited since the run, and every step after it, runs again. " +
+      "from \"start\" runs every step; with it, `input` replaces some trigger inputs, for example a shorter date range for a test run. " +
+      "The retry keeps the old run's audience and follow-up conversation. Returns { runId }; check the result with get_run.",
+    riskLevel: "medium",
+    execute: async ({ run_id, from, input }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const sessionId = (ctx as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
+        return { success: false, error: "A workflow cannot retry runs. Retry the run from the run page or an assistant conversation." };
+      }
+      const result = await retryWorkflowRun(getDeps(), owner, run_id, { from, input });
+      if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
+      if (result === "workflow_deleted") return { success: false, error: "This run's workflow was deleted. Create the workflow again, then start a new run." };
+      if (result === "not_retryable") return { success: false, error: "Only failed or cancelled runs can be retried. Wait for the run to settle, or cancel it first." };
+      if (result === "input_needs_start") return { success: false, error: "A retry from the failed step reuses the original input. To change the input, retry with from \"start\"." };
+      if ("invalidInput" in result) {
+        return { success: false, error: `run input is invalid: ${result.invalidInput.map((e) => e.message).join(" ")} Fix the listed inputs and retry again.` };
+      }
+      return { success: true, data: { runId: result.runId, retryOf: run_id, from } };
     },
   });
 
@@ -1680,6 +1722,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       previewWorkflowAction,
       listRuns,
       cancelRun,
+      retryRun,
       resolveApproval,
       listEventTypesAction,
       createTrigger,

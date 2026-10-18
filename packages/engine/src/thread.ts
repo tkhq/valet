@@ -1,6 +1,6 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -17,7 +17,7 @@ import { isToolDiscoveryApproval, recordHostedActionInvocation, resolveUngatedAc
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
-import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
@@ -190,6 +190,13 @@ const WORKFLOW_AUTO_CONTINUE_PROMPT =
 
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
+
+/** Why a submission stopped at its model call limit, and what to change. */
+export function modelCallLimitText(limit: number): string {
+  return `This step stopped after ${limit} model calls, its limit, before it finished. ` +
+    "Split the work: list the items in one step, then handle one item in each iteration of a foreach step. " +
+    "To allow more calls, raise maxModelCalls on this step.";
+}
 
 /** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
  * prevents automatic posting but does not decide whether content is addressed.
@@ -414,6 +421,10 @@ export class Thread {
    * the item, so the turn aborts and skips settlement (zombie self-fencing).
    */
   private staleFenceDetected = false;
+  /** Model calls the running submission has made, against its `MODEL_CALL_LIMIT_KEY`. */
+  private submissionModelCalls = 0;
+  /** Set when the running submission reached its model call limit. Settlement fails it. */
+  private modelCallLimitReached: number | undefined;
   /** Serializes the claim loop; a second `kick()` while one is running joins the in-flight tail. */
   private kicking = false;
   private kickTail: Promise<void> = Promise.resolve();
@@ -2798,6 +2809,10 @@ export class Thread {
         turnFailed = true;
         turnError = this.turnAgentError;
       }
+      if (!turnFailed && this.modelCallLimitReached !== undefined) {
+        turnFailed = true;
+        turnError = new Error(modelCallLimitText(this.modelCallLimitReached));
+      }
 
       // The turn couldn't run because the host resolver threw
       // NoCredentialsError at turn start (`credentialError` is set ONLY by
@@ -3854,6 +3869,8 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    this.submissionModelCalls = 0;
+    this.modelCallLimitReached = undefined;
     this.nativeImages.beginTurn();
     this.nativeImageGrant = undefined;
     // Per-turn: the next turn may hold a transcript compaction can help.
@@ -4038,7 +4055,8 @@ export class Thread {
       // Proactive compaction: if this turn pushed us past usable, run a
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
-      if (this.shouldCompactProactive() && await this.canRunCurrentSubmission()) {
+      // A submission stopped at its model call limit gets no continuation.
+      if (this.modelCallLimitReached === undefined && this.shouldCompactProactive() && await this.canRunCurrentSubmission()) {
         await this.runProactiveCompaction();
       }
     } finally {
@@ -5284,7 +5302,7 @@ export class Thread {
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.
-      finishTurn: () => this.staleFenceDetected ? { action: "end" } : undefined,
+      finishTurn: (turn) => this.staleFenceDetected ? { action: "end" } : this.chargeModelCall(turn.message),
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -5332,6 +5350,20 @@ export class Thread {
       .reduce((max, gate) => Math.max(max, gate.ordinal + 1), 0);
     const { expiresAt: _expiresAt, ...gate } = fromRequest(req, { ...gateCtx, ordinal });
     await store.saveDecisionGate(this.session.id, this.id, { ...gate, status: "resolved", resolution });
+  }
+
+  /**
+   * Counts one model call against the running submission's limit. At the
+   * limit, a reply that asks for more work ends the loop before the next
+   * call; a final reply still completes.
+   */
+  private chargeModelCall(message: AssistantMessage): { action: "end" } | undefined {
+    const limit = readModelCallLimit(this.runningItem?.metadata?.[MODEL_CALL_LIMIT_KEY]);
+    if (limit === undefined) return undefined;
+    this.submissionModelCalls += 1;
+    if (this.submissionModelCalls < limit || !message.content.some((part) => part.type === "toolCall")) return undefined;
+    this.modelCallLimitReached = limit;
+    return { action: "end" };
   }
 
   /** A workflow step's own session, a workflow task handed to an assistant thread,

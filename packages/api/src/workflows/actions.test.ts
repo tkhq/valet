@@ -85,6 +85,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.propose_trigger",
       "workflows.request_workflow_deletion",
       "workflows.resolve_approval",
+      "workflows.retry_run",
       "workflows.save_workflow",
       "workflows.start_run",
       "workflows.update_model",
@@ -156,6 +157,7 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
     expect(byId.get("workflows.list_runs")).toBe("low");
     expect(byId.get("workflows.cancel_run")).toBe("medium");
+    expect(byId.get("workflows.retry_run")).toBe("medium");
     // Medium → the action asks a person itself on every call, so the
     // catalog's card would only repeat the question.
     expect(byId.get("workflows.resolve_approval")).toBe("medium");

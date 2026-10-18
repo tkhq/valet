@@ -129,6 +129,7 @@ export async function executeWorkflowCall(args: NodeExecutorArgs<WorkflowCallNod
     parentNodeId: node.id,
     parentIteration: iteration,
     ...(run.params.origin ? { origin: run.params.origin } : {}),
+    ...(run.params.build ? { build: run.params.build } : {}),
   };
   await store.createRun(
     childRunId,

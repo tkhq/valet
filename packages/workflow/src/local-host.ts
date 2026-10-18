@@ -60,7 +60,7 @@ import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interprete
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import { isLegacyAccountConsentLoop, matchesGateOccurrence } from './gate-signals.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
-import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
+import { WorkflowFenceError, type NodeCheckpoint, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
 
 /** A run that a drive parked after opening at least one approval gate. */
 export interface ApprovalParkedInfo {
@@ -78,6 +78,12 @@ export interface ApprovalParkedInfo {
  */
 export type OnApprovalParked = (info: ApprovalParkedInfo) => Promise<void> | void;
 
+export interface RunStartOptions {
+  /** Finished checkpoints copied from an earlier run (`retrySeedCheckpoints`).
+   * The host writes them before the run starts, so those steps do not run again. */
+  seed?: readonly NodeCheckpoint[];
+}
+
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
   /** Begin executing a run. Idempotent by runId: re-starting an existing run is a no-op. */
@@ -86,6 +92,7 @@ export interface RunHost {
     params: RunParams,
     definition: unknown,
     owner?: WorkflowRunOwnerInput,
+    opts?: RunStartOptions,
   ): Promise<void>;
   /** Resume a parked run now. Spurious wakes are safe. */
   wake(runId: string): Promise<void>;
@@ -102,6 +109,8 @@ export interface RunHost {
 export interface LocalRunHostDeps {
   store: WorkflowStore;
   engine: WorkflowEngineDeps;
+  /** This server's build. Every run it starts records it in `RunParams.build`. */
+  build?: string;
   executors?: NodeExecutorRegistry;
   clock?: () => number;
   onApprovalPending?: OnApprovalPending;
@@ -150,6 +159,7 @@ function defaultExit(code: number): never {
 export class LocalRunHost implements RunHost {
   private readonly store: WorkflowStore;
   private readonly engine: WorkflowEngineDeps;
+  private readonly build?: string;
   private readonly executors?: NodeExecutorRegistry;
   private readonly clock: () => number;
   private readonly onApprovalPending?: OnApprovalPending;
@@ -204,6 +214,7 @@ export class LocalRunHost implements RunHost {
   constructor(deps: LocalRunHostDeps) {
     this.store = deps.store;
     this.engine = deps.engine;
+    this.build = deps.build;
     this.executors = deps.executors;
     this.clock = deps.clock ?? (() => Date.now());
     this.onApprovalPending = deps.onApprovalPending;
@@ -228,13 +239,28 @@ export class LocalRunHost implements RunHost {
     params: RunParams,
     definition: unknown,
     owner?: WorkflowRunOwnerInput,
+    opts?: RunStartOptions,
   ): Promise<void> {
     // The durable createRun is unconditional: a caller that got a runId back
     // must be able to find the run in the store even if the host is mid-
     // shutdown (the next boot's poll/sweep picks it up). Only the in-process
     // wake is gated on `running`.
-    await this.store.createRun(runId, params, definition, params.definitionVersionId, owner);
+    const stamped = this.build !== undefined && params.build === undefined ? { ...params, build: this.build } : params;
+    await this.store.createRun(runId, stamped, definition, params.definitionVersionId, owner);
+    // Before the wake: a pending run is not runnable until a wake is requested.
+    for (const cp of opts?.seed ?? []) await this.seedCheckpoint(runId, cp);
     await this.wake(runId);
+  }
+
+  /** Writes one copied checkpoint as attempt 0. A re-start finds it already terminal and skips it. */
+  private async seedCheckpoint(runId: string, cp: NodeCheckpoint): Promise<void> {
+    const key = { runId, nodeId: cp.nodeId, iteration: cp.iteration, attempt: 0 };
+    try {
+      await this.store.putIntent({ ...key, status: 'intent', createdAt: cp.createdAt });
+      await this.store.completeCheckpoint(runId, cp.nodeId, cp.iteration, 0, { ...cp, ...key });
+    } catch (err) {
+      if (!(err instanceof WorkflowFenceError)) throw err;
+    }
   }
 
   async wake(runId: string): Promise<void> {

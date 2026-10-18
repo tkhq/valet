@@ -592,3 +592,17 @@ describe('LocalRunHost poisoned-run cap', () => {
     expect(run?.outcome).toBe('completed');
   });
 });
+
+describe('LocalRunHost build stamp', () => {
+  it('records its build on every run it starts, and keeps a build the caller already set', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const host = new LocalRunHost({ store, engine: makeRunHostFixtureEngine(), clock: clock.now, build: 'abc1234' });
+
+    await host.start('run-new', runParams(), simpleDefinition());
+    await host.start('run-carried', runParams({ build: 'def5678' }), simpleDefinition());
+
+    expect((await store.getRun('run-new'))?.params.build).toBe('abc1234');
+    expect((await store.getRun('run-carried'))?.params.build).toBe('def5678');
+  });
+});

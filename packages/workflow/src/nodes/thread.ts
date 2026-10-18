@@ -32,6 +32,7 @@
 
 import type { ThreadNode } from '../dag/nodes.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
+import { stepModelCallLimit } from '../dag/step-budget.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
@@ -94,6 +95,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
           dispatchId: id,
           queueMode: 'followup',
           ownerHint: owner,
+          modelCallLimit: stepModelCallLimit(node),
         });
         return {
           sessionId: dispatched.sessionId,
@@ -106,6 +108,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
           taskSourceQueueItemId,
           queueMode: 'followup',
           ownerHint: owner,
+          modelCallLimit: stepModelCallLimit(node),
         });
         return { threadId: dispatched.threadId, queueItemId: dispatched.queueItemId };
       },

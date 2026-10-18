@@ -207,6 +207,7 @@ import type {
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
+  RetryWorkflowRunRequest,
   RetryWorkflowRunResponse,
   RevokeInviteResponse,
   SandboxJwtResponse,
@@ -1017,10 +1018,11 @@ export const api = {
     ),
   dismissWorkflowRun: (runId: string) =>
     request<{ ok: true }>("POST", `/workflows/runs/${encodeURIComponent(runId)}/dismiss`),
-  retryWorkflowRun: (runId: string) =>
+  retryWorkflowRun: (runId: string, body?: RetryWorkflowRunRequest) =>
     request<RetryWorkflowRunResponse>(
       "POST",
       `/workflows/runs/${encodeURIComponent(runId)}/retry`,
+      body,
     ),
 
   // events (event-system design): org feed, per-event detail with delivery

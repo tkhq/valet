@@ -6,7 +6,7 @@ import type {
 } from "@valet/api/wire";
 import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
 import { MoreHorizontal } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
@@ -43,6 +43,7 @@ import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import type { TriggerKind } from "~/components/workflows/trigger-dialog";
+import { useSendPrompt } from "~/api/queries";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import { blobUrl } from "~/lib/blob-url";
@@ -64,18 +65,41 @@ export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
   // `newTrigger` comes from the new-workflow dialog: the workflow was just
   // created to run on a schedule or an event, so its trigger form opens next.
-  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind } => ({
+  // `explainRun` + `explainStep` come from a failed run's "Explain this
+  // failure": the editor's assistant gets the question once.
+  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind; explainRun?: string; explainStep?: string; explainIteration?: number } => ({
     newTrigger: search.newTrigger === "schedule" || search.newTrigger === "event" ? search.newTrigger : undefined,
+    explainRun: typeof search.explainRun === "string" && search.explainRun ? search.explainRun : undefined,
+    explainStep: typeof search.explainStep === "string" && search.explainStep ? search.explainStep : undefined,
+    explainIteration: typeof search.explainIteration === "number" && search.explainIteration > 0 ? search.explainIteration : undefined,
   }),
 });
 
 function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
-  const { newTrigger } = Route.useSearch();
-  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} />;
+  const { newTrigger, explainRun, explainStep, explainIteration } = Route.useSearch();
+  const explain = explainRun && explainStep ? { runId: explainRun, nodeId: explainStep, iteration: explainIteration } : undefined;
+  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} explain={explain} />;
 }
 
-export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: string; newTrigger?: TriggerKind }) {
+/** A failed step the person asked the assistant to explain. */
+export interface ExplainFailureRequest {
+  runId: string;
+  nodeId: string;
+  /** A foreach item, counted from 0. */
+  iteration?: number;
+}
+
+/** What "Explain this failure" asks. The editor conversation's guidance
+ * (`editor-thread-context.ts`) says how to investigate a failed run. */
+export function explainFailurePrompt({ runId, nodeId, iteration }: ExplainFailureRequest): string {
+  const step = iteration !== undefined ? `"${nodeId}" (item ${iteration + 1})` : `"${nodeId}"`;
+  return `Explain why run ${runId} failed at step ${step}. Say what went wrong in plain words, ` +
+    "whether a Valet update or a workflow edit since the run changes the answer, and the smallest fix. " +
+    "Do not change the workflow or start a run until I agree.";
+}
+
+export function WorkflowEditorPage({ workflowId, newTrigger, explain }: { workflowId: string; newTrigger?: TriggerKind; explain?: ExplainFailureRequest }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
   useAdoptWorkspaceScope(data ? { type: data.ownerType, id: data.ownerId } : undefined);
   const update = useUpdateWorkflow(workflowId);
@@ -125,6 +149,7 @@ export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: str
       allowPermissions={allowPermissions}
       navigate={navigate}
       newTrigger={newTrigger}
+      explain={explain}
     />
   );
 }
@@ -158,9 +183,12 @@ function WorkflowEditorPane({
   allowPermissions,
   navigate,
   newTrigger,
+  explain,
 }: {
   /** Open the Triggers drawer on a new trigger of this kind (from the create dialog). */
   newTrigger?: TriggerKind;
+  /** Ask the assistant to explain this failed step, once. */
+  explain?: ExplainFailureRequest;
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
@@ -197,6 +225,21 @@ function WorkflowEditorPane({
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
+
+  // "Explain this failure" is one click: send the question as soon as the
+  // conversation opens, then drop the request from the URL so a reload does
+  // not ask again. Queued behind a running turn, never in place of it.
+  const sendPrompt = useSendPrompt(assistant.sessionId ?? "");
+  const explainSent = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!explain || !assistant.sessionId || !assistant.threadId) return;
+    const key = `${explain.runId}:${explain.nodeId}:${explain.iteration ?? 0}`;
+    if (explainSent.current === key) return;
+    explainSent.current = key;
+    sendPrompt.mutate({ text: explainFailurePrompt(explain), threadId: assistant.threadId, queueMode: "followup" });
+    editorRef.current?.showAssistant();
+    void navigate({ to: "/workflows/$workflowId", params: { workflowId }, search: {}, replace: true });
+  }, [explain, assistant.sessionId, assistant.threadId, sendPrompt, navigate, workflowId]);
 
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether

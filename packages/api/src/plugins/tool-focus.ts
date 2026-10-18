@@ -4,7 +4,7 @@ import { type ToolScope } from "@valet/shared";
 
 const READS = ["list_workflows", "get_workflow", "get_permissions", "get_run", "get_node_result", "get_node_transcript", "get_node_diagnostics", "list_runs", "list_triggers", "list_schedules", "list_event_types", "get_webhook", "preview_workflow"];
 const REPAIRS = ["save_workflow", "patch_workflow", "update_model", "add_aggregate", "propose_trigger", "propose_schedule", "create_trigger", "update_trigger", "delete_trigger", "create_schedule", "update_schedule", "delete_schedule", "create_webhook", "delete_webhook"];
-const RUNS = ["start_run", "cancel_run", "resolve_approval"];
+const RUNS = ["start_run", "retry_run", "cancel_run", "resolve_approval"];
 const ORIGIN_REPLIES = ["slack.reply_to_origin", "slack.react_to_origin", "slack.reply_file_to_origin", "telegram.reply_to_origin"];
 const TOOLS = ["focus_tools", "list_tools", "call_tool", "skill", "ask_question", "ask_approval", "switch_model", "thread_read", "task", "child_read", "child_status", "mem_read", "mem_search"];
 export type WorkflowFocus = "diagnose" | "repair" | "validate" | "general";

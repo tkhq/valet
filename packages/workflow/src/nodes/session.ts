@@ -31,6 +31,7 @@
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
+import { stepModelCallLimit } from '../dag/step-budget.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, workflowStepSessionId, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
@@ -64,11 +65,11 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
       dispatch: async (id): Promise<SubmissionDispatch> => {
         await engine.createSession({ id: sessionId, title: node.title, purpose: 'workflow' });
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
-        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model });
+        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, modelCallLimit: stepModelCallLimit(node) });
         return { sessionId, receipt };
       },
       dispatchRepair: async (repairDispatchId, repairPrompt, id, taskSourceQueueItemId) =>
-        await engine.prompt(id, repairPrompt, { dispatchId: repairDispatchId, model: node.model, queueMode: 'followup', taskSourceQueueItemId }),
+        await engine.prompt(id, repairPrompt, { dispatchId: repairDispatchId, model: node.model, queueMode: 'followup', taskSourceQueueItemId, modelCallLimit: stepModelCallLimit(node) }),
       buildDispatchedResult: (dispatch) => ({ sessionId: dispatch.sessionId, receipt: dispatch.receipt }),
       buildSettledResult: (id, result) => ({ sessionId: id, response: result.text, output: result.output }),
     },
