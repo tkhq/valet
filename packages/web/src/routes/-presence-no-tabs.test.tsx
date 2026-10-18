@@ -132,7 +132,7 @@ describe("INV-H5: no navigation under the top nav except the breadcrumb", () => 
     ["/presence", "Presence"],
     ["/presence/activity", "Activity"],
     ["/presence/places/slack:T1%2FC900", "#incidents"],
-    ["/presence/rules/sub-1", "When someone mentions Valet in #incidents, reply in a new thread."],
+    ["/presence/rules/sub-1", "When you mention Valet in #incidents, reply in a new thread."],
     ["/presence/routines/S1", "Every day at 9:00, Morning summary: work in its own thread."],
     ["/presence/events/ev-1", "@Valet the deploy is failing"],
   ])("%s has no tab list, and every navigation landmark is the breadcrumb", async (path, title) => {
@@ -175,6 +175,6 @@ describe("INV-H5: no navigation under the top nav except the breadcrumb", () => 
   it("redirects a revision 1 rule URL to its rule page", async () => {
     const router = mountApp("/presence/listeners/sub-1?workspace=user");
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/sub-1"));
-    expect(await screen.findByRole("heading", { level: 1, name: "When someone mentions Valet in #incidents, reply in a new thread." })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "When you mention Valet in #incidents, reply in a new thread." })).toBeTruthy();
   });
 });

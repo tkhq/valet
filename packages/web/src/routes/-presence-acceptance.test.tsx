@@ -38,7 +38,9 @@ import type {
   ListAllWorkflowRunsResponse,
   ListEventSubscriptionsResponse,
   ListIdentityLinksResponse,
+  ListPluginsResponse,
   ListPresencePlacesResponse,
+  OrgDirectoryResponse,
   ListSessionWakeupsResponse,
   ListThreadFeedersResponse,
   ListThreadsResponse,
@@ -97,6 +99,16 @@ import { place } from "~/components/presence/test-fixtures";
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 const NOW = Date.now();
+/** The connected services the wizard's When step reads: all three. */
+const PLUGINS: ListPluginsResponse = {
+  plugins: ["slack", "github", "linear"].map((name) => ({
+    name, version: "1", actionCount: 0,
+    services: [{ service: name, type: "oauth2", configKeys: [], connected: true, connect: "oauth", actions: [] }],
+  })),
+};
+/** The org members a sentence may name. */
+const DIRECTORY: OrgDirectoryResponse = { users: [{ userId: "u-001", email: "u@acme.test", name: "U One", avatarUrl: null }] };
+
 /** The dead-letter text the api stores for an archived pin. */
 const PIN_UNAVAILABLE = "Pick another thread in Presence.";
 
@@ -406,6 +418,8 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
   if (path === "/api/events/catalog") return json(EVENT_CATALOG);
   if (path === "/api/events/filter-options") return json({ options: [], reason: "Connect Slack first." });
   if (path === "/api/me/identity-links") return json(IDENTITY_LINKS);
+  if (path === "/api/plugins") return json(PLUGINS);
+  if (path === "/api/org/directory") return json(DIRECTORY);
   if (/^\/api\/sessions\/[^/]+\/threads$/.test(path)) return json(THREADS);
   if (/^\/api\/sessions\/[^/]+\/wakeups$/.test(path)) return json(WAKEUPS);
   unhandled.push(`${method} ${path}${url.search}`);
@@ -593,7 +607,7 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     await userEvent.click(within(incidentsRow).getByRole("button", { name: "+ Listen for…" }));
     const wizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
     expect(within(wizard.getByRole("group", { name: "When" })).getAllByRole("radio").map((r) => r.parentElement?.textContent))
-      .toEqual(["Someone mentions Valet in Slack"]);
+      .toEqual(["Something happens in Slack"]);
     const preview = wizard.getByTestId("wizard-preview");
     expect(preview.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
     await userEvent.click(wizard.getByRole("button", { name: "Next" }));
@@ -618,13 +632,13 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     const routineWizard = within(await screen.findByRole("dialog"));
     const when = within(routineWizard.getByRole("group", { name: "When" }));
     expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
-      "Someone mentions Valet in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
+      "Something happens in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
     ]);
     await userEvent.click(when.getByLabelText("On a schedule"));
     await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
-    await userEvent.type(routineWizard.getByLabelText("Cron"), "0 9 * * 1-5");
-    await userEvent.clear(routineWizard.getByLabelText("Timezone"));
-    await userEvent.type(routineWizard.getByLabelText("Timezone"), "UTC");
+    // The day and time control opens on weekdays at 9:00; the cron stays under Advanced.
+    expect((routineWizard.getByLabelText("Cron") as HTMLInputElement).value).toBe("0 9 * * 1-5");
+    await userEvent.selectOptions(routineWizard.getByLabelText("Timezone"), "UTC");
     await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
     await userEvent.type(routineWizard.getByLabelText("Prompt"), "Summarize open incidents.");
     await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));

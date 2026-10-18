@@ -52,11 +52,11 @@ describe("EditSubscriptionDialog match form", () => {
 
   it("keeps shared fields and prunes orphaned filters on event deselection", () => {
     edit();
-    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.message/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone posts a message" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone mentions Valet" }));
     expect(screen.getByDisplayValue("C1, C2")).toBeTruthy();
-    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.reaction/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.message/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reaction happens" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone posts a message" }));
     expect(screen.queryByLabelText("Filter value")).toBeNull();
     save();
     expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { eventKeys: ["slack.reaction"], filters: [] } });
@@ -177,5 +177,57 @@ describe("EditSubscriptionDialog Runs in", () => {
   it("offers no Runs in on a workflow target", () => {
     edit({ ...sub, target: { kind: "workflow", workflowId: "wf_1" } });
     expect(screen.queryByRole("group", { name: "Runs in" })).toBeNull();
+  });
+});
+
+describe("EditSubscriptionDialog in words", () => {
+  const scoped: EventSubscriptionWire = {
+    ...sub,
+    filters: [
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#one", "#two"] },
+      { field: "user", op: "eq", value: "U0ABC" },
+    ],
+  };
+
+  it("reads the draft as its sentence at the top, and updates with the form", () => {
+    edit(scoped);
+    const preview = screen.getByTestId("edit-preview");
+    expect(preview.textContent).toBe("When you mention Valet in #one or #two, reply in a new thread.");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone posts a message" }));
+    expect(preview.textContent).toBe("When you mention Valet or someone posts a message in #one or #two, reply in a new thread.");
+  });
+
+  it("hides the creator scope from the filters, shows it as a read-only line, and keeps it on save", () => {
+    edit(scoped);
+    expect(screen.getByTestId("creator-scope").textContent).toMatch(/^Only your own mentions/);
+    expect(screen.queryByDisplayValue("U0ABC")).toBeNull();
+    expect(screen.getAllByLabelText("Filter field")).toHaveLength(1);
+    // Removing the other filter still works, and the scope stays.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter" }));
+    save();
+    expect(patch.mock.calls[0][0].body).toMatchObject({ anyChannel: true, filters: [{ field: "user", op: "eq", value: "U0ABC" }] });
+  });
+
+  it("names the creator when the viewer is someone else", () => {
+    const close = vi.fn();
+    render(
+      <EditSubscriptionDialog
+        open
+        sub={{ ...scoped, target: { kind: "assistant", assistant: "org" }, createdBy: "u2" }}
+        targetLabel="The organization's assistant"
+        onOpenChange={close}
+        names={{ me: "u1", members: { u2: "Jack" } }}
+      />,
+    );
+    expect(screen.getByTestId("creator-scope").textContent).toMatch(/^Only mentions by Jack/);
+    expect(screen.getByTestId("edit-preview").textContent).toBe("When Jack mentions Valet in #one or #two, reply in a new thread.");
+  });
+
+  it("shows When, Do, Runs in, and Appears as in words, never raw keys or filters", () => {
+    edit(scoped);
+    const summary = screen.getByLabelText("Summary");
+    expect([...summary.querySelectorAll("dt")].map((dt) => dt.textContent)).toEqual(["When", "Do", "Runs in", "Appears as", "Delivery", "Permissions"]);
+    expect(summary.textContent).not.toMatch(/slack\.|user eq|channel in|Scope|Destination/);
   });
 });

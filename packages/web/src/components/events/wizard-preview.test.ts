@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { wizardDraft, wizardSentence, type WizardState } from "./wizard-preview";
+import { wizardDraft, wizardSentence, wizardSentenceParts, type WizardState } from "./wizard-preview";
 
 const workflows = [{ id: "wf-1", name: "Triage failures" }];
 const threads = { "t-ci": { title: "Platform CI" } };
@@ -82,8 +82,40 @@ describe("wizardDraft", () => {
 describe("wizardSentence", () => {
   it("reads a reply from a place (Review Focus 4)", () => {
     expect(sentence({ replyChannels: [{ id: "C900", label: "#incidents" }] })).toBe(
+      "When you mention Valet in #incidents, reply in a new thread.",
+    );
+  });
+
+  it("reads you for a personal, an org, and a workflow mention line, and someone for a team line", () => {
+    const channels = [{ id: "C900", label: "#incidents" }];
+    expect(sentence({ replyChannels: channels, target: { kind: "assistant", assistant: "org" } })).toBe(
+      "When you mention Valet in #incidents, reply in a new thread.",
+    );
+    expect(sentence({ replyChannels: channels, target: { kind: "assistant", assistant: "team", teamId: "sre" } })).toBe(
       "When someone mentions Valet in #incidents, reply in a new thread.",
     );
+    expect(
+      sentence({ outcome: "workflow", keys: ["slack.app_mention"], target: { kind: "workflow", workflowId: "wf-1" }, thread: null }),
+    ).toBe("When you mention Valet in any channel, run Triage failures.");
+  });
+
+  it("marks the place and the workflow as tokens", () => {
+    const parts = wizardSentenceParts(
+      wizardDraft(state({
+        outcome: "workflow",
+        service: "github",
+        target: { kind: "workflow", workflowId: "wf-1" },
+        filterRows: [{ id: "r1", field: "repo", op: "eq", value: "acme/api", label: "acme/api" }],
+      })),
+      undefined, workflows, threads,
+    );
+    expect(parts).toEqual([
+      { kind: "text", text: "When something happens on " },
+      { kind: "place", text: "acme/api", service: "github", subject: "github:acme/api" },
+      { kind: "text", text: ", run " },
+      { kind: "workflow", text: "Triage failures", id: "wf-1" },
+      { kind: "text", text: "." },
+    ]);
   });
 
   it("reads Work on it in Slack before an event is picked", () => {
@@ -93,7 +125,7 @@ describe("wizardSentence", () => {
         thread: { mode: "own" },
         filterRows: [{ id: "r1", field: "channel", op: "eq", value: "C900", label: "#incidents" }],
       }),
-    ).toBe("When someone mentions Valet in #incidents, work in its own thread.");
+    ).toBe("When you mention Valet in #incidents, work in its own thread.");
   });
 
   it("names the service when GitHub has no event yet", () => {

@@ -18,11 +18,18 @@ import type {
 } from "@valet/api/wire";
 import { toWireFilters, type UiFilterRow } from "~/components/events/filter-editor";
 import {
-  presenceDoes,
-  presenceSentence,
-  routineDoes,
-  routineSentence,
+  partsText,
+  placeParts,
+  presenceDoesParts,
+  presenceSentenceParts,
+  presenceWhenParts,
+  routineDoesParts,
+  scheduleInWords,
+  routineSentenceParts,
+  text,
+  tidy,
   type RoutineLike,
+  type SentencePart,
   type ThreadTitles,
   type WorkflowNames,
 } from "~/components/presence/sentences";
@@ -163,15 +170,69 @@ export function wizardDraft(state: WizardState): WizardDraft {
 
 const SERVICE_NAMES: Readonly<Record<WhenService, string>> = { slack: "Slack", github: "GitHub", linear: "Linear" };
 
-/** The place a draft with no events names: its first filter's label or value, else the service. */
-function placeOf(filters: readonly EventSubscriptionFilterWire[], service: WhenService): string {
+/** The filter fields that name a place a token can link to. */
+const PLACE_FIELDS = new Set(["channel", "repo", "team", "identifier"]);
+
+/** The place a draft with no events names: its first filter, else the service. */
+function placeOf(filters: readonly EventSubscriptionFilterWire[], service: WhenService): SentencePart[] {
   for (const filter of filters) {
     if (filter.op !== "eq" && filter.op !== "in") continue;
-    if (typeof filter.value === "string") return filter.label?.trim() || filter.value;
+    if (PLACE_FIELDS.has(filter.field)) return placeParts(service, filter);
+    if (typeof filter.value === "string") return [text(filter.label?.trim() || filter.value)];
     const labels = filter.value.map((v, i) => filter.labels?.[i]?.trim() || v);
-    if (labels.length > 0) return labels.join(" or ");
+    if (labels.length > 0) return [text(labels.join(" or "))];
   }
-  return SERVICE_NAMES[service];
+  return [text(SERVICE_NAMES[service])];
+}
+
+/**
+ * The draft as the stored line will read. The server adds the creator's
+ * Slack user filter to an org or workflow mention line (api
+ * events/mention-scope.ts), so the preview adds it too, and the draft's
+ * creator is the viewer: the sentence reads `When you mention Valet`.
+ */
+const DRAFT_CREATOR = "draft";
+
+function asStored(sub: EventSubscriptionWire): EventSubscriptionWire {
+  const mention = sub.eventKeys.some((k) => k === SLACK_APP_MENTION || k === "slack.*");
+  const team = sub.target.kind === "assistant" && sub.target.assistant === "team";
+  if (!mention || team || sub.filters.some((f) => f.field === "user")) return sub;
+  return { ...sub, createdBy: DRAFT_CREATOR, filters: [...sub.filters, { field: "user", op: "eq", value: "" }] };
+}
+
+/** The draft as parts of the sentence the lists show. */
+export function wizardSentenceParts(
+  draft: WizardDraft,
+  catalog: Catalog | undefined,
+  workflows: WorkflowNames,
+  threads: ThreadTitles,
+): SentencePart[] {
+  if (draft.kind === "routine") {
+    const { routine } = draft;
+    // An empty schedule has no words yet.
+    if (routine.detail.cron.length === 0) {
+      return tidy([text(`On a schedule, ${routine.name}: `), ...routineDoesParts(routine, workflows, threads), text(".")]);
+    }
+    return routineSentenceParts(routine, workflows, threads);
+  }
+  const { sub, service } = draft;
+  const names = { me: DRAFT_CREATOR };
+  if (sub.eventKeys.length > 0) return presenceSentenceParts(asStored(sub), catalog, workflows, threads, names);
+  // No event is picked yet. Slack's default Do replies to a mention.
+  if (service === "slack") {
+    return presenceSentenceParts(asStored({ ...sub, eventKeys: [SLACK_APP_MENTION] }), catalog, workflows, threads, names);
+  }
+  const preposition = service === "github" ? "on" : "in";
+  const displayName = sub.target.appearance?.displayName?.trim();
+  const as: SentencePart[] = displayName ? [text(", as "), { kind: "person", text: displayName }] : [];
+  return tidy([
+    text(`When something happens ${preposition} `),
+    ...placeOf(sub.filters, service),
+    text(", "),
+    ...presenceDoesParts(sub, workflows, threads),
+    ...as,
+    text("."),
+  ]);
 }
 
 /** The draft as the sentence the lists show. */
@@ -181,22 +242,28 @@ export function wizardSentence(
   workflows: WorkflowNames,
   threads: ThreadTitles,
 ): string {
+  return partsText(wizardSentenceParts(draft, catalog, workflows, threads));
+}
+
+/** Parts with the first letter of the first text part in upper case. */
+function capitalized(parts: readonly SentencePart[]): SentencePart[] {
+  const [first, ...rest] = parts;
+  if (first === undefined || first.kind !== "text") return [...parts];
+  return [text(first.text.charAt(0).toUpperCase() + first.text.slice(1)), ...rest];
+}
+
+/**
+ * The draft's When, as the review step lists it: `Someone mentions Valet in
+ * #incidents`, `Something happens on acme/api`, or the schedule in words.
+ */
+export function wizardWhenParts(draft: WizardDraft, catalog: Catalog | undefined): SentencePart[] {
   if (draft.kind === "routine") {
-    const { routine } = draft;
-    // An empty schedule has no words yet.
-    if (routine.detail.cron.length === 0) {
-      return `On a schedule, ${routine.name}: ${routineDoes(routine, workflows, threads)}.`;
-    }
-    return routineSentence(routine, workflows, threads);
+    const { cron, timezone } = draft.routine.detail;
+    return [text(cron.length === 0 ? "On a schedule" : scheduleInWords(cron, timezone))];
   }
   const { sub, service } = draft;
-  if (sub.eventKeys.length > 0) return presenceSentence(sub, catalog, workflows, threads);
-  // No event is picked yet. Slack's When choice already names the mention.
-  if (service === "slack") {
-    return presenceSentence({ ...sub, eventKeys: [SLACK_APP_MENTION] }, catalog, workflows, threads);
-  }
-  const preposition = service === "github" ? "on" : "in";
-  const displayName = sub.target.appearance?.displayName?.trim();
-  const as = displayName ? `, as ${displayName}` : "";
-  return `When something happens ${preposition} ${placeOf(sub.filters, service)}, ${presenceDoes(sub, workflows, threads)}${as}.`;
+  const names = { me: DRAFT_CREATOR };
+  if (sub.eventKeys.length > 0) return capitalized(presenceWhenParts(asStored(sub), catalog, names));
+  if (service === "slack") return capitalized(presenceWhenParts(asStored({ ...sub, eventKeys: [SLACK_APP_MENTION] }), catalog, names));
+  return tidy([text(`Something happens ${service === "github" ? "on" : "in"} `), ...placeOf(sub.filters, service)]);
 }

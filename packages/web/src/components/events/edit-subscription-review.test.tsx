@@ -20,7 +20,8 @@ describe("saved automation review", () => {
   it("does not activate on open and patches the same proposal once confirmed", () => {
     render(<EditSubscriptionDialog open review sub={sub} targetLabel="Personal assistant" onOpenChange={() => {}} />);
     expect(patch).not.toHaveBeenCalled();
-    expect(screen.getByText("Scope")).toBeTruthy();
+    expect(screen.getByText("When")).toBeTruthy();
+    expect(screen.getByTestId("edit-preview").textContent).toBe("When someone replies in the Slack thread in C123, reply in a new thread.");
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Follow release" } });
     fireEvent.click(screen.getByRole("button", { name: "Turn on Follow launch" }));
     expect(patch.mock.calls[0][0]).toMatchObject({ id: "proposal-1", body: { name: "Follow release", enabled: true } });
@@ -30,7 +31,7 @@ describe("saved automation review", () => {
     expect(screen.getByText("Follow launch is already on. Review its current configuration.")).toBeTruthy();
     unmount();
     render(<EditSubscriptionDialog open sub={sub} targetLabel="Personal assistant" onOpenChange={() => {}} />);
-    expect(screen.getByText("Change what this matches. A save keeps its target.")).toBeTruthy();
+    expect(screen.getByText("Change what this matches. A save keeps what it does.")).toBeTruthy();
     expect(screen.getByPlaceholderText("Name")).toBeTruthy();
   });
   it("cancel leaves the proposal disabled", () => {

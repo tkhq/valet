@@ -63,6 +63,7 @@ vi.mock("~/api/workflows", () => ({
 let orgRole: "admin" | "member" = "admin";
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
 }));
 
 /** The dialog is its own suite's (its Runs in is tested there); here it

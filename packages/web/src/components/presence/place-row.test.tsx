@@ -248,8 +248,8 @@ describe("PlaceRow", () => {
     expect(within(region).getByText("Everywhere in Slack")).toBeTruthy();
     const sentences = within(region).getAllByRole("link").map((link) => link.textContent);
     expect(sentences).toEqual([
-      "When someone mentions Valet, reply in a new thread.",
-      "When someone mentions Valet in #a or #b, reply in a new thread.",
+      "When you mention Valet, reply in a new thread.",
+      "When you mention Valet in #a or #b, reply in a new thread.",
     ]);
     fireEvent.click(screen.getByRole("button", { name: "+ Listen for…" }));
     expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({

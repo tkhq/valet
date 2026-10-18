@@ -75,6 +75,7 @@ vi.mock("~/components/events/automation-wizard", () => ({
 let meId = "u-001";
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: meId, orgId: "acme", orgRole: "member" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
 }));
 
 /** The dialog is its own suite's; here it records the line and the field it opened on. */

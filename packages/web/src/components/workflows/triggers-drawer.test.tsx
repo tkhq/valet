@@ -79,6 +79,11 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] }, isLoading: false, error: null }),
 }));
 
+// The sentences name the viewer and the org members; this suite names no one.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
+}));
 vi.mock("~/api/events", () => ({
   useEventSubscriptions: () => ({
     data: { subscriptions },
@@ -152,7 +157,7 @@ describe("TriggersPanel: listeners and routines", () => {
 
   it("renders a listener that runs this workflow as its sentence, linked to its page", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
-    const rows = screen.getAllByText("When a pull request opens on acme/api, run Deploy pipeline.");
+    const rows = screen.getAllByText("When a pull request is opened on acme/api, run Deploy pipeline.");
     expect(rows).toHaveLength(1);
     const link = rows[0]!.closest("a");
     expect(link?.getAttribute("data-to")).toBe("/presence/rules/$id");

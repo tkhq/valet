@@ -1,0 +1,47 @@
+// @vitest-environment jsdom
+import { render, screen } from "@testing-library/react";
+import type { EventSubscriptionCollisionsWire, EventSubscriptionWire } from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  Link: ({ to, params, children }: { to: string; params?: Record<string, string>; children: ReactNode }) => (
+    <a href={Object.entries(params ?? {}).reduce((path, [k, v]) => path.replace(`$${k}`, v), to)}>{children}</a>
+  ),
+}));
+
+import { CollisionNotice } from "./collision-notice";
+
+function line(id: string, over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
+  return {
+    id, name: id, ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"],
+    filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }, { field: "user", op: "eq", value: "U0ABC" }],
+    target: { kind: "assistant", assistant: "team", teamId: "sre" }, enabled: true, createdBy: "u-1", createdAt: 1, updatedAt: 1, ...over,
+  };
+}
+
+const blocking: EventSubscriptionCollisionsWire = {
+  blocking: [{ subscription: line("Incident mentions"), relation: "equal", sharedKeys: ["slack.app_mention"] }],
+  overlapping: [],
+};
+
+describe("CollisionNotice", () => {
+  it("says the lines also fire, links each by name, and reads each as its sentence", () => {
+    const { container } = render(<CollisionNotice report={blocking} committed={false} />);
+    expect(screen.getByText("Also fires")).toBeTruthy();
+    expect(screen.queryByText("Would replace")).toBeNull();
+    expect(screen.getByText(/All of them would fire together/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Incident mentions" }).getAttribute("href")).toBe("/presence/rules/Incident mentions");
+    expect(screen.getByText("When someone mentions Valet in #incidents, reply in a new thread.")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/slack\.app_mention|user is|U0ABC|notifies an assistant/);
+  });
+
+  it("says Would replace only for the line this one replaces", () => {
+    render(<CollisionNotice report={blocking} committed={false} intent="save" replaces="Incident mentions" />);
+    expect(screen.getByText("Would replace")).toBeTruthy();
+    expect(screen.queryByText("Also fires")).toBeNull();
+    expect(screen.queryByText(/fire together/)).toBeNull();
+    expect(screen.getByText("To turn the replaced line off, save it anyway.")).toBeTruthy();
+  });
+});

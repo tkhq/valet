@@ -33,6 +33,7 @@ import {
 } from "./presence-rows";
 import { eventInWords, presenceDoes, presenceSentence, runsInLabel, type ThreadTitles } from "./sentences";
 import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
+import { useSentenceNames } from "./use-sentence-names";
 
 /** The one place a line names in its filters, as a crumb label and a place
  * key. Null when no filter names exactly one place. A Slack channel filter
@@ -98,13 +99,14 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   const me = useMe();
   const patch = usePatchEventSubscription();
   const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
+  const names = useSentenceNames();
   const place = linePlace(sub);
   const placeKey = usePlaceSubject(place?.key ?? "");
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const workflowNames = workflows.data?.workflows ?? [];
-  const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitles);
+  const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitles, names);
   const readOnly = lineReadOnly(sub, me.data?.id);
   const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
   const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
@@ -166,6 +168,9 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
             onOpenChange={setEditing}
             sub={sub}
             targetLabel={targetLabel(sub, workflowName)}
+            names={names}
+            threadTitles={pinTitles}
+            workflows={workflowNames}
           />
         )}
       </div>

@@ -350,8 +350,8 @@ describe("Presence overview", () => {
     mountOverview();
     const slack = await screen.findByRole("region", { name: "Everywhere in Slack" });
     expect(within(slack).getByRole("link", { name: "Everywhere in Slack" }).getAttribute("href")).toBe("/presence/places/slack%3AT1");
-    expect(sentences(slack)).toEqual(["When someone mentions Valet, reply in a new thread."]);
-    const everywhere = screen.getAllByRole("link").filter((link) => link.textContent === "When someone mentions Valet, reply in a new thread.");
+    expect(sentences(slack)).toEqual(["When you mention Valet, reply in a new thread."]);
+    const everywhere = screen.getAllByRole("link").filter((link) => link.textContent === "When you mention Valet, reply in a new thread.");
     expect(everywhere).toHaveLength(1);
   });
 
@@ -491,7 +491,7 @@ describe("Presence overview", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add" }));
     const when = within(await screen.findByRole("group", { name: "When" }));
     expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
-      "Someone mentions Valet in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
+      "Something happens in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
     ]);
   });
 

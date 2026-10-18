@@ -11,10 +11,11 @@ import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
 import { ProblemBadge } from "./problem-badge";
 import { presenceSentence, type PresenceSentenceOptions, type ThreadTitles } from "./sentences";
+import { useSentenceNames } from "./use-sentence-names";
 
 /**
  * The sentence for each line of presence. It reads the event picker's labels, the
- * workflow names, and the titles of pinned threads. `knownThreads` adds
+ * workflow names, the org members' names, and the titles of pinned threads. `knownThreads` adds
  * titles the caller already has, such as a place page's threads. The
  * returned function takes `presenceSentence` options, such as `{ place:
  * false }` for a row under an overview block.
@@ -27,8 +28,9 @@ export function usePresenceSentence(
   const workflows = useWorkflows();
   const pinned = usePinnedThreadTitles(subs.map((sub) => (sub.target.kind === "assistant" ? sub.target.thread : undefined)));
   const threads: ThreadTitles = { ...knownThreads, ...pinned };
+  const names = useSentenceNames();
   const workflowNames = workflows.data?.workflows ?? [];
-  return (sub, options) => presenceSentence(sub, catalog.data?.catalog, workflowNames, threads, options);
+  return (sub, options) => presenceSentence(sub, catalog.data?.catalog, workflowNames, threads, names, options);
 }
 
 /** Coverage copy for a personal line that a team line paused (Part C step 3). */

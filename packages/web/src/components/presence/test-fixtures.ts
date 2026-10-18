@@ -16,6 +16,7 @@ export const ME_MEMBER = { id: "u-001", orgId: "acme", orgRole: "member" } as co
 export const memberSettings = {
   useMe: () => ({ data: ME_MEMBER }),
   useTeams: () => ({ data: { teams: [] } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
 };
 
 /** A line of presence owned by `u-001`, with `over` on top. */

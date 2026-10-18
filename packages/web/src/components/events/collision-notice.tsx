@@ -3,16 +3,17 @@
  * (TKAI-294). The server refuses a write that covers an existing enabled
  * rule (409 with a `collisions` payload) and commits a partial overlap with
  * the same payload as a warning. Either way the person saving the rule sees
- * what they are about to step on: each colliding rule's name, owner, target
- * kind, and filter summary.
+ * what they are about to step on: each colliding line's name (a link to its
+ * page), owner, and sentence.
  */
+import { Link } from "@tanstack/react-router";
 import type {
   EventSubscriptionCollisionsWire,
   EventSubscriptionCollisionWire,
-  EventSubscriptionFilterWire,
 } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { Badge } from "~/components/primitives";
+import { presenceSentence } from "~/components/presence/sentences";
 
 /** The collision payload of a blocked (409) subscription write, or null when
  * the failure is not one. */
@@ -27,56 +28,35 @@ export function collisionsFromError(err: unknown): EventSubscriptionCollisionsWi
   return collisions as EventSubscriptionCollisionsWire;
 }
 
-function opWord(op: EventSubscriptionFilterWire["op"]): string {
-  switch (op) {
-    case "eq":
-      return "is";
-    case "in":
-      return "is one of";
-    case "prefix":
-      return "starts with";
-    case "contains":
-      return "contains";
-    case "regex":
-      return "matches";
-  }
-}
-
-/** One filter as words, preferring the stored display labels over raw ids. */
-function describeFilter(f: EventSubscriptionFilterWire): string {
-  const value = Array.isArray(f.value)
-    ? (f.labels ?? f.value).join(", ")
-    : (f.label ?? f.value);
-  return `${f.field} ${opWord(f.op)} ${value}`;
-}
-
-function describeTargetKind(kind: string): string {
-  return kind === "workflow" ? "runs a workflow" : "notifies an assistant";
-}
-
 function ownerLabel(ownerType: "user" | "team" | "org"): string {
   if (ownerType === "org") return "Org";
   if (ownerType === "team") return "Team";
   return "Personal";
 }
 
-function CollisionRow({ collision, blocking }: { collision: EventSubscriptionCollisionWire; blocking: boolean }) {
+/**
+ * One colliding line: its name (a link to its page), its owner, and its
+ * sentence. The badge says `Would replace` only for the line this one
+ * replaces (the proposal's `replaces` id, which the server turns off when
+ * this one turns on). Every other line keeps firing: `Also fires`.
+ */
+function CollisionRow({ collision, replaces }: { collision: EventSubscriptionCollisionWire; replaces: string | undefined }) {
   const sub = collision.subscription;
-  const filters = sub.filters.map(describeFilter).join(", and ");
+  const replaced = replaces !== undefined && sub.id === replaces;
   return (
-    <li className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-1">
-      <Badge variant={blocking ? "danger" : "warning"} className="shrink-0">
-        {blocking ? "Would replace" : "Overlaps"}
-      </Badge>
-      <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
-      <Badge variant="neutral" className="shrink-0">
-        {ownerLabel(sub.ownerType)}
-      </Badge>
-      <span className="text-xs text-muted">
-        {describeTargetKind(sub.target.kind)}
-        {filters ? ` · ${filters}` : " · no filters"}
-        {` · ${collision.sharedKeys.join(", ")}`}
-      </span>
+    <li className="min-w-0 py-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+        <Badge variant={replaced ? "danger" : "warning"} className="shrink-0">
+          {replaced ? "Would replace" : "Also fires"}
+        </Badge>
+        <Link to="/presence/rules/$id" params={{ id: sub.id }} className="truncate text-sm font-medium text-ink underline-offset-2 hover:underline">
+          {sub.name}
+        </Link>
+        <Badge variant="neutral" className="shrink-0">
+          {ownerLabel(sub.ownerType)}
+        </Badge>
+      </div>
+      <p className="mt-0.5 text-xs text-muted">{presenceSentence(sub, undefined, [], {})}</p>
     </li>
   );
 }
@@ -92,12 +72,16 @@ export function CollisionNotice({
   report,
   committed,
   intent = "create",
+  replaces,
 }: {
   report: EventSubscriptionCollisionsWire;
   committed: boolean;
   intent?: "create" | "save";
+  /** The id of the line this one replaces, from a proposal's `target.replaces`. */
+  replaces?: string;
 }) {
   const blocked = report.blocking.length > 0 && !committed;
+  const onlyReplaced = report.blocking.length > 0 && report.blocking.every((c) => c.subscription.id === replaces);
   return (
     <div
       className={`rounded border px-3 py-2 ${
@@ -107,22 +91,23 @@ export function CollisionNotice({
       <p className="text-xs font-medium text-ink">
         {committed
           ? `${intent === "save" ? "Saved" : "Created"}. These also fire for the same events:`
-          : report.blocking.length > 0
-            ? "Not saved: these already handle everything this covers. All of them would fire together."
-            : "This overlaps with what Valet already does:"}
+          : onlyReplaced
+            ? "Not saved: this covers everything the line it replaces covers."
+            : report.blocking.length > 0
+              ? "Not saved: these already handle everything this covers. All of them would fire together."
+              : "This overlaps with what Valet already does:"}
       </p>
       <ul className="mt-1 divide-y divide-line/60">
-        {report.blocking.map((c) => (
-          <CollisionRow key={c.subscription.id} collision={c} blocking />
-        ))}
-        {report.overlapping.map((c) => (
-          <CollisionRow key={c.subscription.id} collision={c} blocking={false} />
+        {[...report.blocking, ...report.overlapping].map((c) => (
+          <CollisionRow key={c.subscription.id} collision={c} replaces={replaces} />
         ))}
       </ul>
       {blocked && (
         <p className="mt-1 text-xs text-muted">
-          Narrow the channels or filters so they stay separate, or{" "}
-          {intent === "save" ? "save" : "create"} it anyway to accept the double delivery.
+          {onlyReplaced
+            ? `To turn the replaced line off, ${intent === "save" ? "save" : "create"} it anyway.`
+            : <>Narrow the channels or filters so they stay separate, or{" "}
+              {intent === "save" ? "save" : "create"} it anyway to accept the double delivery.</>}
         </p>
       )}
     </div>

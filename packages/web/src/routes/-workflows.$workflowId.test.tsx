@@ -167,6 +167,11 @@ vi.mock("~/api/events", () => ({
 }));
 
 // Thread titles for pinned listeners and routines; none here pins a thread.
+// The sentences name the viewer and the org members; this suite names no one.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
+}));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
 
 /** The wizard has its own suite. A stub names the flow it opened on. */
