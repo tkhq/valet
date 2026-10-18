@@ -1401,7 +1401,8 @@ export async function startWorkflowRun(
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
   originToolScope?: import("@valet/shared").ToolScope,
-  retry?: { of: string; from: RetryFrom; seed: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]> },
+  /** Finished checkpoints a retry from the failed step reuses (`retrySeedCheckpoints`). */
+  seedFor?: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]>,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1433,7 +1434,6 @@ export async function startWorkflowRun(
     definitionVersionId: versionId,
     input: trigger,
     ...(validOrigin ? { origin: validOrigin } : {}),
-    ...(retry ? { retryOf: { runId: retry.of, from: retry.from } } : {}),
   };
 
   // Team and user runs use the definition owner, matching the scheduler,
@@ -1446,7 +1446,7 @@ export async function startWorkflowRun(
     ownerId: runAsCaller ? owner.userId : row.ownerId,
     actorUserId: owner.userId,
   };
-  const seed = retry ? await retry.seed({ definition }) : [];
+  const seed = seedFor ? await seedFor({ definition }) : [];
   if (seed.length > 0) await deps.workflowRunHost.start(runId, params, definition, hostOwner, { seed });
   else await deps.workflowRunHost.start(runId, params, definition, hostOwner);
   return { runId };
@@ -1973,16 +1973,11 @@ export async function retryWorkflowRun(
       && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
     readToolScope(run.params.toolScope),
     readToolScope(run.params.originToolScope),
-    {
-      of: runId,
-      from,
-      seed: async (next) => {
-        if (from !== "failed_step") return [];
-        const previous = dagDefinition(run.definition);
-        const current = dagDefinition(next.definition);
-        return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
-      },
-    },
+    from === "failed_step" ? async (next) => {
+      const previous = dagDefinition(run.definition);
+      const current = dagDefinition(next.definition);
+      return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
+    } : undefined,
   );
   if (!started) return "workflow_deleted";
   return started;

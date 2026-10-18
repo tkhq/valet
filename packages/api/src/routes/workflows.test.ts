@@ -1097,7 +1097,6 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect(step.status).toBe(201);
     const stepRun = stub.started.at(-1);
     expect(stepRun?.opts?.seed?.map((cp) => cp.nodeId)).toEqual(["trigger", "list"]);
-    expect((stepRun?.params as { retryOf?: unknown }).retryOf).toEqual({ runId, from: "failed_step" });
 
     const withInput = await fetch(`${api.baseUrl}/api/workflows/runs/${runId}/retry`, {
       method: "POST",
