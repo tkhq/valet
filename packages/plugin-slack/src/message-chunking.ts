@@ -11,8 +11,8 @@
  */
 
 import { containsSlackSpans, linkGitHubReferencesInMarkdown, markdownToSlackMrkdwn, type MarkdownToSlackMrkdwnOptions } from "./transport/format.js";
-import { isTableDelimiterRow, tablesToLabeledRows } from "./table-format.js";
-import { tablesToTableBlocks } from "./table-blocks.js";
+import { isTableDelimiterRow, splitMarkdownTables, tablesToLabeledRows } from "./table-format.js";
+import { hasTableBlock, SLACK_TABLE_ROW_LIMIT, tablesToTableBlocks } from "./table-blocks.js";
 
 export { hasTableBlock } from "./table-blocks.js";
 
@@ -144,4 +144,84 @@ export function buildContentBlocks(
     type: 'section',
     text: { type: 'mrkdwn', text: chunk },
   }));
+}
+
+/** At most this many messages carry one table. A longer table keeps the
+ * single-message rendering. */
+export const SLACK_TABLE_PART_LIMIT = 10;
+
+/**
+ * Split a message whose one table is too large for a single Slack message
+ * (it would fall back to `mrkdwn` sections, which show no table) into parts
+ * that each render as a native `table` block. Each part repeats
+ * the header and delimiter rows. The text before the table opens the first
+ * part, and the text after it closes the last part. Each part except the
+ * last ends with `note`, for example "_Continued in the thread._".
+ *
+ * Returns undefined when the message fits one Markdown or table block, has
+ * no single standalone table, has Slack native spans, or needs more than
+ * {@link SLACK_TABLE_PART_LIMIT} parts. The caller then keeps its
+ * single-message rendering.
+ */
+export function splitTableMessage(text: string, maxBlocks: number, note: string): string[] | undefined {
+  if (containsSlackSpans(text) || !text.split(/\r?\n/).some(isTableDelimiterRow)) return undefined;
+  // A message that fits a Markdown block keeps its table: only the section
+  // fallback loses it.
+  if (buildContentBlocks(text, '', maxBlocks).every((block) => block.type !== 'section')) return undefined;
+  const renders = (part: string): boolean => hasTableBlock(buildContentBlocks(part, '', maxBlocks));
+  let segments = splitMarkdownTables(text);
+  let tables = segments.filter((segment) => segment.type === 'table');
+  if (tables.length !== 1) return undefined;
+  if (!tables[0].table.standalone) {
+    // GFM reads a line without a pipe right after the rows as one more row.
+    // The parts end the table with a blank line, so that line stays prose.
+    // Any other reason (a list item or an indented delimiter) keeps the
+    // single message.
+    const lines = text.split(/\r?\n/);
+    const before = segments.slice(0, segments.indexOf(tables[0]))
+      .reduce((count, segment) => count + (segment.type === 'text' ? segment.lines.length : segment.table.lines.length), 0);
+    const end = before + tables[0].table.lines.length;
+    segments = splitMarkdownTables([...lines.slice(0, end), '', ...lines.slice(end)].join('\n'));
+    tables = segments.filter((segment) => segment.type === 'table');
+    if (tables.length !== 1 || !tables[0].table.standalone) return undefined;
+  }
+  const at = segments.indexOf(tables[0]);
+  const prose = (from: number, to: number): string =>
+    segments.slice(from, to).flatMap((segment) => segment.type === 'text' ? segment.lines : []).join('\n').trim();
+  const before = prose(0, at);
+  const after = prose(at + 1, segments.length);
+  const [header, delimiter, ...rows] = tables[0].table.lines;
+  if (rows.length > SLACK_TABLE_PART_LIMIT * (SLACK_TABLE_ROW_LIMIT - 1)) return undefined;
+  const compose = (lead: string, body: readonly string[], tail: string): string =>
+    [lead, [header, delimiter, ...body].join('\n'), tail].filter(Boolean).join('\n\n');
+
+  const parts: string[] = [];
+  let lead = before;
+  let body: string[] = [];
+  for (const row of rows) {
+    if (renders(compose(lead, [...body, row], note))) {
+      body.push(row);
+      continue;
+    }
+    if (body.length === 0) {
+      // The text before the table leaves no room for a row: send it alone.
+      if (!lead || !renders(compose('', [row], note))) return undefined;
+      parts.push(lead);
+      lead = '';
+      body = [row];
+      continue;
+    }
+    parts.push(compose(lead, body, note));
+    lead = '';
+    body = [row];
+    if (!renders(compose(lead, body, note))) return undefined;
+  }
+  const last = compose(lead, body, after);
+  if (renders(last)) {
+    parts.push(last);
+  } else {
+    // The text after the table goes in its own message.
+    parts.push(compose(lead, body, note), after);
+  }
+  return parts.length > 1 && parts.length <= SLACK_TABLE_PART_LIMIT ? parts : undefined;
 }

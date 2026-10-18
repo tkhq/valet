@@ -23,7 +23,7 @@ import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, splitTableMessage, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
@@ -1166,6 +1166,10 @@ const getReactions = action(Type.Object({
   },
 });
 
+/** Wait between the parts of a split message: Slack allows about one
+ * message per second in a channel. */
+const SLACK_PART_INTERVAL_MS = 1100;
+
 const sendMessage = action(Type.Object({
     ...senderParameters,
     channel: Type.String({ description: 'Channel ID (C...) or channel name with # prefix (e.g. #proj-valet). Use list_channels to find IDs.' }),
@@ -1177,7 +1181,7 @@ const sendMessage = action(Type.Object({
   }))({
   id: 'slack.send_message',
   name: 'Send Message',
-  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. It can post outside the current conversation, for example into a customer channel, so Valet asks for approval when your organization\'s policy requires it. Do not call ask_approval before this action. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
+  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. It can post outside the current conversation, for example into a customer channel, so Valet asks for approval when your organization\'s policy requires it. Do not call ask_approval before this action. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message. A table too large for one Slack message is sent as several native tables: the first part goes to the channel or thread you name, the rest follow in its thread, ts names the first part, and part_ts lists every part.',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -1213,10 +1217,6 @@ const sendMessage = action(Type.Object({
     const guard = await guardPrivateChannel(token, channelId, ownerSlackUserId(cred), ctx.owner?.type);
     if (guard.denied) return guard.denied;
 
-    const formattedText = markdownToSlackMrkdwn(p.text, { preserveSlackNativeSpans: true });
-    const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
-    if (p.thread_ts) body.thread_ts = p.thread_ts;
-
     let userBlocks: Record<string, unknown>[] | undefined;
     if (p.blocks) {
       try {
@@ -1231,43 +1231,75 @@ const sendMessage = action(Type.Object({
       }
     }
 
-    if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
-    if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
-
     // Attribute non-DM posts to the session owner (mirrors the channel
     // transport's attribution context block on agent-authored replies).
     const ownerSlackId = ownerSlackUserId(cred);
     const hasAttribution = Boolean(ownerSlackId) && !channelId.startsWith('D');
-    const needsGeneratedBlocks = !userBlocks && needsContentBlocks(p.text);
-    let fallbackBlocks: Record<string, unknown>[] | undefined;
+    const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
 
-    if (hasAttribution || needsGeneratedBlocks) {
-      const blockBudget = hasAttribution ? SLACK_MAX_BLOCKS - 1 : SLACK_MAX_BLOCKS;
-      const attribution = { type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] };
-      const contentBlocks = userBlocks
-        ? userBlocks.slice(0, blockBudget)
-        : buildContentBlocks(p.text, formattedText, blockBudget, { preserveSlackNativeSpans: true });
-      if (!userBlocks) {
-        fallbackBlocks = markdownFallbackBlocks(contentBlocks, p.text, formattedText, blockBudget);
-        if (fallbackBlocks && hasAttribution) fallbackBlocks.push(attribution);
+    const post = async (text: string, threadTs: string | undefined): Promise<{ ts?: string; channel?: string } | { failed: PluginActionResult }> => {
+      const formattedText = markdownToSlackMrkdwn(text, { preserveSlackNativeSpans: true });
+      const body: Record<string, unknown> = { channel: channelId, text: formattedText, mrkdwn: true };
+      if (threadTs) body.thread_ts = threadTs;
+      if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
+      if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
+
+      const needsGeneratedBlocks = !userBlocks && needsContentBlocks(text);
+      let fallbackBlocks: Record<string, unknown>[] | undefined;
+      if (hasAttribution || needsGeneratedBlocks) {
+        const attribution = { type: 'context', elements: [{ type: 'mrkdwn', text: `↳ <@${ownerSlackId}>` }] };
+        const contentBlocks = userBlocks
+          ? userBlocks.slice(0, blockBudget)
+          : buildContentBlocks(text, formattedText, blockBudget, { preserveSlackNativeSpans: true });
+        if (!userBlocks) {
+          fallbackBlocks = markdownFallbackBlocks(contentBlocks, text, formattedText, blockBudget);
+          if (fallbackBlocks && hasAttribution) fallbackBlocks.push(attribution);
+        }
+        if (hasAttribution) contentBlocks.push(attribution);
+        body.blocks = contentBlocks;
+        if (needsGeneratedBlocks) {
+          body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+        }
+      } else if (userBlocks) {
+        body.blocks = userBlocks;
       }
-      if (hasAttribution) contentBlocks.push(attribution);
-      body.blocks = contentBlocks;
-      if (needsGeneratedBlocks) {
-        body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+
+      const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks], ownerSlackId);
+      if (mentionError) return { failed: mentionError };
+      const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
+      if (!res.ok || !data.ok) {
+        return { failed: { success: false, error: `Slack API error: ${data.error || res.statusText}` } };
       }
-    } else if (userBlocks) {
-      body.blocks = userBlocks;
-    }
+      return { ts: data.ts, channel: data.channel };
+    };
 
-    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks], ownerSlackId);
-    if (mentionError) return mentionError;
-    const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
-    if (!res.ok || !data.ok) {
-      return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
+    // A table too large for one message goes out as several native tables.
+    // The first part goes where the caller aimed it; the rest follow in its
+    // thread, so replies threaded under the returned ts come after them.
+    const parts = userBlocks
+      ? undefined
+      : splitTableMessage(p.text, blockBudget, p.thread_ts ? '_Continued below._' : '_Continued in the thread._');
+    if (!parts) {
+      const sent = await post(p.text, p.thread_ts);
+      if ('failed' in sent) return sent.failed;
+      return { success: true, data: { ts: sent.ts, channel: sent.channel } };
     }
-
-    return { success: true, data: { ts: data.ts, channel: data.channel } };
+    const first = await post(parts[0], p.thread_ts);
+    if ('failed' in first) return first.failed;
+    const partTs = [first.ts];
+    for (const [index, part] of parts.entries()) {
+      if (index === 0) continue;
+      await new Promise((resolve) => setTimeout(resolve, SLACK_PART_INTERVAL_MS));
+      const sent = await post(part, p.thread_ts ?? first.ts);
+      if ('failed' in sent) {
+        return {
+          success: false,
+          error: `Slack posted parts 1-${index} of ${parts.length} (ts ${partTs.join(', ')}) and rejected part ${index + 1}: ${sent.failed.error}. Delete the posted parts with delete_message before you send the message again.`,
+        };
+      }
+      partTs.push(sent.ts);
+    }
+    return { success: true, data: { ts: first.ts, channel: first.channel, part_ts: partTs } };
   },
 });
 
