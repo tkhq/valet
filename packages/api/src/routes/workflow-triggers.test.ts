@@ -377,7 +377,7 @@ describe("PATCH /api/workflows/schedules/:id", () => {
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Confirm the id");
+    expect(body.error).toBe("This routine was not found. Refresh Presence and try again.");
   });
 });
 
@@ -395,6 +395,10 @@ describe("DELETE /api/workflows/schedules/:id", () => {
 
     const second = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_del`, { method: "DELETE" });
     expect(second.status).toBe(404);
+    expect(((await second.json()) as { error: string }).error).toBe("This routine was not found. Refresh Presence and try again.");
+    const fire = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_del/run`, { method: "POST" });
+    expect(fire.status).toBe(404);
+    expect(((await fire.json()) as { error: string }).error).toBe("This routine was not found. Refresh Presence and try again.");
   });
 });
 

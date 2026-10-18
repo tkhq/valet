@@ -104,7 +104,7 @@ pin.
 | P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names its place, `acme/api#12`. |
 | P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/routines`, `/presence/routines?routine=<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, `/presence/routines` to `/presence`, `/presence/routines?routine=<id>` to `/presence/routines/<id>`, the last two to `/workflows`. No URL returns a 404. |
 | P13 | Open a proposal from its `Proposed` row and press **Turn on**. | The page shows `Proposed by the assistant.` and, when the proposal replaces a line, `Turning it on turns off <name>.` **Turn on** opens the edit dialog in review mode. After the reader confirms, the line is on, its row reads its sentence without `Proposed`, and the line it replaces is off. |
-| P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | On the overview row, the switch and the row menu's Edit, Appears as, and Delete are disabled. The line's page shows the `Team` mark, disables the switch, **Edit**, **Delete**, and the thread picker, and reads `Only members of SRE can change this.` |
+| P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | On the overview row, the switch and the row menu's Edit, Appears as, and Delete are disabled. The line's page shows the `Team` mark, disables the switch, **Edit**, and **Delete**, hides the thread picker, and reads `Only members of SRE can change this.` |
 | P15 | Delete the workflow of a routine that runs a workflow, then let the routine fire. | The routine is off. The **Needs attention** banner reads `<name> is off: Its workflow was deleted. Edit the routine and pick another workflow.` with an `Edit` link to `/presence/routines/<id>`. |
 | P16 | With Slack, GitHub, and Linear all not connected, click **Add**. | The When step opens on `On a schedule`. `Something happens in Slack`, `Something happens on GitHub`, and `Something happens in Linear` are disabled, each with `Connect Slack first`, `Connect GitHub first`, or `Connect Linear first` linking to Integrations. |
 | P17 | On the `acme/api` place page, click **View all** under **Recent activity**. | `/presence/activity?place=github:acme/api` opens with the removable chip `In acme/api` and lists only events whose place is `acme/api` or inside it. Removing the chip lists every event again. |
@@ -338,9 +338,9 @@ Pass criterion: all steps, in one run, from a clean start.
    <name>.` when it replaces a line, **Turn on** (the edit dialog in review
    mode) and **Delete**, in place of the switch. The page follows the Part
    C step 3 gate: for a viewer who may not change the line, the switch,
-   **Edit**, **Delete**, and the picker are disabled, and the page reads
-   `Only members of <team name> can change this.` or `Only its owner can
-   change this.`
+   **Edit**, and **Delete** are disabled, the picker is hidden, and the
+   page reads `Only members of <team name> can change this.` or `Only its
+   owner can change this.`
 2. `EventSubscriptionWire` carries `problem?: string` (the pin text when
    the latest settled delivery since the line's last edit dead-lettered on
    its pin). The api offers `GET /api/event-subscriptions/:id/deliveries`
@@ -369,12 +369,16 @@ Pass criterion: all steps, in one run, from a clean start.
    routine` on the group, both of which open the wizard (Part H) on the
    schedule step.
 4. `workflow_schedules` carries `disabled_reason`, set each time the
-   scheduler disables a routine, and cleared on enable or a pin change;
-   the wire exposes `disabledReason` and the routine's owner. Each reason
-   names its fix: the pin text for an undeliverable pin, `Its prompt is
-   empty. Edit the routine and add a prompt.`, `Its workflow was deleted.
-   Edit the routine and pick another workflow.`, or `Its schedule does not
-   parse. Edit the routine and fix the schedule.`
+   scheduler disables a routine. The wire exposes `disabledReason` and the
+   routine's owner. Each reason names its fix: the pin text for an
+   undeliverable pin, `Its prompt is empty. Edit the routine and add a
+   prompt.`, `Its workflow was deleted. Edit the routine and pick another
+   workflow.`, or `Its schedule does not parse. Edit the routine and fix
+   the schedule.` An enable clears any reason. An edit of the field a
+   reason names also clears it: the schedule or its timezone for the
+   schedule reason, and the prompt for the prompt reason. A thread change
+   clears the pin reason. A PATCH cannot change a routine's workflow, so
+   the workflow reason clears only on enable.
 
 ## Part F: Activity
 
@@ -393,8 +397,13 @@ Pass criterion: all steps, in one run, from a clean start.
    page then shows a removable chip above the list: `In <place name>`, or
    the service-wide place's own name (`Across GitHub`). A key that the
    places list does not hold reads by its last part (`In api`). Its remove
-   button reads `Remove the place filter <chip text>`. Rows render through
-   `Sentence` (Part K); the place token sits inside the row's link.
+   button reads `Remove the place filter <chip text>`. With no row, the
+   list reads `Nothing happened in <place name> in the last 30 days.` when
+   only the place filters, `Nothing matches. Choose All or remove the
+   place.` when the place and another filter are set, and `No activity
+   yet.` only when nothing filters. Rows render through `Sentence` (Part
+   K), keyed by delivery; the place token sits inside the row's link. A
+   dead delivery in **Needs attention** renders through the same parts.
    Receipt stages and diagnostics sit under disclosures for admins. The
    event page keeps payload and redeliver. Its title is `<event in words>
    in <place>`, with the event's summary as a muted line under it, and each

@@ -31,16 +31,18 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
-import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
-import type { WorkflowOwner } from "./service.js";
-import { readScheduleTargetKind } from "../events/target-names.js";
+import {
+  accessibleScheduleRow, BAD_CRON_REASON, EMPTY_PROMPT_REASON, nextFireAt, WORKFLOW_DELETED_REASON,
+} from "./schedule-service.js";
 
 /** Reasons the poll loop records when it turns a schedule off. Each one
  * names the fix, because the routine page shows it as written. A manual
- * fire answers with the same text. */
-export const EMPTY_PROMPT_REASON = "Its prompt is empty. Edit the routine and add a prompt.";
-export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Edit the routine and pick another workflow.";
-export const BAD_CRON_REASON = "Its schedule does not parse. Edit the routine and fix the schedule.";
+ * fire answers with the same text. They live beside the PATCH that clears
+ * them (`patchAnswersReason`). */
+export { BAD_CRON_REASON, EMPTY_PROMPT_REASON, WORKFLOW_DELETED_REASON };
+import type { WorkflowOwner } from "./service.js";
+import { readScheduleTargetKind } from "../events/target-names.js";
+
 
 const POLL_MS = 30_000;
 

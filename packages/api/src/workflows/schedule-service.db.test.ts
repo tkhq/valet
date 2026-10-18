@@ -9,9 +9,12 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { teams, teamMembers, workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { eq } from "drizzle-orm";
 import {
+  BAD_CRON_REASON,
   createWorkflowSchedule,
+  EMPTY_PROMPT_REASON,
   updateWorkflowSchedule,
   nextFireAt,
+  WORKFLOW_DELETED_REASON,
 } from "./schedule-service.js";
 import type { AppDb } from "../lib/drizzle.js";
 
@@ -155,6 +158,44 @@ describe("updateWorkflowSchedule", () => {
       expect(updated.schedule.disabledReason).toBeUndefined();
       const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
       expect(row?.disabledReason).toBeNull();
+    });
+
+    it("clears the bad-schedule reason when the schedule changes, and not on a rename or a thread change", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: BAD_CRON_REASON }).where(eq(workflowSchedules.id, id));
+      const renamed = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "renamed", thread: { mode: "new" } }, NOW);
+      if (!renamed.ok) throw new Error(renamed.error);
+      expect(renamed.schedule.disabledReason).toBe(BAD_CRON_REASON);
+      const fixed = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *" }, NOW);
+      if (!fixed.ok) throw new Error(fixed.error);
+      expect(fixed.schedule.disabledReason).toBeUndefined();
+      expect(fixed.schedule.enabled).toBe(false);
+    });
+
+    it("clears the empty-prompt reason when the prompt changes, and not on a schedule change", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: EMPTY_PROMPT_REASON }).where(eq(workflowSchedules.id, id));
+      const moved = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *" }, NOW);
+      if (!moved.ok) throw new Error(moved.error);
+      expect(moved.schedule.disabledReason).toBe(EMPTY_PROMPT_REASON);
+      const fixed = await updateWorkflowSchedule(armDeps(), OWNER, id, { prompt: "Summarize the night." }, NOW);
+      if (!fixed.ok) throw new Error(fixed.error);
+      expect(fixed.schedule.disabledReason).toBeUndefined();
+    });
+
+    it("keeps the deleted-workflow reason through edits, because a PATCH cannot change the workflow", async () => {
+      const id = await disabledByPin();
+      await db.update(workflowSchedules).set({ disabledReason: WORKFLOW_DELETED_REASON }).where(eq(workflowSchedules.id, id));
+      const edited = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *", thread: { mode: "new" } }, NOW);
+      if (!edited.ok) throw new Error(edited.error);
+      expect(edited.schedule.disabledReason).toBe(WORKFLOW_DELETED_REASON);
+    });
+
+    it("keeps the pin reason through a schedule or prompt edit", async () => {
+      const id = await disabledByPin();
+      const edited = await updateWorkflowSchedule(armDeps(), OWNER, id, { cron: "0 10 * * *", prompt: "q" }, NOW);
+      if (!edited.ok) throw new Error(edited.error);
+      expect(edited.schedule.disabledReason).toBe(PIN_TEXT);
     });
 
     it("clears the reason when the pin changes", async () => {

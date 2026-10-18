@@ -71,6 +71,9 @@ function withCronHint(error: string): string {
   return error.includes("cron") ? error + CRON_HINT : error;
 }
 
+/** A routine id that is missing, or that the caller may not reach. */
+const ROUTINE_NOT_FOUND = "This routine was not found. Refresh Presence and try again.";
+
 workflowTriggersRouter.get("/triggers", async (c) => {
   const { db } = c.var.providers;
   const owner = ownerFrom(c);
@@ -224,7 +227,7 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that you have access to it.`
+        ? ROUTINE_NOT_FOUND
         : withCronHint(result.error);
     return c.json({ error: msg }, result.status);
   }
@@ -236,14 +239,14 @@ workflowTriggersRouter.delete("/schedules/:id", async (c) => {
   const { db } = c.var.providers;
   const owner = ownerFrom(c);
   const result = await deleteWorkflowSchedule(db, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
+  if (result === "not_found") return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   return c.json({ ok: true });
 });
 
 workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
   const result = await c.var.providers.workflowScheduler.fireNow(ownerFrom(c), c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
+    return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   if (result !== "ok") return c.json({ error: result.error }, 400);
   return c.json({ ok: true });
 });

@@ -1,8 +1,8 @@
 // INV-H2 (docs/specs/2026-10-16-presence-hub-design.md) for the api side:
 // the sentences the api sends to Presence use only the Terminology table's
-// words. This lint parses the event and workflow services and the events and
-// presence routes, and reads each string literal or template that starts
-// with a capital letter and ends with a period: a sentence a reader sees,
+// words. This lint parses the event and workflow services and the events,
+// presence, and workflow-triggers routes. It reads each string literal or
+// template that starts with a capital letter and ends with a period: a sentence a reader sees,
 // such as an error or a reason. It fails on a banned word. A line that
 // carries `// copy-lint: allow <word>` (on the line or the line before) may
 // use that word, for the few sentences that name a system value such as a
@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 
 const SRC = resolve(__dirname);
 const DIRS = ["events", "workflows"] as const;
-const FILES = ["routes/events.ts", "routes/presence.ts"] as const;
+const FILES = ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts"] as const;
 /** Files whose sentences only the model reads: tool descriptions, tool
  * results, and thread prompts. They name tool ids such as
  * `events.list_subscriptions`, so the system words stay. */
@@ -109,7 +109,7 @@ describe("api Presence copy lint (INV-H2)", () => {
 
   it("reads the event and workflow services and both routes", () => {
     const read = new Set(sourceFiles().map((file) => relative(SRC, file)));
-    for (const file of ["routes/events.ts", "routes/presence.ts", "events/dispatcher.ts", "workflows/service.ts"]) {
+    for (const file of ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "events/dispatcher.ts", "workflows/service.ts"]) {
       expect(read.has(file), file).toBe(true);
     }
     expect(read.has("events/actions.ts")).toBe(false);

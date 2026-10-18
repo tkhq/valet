@@ -354,6 +354,34 @@ export async function accessibleScheduleRow(
   return canAccessTriggerRow(owner, await triggerAccessSets(db, owner), row) ? row : null;
 }
 
+/** The reasons the scheduler records when it turns a routine off. Each
+ * names the field whose edit answers it. */
+export const EMPTY_PROMPT_REASON = "Its prompt is empty. Edit the routine and add a prompt.";
+export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Edit the routine and pick another workflow.";
+export const BAD_CRON_REASON = "Its schedule does not parse. Edit the routine and fix the schedule.";
+
+/**
+ * Whether a PATCH answers the routine's recorded reason, so the reason
+ * clears: enabling the routine answers any reason; an edit of the field a
+ * reason names answers that reason (the schedule or its timezone for
+ * `BAD_CRON_REASON`, the prompt for `EMPTY_PROMPT_REASON`); a thread change
+ * answers the pin reason and any reason this list does not name. A PATCH
+ * cannot change a routine's workflow, so `WORKFLOW_DELETED_REASON` clears
+ * only on enable.
+ */
+export function patchAnswersReason(
+  reason: string | null,
+  patch: WorkflowSchedulePatch,
+  changed: { schedule: boolean; prompt: boolean },
+): boolean {
+  if (reason === null) return false;
+  if (patch.enabled === true) return true;
+  if (reason === BAD_CRON_REASON) return changed.schedule;
+  if (reason === EMPTY_PROMPT_REASON) return changed.prompt;
+  if (reason === WORKFLOW_DELETED_REASON) return false;
+  return patch.thread !== undefined;
+}
+
 export interface WorkflowSchedulePatch {
   name?: string;
   cron?: string;
@@ -431,8 +459,11 @@ export async function updateWorkflowSchedule(
       input: patch.input !== undefined ? patch.input : row.input,
       threadPolicy: patch.thread === undefined ? row.threadPolicy
         : patch.thread === null ? null : readThreadPolicy(patch.thread),
-      // Enabling the schedule or changing its pin answers the recorded reason.
-      disabledReason: patch.enabled === true || patch.thread !== undefined ? null : row.disabledReason,
+      // An edit that answers the recorded reason clears it (`patchAnswersReason`).
+      disabledReason: patchAnswersReason(row.disabledReason, patch, {
+        schedule: cronOrTzChanged,
+        prompt: patch.prompt !== undefined && patch.prompt !== row.prompt,
+      }) ? null : row.disabledReason,
       nextFireAt: nextAt,
       updatedAt: now,
     })
