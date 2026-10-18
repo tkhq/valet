@@ -1282,6 +1282,69 @@ describe('slack actions', () => {
     },
   );
 
+  describe('send_message with a table too large for one message', () => {
+    const report = [
+      '**Weekly release report**',
+      '',
+      '| PR | Summary |',
+      '|---|---|',
+      ...Array.from({ length: 80 }, (_, index) => `| [tkhq/mono#${8000 + index}](https://github.com/tkhq/mono/pull/${8000 + index}) | ${'Moves the signer pool behind the new retry budget. '.repeat(3)} |`),
+    ].join('\n');
+
+    /** Answer every call; each post gets its own ts. Returns the posted bodies. */
+    function recordPosts(reject?: (count: number) => string | undefined): Record<string, unknown>[] {
+      const posts: Record<string, unknown>[] = [];
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (!new URL(url).pathname.endsWith('/chat.postMessage')) {
+          return jsonResponse(200, { ok: true, channel: { id: 'C1', name: 'general', is_private: false } });
+        }
+        posts.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+        const error = reject?.(posts.length);
+        return jsonResponse(200, error ? { ok: false, error } : { ok: true, ts: `100.${posts.length}`, channel: 'C1' });
+      });
+      return posts;
+    }
+
+    const tableParts = (posts: Record<string, unknown>[]) =>
+      posts.map((post) => (post.blocks as { type: string }[]).map((block) => block.type));
+
+    it('posts native tables in parts and threads the rest under the first', async () => {
+      const posts = recordPosts();
+
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: report }, pluginCtx());
+
+      expect(posts.length).toBeGreaterThan(1);
+      expect(tableParts(posts).every((types) => types.includes('table'))).toBe(true);
+      expect(posts[0].thread_ts).toBeUndefined();
+      expect(posts.slice(1).every((post) => post.thread_ts === '100.1')).toBe(true);
+      expect(JSON.stringify(posts[0].blocks)).toContain('Continued in the thread.');
+      expect(result).toEqual({
+        success: true,
+        data: { ts: '100.1', channel: 'C1', part_ts: posts.map((_, index) => `100.${index + 1}`) },
+      });
+    });
+
+    it('keeps every part in the thread it was aimed at', async () => {
+      const posts = recordPosts();
+
+      await action('slack.send_message').execute({ channel: 'C1', text: report, thread_ts: '99.9' }, pluginCtx());
+
+      expect(posts.length).toBeGreaterThan(1);
+      expect(posts.every((post) => post.thread_ts === '99.9')).toBe(true);
+      expect(JSON.stringify(posts[0].blocks)).toContain('Continued below.');
+    });
+
+    it('names the posted parts when Slack rejects a later part', async () => {
+      const posts = recordPosts((count) => (count === 2 ? 'msg_too_long' : undefined));
+
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: report }, pluginCtx());
+
+      expect(posts).toHaveLength(2);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/^Slack posted parts 1-1 of \d+ \(ts 100\.1\) and rejected part 2: Slack API error: msg_too_long\. Delete the posted parts/);
+    });
+  });
+
   it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
     '%s preserves native links and mentions in readable table rows', async (name) => {
       if (name === 'slack.dm_user') {

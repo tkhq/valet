@@ -619,6 +619,37 @@ item or blockquote, because the scanner tracks top-level fences only.
 Messages with Slack-native spans use the labeled-row path, which converts
 every table, also one that continues a list or blockquote.
 
+### Tables too large for one message (2026-10-18)
+
+A weekly release report had a 79-row table and about 25,000 characters. The
+message was over the Markdown limit, so `slack.send_message` fell back to
+`mrkdwn` sections and the table showed as plain text.
+
+`slack.send_message` now splits a message with one table when the message is
+too large for one Markdown block and would fall back to sections. A message
+that fits one Markdown block keeps it, even when its table is over the
+native-table limits. Each part is a native table that repeats the header and delimiter
+rows. The splitter fills each part with rows until the next row would stop the
+part from rendering as a native table. So each part keeps the limits above and
+the 12,000-character text check. The text before the table opens the first
+part. The text after the table closes the last part, or goes in its own message
+when it does not fit.
+
+The first part goes to the channel or thread that the caller named. The other
+parts go in the thread of the first part, or in the caller's thread, about one
+second apart. Each part except the last ends with "Continued in the thread."
+(or "Continued below." in a thread). The action returns the first part's `ts`,
+so replies threaded under it come after the table, and `part_ts` lists every
+part. If Slack rejects a later part, the action fails and names the parts it
+posted, so the caller can delete them before it sends the message again.
+
+The split keeps the single-message rendering when the message has Slack-native
+spans, more than one table, a table that a list item or indented delimiter
+keeps from standing alone, or more than 10 parts. One exception to the rule
+above: a line without a pipe directly after the rows becomes prose after the
+last part, because each part ends its table with a blank line. A model often
+ends a table this way, and does not mean the line as a row.
+
 ### Images in question answers
 
 The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.

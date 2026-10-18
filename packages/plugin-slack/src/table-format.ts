@@ -58,6 +58,8 @@ export interface MarkdownTable {
   /** False when Markdown could read the table as part of the lines around
    * it, so lifting it out as its own block would change the document. */
   standalone: boolean;
+  /** The source lines: header, delimiter, then one line per body row. */
+  lines: string[];
 }
 
 export type MarkdownSegment =
@@ -120,6 +122,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     let standalone = !inContainer && !/^\s/.test(delimiter);
     index += 1;
     const rows: string[][] = [];
+    const tableLines = [line, delimiter];
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
       if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
@@ -129,9 +132,10 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
         break;
       }
       rows.push(cells);
+      tableLines.push(next);
       index += 1;
     }
-    segments.push({ type: 'table', table: { headers, alignments: separators.map(alignmentOf), rows, standalone } });
+    segments.push({ type: 'table', table: { headers, alignments: separators.map(alignmentOf), rows, standalone, lines: tableLines } });
   }
   return segments;
 }
