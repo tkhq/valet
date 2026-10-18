@@ -64,6 +64,29 @@ Copy: header button `Add` (opens `AutomationWizard` with no preselection); banne
 - [ ] Implement; `pnpm --filter @valet/web test overview place-block attention-banner use-faults overview-groups presence-no-tabs sentences`; `pnpm typecheck`.
 - [ ] Commit `feat(web): land Presence on an overview of places` with Changelog line: `Presence opens on an overview of every place and what Valet does there.`
 
+### Task 1b: The roster presentation
+
+**Files:**
+- Modify: `components/presence/overview.tsx` (+ test), `components/presence/place-block.tsx` → rename `place-row.tsx` (+ test; `PlaceRow`), `components/presence/attention-banner.tsx` (+ test), `components/presence/presence-line.tsx` (+ test), `components/presence/onboarding.tsx` (+ test), `components/presence/routine-row.tsx` or the `RoutineRow` export (+ test), `components/presence/overview-groups.ts` (group counts), `components/primitives/switch.tsx` (a `size="sm"` variant: 28×16, if the primitive has none).
+- Reference: the approved mockup `presence-roster.html` (the controller passes its path). Spec Part B steps 1 to 11 are the requirements; the mockup is the visual target: same tokens, no new colors.
+
+**Changes:**
+- Header: a flex row with the title pair left and the pair `Activity` (secondary `Button` as a `Link` to `/presence/activity`) and `Add` (primary) right. Remove the footer `Activity` link.
+- Needs attention: a ruled `section` (`border-t border-line pt-3.5`) with a danger mark and the heading `Needs attention` in `text-xs font-medium text-muted`; each item `In <place>, <fault>` with its fix inline; danger color only on the mark and the fault text.
+- Groups: heading `h2` in `text-xs font-medium text-muted` on `border-b border-line`, count right-aligned (`2 places`, `1 routine`), `mt-9`.
+- Place row: `grid grid-cols-[200px_minmax(0,1fr)] gap-x-8 gap-y-1 py-4 border-b border-line last:border-0`; at `sm` and below one column. Place column: name link `text-[15px] font-medium text-ink`, then stacked `text-xs text-muted tabular-nums` lines: `<mark> <n> active threads` (only when > 0, else `No active thread`) and `<time ago>`. No `cardClass` anywhere in the roster; a test asserts no element inside the roster has a `rounded-*` border box with `border` on all sides.
+- Sentence row (`PresenceLine`): `grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 px-2 -mx-2 py-1.5 rounded-md hover:bg-ink-wash`; sentence `text-base text-ink` as a `Link` to the line page; name `text-xs text-muted`; off line: sentence `text-muted` and `Off` under it; faulted line: danger mark before the sentence and `ThreadProblem variant="inline"` under the row; controls column: `Switch size="sm"` and the overflow trigger (`h-6 w-6`). Keep the overflow items, the delete confirm, the read-only rule, the paused line.
+- Appearance: when any line of the place sets one, one `Appears as <name>` line with a 16px avatar after the sentences.
+- `+ Listen for…`: a ghost button `text-xs text-muted hover:text-accent-600 hover:bg-moss-wash -ml-2 px-2 py-1 rounded-md` at the end of the sentence column; the schedule place uses `+ New routine`.
+- `On a schedule`: the same grid; place column `scheduleInWords` without the timezone, then the timezone when not UTC, then `Next <toLocaleString>` or `Off`; sentence column: `<name>: <do>.` with the prompt as the small muted line, controls `Fire now` (ghost, `text-xs`), the small switch, the overflow.
+- Empty state: the two paragraphs from spec Part B step 9 with `Slack`, `GitHub`, `Linear` as `Link`s to `/integrations`; header shows only `Add`.
+- Scale (Part B step 8): the collapse threshold counts places; groups collapse to `<details>` with the heading as `<summary>`; a group with a fault stays open; the filter box filters place names.
+- Delete the card-era copy and tests that assert `cardClass` boxes.
+
+- [ ] Failing tests: header pair, no-card assertion, place row columns, off line, faulted line mark and inline fix, appearance line, schedule place column, empty state copy and links, small switch.
+- [ ] Implement; `pnpm --filter @valet/web test overview place-row attention-banner presence-line onboarding routine-row switch presence-no-tabs copy-lint`; the whole web suite; `pnpm typecheck`; `pnpm --filter @valet/web exec tsc --noEmit`.
+- [ ] Commit `feat(web): set the Presence overview as a roster` with Changelog line: `The Presence overview reads as a roster of places and sentences.`
+
 ### Task 2: Routes, redirects, drill-ins
 
 **Files:**
