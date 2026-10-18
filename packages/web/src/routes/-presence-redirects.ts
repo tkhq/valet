@@ -15,8 +15,9 @@ import { redirect } from "@tanstack/react-router";
  * `/presence/routines/$id`.
  *
  * `/workflows` is a live page and a legacy route at once. Before revision 1,
- * its `?tab=scheduled` and `?tab=triggers` opened schedules and `?tab=runs`
- * opened runs. Those URLs redirect; every other `/workflows` URL matches no
+ * its `?tab=scheduled` opened schedules, `?tab=triggers` opened event
+ * rules, and `?tab=runs` opened runs. So a `review` id on `scheduled`
+ * names a routine, and one on `triggers` names a rule. Those URLs redirect; every other `/workflows` URL matches no
  * row and serves the list.
  *
  * A row keeps every search param it does not consume, so `workspace`,

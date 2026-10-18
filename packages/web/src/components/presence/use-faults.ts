@@ -17,7 +17,9 @@ import { useListOwner } from "~/lib/use-list-owner";
 import { blockSubjectFor, faultLeadParts, placeLeadParts, type OverviewService } from "./overview-groups";
 import { isPinProblem, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routine-helpers";
-import { activitySentence, partsText, text, type SentencePart, type ThreadTitles } from "./sentences";
+import {
+  activitySentence, activitySentenceParts, partsText, text, type ActivitySentenceParts, type SentencePart, type ThreadTitles,
+} from "./sentences";
 
 /** How far back a dead delivery counts. */
 export const FAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -27,7 +29,11 @@ export type Fault =
    * `Everywhere in Slack,`. `leadParts` is the same lead with the place as a token. */
   | { kind: "line"; sub: EventSubscriptionWire; text: string; lead?: string; leadParts?: readonly SentencePart[] }
   | { kind: "routine"; routine: Routine; text: string }
-  | { kind: "delivery"; eventId: string; subscriptionId: string; text: string; lead?: string; leadParts?: readonly SentencePart[] };
+  /** `sentence` is `text` as parts, with the place and the thread as tokens. */
+  | {
+    kind: "delivery"; eventId: string; subscriptionId: string; text: string; sentence?: ActivitySentenceParts;
+    lead?: string; leadParts?: readonly SentencePart[];
+  };
 
 /** A lead's string and parts, or nothing. */
 function leadFields(parts: SentencePart[] | null): { lead?: string; leadParts?: SentencePart[] } {
@@ -102,11 +108,16 @@ export function faultsOf(input: {
       if (line !== undefined) faultedLines.push(line);
       // The line's place leads; a line this list does not hold falls back to the event's place.
       const lead = line !== undefined ? faultLeadParts(line, input.places) : eventLeadParts(item);
+      const placeNames = {
+        ...(item.place !== undefined ? { place: item.place } : {}),
+        ...(item.placeKey !== undefined ? { placeKey: item.placeKey } : {}),
+      };
       faults.push({
         kind: "delivery",
         eventId: item.id,
         subscriptionId: delivery.subscriptionId,
-        text: activitySentence({ eventKey: item.eventKey }, delivery, item.place !== undefined ? { place: item.place } : {}),
+        text: activitySentence({ eventKey: item.eventKey }, delivery, placeNames),
+        sentence: activitySentenceParts({ eventKey: item.eventKey }, delivery, placeNames),
         ...leadFields(lead),
       });
     }

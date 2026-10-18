@@ -688,7 +688,7 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(wizard.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
     await userEvent.click(wizard.getByRole("button", { name: "Next" }));
     // A reply has four steps like every flow: Runs in has its own.
-    expect(wizard.getByText("Step 3 of 4 — Runs in")).toBeTruthy();
+    expect(wizard.getByText("Step 3 of 4: Runs in")).toBeTruthy();
     await userEvent.click(wizard.getByRole("button", { name: "Next" }));
     await userEvent.type(wizard.getByLabelText("Name"), "Incident replies");
     await userEvent.click(wizard.getByRole("button", { name: "Create" }));
@@ -884,6 +884,8 @@ describe("Presence hub acceptance (P1 to P17)", () => {
 
   it("P14: a team line is read-only to a viewer outside the team", { timeout: 30_000 }, async () => {
     teamsNow = [{ ...SRE, callerRole: null }];
+    // The line's pin is archived, so a member would see the thread picker.
+    rules.sre = [{ ...M, problem: PIN_UNAVAILABLE }, P];
     mountApp("/presence?workspace=sre");
     const incidents = await screen.findByRole("region", { name: "#incidents" });
     await waitFor(() => expect(within(incidents).getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true));
@@ -900,7 +902,12 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(line.getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true);
     expect(line.getByRole("button", { name: "Edit" })).toHaveProperty("disabled", true);
     expect(line.getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
-    expect(line.getByText("Only members of SRE can change this.")).toBeTruthy();
+    expect(line.getAllByText("Only members of SRE can change this.").length).toBeGreaterThan(0);
+    // The problem reads, and the thread picker is hidden from a viewer who may not change the line.
+    expect(line.getByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
+    expect(line.queryByRole("combobox")).toBeNull();
+    expect(line.queryByRole("listbox")).toBeNull();
+    expect(line.queryByRole("button", { name: "Pick another thread" })).toBeNull();
   });
 
   it("P15: a routine turned off for a deleted workflow reads its reason and its fix in Needs attention", async () => {

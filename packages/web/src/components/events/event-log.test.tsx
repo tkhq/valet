@@ -131,3 +131,32 @@ it("opts into diagnostics and stops requesting them when switched off", () => {
   fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
   expect(lastParams?.diagnostics).toBe(false);
 });
+
+describe("EventLog empty state", () => {
+  function renderEmpty(props: { filter?: LogFilter; query?: string; place?: { key: string; name: string } }) {
+    render(
+      <EventLog
+        filter={props.filter ?? "all"} onFilterChange={vi.fn()} query={props.query ?? ""} onQueryChange={vi.fn()}
+        {...(props.place !== undefined ? { place: props.place.key, placeName: props.place.name } : {})}
+      />,
+    );
+  }
+
+  it("says nothing happened in the place when only the place filters", () => {
+    renderEmpty({ place: { key: "github:acme/api", name: "acme/api" } });
+    expect(screen.getByText("Nothing happened in acme/api in the last 30 days.")).toBeTruthy();
+  });
+
+  it("names the fix when a place and another filter match nothing", () => {
+    renderEmpty({ filter: "problems", place: { key: "github:acme/api", name: "acme/api" } });
+    expect(screen.getByText("Nothing matches. Choose All or remove the place.")).toBeTruthy();
+    cleanup();
+    renderEmpty({ query: "deploy" });
+    expect(screen.getByText("Nothing matches. Choose All or clear Search.")).toBeTruthy();
+  });
+
+  it("says no activity yet only when nothing filters", () => {
+    renderEmpty({});
+    expect(screen.getByText(/^No activity yet\./)).toBeTruthy();
+  });
+});

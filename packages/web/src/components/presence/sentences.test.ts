@@ -11,6 +11,7 @@ import type {
 import {
   activityLeadParts,
   activitySentence,
+  activityPartsText,
   activitySentenceParts,
   cronInWords,
   derivedClause,
@@ -545,25 +546,33 @@ describe("activitySentenceParts", () => {
   ];
 
   it.each(cases)("reads as the same string as activitySentence: %s", (_name, args) => {
-    expect(partsText(activitySentenceParts(...args))).toBe(activitySentence(...args));
+    expect(activityPartsText(activitySentenceParts(...args))).toBe(activitySentence(...args));
   });
 
   it("names the place as a token when the row knows its key, and the thread as a token with its id", () => {
     const parts = activitySentenceParts(check, delivery({ thread: { sessionId: "s", threadId: "t-ci" } }), {
       threads, place: "acme/api#12", placeKey: "github:acme/api#12",
     });
-    expect(parts).toEqual([
+    expect(parts.lead).toEqual([
       { kind: "text", text: "Completed check in " },
       { kind: "place", text: "acme/api#12", service: "github", subject: "github:acme/api#12" },
-      { kind: "text", text: " → delivered to " },
-      { kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" },
     ]);
+    expect(parts.outcomes.map((o) => [o.key, o.parts])).toEqual([[
+      "d-1",
+      [{ kind: "text", text: "delivered to " }, { kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" }],
+    ]]);
   });
 
   it("keeps the place as words when the row has no key, and an archived thread unlinked", () => {
     expect(activityLeadParts(check)).toEqual([{ kind: "text", text: "Completed check in acme/api" }]);
     const parts = activitySentenceParts(mention, delivery({ thread: { sessionId: "s", threadId: "t-inc", archived: true } }), { threads });
-    expect(parts.at(-1)).toEqual({ kind: "thread", text: "t-inc" });
+    expect(parts.outcomes[0]?.parts.at(-1)).toEqual({ kind: "thread", text: "t-inc" });
+  });
+
+  it("keys each outcome by its delivery, so two deliveries with the same words stay apart", () => {
+    const parts = activitySentenceParts(check, [delivery({ id: "d-a" }), delivery({ id: "d-b" })]);
+    expect(parts.outcomes.map((o) => [o.key, partsText(o.parts)])).toEqual([["d-a", "delivered"], ["d-b", "delivered"]]);
+    expect(activitySentenceParts(check, null).outcomes.map((o) => o.key)).toEqual(["none"]);
   });
 });
 

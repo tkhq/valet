@@ -646,7 +646,7 @@ export function AutomationWizard({
         description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Choose when Valet acts and what it does."}
         className="max-w-lg"
       >
-        {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 3 · {plan.labels[step - 1]}</p> : <StepHeader step={step} plan={plan} />}
+        {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 3: {plan.labels[step - 1]}</p> : <StepHeader step={step} plan={plan} />}
         <p aria-live="polite" data-testid="wizard-preview" className="mb-4 mt-2 rounded-md border border-line px-3 py-2 text-sm leading-relaxed text-ink">
           <Sentence parts={previewParts} links={false} />
         </p>
@@ -849,7 +849,7 @@ type EventSubscriptionTarget =
 function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; count: Step } }) {
   return (
     <p className="text-xs font-medium text-muted">
-      Step {step} of {plan.count} — {plan.labels[step - 1]}
+      Step {step} of {plan.count}: {plan.labels[step - 1]}
     </p>
   );
 }

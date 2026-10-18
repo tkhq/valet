@@ -19,7 +19,7 @@ import { Button } from "~/components/primitives";
 import { textParam } from "~/lib/search-params";
 import { useNotPresentAnywhere } from "./onboarding";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
-import { isServiceRoot } from "./places";
+import { isServiceRoot, SERVICE_NAMES } from "./places";
 
 export interface ActivitySearch {
   status?: "problems";
@@ -58,9 +58,16 @@ export function readActivitySearch(raw: unknown): ActivitySearch {
  */
 export function placeChipText(key: string, places: readonly PresencePlaceWire[]): string {
   const place = places.find((candidate) => candidate.subject === key);
-  if (place !== undefined) return isServiceRoot(place) ? place.label : `In ${place.label}`;
-  const last = key.split(/[:/]/).filter((part) => part !== "").at(-1) ?? key;
-  return `In ${last}`;
+  if (place !== undefined && isServiceRoot(place)) return place.label;
+  return `In ${placeName(key, places)}`;
+}
+
+/** A place's name in a sentence: its label, its service for a service-wide
+ * place (`GitHub`), or the last part of a key the list does not hold. */
+export function placeName(key: string, places: readonly PresencePlaceWire[]): string {
+  const place = places.find((candidate) => candidate.subject === key);
+  if (place !== undefined) return isServiceRoot(place) ? SERVICE_NAMES[place.service] : place.label;
+  return key.split(/[:/]/).filter((part) => part !== "").at(-1) ?? key;
 }
 
 /** The chip a search selects. `Problems` and a service chip exclude each other. */
@@ -74,6 +81,7 @@ export function ActivityPane({ search, onSearchChange }: {
   onSearchChange: (next: ActivitySearch) => void;
 }) {
   const notPresent = useNotPresentAnywhere();
+  const places = usePresencePlaces();
   const [adding, setAdding] = useState(false);
   // A blank box clears q. The draft keeps its spaces, so the box's own echo matches it.
   const keepQ = (q: string | undefined) => (q !== undefined && q.trim() !== "" ? { q } : {});
@@ -105,7 +113,9 @@ export function ActivityPane({ search, onSearchChange }: {
         onFilterChange={onFilterChange}
         query={search.q ?? ""}
         onQueryChange={onQueryChange}
-        {...(search.place !== undefined ? { place: search.place } : {})}
+        {...(search.place !== undefined
+          ? { place: search.place, placeName: placeName(search.place, places.data?.places ?? []) }
+          : {})}
       />
       {adding && <AutomationWizard open onOpenChange={setAdding} />}
     </PresenceDetailPage>

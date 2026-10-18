@@ -4,13 +4,10 @@
  * returns every grain. The overview keeps the service-wide rows and the mid
  * grain: Slack channels, GitHub repositories, and Linear teams.
  */
-import type { PresencePlaceService, PresencePlaceWire } from "@valet/api/wire";
+import type { PresencePlaceWire } from "@valet/api/wire";
 
-export const SERVICE_NAMES: Readonly<Record<PresencePlaceService, string>> = {
-  slack: "Slack",
-  github: "GitHub",
-  linear: "Linear",
-};
+/** The service names have one table, beside the service marks. */
+export { SERVICE_NAMES } from "./service-mark";
 
 /** A service-wide row: the Slack workspace (`slack:<team>`), `github:*`, or `linear:*`. */
 export function isServiceRoot(place: Pick<PresencePlaceWire, "subject" | "parent">): boolean {

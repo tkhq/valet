@@ -17,6 +17,7 @@ import { usePatchEventSubscription } from "~/api/events";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { ActivitySentence } from "./activity-row";
 import { ThreadProblem } from "./problem-badge";
 import { Sentence } from "./sentence";
 import type { SentencePart } from "./sentences";
@@ -68,9 +69,13 @@ function FaultItem({ fault }: { fault: Fault }) {
   return (
     <p className="[overflow-wrap:anywhere]">
       <Lead lead={fault.lead} parts={fault.leadParts} />
-      <Link to="/presence/events/$eventId" params={{ eventId: fault.eventId }} className="text-danger-600 hover:underline dark:text-danger-500">
-        {fault.text}
-      </Link>
+      {fault.sentence !== undefined
+        ? <ActivitySentence eventId={fault.eventId} sentence={fault.sentence} className="text-danger-600 dark:text-danger-500" />
+        : (
+          <Link to="/presence/events/$eventId" params={{ eventId: fault.eventId }} className="text-danger-600 hover:underline dark:text-danger-500">
+            {fault.text}
+          </Link>
+        )}
     </p>
   );
 }

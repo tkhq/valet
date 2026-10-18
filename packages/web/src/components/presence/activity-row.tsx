@@ -16,7 +16,7 @@ import { Badge, WorkRow, textLinkClass } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
 import { Ref } from "./ref";
 import { Sentence } from "./sentence";
-import { activityLeadParts, activityOutcomes, outcomeParts, type ActivityOutcome, type SentencePart } from "./sentences";
+import { activitySentenceParts, type ActivityOutcome, type ActivitySentenceParts, type SentencePart } from "./sentences";
 
 /** The badge each Log status wears. Exported for the event-log problem rows. */
 export const LOG_STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent" }> = {
@@ -52,7 +52,7 @@ export function useWorkflowsByListener(): Readonly<Record<string, string>> {
  * archived thread keeps its token in a disabled link, because it no longer
  * takes deliveries. A run outcome links the run.
  */
-function Outcome({ outcome }: { outcome: ActivityOutcome }) {
+function Outcome({ outcome, parts }: { outcome: ActivityOutcome; parts: readonly SentencePart[] }) {
   if (outcome.runId !== undefined) {
     return <Link to="/workflows/runs/$runId" params={{ runId: outcome.runId }} className={textLinkClass}>{outcome.words}</Link>;
   }
@@ -67,36 +67,32 @@ function Outcome({ outcome }: { outcome: ActivityOutcome }) {
       </>
     );
   }
-  return <Sentence parts={outcomeParts(outcome)} />;
+  return <Sentence parts={parts} />;
 }
 
 /**
- * An activity sentence with links: the lead opens the event page and names
- * its place as a token, and each thread opens its thread. The place token
- * sits inside the lead's link, so it does not link on its own.
+ * An activity sentence from `activitySentenceParts`: the lead opens the
+ * event page and names its place as a token, and each thread opens its
+ * thread. The place token sits inside the lead's link, so it does not link
+ * on its own. Outcomes key by their delivery.
  */
-export function ActivitySentence({ eventId, lead, outcomes }: {
+export function ActivitySentence({ eventId, sentence, className }: {
   eventId: string;
-  lead: readonly SentencePart[];
-  outcomes: readonly ActivityOutcome[];
+  sentence: ActivitySentenceParts;
+  className?: string;
 }) {
   return (
-    <span>
-      <Link to="/presence/events/$eventId" params={{ eventId }}><Sentence parts={lead} links={false} /></Link>
-      {outcomes.length > 0 && " → "}
-      {outcomes.map((outcome, index) => (
-        <Fragment key={outcomeKey(outcome)}>
+    <span className={className}>
+      <Link to="/presence/events/$eventId" params={{ eventId }}><Sentence parts={sentence.lead} links={false} /></Link>
+      {sentence.outcomes.length > 0 && " → "}
+      {sentence.outcomes.map(({ key, outcome, parts }, index) => (
+        <Fragment key={key}>
           {index > 0 && ", "}
-          <Outcome outcome={outcome} />
+          <Outcome outcome={outcome} parts={parts} />
         </Fragment>
       ))}
     </span>
   );
-}
-
-/** A stable key per outcome: its run, its thread, or its words. */
-function outcomeKey(outcome: ActivityOutcome): string {
-  return outcome.runId ?? (outcome.thread ? `${outcome.words}:${outcome.thread.ref.threadId}` : outcome.words);
 }
 
 /** The deliveries and the receipt stages of one event, behind a disclosure. */
@@ -125,12 +121,13 @@ export function ActivityRow({ item, workflowsByListener }: { item: EventLogItem;
     workflowsByListener,
   };
   const deliveries = item.deliveries ?? [];
+  const parts = activitySentenceParts(event, deliveries, names);
   // An older server sends no deliveries; the row then names no outcome it cannot see.
-  const outcomes = item.deliveries === undefined ? [] : activityOutcomes(event, deliveries, names);
+  const sentence = item.deliveries === undefined ? { lead: parts.lead, outcomes: [] } : parts;
   return (
     <div>
       <WorkRow
-        title={<ActivitySentence eventId={item.id} lead={activityLeadParts(event, names)} outcomes={outcomes} />}
+        title={<ActivitySentence eventId={item.id} sentence={sentence} />}
         badge={<Badge variant={meta.badge}>{meta.label}</Badge>}
         time={item.at}
         detail={[item.summary, item.actor].filter(Boolean).join(" · ")}

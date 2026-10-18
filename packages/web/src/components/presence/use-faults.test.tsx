@@ -86,7 +86,7 @@ vi.mock("~/api/workflows", () => ({ useWorkflowTriggers: () => ({ data: { trigge
 vi.mock("~/api/presence", () => ({ usePresencePlaces: () => ({ data: { places: PLACES }, isPending: false }) }));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({ "t-ci": { title: "Platform CI" } }) }));
 
-import { partsText } from "./sentences";
+import { activityPartsText, partsText } from "./sentences";
 import { faultsOf, useFaults } from "./use-faults";
 
 describe("useFaults", () => {
@@ -111,6 +111,8 @@ describe("useFaults", () => {
     for (const fault of result.current.faults) {
       if (fault.kind === "routine") continue;
       expect(partsText(fault.leadParts ?? [])).toBe(fault.lead);
+      // A dead delivery's text comes from the same parts the Activity row renders.
+      if (fault.kind === "delivery") expect(activityPartsText(fault.sentence!)).toBe(fault.text);
     }
     const first = result.current.faults[0];
     expect(first?.kind === "line" ? first.leadParts?.[1] : undefined).toEqual({

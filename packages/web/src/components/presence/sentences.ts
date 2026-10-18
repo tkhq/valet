@@ -837,6 +837,9 @@ export interface ActivityOutcome {
   words: string;
   thread?: ActivityThread;
   runId?: string;
+  /** The delivery the outcome reads. Absent on `no one listening`. A
+   * renderer keys outcomes by it: two deliveries can read the same words. */
+  deliveryId?: string;
 }
 
 /** The server's skip text for a claim whose thread this viewer may not open. */
@@ -895,7 +898,7 @@ export function activityOutcomes(
 ): ActivityOutcome[] {
   const deliveries: readonly EventDeliveryWire[] = delivery === null ? [] : Array.isArray(delivery) ? delivery : [delivery];
   if (deliveries.length === 0) return [{ words: "no one listening" }];
-  return deliveries.map((d) => deliveryOutcome(event, d, names));
+  return deliveries.map((d) => ({ ...deliveryOutcome(event, d, names), deliveryId: d.id }));
 }
 
 /** One outcome as text. */
@@ -952,16 +955,42 @@ export function activitySentence(
   return `${activityLead(event, names)} → ${activityOutcomes(event, delivery, names).map(outcomeText).join(", ")}`;
 }
 
-/** An activity row as parts. The parts read as `activitySentence`. */
+/** One outcome of an activity row with its parts and a stable key. */
+export interface ActivityOutcomeParts {
+  /** The delivery id, or `none` for `no one listening`. */
+  key: string;
+  outcome: ActivityOutcome;
+  parts: SentencePart[];
+}
+
+/** An activity row as parts: the lead, then each outcome. */
+export interface ActivitySentenceParts {
+  lead: SentencePart[];
+  outcomes: ActivityOutcomeParts[];
+}
+
+/**
+ * An activity row as parts, for a renderer that shows the place and the
+ * threads as tokens. `activityPartsText` of the result reads as
+ * `activitySentence`.
+ */
 export function activitySentenceParts(
   event: ActivityEvent,
   delivery: EventDeliveryWire | readonly EventDeliveryWire[] | null,
   names: ActivityNames = {},
-): SentencePart[] {
-  const outcomes = activityOutcomes(event, delivery, names);
-  return tidy([
-    ...activityLeadParts(event, names),
-    text(" → "),
-    ...outcomes.flatMap((outcome, i) => [...(i > 0 ? [text(", ")] : []), ...outcomeParts(outcome)]),
-  ]);
+): ActivitySentenceParts {
+  return {
+    lead: activityLeadParts(event, names),
+    outcomes: activityOutcomes(event, delivery, names).map((outcome) => ({
+      key: outcome.deliveryId ?? "none",
+      outcome,
+      parts: outcomeParts(outcome),
+    })),
+  };
+}
+
+/** The parts of an activity row as one string: `<lead> → <outcome>, <outcome>`. */
+export function activityPartsText(sentence: ActivitySentenceParts): string {
+  const outcomes = sentence.outcomes.map((o) => partsText(o.parts)).join(", ");
+  return outcomes.length > 0 ? `${partsText(sentence.lead)} → ${outcomes}` : partsText(sentence.lead);
 }

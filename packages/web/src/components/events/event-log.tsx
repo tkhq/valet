@@ -42,7 +42,7 @@ export function itemsForFilter(items: readonly EventLogItem[], filter: LogFilter
   return items.filter((item) => item.eventKey?.startsWith(`${filter}.`) ?? false);
 }
 
-export function EventLog({ filter, onFilterChange, query, onQueryChange, place }: {
+export function EventLog({ filter, onFilterChange, query, onQueryChange, place, placeName }: {
   filter: LogFilter;
   onFilterChange: (next: LogFilter) => void;
   /** The search text; the server matches it against the stored events. */
@@ -50,6 +50,8 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place }
   onQueryChange: (next: string) => void;
   /** A place key: the server keeps the events in that place or inside it. */
   place?: string;
+  /** The place's name for the empty state, such as `acme/api`. */
+  placeName?: string;
 }) {
   const me = useMe();
   const admin = !me.error && me.data?.orgRole === "admin";
@@ -92,7 +94,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place }
       {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
       {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
       {log.data && items.length === 0 && (
-        <EmptyRow>{query || filter !== "all" ? "Nothing matches. Choose All, clear Search, or remove the place." : "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics."}</EmptyRow>
+        <EmptyRow>{emptyText({ filter, query, place, placeName, windowDays: first?.windowDays ?? 30 })}</EmptyRow>
       )}
       {items.length > 0 && (
         <WorkList>
@@ -108,6 +110,28 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place }
       )}
     </div>
   );
+}
+
+/**
+ * What the Log says when no row shows. A place alone says nothing happened
+ * there; any other filter names how to widen it; no filter says no
+ * activity yet.
+ */
+export function emptyText({ filter, query, place, placeName, windowDays }: {
+  filter: LogFilter;
+  query: string;
+  place: string | undefined;
+  placeName: string | undefined;
+  windowDays: number;
+}): string {
+  const otherFilter = query.trim() !== "" || filter !== "all";
+  if (place !== undefined && !otherFilter) {
+    return `Nothing happened in ${placeName ?? "this place"} in the last ${windowDays} days.`;
+  }
+  if (place !== undefined) return "Nothing matches. Choose All or remove the place.";
+  if (query.trim() !== "") return "Nothing matches. Choose All or clear Search.";
+  if (filter !== "all") return "Nothing matches. Choose All.";
+  return "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics.";
 }
 
 /** Consecutive problems with the same reason and detail read as one row with a count. */

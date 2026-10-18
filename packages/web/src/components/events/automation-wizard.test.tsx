@@ -1173,22 +1173,22 @@ describe("AutomationWizard", () => {
     it("keeps one step count while the Do choice changes and between steps", () => {
       render(<AutomationWizard open onOpenChange={() => {}} />);
       expect((screen.getByLabelText("Reply") as HTMLInputElement).checked).toBe(true);
-      expect(screen.getByText("Step 1 of 4 — When")).toBeTruthy();
+      expect(screen.getByText("Step 1 of 4: When")).toBeTruthy();
       fireEvent.click(screen.getByLabelText("Work on it"));
-      expect(screen.getByText("Step 1 of 4 — When")).toBeTruthy();
+      expect(screen.getByText("Step 1 of 4: When")).toBeTruthy();
       clickNext();
-      expect(screen.getByText("Step 2 of 4 — What")).toBeTruthy();
+      expect(screen.getByText("Step 2 of 4: What")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Back" }));
-      expect(screen.getByText("Step 1 of 4 — When")).toBeTruthy();
+      expect(screen.getByText("Step 1 of 4: When")).toBeTruthy();
       fireEvent.click(screen.getByLabelText("Reply"));
       clickNext();
-      expect(screen.getByText("Step 2 of 4 — Reply")).toBeTruthy();
+      expect(screen.getByText("Step 2 of 4: Reply")).toBeTruthy();
       addReplyChannel("C1");
       clickNext();
-      expect(screen.getByText("Step 3 of 4 — Runs in")).toBeTruthy();
+      expect(screen.getByText("Step 3 of 4: Runs in")).toBeTruthy();
       expect(screen.getByRole("group", { name: "Runs in" })).toBeTruthy();
       clickNext();
-      expect(screen.getByText("Step 4 of 4 — Review")).toBeTruthy();
+      expect(screen.getByText("Step 4 of 4: Review")).toBeTruthy();
     });
 
     it("keeps one step count through every step of a flow", () => {
@@ -1202,7 +1202,7 @@ describe("AutomationWizard", () => {
       headers.push(screen.getByText(/^Step \d of \d/).textContent);
       clickNext();
       headers.push(screen.getByText(/^Step \d of \d/).textContent);
-      expect(headers).toEqual(["Step 1 of 4 — When", "Step 2 of 4 — What", "Step 3 of 4 — Do", "Step 4 of 4 — Review"]);
+      expect(headers).toEqual(["Step 1 of 4: When", "Step 2 of 4: What", "Step 3 of 4: Do", "Step 4 of 4: Review"]);
     });
 
     it("lists events in words, common ones first and the rest under More events", () => {
@@ -1248,16 +1248,16 @@ describe("AutomationWizard", () => {
     });
 
     it.each([
-      ["Something happens in Slack", "Reply", "Step 2 of 4 — Reply"],
-      ["Something happens in Slack", "Follow a Slack thread", "Step 2 of 4 — What"],
-      ["Something happens in Slack", "Work on it", "Step 2 of 4 — What"],
-      ["Something happens on GitHub", "Run a workflow", "Step 2 of 4 — What"],
-      ["On a schedule", undefined, "Step 2 of 4 — Schedule"],
+      ["Something happens in Slack", "Reply", "Step 2 of 4: Reply"],
+      ["Something happens in Slack", "Follow a Slack thread", "Step 2 of 4: What"],
+      ["Something happens in Slack", "Work on it", "Step 2 of 4: What"],
+      ["Something happens on GitHub", "Run a workflow", "Step 2 of 4: What"],
+      ["On a schedule", undefined, "Step 2 of 4: Schedule"],
     ])("%s + %s leads to %s", (when, todo, header) => {
       workflowsData = { workflows: [{ id: "wf_1", name: "Deploy" }] };
       render(<AutomationWizard open onOpenChange={() => {}} />);
       pickWhenDo(when, todo);
-      expect(screen.getByText(/^Step 1 of \d — When$/)).toBeTruthy();
+      expect(screen.getByText(/^Step 1 of \d: When$/)).toBeTruthy();
       clickNext();
       expect(screen.getByText(header)).toBeTruthy();
     });
@@ -1305,7 +1305,7 @@ describe("AutomationWizard", () => {
       clickNext();
       clickNext();
       clickNext();
-      expect(screen.getByText("Step 4 of 4 — Review")).toBeTruthy();
+      expect(screen.getByText("Step 4 of 4: Review")).toBeTruthy();
       expect(preview()).toBe("When you mention Valet in #incidents, reply in a new thread.");
       const review = within(screen.getByLabelText("Summary"));
       expect(review.getByText("When").nextElementSibling?.textContent).toBe("You mention Valet in #incidents");
