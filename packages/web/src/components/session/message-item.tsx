@@ -61,7 +61,7 @@ export const MessageItem = memo(function MessageItem({
 }: {
   message: StreamMessage;
   /** The same assistant turn as the row above: no repeated author, time,
-   *  and model line. The row's actions still show on hover. */
+   *  and model line. A reply's actions move under its text. */
   continuation?: boolean;
   /** True for the last message while the agent is mid-turn — an empty
    *  assistant row is then a streaming placeholder, not a failed turn. */
@@ -81,6 +81,27 @@ export const MessageItem = memo(function MessageItem({
   // Defined only for another member's message on a shared session; the
   // viewer's own messages (and authorless rows) keep the "You" treatment.
   const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
+  const actions = <>
+    {message.role === "assistant" && message.completed === true && copyText && onReply && (
+      <button
+        type="button"
+        onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
+        className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
+        aria-label="Reply to message"
+      >
+        <Reply className="h-3 w-3" aria-hidden />
+        Reply
+      </button>
+    )}
+    {ratings && message.role === "assistant" && <MessageRating message={message} />}
+    {copyText && (
+      <CopyButton
+        getText={() => copyText}
+        label="Copy message"
+        className="opacity-0 group-hover:opacity-100"
+      />
+    )}
+  </>;
   return (
     <article data-message-id={message.id} className={cn("group min-w-0 px-5 sm:px-8", continuation ? "pb-3" : "py-3")}>
       {/* Row background spans full width; the content column is capped at a
@@ -89,49 +110,26 @@ export const MessageItem = memo(function MessageItem({
         "mx-auto flex w-full min-w-0 max-w-3xl justify-end"
       )}>
 
-        <div className={cn("relative flex-1 min-w-0 space-y-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
-          <div className={cn("text-xs text-muted flex min-w-0 flex-wrap items-center gap-2",
-            // A continuation keeps only its hover actions, floated so they
-            // take no line of their own.
-            continuation && "absolute right-0 top-0 z-10")}>
-            {!continuation && <>
-            <span className="font-medium text-ink/80">
-              {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
-            </span>
-            <span>•</span>
-            <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
-            </>}
-            {!continuation && message.role === "assistant" && message.model && (
-              <span
-                className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
-                title={message.model}
-              >
-                {shortModelLabel(message.model)}
+        <div className={cn("flex-1 min-w-0 space-y-2", isUser && "sm:max-w-[85%] rounded-2xl bg-ink-wash px-4 py-3")}>
+          {!continuation && (
+            <div className="text-xs text-muted flex min-w-0 flex-wrap items-center gap-2">
+              <span className="font-medium text-ink/80">
+                {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
               </span>
-            )}
-            {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
-            <div className={cn("flex items-center gap-1", !continuation && "ml-auto")}>
-              {message.role === "assistant" && message.completed === true && copyText && onReply && (
-                <button
-                  type="button"
-                  onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
-                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
-                  aria-label="Reply to message"
+              <span>•</span>
+              <span title={new Date(message.createdAt).toLocaleString()}>{formatTime(message.createdAt)}</span>
+              {message.role === "assistant" && message.model && (
+                <span
+                  className="hidden sm:inline font-mono text-[10px] text-muted opacity-80"
+                  title={message.model}
                 >
-                  <Reply className="h-3 w-3" aria-hidden />
-                  Reply
-                </button>
+                  {shortModelLabel(message.model)}
+                </span>
               )}
-              {ratings && message.role === "assistant" && <MessageRating message={message} />}
-              {copyText && (
-                <CopyButton
-                  getText={() => copyText}
-                  label="Copy message"
-                  className="opacity-0 group-hover:opacity-100"
-                />
-              )}
+              {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
+              <div className="ml-auto flex items-center gap-1">{actions}</div>
             </div>
-          </div>
+          )}
           <div className="space-y-2">
             {isUser && message.replyTo && (
               <blockquote className="rounded border-l-2 border-moss bg-moss-wash px-3 py-2 text-xs text-muted">
@@ -166,6 +164,11 @@ export const MessageItem = memo(function MessageItem({
               </p>
             )}
           </div>
+          {/* A continuation has no header line, so a reply's actions sit
+              under its text instead. A tool-only continuation has none. */}
+          {continuation && copyText && (
+            <div className="flex items-center justify-end gap-1 text-xs text-muted">{actions}</div>
+          )}
         </div>
       </div>
     </article>

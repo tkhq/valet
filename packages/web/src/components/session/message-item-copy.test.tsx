@@ -242,18 +242,33 @@ it("preserves JSON integer precision in expanded results", async () => {
 });
 
 describe("MessageItem continuation", () => {
-  it("drops the repeated author line but keeps the copy action", () => {
-    render(
+  it("drops the repeated author line and puts a reply's actions under its text", () => {
+    const { container } = render(
       <TooltipProvider>
         <MessageItem continuation message={msg({ model: "gpt-6-luna", parts: [{ kind: "text", text: "Done." }] })} />
       </TooltipProvider>,
     );
     expect(screen.queryByText("Assistant")).toBeNull();
-    expect(screen.getByRole("button", { name: "Copy message" })).toBeTruthy();
+    const copy = screen.getByRole("button", { name: "Copy message" });
+    // After the text in document order, not floated over it.
+    const text = screen.getByText("Done.");
+    expect(text.compareDocumentPosition(copy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector(".absolute")).toBeNull();
   });
 
-  it("shows the author line on the first message of a turn", () => {
+  it("gives a tool-only continuation no action row to cover its card", () => {
+    render(
+      <TooltipProvider>
+        <MessageItem continuation message={msg({ parts: [{ kind: "tool_call", callId: "c1", toolName: "bash", args: { command: "ls" }, status: "completed" }] })} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByRole("button", { name: "Copy message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Good reply|Bad reply/ })).toBeNull();
+  });
+
+  it("shows the author line and the rating controls on the first message of a turn", () => {
     renderItem(msg({ parts: [{ kind: "text", text: "Done." }] }));
     expect(screen.getByText("Assistant")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Good reply/ })).toBeTruthy();
   });
 });

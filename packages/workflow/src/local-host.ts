@@ -252,11 +252,12 @@ export class LocalRunHost implements RunHost {
     await this.wake(runId);
   }
 
-  /** Writes one copied checkpoint as attempt 0. A re-start finds it already terminal and skips it. */
+  /** Writes one copied checkpoint as attempt 0. A re-start finds it already terminal and skips it.
+   * It keeps the source step's start, so its time is the time it took in the earlier run. */
   private async seedCheckpoint(runId: string, cp: NodeCheckpoint): Promise<void> {
     const key = { runId, nodeId: cp.nodeId, iteration: cp.iteration, attempt: 0 };
     try {
-      await this.store.putIntent({ ...key, status: 'intent', createdAt: cp.createdAt });
+      await this.store.putIntent({ ...key, status: 'intent', createdAt: cp.startedAt ?? cp.createdAt });
       await this.store.completeCheckpoint(runId, cp.nodeId, cp.iteration, 0, { ...cp, ...key });
     } catch (err) {
       if (!(err instanceof WorkflowFenceError)) throw err;
