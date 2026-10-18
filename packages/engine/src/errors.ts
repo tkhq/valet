@@ -171,7 +171,7 @@ export class WorkspaceProvisioningError extends Error {
   constructor(public readonly timeoutMs: number, public readonly lastStartError?: string) {
     super(
       lastStartError
-        ? `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms. The last start attempt failed: ${lastStartError}`
+        ? `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms. The last start attempt failed: ${lastStartError.replace(/\.+$/, "")}. Retry the operation; if it fails the same way again, check the sandbox image and configuration.`
         : `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
     );
     this.name = "WorkspaceProvisioningError";

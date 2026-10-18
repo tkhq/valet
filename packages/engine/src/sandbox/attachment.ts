@@ -786,6 +786,8 @@ export class SandboxAttachment {
 
   private async doResume(): Promise<void> {
     const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     const sandbox = this._sandbox;
     const provider = this.provider;
     // Wake folding (spec decision 3, wake-when-stale). Before waking the
@@ -945,6 +947,7 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
+      this.recordStartFailure(err, startEpoch, "resume");
       this._state = "error";
       this.emitStatus();
       // Same fast-fail rule as doProvision: a terminal SandboxStartupError
@@ -998,6 +1001,8 @@ export class SandboxAttachment {
 
   private async doProvisionInner(): Promise<void> {
     const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     // Set BEFORE any await, including provider.create. The api's per-org
     // capacity gate (gated-sandbox-provider.ts) depends on this ordering:
     // it counts `provisioning|ready` attachments and subtracts its own
@@ -1117,10 +1122,7 @@ export class SandboxAttachment {
       if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
     } catch (err) {
       if (this.destroyed) return;
-      // The cause was dropped here before: waiters timed out with a generic
-      // "retry shortly" and nothing recorded why the start failed.
-      this.lastStartError = formatSandboxErrorCause(err);
-      console.error("SandboxAttachment: sandbox start failed", { epoch: startEpoch, ...formatSandboxErrorLog(err) });
+      this.recordStartFailure(err, startEpoch, "create");
       this._state = "error";
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
@@ -1147,6 +1149,16 @@ export class SandboxAttachment {
     if (this.destroyed || this._epoch !== epoch || this._sandbox !== sandbox) return false;
     this.pendingReadyEpoch = null;
     return true;
+  }
+
+  /**
+   * The cause was dropped before: waiters timed out with a generic "retry
+   * shortly" and nothing recorded why the start failed. Keep it for the
+   * timeout message and the provision span, and log it once.
+   */
+  private recordStartFailure(err: unknown, epoch: number, phase: "create" | "resume"): void {
+    this.lastStartError = formatSandboxErrorCause(err);
+    console.error("SandboxAttachment: sandbox start failed", { phase, epoch, ...formatSandboxErrorLog(err) });
   }
 
   private publishReady(): void {

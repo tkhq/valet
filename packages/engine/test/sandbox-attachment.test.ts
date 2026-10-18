@@ -262,8 +262,29 @@ describe("SandboxAttachment", () => {
       setTimeout(() => d.reject(new Error("docker run failed (125): image not found")), 10);
       const err = await opPromise.then(() => undefined, (e: unknown) => e);
       expect(err).toBeInstanceOf(WorkspaceProvisioningError);
-      expect((err as WorkspaceProvisioningError).message).toContain("The last start attempt failed: docker run failed (125): image not found");
+      expect((err as WorkspaceProvisioningError).message).toContain("The last start attempt failed: docker run failed (125): image not found. Retry the operation");
       expect(logged).toHaveBeenCalledWith("SandboxAttachment: sandbox start failed", expect.objectContaining({ message: expect.stringContaining("image not found") }));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("4e. a newer start attempt still running does not report an earlier attempt's failure", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment, { readyTimeoutMs: 100 });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = provider.nextDeferred();
+      const firstOp = wrapper.readFile("/a.txt");
+      setTimeout(() => first.reject(new Error("transient docker error")), 10);
+      await firstOp.catch(() => undefined);
+      // The next call starts a new attempt, which stays slow but healthy.
+      provider.nextDeferred();
+      const err = await wrapper.readFile("/b.txt").then(() => undefined, (e: unknown) => e);
+      expect(err).toBeInstanceOf(WorkspaceProvisioningError);
+      expect((err as WorkspaceProvisioningError).message).not.toContain("transient docker error");
+      expect((err as WorkspaceProvisioningError).message).toContain("retry shortly");
     } finally {
       logged.mockRestore();
     }
