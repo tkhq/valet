@@ -989,3 +989,47 @@ describe('driveUntilPark: onError "continue"', () => {
     expect(byNode.get('probe')?.result).toEqual({ saw: 'the failure is in the template context' });
   });
 });
+
+// ─── Parked branch does not hold independent work ───────────────────────────
+
+describe('driveUntilPark: a parked branch does not hold independent work', () => {
+  it('finishes a ready branch in the same drive before parking on the waiting one', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    // `w` parks on a timer in the first wave beside `x`. Before, the run
+    // parked right after that wave, so `y` (ready once `x` finished) waited
+    // for the timer: in production, 1.5s of work waited 14-19h behind an approval.
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'w', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'y', type: 'set', values: { b: '{{nodes.x.result.a}}' } },
+        { id: 'join', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'w' },
+        { from: 't', to: 'x' },
+        { from: 'x', to: 'y' },
+        { from: 'w', to: 'join' },
+        { from: 'y', to: 'join' },
+      ],
+    };
+    await store.createRun('run-branches', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-branches');
+
+    const park = await driveUntilPark('run-branches', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('parked');
+    const byNode = new Map((await store.getCheckpoints('run-branches')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('x')?.status).toBe('completed');
+    expect(byNode.get('y')?.status).toBe('completed');
+    expect(byNode.get('w')?.status).toBe('intent');
+    expect(byNode.has('join')).toBe(false);
+    const run = await store.getRun('run-branches');
+    expect(run?.waitingOn).toEqual([expect.objectContaining({ kind: 'timer', nodeId: 'w' })]);
+    expect(run?.wakeAt).toBe(clock.now() + 3_600_000);
+  });
+});

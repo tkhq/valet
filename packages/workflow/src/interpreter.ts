@@ -25,8 +25,9 @@
  *   6. else execute the runnable nodes (deterministic definition order);
  *      a `stop` node's `terminate` signal short-circuits to two-phase
  *      settle once the current wave finishes; parked nodes' wait
- *      conditions accumulate and `parkRun` once the wave has no more
- *      newly-runnable work; otherwise loop again
+ *      conditions accumulate for the rest of this drive, and a parked node
+ *      is not run again in it, so the other nodes keep going; `parkRun`
+ *      only when nothing else is runnable; otherwise loop again
  */
 
 import { markSpanError, withSpan } from '@valet/engine';
@@ -220,6 +221,16 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   /** Every template finding this drive segment has seen, for the span attributes. */
   const driveDiagnostics: TemplatePathDiagnostic[] = [];
 
+  /**
+   * Nodes that parked in this drive, with what each waits on. A parked node
+   * is not run again in this drive, so independent work keeps going: an
+   * approval on one branch must not hold a ready step on another branch
+   * until the approval resolves. The run parks with every wait once nothing
+   * else can run.
+   */
+  const parked = new Map<string, RunWaitCondition[]>();
+  const parkedWaits = (): RunWaitCondition[] => [...parked.values()].flat();
+
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
@@ -260,8 +271,12 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     const skippedAny = await propagateSkips(store, run, definition, graph, cpAll, attempt, clock);
     if (skippedAny) continue; // re-derive the runnable set with the new skips visible
 
-    const runnable = computeRunnable(definition, graph, cpAll, templateContext);
+    const runnable = computeRunnable(definition, graph, cpAll, templateContext).filter((node) => !parked.has(node.id));
 
+    if (runnable.length === 0 && parked.size > 0) {
+      const waits = parkedWaits();
+      return await parkAndReturn(store, run, attempt, waits, earliestTimerWake(waits));
+    }
     if (runnable.length === 0) {
       const allTerminal = definition.nodes.every((n) => isSettled(cpAll, n.id));
       if (allTerminal) {
@@ -368,6 +383,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
           );
         }
         waitingOn.push(...outcome.waitingOn);
+        parked.set(node.id, outcome.waitingOn);
         continue;
       }
       if ((outcome.status === 'completed' || outcome.status === 'failed') && outcome.terminate) {
@@ -377,11 +393,17 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(deps, run.runId, attempt, waitingOn, finalOutcome);
+      return await terminateSettle(deps, run.runId, attempt, parkedWaits(), finalOutcome);
     }
     if (waitingOn.length > 0) {
-      const wakeAt = earliestTimerWake(waitingOn);
-      return await parkAndReturn(store, run, attempt, waitingOn, wakeAt);
+      // Another node in this wave finished: run what it unblocked before
+      // parking. When every node in the wave parked, park now.
+      const progressed = runnable.some((node) => outcomeById.get(node.id)?.status !== 'parked');
+      if (!progressed) {
+        const waits = parkedWaits();
+        return await parkAndReturn(store, run, attempt, waits, earliestTimerWake(waits));
+      }
+      continue;
     }
 
     // Otherwise loop again: this wave's completions may unblock more nodes.

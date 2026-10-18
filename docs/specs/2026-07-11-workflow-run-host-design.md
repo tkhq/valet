@@ -94,6 +94,8 @@ Rules:
 
 When no node is runnable, the interpreter parks by persisting the run's wake conditions and returning:
 
+A node that parks in a drive is not run again in that drive, and its wait conditions accumulate. The other nodes keep going, so an approval or a session on one branch does not hold a ready step on another branch. The run parks with every accumulated wait once nothing else is runnable. Until 2026-10-18 the interpreter parked right after the first wave in which any node parked, even when another node in that wave had unblocked more work; in production a step with 1.5 seconds of work waited 14 to 19 hours behind an unrelated approval.
+
 ```typescript
 interface RunParkState {
   runId: string;
