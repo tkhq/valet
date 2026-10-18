@@ -76,7 +76,7 @@ export function PlaceRow({ block, highlighted = false }: {
   const [adding, setAdding] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const { teamId } = useWorkspaceScope();
-  // A team picks its Slack channels from any Slack row (spec Part B step 11).
+  // A team picks its Slack channels from any Slack row (spec Part B step 4).
   const choosesChannels = teamId !== undefined && block.service === "slack";
   const sentence = usePresenceSentenceParts(block.lines);
   const active = activeThreadsText(block.activeThreadCount);
