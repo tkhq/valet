@@ -195,7 +195,7 @@ it("resolves a channel-only Slack key to the org's Slack workspace", async () =>
   // With no Slack workspace connected, a channel-only key names no place.
   const unplaced = await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("slack:C900")}?scope=user`);
   expect(unplaced.status).toBe(404);
-  expect(await unplaced.json()).toEqual({ error: "That Slack channel has no workspace in its link. Pick the channel from the rail." });
+  expect(await unplaced.json()).toEqual({ error: "That Slack channel has no workspace in its link. Pick the channel from Presence." });
 
   await connectSlack(api);
   await rule(api, { id: "r-inc", eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: "C900" }] });

@@ -53,7 +53,7 @@ presenceRouter.get("/places", async (c) => {
 });
 
 /** The refusal for a channel-only Slack key the api cannot place in one Slack workspace. */
-export const CHANNEL_KEY_REFUSAL = "That Slack channel has no workspace in its link. Pick the channel from the rail.";
+export const CHANNEL_KEY_REFUSAL = "That Slack channel has no workspace in its link. Pick the channel from Presence.";
 
 /**
  * The place key to read. An old `/channel?key=slack:<channel>` link and a
