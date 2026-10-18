@@ -190,6 +190,22 @@ describe("Presence copy lint (INV-H2)", () => {
     ]);
   });
 
+  it("reads the overview, its rows, the banner, onboarding, and the routine page", () => {
+    const read = new Set(sourceFiles().map((file) => file.slice(SRC.length + 1)));
+    for (const file of [
+      "components/presence/overview.tsx",
+      "components/presence/place-row.tsx",
+      "components/presence/routine-row.tsx",
+      "components/presence/routine-helpers.ts",
+      "components/presence/attention-banner.tsx",
+      "components/presence/onboarding.tsx",
+      "components/presence/created-highlight.ts",
+      "routes/presence.routines.$id.tsx",
+    ]) {
+      expect(read.has(file), file).toBe(true);
+    }
+  });
+
   it("finds no banned word in Presence UI copy", () => {
     const hits = sourceFiles().flatMap((file) => lintCopy(file, readFileSync(file, "utf8")));
     expect(hits.map((hit) => `${hit.file}:${hit.line} ${hit.word}: ${hit.text}`)).toEqual([]);

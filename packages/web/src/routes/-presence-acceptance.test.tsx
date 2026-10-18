@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The Presence hub acceptance scenario, P1 to P12
+ * The Presence hub acceptance scenario, P1 to P12, revision 3
  * (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
  *
  * The test renders the app's real route tree (`routeTree.gen.ts`, with the
@@ -12,6 +12,9 @@
  * browser driver for the web app; the api integration suite
  * `integration/presence-hub.test.ts` runs the data half of the scenario
  * over a real database.
+ *
+ * `/presence` lands on the overview roster (Part B). Each place and each
+ * drill-in is reached from the overview, as a reader reaches it.
  *
  * P11 renders the thread context card's background section on its own
  * router, because the thread page needs a live session socket. The thread
@@ -417,6 +420,8 @@ beforeEach(() => {
   unhandled.length = 0;
   window.sessionStorage.clear();
   window.localStorage.clear();
+  // jsdom has no scrolling. The overview scrolls a new row into view after a Create (Part H step 9).
+  Element.prototype.scrollIntoView = () => {};
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const body = typeof init?.body === "string" ? init.body : undefined;
@@ -441,18 +446,28 @@ async function switchWorkspace(from: string, to: string) {
   await screen.findByRole("button", { name: `Workspace: ${to}. Change workspace` });
 }
 
-function rail() {
-  return within(screen.getByRole("navigation", { name: "Presence" }));
+/** The overview's header row: the `Presence` title, the subtitle, and the action pair. */
+function overviewHeader(): HTMLElement {
+  const header = screen.getByRole("heading", { level: 1, name: "Presence" }).closest<HTMLElement>(".justify-between");
+  if (header === null) throw new Error("The overview has no header row.");
+  return header;
 }
 
-/** The rail's Activity row. Its name carries the problem count. */
-function activityRow(): HTMLElement {
-  return rail().getByRole("link", { name: /^Activity/ });
+/** The text of every group heading of the roster, in order. */
+function groupNames(): string[] {
+  return screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent ?? "").filter((name) => name !== "Needs attention");
 }
 
 /** The sentence links of a section of lines, in order. */
 function sentences(section: HTMLElement): string[] {
   return within(section).getAllByRole("link").map((link) => link.textContent ?? "").filter((text) => text.startsWith("When "));
+}
+
+/** Back to the overview through the first crumb of a detail page. */
+async function crumbToOverview(router: ReturnType<typeof mountApp>) {
+  await userEvent.click(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "Presence" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/presence"));
+  await screen.findByRole("heading", { level: 1, name: "Presence" });
 }
 
 describe("Presence hub acceptance (P1 to P12)", () => {
@@ -466,27 +481,69 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(within(nav).queryByRole("link", { name: "Events" })).toBeNull();
     expect(within(nav).queryByRole("link", { name: "Automation" })).toBeNull();
 
-    // P2: /presence opens on Activity. The rail shows Activity with a problem
-    // count of 1, Routines with 1, then Slack and GitHub; acme/api has 2
-    // lines and an active dot; no pull request shows.
+    // P2: /presence lands on the overview. The header pairs Activity and Add.
+    // Needs attention holds one item, R4's archived pin with its picker. The
+    // group GitHub holds the acme/api row: an active mark, R1 and R4 as
+    // sentences without their place clause and with switches, R4's mark and
+    // its fix under its row. The group On a schedule holds S1 with Next and
+    // Fire now. No rail, no tabs, no pull request row, no card.
     await userEvent.click(within(nav).getByRole("link", { name: "Presence" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence"));
-    expect(await screen.findByRole("searchbox", { name: "Place" })).toBeTruthy();
-    await waitFor(() => expect(activityRow().textContent).toBe("Activity1"));
-    expect(activityRow().getAttribute("aria-current")).toBe("page");
-    await waitFor(() => expect(rail().getByRole("link", { name: /^Routines/ }).textContent).toBe("Routines1"));
-    const groups = rail().getAllByRole("group").map((group) => group.getAttribute("aria-label"));
-    expect(groups).toEqual(["Slack", "GitHub"]);
-    const acmeApi = await within(rail().getByRole("group", { name: "GitHub" })).findByRole("link", { name: /^acme\/api/ });
-    expect(acmeApi.textContent).toBe("acme/api2");
-    expect(within(acmeApi).getByRole("img", { name: "Active thread" })).toBeTruthy();
-    expect(within(acmeApi).getByRole("img", { name: "Has a problem" })).toBeTruthy();
-    expect(rail().queryByRole("link", { name: /acme\/api#12/ })).toBeNull();
+    await screen.findByRole("heading", { level: 2, name: "On a schedule" });
+    const header = within(overviewHeader());
+    expect(header.getByRole("link", { name: "Activity" }).getAttribute("href")).toBe("/presence/activity");
+    expect(header.getByRole("button", { name: "Add" })).toBeTruthy();
+    expect(screen.getByText("Where Valet is, and what it does there.")).toBeTruthy();
+
+    const attention = within(await screen.findByRole("region", { name: "Needs attention" }));
+    expect(attention.getAllByRole("listitem")).toHaveLength(1);
+    await waitFor(() => expect(attention.getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:"));
+    expect(await within(attention.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
+
+    expect(groupNames()).toEqual(["GitHub", "On a schedule"]);
+    const github = screen.getByRole("region", { name: "GitHub" });
+    const acme = within(github).getByRole("region", { name: "acme/api" });
+    expect(within(acme).getByText("1 active thread").querySelector(".bg-moss")).not.toBeNull();
+    await waitFor(() => expect(sentences(acme)).toEqual([
+      "When a pull request review or a check completes, work in one thread per pull request.",
+      "When a check completes, work in the Platform CI thread.",
+    ]));
+    expect(within(acme).getByRole("switch", { name: "Turn off Reviews and checks" })).toBeTruthy();
+    expect(within(acme).getByRole("switch", { name: "Turn off CI failures" })).toBeTruthy();
+    const r4Row = within(acme).getByRole("link", { name: "When a check completes, work in the Platform CI thread." });
+    expect(r4Row.previousElementSibling?.className).toContain("bg-danger-500");
+    const r1Row = within(acme).getByRole("link", { name: /^When a pull request review/ });
+    expect(r1Row.previousElementSibling).toBeNull();
+    const r4Fix = within(within(acme).getByRole("group", { name: "Problem" }));
+    expect(r4Fix.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
+    expect(r4Fix.getByRole("listbox", { name: "Threads" })).toBeTruthy();
+
+    const schedule = screen.getByRole("region", { name: "On a schedule" });
+    const s1 = within(within(schedule).getByRole("region", { name: "Morning summary" }));
+    expect(s1.getByRole("link", { name: "Morning summary: work in its own thread." }).getAttribute("href")).toBe("/presence/routines/S1");
+    expect(s1.getByText("Every day at 9:00")).toBeTruthy();
+    // `Next <date and time>`, without seconds, in the reader's locale.
+    expect(s1.getByText(/^Next /).textContent).not.toMatch(/\d:\d\d:\d\d/);
+    expect(s1.getByRole("button", { name: "Fire Morning summary now" })).toBeTruthy();
+
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "Presence" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "acme/api#12" })).toBeNull();
+    // No card in the roster: no element has a border on all sides with
+    // rounded corners. The thread picker in a fix is a form control.
+    const roster = schedule.parentElement;
+    if (roster === null) throw new Error("The groups have no container.");
+    const cards = [roster, ...roster.querySelectorAll("*")].filter((element) => {
+      if (element.closest('[role="group"][aria-label="Problem"]') !== null) return false;
+      const classes = [...element.classList];
+      return classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+    });
+    expect(cards).toEqual([]);
 
     // P3: acme/api reads R1 and R4 as sentences; R4 carries the inline
     // problem line and a picker; Threads lists the pull request threads.
-    await userEvent.click(acmeApi);
-    expect(await screen.findByRole("heading", { level: 2, name: "acme/api" })).toBeTruthy();
+    await userEvent.click(within(acme).getByRole("link", { name: "acme/api" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "acme/api" })).toBeTruthy();
     expect(screen.getByText("GitHub", { selector: "p" })).toBeTruthy();
     const here = screen.getByRole("region", { name: "Valet here" });
     await waitFor(() => expect(sentences(here)).toEqual([
@@ -501,9 +558,11 @@ describe("Presence hub acceptance (P1 to P12)", () => {
 
     // P4: in the sre workspace, #incidents lists M and P as sentences,
     // Appears as Ops Bot, the active and the followed thread, and the C2 mention.
+    await crumbToOverview(router);
     await switchWorkspace("Personal", "SRE");
-    await userEvent.click(await within(rail().getByRole("group", { name: "Slack" })).findByRole("link", { name: /^#incidents/ }));
-    expect(await screen.findByRole("heading", { level: 2, name: "#incidents" })).toBeTruthy();
+    const slack = await screen.findByRole("region", { name: "Slack" });
+    await userEvent.click(await within(slack).findByRole("link", { name: "#incidents" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "#incidents" })).toBeTruthy();
     const incidents = await screen.findByRole("region", { name: "Valet here" });
     await waitFor(() => expect(sentences(incidents)).toEqual([
       "When someone mentions Valet in #incidents, reply in a new thread, as Ops Bot.",
@@ -516,10 +575,13 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(following.getByRole("link", { name: /Slack thread/ })).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Recent activity" })).getByRole("link", { name: "Mention in #incidents" })).toBeTruthy();
 
-    // P5: Listen for… on #incidents opens the wizard fixed on the place. The
-    // When step offers only Slack, and the preview reads the default line.
-    // Create stores the policy `{ mode: "new" }`.
-    await userEvent.click(within(incidents).getByRole("button", { name: "Listen for…" }));
+    // P5: + Listen for… on the overview's #incidents row opens the wizard
+    // fixed on the place. The When step offers only Slack, and the preview
+    // reads the default line. Create stores the policy `{ mode: "new" }`, and
+    // the row shows the new line.
+    await crumbToOverview(router);
+    const incidentsRow = await screen.findByRole("region", { name: "#incidents" });
+    await userEvent.click(within(incidentsRow).getByRole("button", { name: "+ Listen for…" }));
     const wizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
     expect(within(wizard.getByRole("group", { name: "When" })).getAllByRole("radio").map((r) => r.parentElement?.textContent))
       .toEqual(["Someone mentions Valet in Slack"]);
@@ -535,17 +597,22 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(created[0]!.filters).toEqual([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]);
     expect(created[0]!.target).toMatchObject({ kind: "assistant", thread: { mode: "new" } });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Listen for…" })).toBeNull());
-    await waitFor(() => expect(sentences(screen.getByRole("region", { name: "Valet here" }))).toContain(
-      "When someone mentions Valet in #incidents, reply in a new thread.",
-    ));
+    expect(await within(incidentsRow).findByText("Incident replies")).toBeTruthy();
+    expect(sentences(incidentsRow)).toContain("When someone mentions Valet, reply in a new thread.");
 
-    // P6: New routine opens the wizard on the schedule step. The preview
-    // reads the Part E sentence, and the row shows Next and Fire now.
+    // P6: Add, then On a schedule. The When step offers all four choices,
+    // the preview reads the Part E sentence, and the new row shows Next and
+    // Fire now under On a schedule.
     await switchWorkspace("SRE", "Personal");
-    await userEvent.click(rail().getByRole("link", { name: /^Routines/ }));
-    const routinesPane = await screen.findByRole("region", { name: "Routines" });
-    await userEvent.click(within(routinesPane).getByRole("button", { name: "New routine" }));
-    const routineWizard = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await screen.findByRole("region", { name: "acme/api" });
+    await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
+    const routineWizard = within(await screen.findByRole("dialog"));
+    const when = within(routineWizard.getByRole("group", { name: "When" }));
+    expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
+      "Someone mentions Valet in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
+    ]);
+    await userEvent.click(when.getByLabelText("On a schedule"));
+    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
     await userEvent.type(routineWizard.getByLabelText("Cron"), "0 9 * * 1-5");
     await userEvent.clear(routineWizard.getByLabelText("Timezone"));
     await userEvent.type(routineWizard.getByLabelText("Timezone"), "UTC");
@@ -557,19 +624,21 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     await userEvent.click(routineWizard.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(createdRoutines).toHaveLength(1));
     expect(createdRoutines[0]).toMatchObject({ name: "Incident digest", cron: "0 9 * * 1-5", timezone: "UTC" });
-    const digest = await within(routinesPane).findByRole("link", { name: "Every weekday at 9:00, Incident digest: work in its own thread." });
-    expect(digest.closest("div")?.parentElement?.textContent).toMatch(/Next: /);
-    expect(within(routinesPane).getByRole("button", { name: "Fire Incident digest now" })).toBeTruthy();
+    const digest = within(await within(screen.getByRole("region", { name: "On a schedule" })).findByRole("region", { name: "Incident digest" }));
+    expect(digest.getByRole("link", { name: "Incident digest: work in its own thread." })).toBeTruthy();
+    expect(digest.getByText("Every weekday at 9:00")).toBeTruthy();
+    expect(digest.getByText(/^Next /)).toBeTruthy();
+    expect(digest.getByRole("button", { name: "Fire Incident digest now" })).toBeTruthy();
 
     // P7: R4's page shows the breadcrumb, the sentence as the title, the
     // fact strip with Edit, and the problem line with the picker.
-    await userEvent.click(rail().getByRole("link", { name: /^acme\/api/ }));
-    await userEvent.click(await screen.findByRole("link", { name: "When a check completes on acme/api, work in the Platform CI thread." }));
+    await userEvent.click(within(screen.getByRole("region", { name: "acme/api" })).getByRole("link", { name: "When a check completes, work in the Platform CI thread." }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/R4"));
-    const crumbs = within(await screen.findByRole("navigation", { name: "Breadcrumb" }));
-    expect(crumbs.getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
-    expect(crumbs.getByText("CI failures").getAttribute("aria-current")).toBe("page");
-    expect(await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
+    const crumbs = await screen.findByRole("navigation", { name: "Breadcrumb" });
+    expect(crumbs.textContent).toBe("Presence›acme/api›CI failures");
+    expect(within(crumbs).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
+    expect(within(crumbs).getByText("CI failures").getAttribute("aria-current")).toBe("page");
+    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
     const facts = screen.getByLabelText("Facts");
     expect([...facts.querySelectorAll("dt")].map((term) => term.textContent)).toEqual(["When", "Do", "Runs in", "Appears as"]);
     expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
@@ -577,19 +646,28 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(problem.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
     expect(screen.getByRole("region", { name: "Deliveries" })).toBeTruthy();
 
-    // P8: a pick patches the pin; the problem line goes, the sentence names
-    // the new thread, and the rail's problem count drops to 0.
+    // P8: a pick patches the pin; the problem line goes and the title names
+    // the new thread. Back on /presence, the row's sentence ends with the new
+    // thread, its fix is gone, and Needs attention is gone.
     await userEvent.click(await within(problem.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({ id: "R4", body: { thread: { mode: "existing", sessionId: "s-u", threadId: "t-ops" } } });
     await waitFor(() => expect(screen.queryByRole("region", { name: "Problem" })).toBeNull());
-    expect(await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform Ops thread." })).toBeTruthy();
-    await waitFor(() => expect(activityRow().textContent).toBe("Activity"));
+    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform Ops thread." })).toBeTruthy();
+    await crumbToOverview(router);
+    const acmeAfter = await screen.findByRole("region", { name: "acme/api" });
+    await waitFor(() => expect(sentences(acmeAfter)).toContain("When a check completes, work in the Platform Ops thread."));
+    expect(within(acmeAfter).queryByRole("group", { name: "Problem" })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull());
 
-    // P9: in sre, the Problems chip shows the dead-lettered delivery; with
-    // the chip off, the C2 mention reads as replied in t-inc.
+    // P9: in sre, Activity in the header opens /presence/activity under the
+    // breadcrumb Presence › Activity. The Problems chip shows the
+    // dead-lettered delivery; with the chip off, the C2 mention reads as
+    // replied in t-inc.
     await switchWorkspace("Personal", "SRE");
-    await userEvent.click(activityRow());
+    await userEvent.click(within(overviewHeader()).getByRole("link", { name: "Activity" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/activity"));
+    expect((await screen.findByRole("navigation", { name: "Breadcrumb" })).textContent).toBe("Presence›Activity");
     await userEvent.click(await screen.findByRole("button", { name: "Problems" }));
     await waitFor(() => expect(router.state.location.search).toEqual({ status: "problems" }));
     const dead = await screen.findByRole("link", { name: "Completed check in acme/api#14" });
@@ -628,6 +706,8 @@ describe("Presence hub acceptance (P1 to P12)", () => {
       ["/events/ev-c2", "/presence/events/ev-c2"],
       ["/channel?key=slack%3AT1%2FC900", "/presence/places/slack%3AT1%2FC900"],
       ["/presence/listeners/R4", "/presence/rules/R4"],
+      ["/presence/routines", "/presence"],
+      ["/presence/routines?routine=S1", "/presence/routines/S1"],
       ["/presence/workflows", "/workflows"],
       ["/presence/runs/run-1", "/workflows/runs/run-1"],
     ] as const) {
@@ -635,6 +715,7 @@ describe("Presence hub acceptance (P1 to P12)", () => {
       await waitFor(() => expect(decodeURIComponent(router.state.location.pathname)).toBe(decodeURIComponent(to)));
       expect(screen.queryByText("This page doesn’t exist.")).toBeNull();
     }
+    expect(router.state.location.search).toEqual({});
 
     // Every Presence read had a fixture. The reads left over belong to the
     // chrome, the workflow editor's other panels, and the pages that P12's
