@@ -16,6 +16,8 @@ describe('step budget', () => {
 
   it('does not warn for bounded work or for steps that are not agent steps', () => {
     expect(unboundedWorkWarning(session('Summarize the meeting notes in three bullets.'))).toBeUndefined();
+    // An explicit limit is a deliberate bound, such as a step that lists PRs for a later foreach.
+    expect(unboundedWorkWarning(session('List every merged PR in the window.', { maxModelCalls: 20 }))).toBeUndefined();
     expect(unboundedWorkWarning({ id: 'l', type: 'llm', model: 'm', prompt: 'Classify every PR.' })).toBeUndefined();
   });
 

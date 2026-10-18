@@ -27,9 +27,12 @@ const LIST_OF_WORK =
  * Says when an agent step outside a foreach asks one agent to handle every
  * item in a list. A list that grows makes that step run out of model calls.
  * A heuristic over the prompt text: a suggestion, never a validation error.
+ * A step that sets its own `maxModelCalls` was bounded on purpose, so it gets
+ * no warning.
  */
 export function unboundedWorkWarning(node: WorkflowNode): string | undefined {
   if (node.type !== 'session' && node.type !== 'orchestrator') return undefined;
+  if (node.maxModelCalls !== undefined) return undefined;
   if (typeof node.prompt !== 'string' || !LIST_OF_WORK.test(node.prompt)) return undefined;
   return (
     `This step asks one agent to handle every item in a list. It stops after ${stepModelCallLimit(node)} model calls. ` +
