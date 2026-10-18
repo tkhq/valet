@@ -7,6 +7,19 @@ import typography from "@tailwindcss/typography";
  * Components consume these via Tailwind class names; we don't hand-pick raw
  * hex values in components.
  */
+/**
+ * A theme color held in a CSS variable that also takes an opacity, as in
+ * `bg-ink/60`. A plain class keeps `var(--x)`; only an explicit opacity
+ * mixes the color with transparent. Before this, a slash class on these
+ * tokens emitted no CSS at all.
+ */
+function varColor(name: string) {
+  return ({ opacityValue }: { opacityValue?: string }): string =>
+    opacityValue === undefined || opacityValue === "1" || opacityValue.startsWith("var(")
+      ? `var(${name})`
+      : `color-mix(in oklch, var(${name}) calc(${opacityValue} * 100%), transparent)`;
+}
+
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   // `dark:` utilities must follow the SAME resolution as theme.css's token
@@ -44,17 +57,17 @@ export default {
         // backgrounds, borders, secondary text. Names map to Tailwind's
         // expected scale so we get the standard shade utilities.
         neutral: {
-          50:  "oklch(98.5% 0.002 247)",
-          100: "oklch(96.7% 0.003 247)",
-          200: "oklch(92.9% 0.005 247)",
-          300: "oklch(86.9% 0.007 247)",
-          400: "oklch(70.7% 0.012 247)",
-          500: "oklch(55.4% 0.015 247)",
-          600: "oklch(44.6% 0.013 247)",
-          700: "oklch(37.2% 0.010 247)",
-          800: "oklch(27.8% 0.008 247)",
-          900: "oklch(20.5% 0.006 247)",
-          950: "oklch(13.0% 0.005 247)",
+          50:  "oklch(98.5% 0.002 247 / <alpha-value>)",
+          100: "oklch(96.7% 0.003 247 / <alpha-value>)",
+          200: "oklch(92.9% 0.005 247 / <alpha-value>)",
+          300: "oklch(86.9% 0.007 247 / <alpha-value>)",
+          400: "oklch(70.7% 0.012 247 / <alpha-value>)",
+          500: "oklch(55.4% 0.015 247 / <alpha-value>)",
+          600: "oklch(44.6% 0.013 247 / <alpha-value>)",
+          700: "oklch(37.2% 0.010 247 / <alpha-value>)",
+          800: "oklch(27.8% 0.008 247 / <alpha-value>)",
+          900: "oklch(20.5% 0.006 247 / <alpha-value>)",
+          950: "oklch(13.0% 0.005 247 / <alpha-value>)",
         },
         // Brand blue — hue 264 is the OKLCH hue of the mascot uniform's
         // royal blue (docs/valet.png), so this scale IS the brand color,
@@ -62,51 +75,49 @@ export default {
         // contrast and hover washes have real stops to reach for, not just
         // the original 3-shade button palette.
         accent: {
-          50:  "oklch(97.0% 0.025 264)",
-          100: "oklch(93.2% 0.045 264)",
-          200: "oklch(86.0% 0.070 264)",
-          300: "oklch(78.0% 0.110 264)",
-          400: "oklch(69.0% 0.150 264)",
-          500: "oklch(60.5% 0.180 264)",
-          600: "oklch(53.5% 0.190 264)",
-          700: "oklch(46.5% 0.180 264)",
-          800: "oklch(39.5% 0.165 264)",
-          900: "oklch(32.0% 0.140 264)",
+          50:  "oklch(97.0% 0.025 264 / <alpha-value>)",
+          100: "oklch(93.2% 0.045 264 / <alpha-value>)",
+          200: "oklch(86.0% 0.070 264 / <alpha-value>)",
+          300: "oklch(78.0% 0.110 264 / <alpha-value>)",
+          400: "oklch(69.0% 0.150 264 / <alpha-value>)",
+          500: "oklch(60.5% 0.180 264 / <alpha-value>)",
+          600: "oklch(53.5% 0.190 264 / <alpha-value>)",
+          700: "oklch(46.5% 0.180 264 / <alpha-value>)",
+          800: "oklch(39.5% 0.165 264 / <alpha-value>)",
+          900: "oklch(32.0% 0.140 264 / <alpha-value>)",
         },
         danger: {
-          500: "oklch(60.0% 0.220 27)",
-          600: "oklch(53.0% 0.220 27)",
+          500: "oklch(60.0% 0.220 27 / <alpha-value>)",
+          600: "oklch(53.0% 0.220 27 / <alpha-value>)",
         },
         success: {
-          500: "oklch(65.0% 0.150 145)",
-          600: "oklch(57.0% 0.150 145)",
+          500: "oklch(65.0% 0.150 145 / <alpha-value>)",
+          600: "oklch(57.0% 0.150 145 / <alpha-value>)",
         },
         // Calm-companion palette (assistant-centered web UI, decision 9).
         // Backed by CSS variables in `src/theme.css` so light/dark and any
         // future `data-theme` override apply without touching Tailwind.
-        paper: "var(--paper)",
-        ink: "var(--ink)",
-        muted: "var(--muted)",
-        line: "var(--line)",
-        moss: "var(--moss)",
+        paper: varColor("--paper"),
+        ink: varColor("--ink"),
+        muted: varColor("--muted"),
+        line: varColor("--line"),
+        moss: varColor("--moss"),
         // DEFAULT keeps `bg-amber` (the token) working while restoring
         // Tailwind's numeric amber scale — a bare `amber: "var(--amber)"`
         // REPLACED the whole palette here and silently killed every
         // `amber-500`-style class in the session components.
         amber: { ...colors.amber, DEFAULT: "var(--amber)" },
-        // Pre-mixed hover/press washes — see the opacity-modifier-trap
-        // comment in `theme.css` for why these exist instead of
-        // `bg-ink/10`-style opacity modifiers on the tokens above.
-        "ink-wash": "var(--ink-wash)",
-        "ink-wash-strong": "var(--ink-wash-strong)",
-        "moss-wash": "var(--moss-wash)",
-        "moss-wash-strong": "var(--moss-wash-strong)",
+        // Pre-mixed hover/press washes: one tuned alpha per theme (see the
+        // wash note in `theme.css`).
+        "ink-wash": varColor("--ink-wash"),
+        "ink-wash-strong": varColor("--ink-wash-strong"),
+        "moss-wash": varColor("--moss-wash"),
+        "moss-wash-strong": varColor("--moss-wash-strong"),
         // Mid-strength neutral fill for data marks (chart bars, idle dots).
-        // `bg-muted/50` is the same trap: it emits no rule.
-        "muted-wash": "var(--muted-wash)",
-        // Status washes. `success`/`danger` above are raw `oklch(...)`
-        // strings, so `bg-success-500/15` emitted no rule at all and those
-        // badges rendered with no background. Alpha lives in the token.
+        "muted-wash": varColor("--muted-wash"),
+        // Status washes. The `oklch(... / <alpha-value>)` scales above also
+        // take an opacity (`bg-success-500/15`); these tokens keep one alpha
+        // per theme.
         "success-wash": "var(--success-wash)",
         "danger-wash": "var(--danger-wash)",
         "warning-wash": "var(--warning-wash)",
