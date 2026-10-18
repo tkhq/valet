@@ -361,6 +361,8 @@ describe("Presence overview", () => {
     const lead = await within(banner).findByText("Platform CI is archived. Pick another thread:");
     expect(lead.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     const acme = screen.getByRole("region", { name: "acme/api" });
+    // The row offers the same fix behind one button.
+    await userEvent.click(await within(acme).findByRole("button", { name: "Pick another thread" }));
     expect(await within(acme).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
 
     await userEvent.click(await within(banner).findByRole("option", { name: /Platform Ops/ }));

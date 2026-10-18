@@ -2,12 +2,16 @@
  * One line of presence on its own page (docs/specs/2026-10-16-presence-hub-design.md
  * Part D): a breadcrumb to its place, the sentence as the title, a fact
  * strip (When, Do, Runs in, Appears as) with **Edit** (the existing dialog,
- * where **Runs in** is editable), enable or disable, the problem with the
- * thread picker, the delivery list, and, for an administrator, this line's
- * receipts under a disclosure.
+ * where **Runs in** is editable) and **Delete**, enable or disable, the
+ * problem with the thread picker, the delivery list, and, for an
+ * administrator, this line's receipts under a disclosure.
+ *
+ * A line the assistant proposed opens with its review: what turning it on
+ * turns off, **Turn on** (the edit dialog in review mode) and **Delete**.
+ * A viewer who may not change the line reads who may.
  */
 import { useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { EventReceiptWire, EventSubscriptionWire, ReceiptSubscriptionDecision } from "@valet/api/wire";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
 import { placeOfSubject, usePlaceSubject } from "~/api/presence";
@@ -27,11 +31,13 @@ import {
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
+import { DeleteLineDialog, PausedLine } from "./presence-line";
 import { ThreadProblem } from "./problem-badge";
 import {
-  PAUSED_BY_TEAM, lineReadOnly, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel,
+  OwnerBadge, isProposal, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel, useLineAccess,
 } from "./presence-rows";
-import { eventInWords, presenceDoes, presenceSentence, runsInLabel, type ThreadTitles } from "./sentences";
+import { Ref } from "./ref";
+import { eventInWords, presenceAction, presenceSentence, runsInLabel, type ThreadTitles, type WorkflowNames } from "./sentences";
 import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
 import { useSentenceNames } from "./use-sentence-names";
 
@@ -56,7 +62,7 @@ export function linePlace(sub: EventSubscriptionWire): { label: string; key: str
 export function RulePage({ id }: { id: string }) {
   const subsQ = useEventSubscriptions();
   const sub = subsQ.data?.subscriptions.find((s) => s.id === id);
-  if (sub !== undefined) return <RuleBody sub={sub} />;
+  if (sub !== undefined) return <RuleBody sub={sub} subs={subsQ.data?.subscriptions ?? []} />;
   const title = subsQ.isPending ? "Loading…" : "Not available";
   return (
     <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title}>
@@ -71,15 +77,17 @@ export function RulePage({ id }: { id: string }) {
   );
 }
 
-/** The fact strip's values (spec Part D step 1). */
+/** The fact strip's values (spec Part D step 1). Do names the action and
+ * Runs in names the thread, so the strip says each fact once; the title
+ * holds the whole sentence. */
 function lineFacts(
   sub: EventSubscriptionWire,
-  workflows: ReadonlyArray<{ id: string; name: string }>,
+  workflows: WorkflowNames,
   threads: ThreadTitles,
 ): readonly { term: string; value: string }[] {
   const facts = [
     { term: "When", value: sub.eventKeys.map((key) => eventInWords(key)).join(" or ") },
-    { term: "Do", value: presenceDoes(sub, workflows, threads) },
+    { term: "Do", value: presenceAction(sub, workflows) },
   ];
   // A workflow target starts a run, not a thread, so it has no Runs in.
   if (sub.target.kind === "assistant") {
@@ -93,21 +101,26 @@ function lineFacts(
   return facts;
 }
 
-function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
+function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly EventSubscriptionWire[] }) {
   const catalog = useTriggerCatalog();
   const workflows = useWorkflows();
   const me = useMe();
+  const navigate = useNavigate();
   const patch = usePatchEventSubscription();
   const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
   const names = useSentenceNames();
   const place = linePlace(sub);
   const placeKey = usePlaceSubject(place?.key ?? "");
-  const [editing, setEditing] = useState(false);
+  const { readOnly, readOnlyText, teams } = useLineAccess(sub);
+  const [editing, setEditing] = useState<"edit" | "review" | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const workflowNames = workflows.data?.workflows ?? [];
   const sentence = presenceSentence(sub, catalog.data?.catalog, workflowNames, pinTitles, names);
-  const readOnly = lineReadOnly(sub, me.data?.id);
+  const proposal = isProposal(sub);
+  const replacesId = sub.target.kind === "assistant" ? sub.target.replaces : undefined;
+  const replaced = replacesId === undefined ? undefined : subs.find((other) => other.id === replacesId);
   const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
   const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
   // `Presence`, then the line's place when it has one place, then the line.
@@ -123,6 +136,25 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   return (
     <PresenceDetailPage crumbs={crumbs} title={sentence}>
       <div className="space-y-8">
+        {proposal && (
+          <section aria-label="Proposal" className="space-y-2 rounded-md border border-line px-3 py-2.5">
+            <p className="text-sm text-ink">Proposed by the assistant.</p>
+            {replaced !== undefined && (
+              <p className="text-sm text-ink">
+                Turning it on turns off{" "}
+                <Ref kind="line" text={replaced.name} to="/presence/rules/$id" params={{ id: replaced.id }} />.
+              </p>
+            )}
+            {readOnly
+              ? <p className="text-xs text-muted">{readOnlyText}</p>
+              : (
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={() => setEditing("review")}>Turn on</Button>
+                  <Button size="sm" variant="secondary" onClick={() => setDeleting(true)}>Delete</Button>
+                </div>
+              )}
+          </section>
+        )}
         <section aria-label={sub.name} className="space-y-3">
           <div className="flex flex-wrap items-start gap-3">
             <dl aria-label="Facts" className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
@@ -133,19 +165,27 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
                 </div>
               ))}
             </dl>
-            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+            <OwnerBadge ownerType={sub.ownerType} />
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing("edit")}>Edit</Button>
+              {!proposal && (
+                <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setDeleting(true)}>Delete</Button>
+              )}
+            </div>
           </div>
-          <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
-            <Switch
-              checked={sub.enabled}
-              disabled={readOnly || patch.isPending}
-              onCheckedChange={(enabled) => save({ enabled })}
-              aria-label={`${sub.enabled ? "Turn off" : "Turn on"} ${sub.name}`}
-            />
-            {sub.enabled ? "On" : "Off"}
-          </label>
-          {pausedByTeam(sub) && <p role="status" className="text-sm text-warning-fg">{PAUSED_BY_TEAM}</p>}
-          {readOnly && !sub.problem && <p className="text-xs text-muted">Only its owner can change {sub.name}.</p>}
+          {!proposal && (
+            <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+              <Switch
+                checked={sub.enabled}
+                disabled={readOnly || patch.isPending}
+                onCheckedChange={(enabled) => save({ enabled })}
+                aria-label={`${sub.enabled ? "Turn off" : "Turn on"} ${sub.name}`}
+              />
+              {sub.enabled ? "On" : "Off"}
+            </label>
+          )}
+          {pausedByTeam(sub) && <PausedLine sub={sub} teams={teams} readOnly={readOnly} />}
+          {readOnly && !sub.problem && !proposal && <p className="text-xs text-muted">{readOnlyText}</p>}
           {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
           {sub.problem && (
             <ThreadProblem
@@ -153,6 +193,7 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
               threadTitle={pinnedTitle(sub, pinTitles)}
               workspace={lineWorkspace(sub)}
               readOnly={readOnly}
+              readOnlyText={readOnlyText}
               onPick={(thread) => save({ thread })}
               pending={patch.isPending}
             />
@@ -162,17 +203,26 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
         <RuleDeliveries id={sub.id} name={sub.name} />
         {me.data?.orgRole === "admin" && <RuleReceipts id={sub.id} name={sub.name} />}
 
-        {editing && (
+        {editing !== null && (
           <EditSubscriptionDialog
             open
-            onOpenChange={setEditing}
+            onOpenChange={(open) => { if (!open) setEditing(null); }}
             sub={sub}
             targetLabel={targetLabel(sub, workflowName)}
+            review={editing === "review"}
+            replacesNote={editing === "review" ? replaced?.name : undefined}
             names={names}
             threadTitles={pinTitles}
             workflows={workflowNames}
           />
         )}
+        <DeleteLineDialog
+          sub={sub}
+          teams={teams}
+          open={deleting}
+          onOpenChange={setDeleting}
+          onDeleted={() => { void navigate({ to: "/presence" }); }}
+        />
       </div>
     </PresenceDetailPage>
   );

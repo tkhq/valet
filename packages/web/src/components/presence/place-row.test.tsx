@@ -187,13 +187,16 @@ describe("PlaceRow", () => {
     expect(within(rowOf(sentence)).getByText("Off")).toBeTruthy();
   });
 
-  it("marks a faulted line before its sentence and shows its fix under the row; a pick patches the line", async () => {
+  it("marks a faulted line before its sentence and opens its fix under the row; a pick patches the line", async () => {
     renderRow(block({}));
     const sentence = await screen.findByRole("link", { name: "When a check completes, work in the Platform CI thread." });
     const row = rowOf(sentence);
     const mark = row.querySelector(".bg-danger-500");
     expect(mark).not.toBeNull();
     expect(mark?.getAttribute("aria-hidden")).toBe("true");
+    // The row offers the picker behind one button; the banner shows it open.
+    expect(within(row).queryByText("Platform CI is archived. Pick another thread:")).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Pick another thread" }));
     expect(within(row).getByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
     // A line with no fault carries no mark.
     const calm = screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request." });

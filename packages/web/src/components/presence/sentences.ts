@@ -558,6 +558,16 @@ export function presenceDoesParts(sub: EventSubscriptionWire, workflows: Workflo
   }
 }
 
+/**
+ * What a line does, without where it runs, for the fact strip's Do: `reply`
+ * for a conversation, `work on it` for other events, `run <workflow>` for a
+ * workflow. The strip's Runs in names the thread.
+ */
+export function presenceAction(sub: EventSubscriptionWire, workflows: WorkflowNames): string {
+  if (sub.target.kind === "workflow") return partsText(workflowParts(workflows, sub.target.workflowId));
+  return isConversational(sub.eventKeys) ? "reply" : "work on it";
+}
+
 /** The `<do>` of a line (spec Part C step 2), such as `reply in a new thread`. */
 export function presenceDoes(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): string {
   return partsText(presenceDoesParts(sub, workflows, threads));
@@ -750,6 +760,12 @@ export function routineDoesParts(routine: RoutineLike, workflows: WorkflowNames,
     case "own":
       return [text("work in its own thread")];
   }
+}
+
+/** What a routine does, without where it runs, for the fact strip's Do:
+ * `work on it`, or `run <workflow>`. */
+export function routineAction(routine: RoutineLike, workflows: WorkflowNames): string {
+  return routine.detail.targetKind === "workflow" ? partsText(workflowParts(workflows, routine.workflowId)) : "work on it";
 }
 
 /** The `<do>` of a routine (spec Part E step 1). */

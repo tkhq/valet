@@ -8,6 +8,7 @@
  * routine's `disabledReason`. Any other text, such as a routine the
  * scheduler turned off for an empty prompt, shows as written.
  */
+import type { ReactNode } from "react";
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { Badge } from "~/components/primitives";
 import { ThreadPicker } from "./thread-picker";
@@ -55,8 +56,10 @@ export function ThreadProblem({
   pending = false,
   error,
   readOnly = false,
+  readOnlyText = "Only its owner can change this.",
   variant = "box",
   lead,
+  action,
 }: {
   problem: string;
   /** Muted words before the problem text, such as `In acme/api,`. */
@@ -65,6 +68,8 @@ export function ThreadProblem({
   threadTitle?: string;
   /** The viewer may not change the rule: no picker, and the text names who can. */
   readOnly?: boolean;
+  /** Who may change it, for a read-only viewer. */
+  readOnlyText?: string;
   /** The workspace key whose threads the picker lists. Absent hides the picker. */
   workspace: string | undefined;
   onPick: (policy: Extract<AssistantThreadPolicy, { mode: "existing" }>) => void;
@@ -73,6 +78,8 @@ export function ThreadProblem({
   /** `box` frames the problem on a page of its own. `inline` sits under a
    * row in a list, without the frame. */
   variant?: "box" | "inline";
+  /** A control after a problem that has no picker, such as the routine page's `Edit`. */
+  action?: ReactNode;
 }) {
   const pin = isPinProblem(problem);
   const text = pin ? pinProblemText(threadTitle) : problem;
@@ -82,11 +89,12 @@ export function ThreadProblem({
         {lead !== undefined && <span className="text-muted">{`${lead} `}</span>}
         {text}
       </p>
-      {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this.</p>}
+      {pin && readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (
         <p className="text-xs text-muted">Select Edit, then choose another option under Runs in.</p>
       )}
+      {!pin && action}
       {pending && <p className="text-xs text-muted">Saving…</p>}
       {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
     </>

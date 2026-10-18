@@ -38,7 +38,8 @@ const destinationLinkClass = cn(textLinkClass, "min-h-11 text-xs sm:min-h-0");
  * claims, Part E step 2). A dead delivery shows its dead-letter text.
  *
  * A row names its thread by the title on its thread ref. A row that
- * carries its event (a listener's list) leads with the event, not the rule.
+ * carries its event (a line's list) leads with the event. Otherwise it leads
+ * with the line's name, linked to the line's page.
  */
 export function DeliveryList({
   deliveries,
@@ -70,7 +71,9 @@ export function DeliveryList({
                 {d.event.summary}
               </Link>
             ) : (
-              <span className="break-all text-xs text-ink">{d.subscriptionName ?? d.subscriptionId}</span>
+              <Link to="/presence/rules/$id" params={{ id: d.subscriptionId }} className={cn(destinationLinkClass, "break-all")}>
+                {d.subscriptionName ?? d.subscriptionId}
+              </Link>
             )}
             {!d.claimedBy && <span className="text-xs text-muted">{deliveryStatusLine(d, now)}</span>}
             {d.deliveredAt !== null && (

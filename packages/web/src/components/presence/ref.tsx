@@ -1,6 +1,6 @@
 /**
  * A reference token: a thing a sentence names, such as a place, a thread, a
- * workflow, or a person. The token sits in the line of text at the text's
+ * workflow, a person, or a line of presence. The token sits in the line of text at the text's
  * size, on a hairline wash, with a 12px mark that says what kind of thing it
  * is. It is a link when the thing has a page.
  */
@@ -9,7 +9,7 @@ import type { AppPath } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { ServiceGlyph, glyphColor, type MarkService } from "./service-mark";
 
-export type RefKind = "place" | "thread" | "workflow" | "person";
+export type RefKind = "place" | "thread" | "workflow" | "person" | "line";
 
 const GLYPH = 12;
 
@@ -31,6 +31,9 @@ function KindGlyph({ kind }: { kind: Exclude<RefKind, "place"> }) {
   }
   if (kind === "workflow") {
     return <svg {...common}><path d="M5 6h5v5H5zM14 13h5v5h-5zM10 8.5h4v7" /></svg>;
+  }
+  if (kind === "line") {
+    return <svg {...common}><path d="M3 12h4l2-5 4 10 2-5h6" /></svg>;
   }
   return <svg {...common}><circle cx="12" cy="8" r="4" /><path d="M4 21c1-4 4-6 8-6s7 2 8 6" /></svg>;
 }

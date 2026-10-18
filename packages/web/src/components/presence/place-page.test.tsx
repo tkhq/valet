@@ -76,6 +76,7 @@ let meId = "u-001";
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: meId, orgId: "acme", orgRole: "member" } }),
   useOrgDirectory: () => ({ data: { users: [] } }),
+  useTeams: () => ({ data: { teams: [] } }),
 }));
 
 /** The dialog is its own suite's; here it records the line and the field it opened on. */
@@ -358,10 +359,13 @@ describe("PlacePage", () => {
     await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("R4"));
   });
 
-  it("shows a line's problem inline with the picker; a pick repins the line (P3, P8)", async () => {
+  it("opens a line's picker from Pick another thread; a pick repins the line (P3, P8)", async () => {
     getPresencePlace.mockResolvedValue({ ...ACME_API, listeners: [R1, { ...R4, problem: PIN_TEXT }] });
     renderPage("github:acme/api");
     const here = await screen.findByRole("region", { name: "Valet here" });
+    // The row keeps the picker closed until the reader asks for it.
+    expect(within(here).queryByRole("group", { name: "Problem" })).toBeNull();
+    fireEvent.click(within(here).getByRole("button", { name: "Pick another thread" }));
     const problem = within(here).getByRole("group", { name: "Problem" });
     expect(await within(problem).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));

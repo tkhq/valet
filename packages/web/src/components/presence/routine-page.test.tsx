@@ -21,8 +21,10 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const navigate = vi.fn<(to: { to: string }) => Promise<void>>();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  useNavigate: () => navigate,
   Link: ({ to, params, search, hash, children, className, "aria-label": label }: {
     to: string; params?: Record<string, string>; search?: Record<string, string>; hash?: string; children: ReactNode; className?: string; "aria-label"?: string;
   }) => {
@@ -39,6 +41,7 @@ const listWorkflowRuns = vi.fn<(id: string) => Promise<ListWorkflowRunsResponse>
 const runWorkflowScheduleNow = vi.fn<(id: string) => Promise<{ ok: true }>>();
 const updateWorkflowSchedule = vi.fn<(id: string, body: UpdateWorkflowScheduleRequest) => Promise<WorkflowScheduleResponse>>();
 const listThreads = vi.fn<(sessionId: string, opts?: { threadId?: string; archived?: boolean }) => Promise<ListThreadsResponse>>();
+const deleteWorkflowSchedule = vi.fn<(id: string) => Promise<{ ok: true }>>();
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
   return {
@@ -51,12 +54,13 @@ vi.mock("~/api/client", async (importOriginal) => {
       runWorkflowScheduleNow: (id: string) => runWorkflowScheduleNow(id),
       updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) => updateWorkflowSchedule(id, body),
       listThreads: (sessionId: string, opts?: { threadId?: string; archived?: boolean }) => listThreads(sessionId, opts),
+      deleteWorkflowSchedule: (id: string) => deleteWorkflowSchedule(id),
     },
   };
 });
 
-let teamsData: { teams: { id: string; callerRole: "admin" | "member" | null }[] } | undefined = {
-  teams: [{ id: "team-sre", callerRole: "member" }],
+let teamsData: { teams: { id: string; name?: string; callerRole: "admin" | "member" | null }[] } | undefined = {
+  teams: [{ id: "team-sre", name: "SRE", callerRole: "member" }],
 };
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }),
@@ -68,9 +72,12 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
   useWorkspaceScope: () => ({ key: "user", teamId: undefined, available: ["user"], setKey: () => {} }),
 }));
 
-/** The dialog is its own suite's; here it records what it opened on. */
+/** The dialog is its own suite's; here it records what it opened on and
+ * whose threads its Runs in lists. */
 vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ editing }: { editing?: WorkflowTriggerItem }) => <p>{editing ? `Editing ${editing.name}` : "New routine dialog"}</p>,
+  TriggerDialog: ({ editing, workspace }: { editing?: WorkflowTriggerItem; workspace?: string }) => (
+    <p>{editing ? `Editing ${editing.name}${workspace ? ` in ${workspace}` : ""}` : "New routine dialog"}</p>
+  ),
 }));
 
 vi.mock("./thread-picker", () => ({
@@ -104,10 +111,12 @@ function wrap(node: ReactNode) {
 }
 
 beforeEach(() => {
-  teamsData = { teams: [{ id: "team-sre", callerRole: "member" }] };
-  for (const mock of [listWorkflowTriggers, listWorkflows, listWorkflowRuns, runWorkflowScheduleNow, updateWorkflowSchedule, listThreads]) {
+  teamsData = { teams: [{ id: "team-sre", name: "SRE", callerRole: "member" }] };
+  navigate.mockReset();
+  for (const mock of [listWorkflowTriggers, listWorkflows, listWorkflowRuns, runWorkflowScheduleNow, updateWorkflowSchedule, listThreads, deleteWorkflowSchedule]) {
     mock.mockReset();
   }
+  deleteWorkflowSchedule.mockResolvedValue({ ok: true });
   listWorkflowTriggers.mockResolvedValue({ triggers: [S1, DENVER, NIGHTLY, EVENT_TRIGGER] });
   listWorkflows.mockResolvedValue({
     workflows: [{ id: "wf-1", name: "Build", definition: {}, createdAt: 1, updatedAt: 1, ownerType: "user", ownerId: "u-001" }],
@@ -133,7 +142,7 @@ describe("RoutinePage", () => {
     await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
     expect(await screen.findByText("Fired. The routine runs now.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByText("Editing Morning summary")).toBeTruthy();
+    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
     fireEvent.click(screen.getByRole("switch", { name: "Turn off Morning summary" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", { enabled: false }));
   });
@@ -154,7 +163,7 @@ describe("RoutinePage", () => {
     const strip = await screen.findByLabelText("Facts");
     expect(factsOf(strip)).toEqual([
       ["When", "Every weekday at 8:30 (America/Denver)"],
-      ["Do", "work in a new thread each time"],
+      ["Do", "work on it"],
       ["Runs in", "A new thread each time"],
     ]);
   });
@@ -213,11 +222,49 @@ describe("RoutinePage", () => {
   });
 
   it("keeps a team routine read-only for a viewer outside the team", async () => {
-    teamsData = { teams: [{ id: "team-sre", callerRole: null }] };
+    teamsData = { teams: [{ id: "team-sre", name: "SRE", callerRole: null }] };
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
     wrap(<RoutinePage id="S1" />);
-    expect(await screen.findByText("Only its owner can change this routine.")).toBeTruthy();
+    expect(await screen.findByText("Only members of SRE can change this.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Delete" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("scopes Edit's Runs in to a team routine's team and marks the routine Team", async () => {
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
+    wrap(<RoutinePage id="S1" />);
+    expect(await screen.findByText("Team")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByText("Editing Morning summary in team-sre")).toBeTruthy();
+  });
+
+  it("deletes the routine after the confirm, then opens Presence", async () => {
+    wrap(<RoutinePage id="S1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteWorkflowSchedule).toHaveBeenCalledWith("S1"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence" }));
+  });
+
+  it("names a team routine's team in the Delete confirm", async () => {
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
+    wrap(<RoutinePage id="S1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("This is SRE's routine. Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
+  });
+
+  it("shows a scheduler reason as written, with Edit to fix it", async () => {
+    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    listWorkflowTriggers.mockResolvedValue({
+      triggers: [routine("S1", { enabled: false, workflowId: "wf-gone", detail: { targetKind: "workflow", disabledReason: reason } })],
+    });
+    wrap(<RoutinePage id="S1" />);
+    const problem = await screen.findByRole("region", { name: "Problem" });
+    expect(within(problem).getByText(reason)).toBeTruthy();
+    fireEvent.click(within(problem).getByRole("button", { name: "Edit the routine" }));
+    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
   });
 
   it("reads a routine as read-only until the viewer and the teams load", () => {

@@ -5,8 +5,10 @@
  * schedule in words, then the timezone when it is not UTC, then `Next
  * <time>` or `Off`. The sentence column holds `<name>: <do>.` linked to the
  * routine's page, the prompt under it, and at the right Fire now, a small
- * on/off switch, and the overflow menu (Edit, Delete). A routine that the
- * scheduler turned off carries the danger mark and its fix under the row.
+ * on/off switch, and the overflow menu (Edit, Delete). A team routine
+ * carries the `Team` mark. A routine that the scheduler turned off carries
+ * the danger mark and its fix under the row; for an archived pin the fix is
+ * `Pick another thread`, which opens the picker.
  */
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
@@ -21,9 +23,11 @@ import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
-import { ThreadProblem } from "./problem-badge";
-import { routineReadOnly } from "./routine-page";
-import { routineWhen, useRoutineActions, type Routine } from "./routine-helpers";
+import { ThreadProblem, isPinProblem } from "./problem-badge";
+import { OwnerBadge, type TeamLike } from "./presence-rows";
+import {
+  deleteRoutineDescription, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineActions, type Routine,
+} from "./routine-helpers";
 import { cronInWords, scheduleZone } from "./sentences";
 
 export function RoutineRosterRow({ routine, sentence, now, children }: {
@@ -39,17 +43,17 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
   const teams = useTeams();
   const readOnly = routineReadOnly(routine, me.data, teams.data?.teams);
   const { fire, update, message, fireNow, save, setEnabled } = useRoutineActions(routine);
-  const remove = useDeleteSchedule();
   const pin = routine.detail.thread?.mode === "existing" ? routine.detail.thread : undefined;
   const pinTitles = usePinnedThreadTitle(pin);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [picking, setPicking] = useState(false);
   const schedule = cronInWords(routine.detail.cron);
   const zone = scheduleZone(routine.detail.timezone);
   const problem = routine.detail.disabledReason ?? "";
-  const { ownerType, ownerId } = routine.detail;
-  // The picker lists the routine owner's threads, whatever the switcher shows.
-  const workspace = ownerType === "user" ? "user" : ownerType === "team" ? ownerId : undefined;
+  const workspace = routineWorkspace(routine);
+  // A pin problem the viewer can fix waits behind one button.
+  const collapsed = isPinProblem(problem) && !readOnly && !picking;
   const prompt = routine.detail.prompt?.trim() ?? "";
 
   return (
@@ -75,6 +79,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
               </Link>
             </p>
             {prompt !== "" && <p className="mt-px line-clamp-2 text-xs text-muted [overflow-wrap:anywhere]">{prompt}</p>}
+            {routine.detail.ownerType !== "user" && <p className="mt-px"><OwnerBadge ownerType={routine.detail.ownerType} /></p>}
           </div>
           <div className="flex items-center gap-2 pt-1">
             <Button
@@ -102,22 +107,26 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={readOnly} onSelect={() => setEditing(true)}>Edit</DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={readOnly}
-                  className="text-danger-500"
-                  onSelect={() => {
-                    // React Query holds `error` until the next mutate, so
-                    // without this the last refusal greets the next open.
-                    remove.reset();
-                    setDeleting(true);
-                  }}
-                >
+                <DropdownMenuItem disabled={readOnly} className="text-danger-500" onSelect={() => setDeleting(true)}>
                   Delete
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          {problem !== "" && (
+          {problem !== "" && collapsed && (
+            <div className="col-span-full">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-auto px-1.5 py-0.5 text-xs font-normal text-danger-600 hover:text-danger-600 dark:text-danger-500"
+                onClick={() => setPicking(true)}
+              >
+                Pick another thread
+              </Button>
+            </div>
+          )}
+          {problem !== "" && !collapsed && (
             <div className="col-span-full">
               <ThreadProblem
                 variant="inline"
@@ -125,6 +134,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
                 threadTitle={pin ? pinTitles[pin.threadId]?.title ?? undefined : undefined}
                 workspace={workspace}
                 readOnly={readOnly}
+                readOnlyText={routineReadOnlyText(routine, teams.data?.teams)}
                 onPick={(thread) => save({ thread, enabled: true })}
                 pending={update.isPending}
               />
@@ -138,18 +148,46 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
         </div>
         {children}
       </div>
-      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly />}
-      <ConfirmDialog
-        open={deleting}
-        onOpenChange={setDeleting}
-        title={`Delete "${routine.name}"?`}
-        description="Valet stops acting on this schedule. Its past runs stay."
-        confirmLabel="Delete"
-        pendingLabel="Deleting…"
-        pending={remove.isPending}
-        error={remove.error ? errorText(remove.error) : undefined}
-        onConfirm={() => remove.mutate(routine.id, { onSuccess: () => setDeleting(false) })}
-      />
+      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly workspace={workspace} />}
+      <DeleteRoutineDialog routine={routine} teams={teams.data?.teams} open={deleting} onOpenChange={setDeleting} />
     </section>
+  );
+}
+
+/**
+ * The Delete confirm for a routine, on its row and on its page. A team
+ * routine names its team. `onDeleted` runs after the delete, such as a page
+ * that leaves for Presence.
+ */
+export function DeleteRoutineDialog({ routine, teams, open, onOpenChange, onDeleted }: {
+  routine: Routine;
+  teams: readonly TeamLike[] | undefined;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onDeleted?: () => void;
+}) {
+  const remove = useDeleteSchedule();
+  return (
+    <ConfirmDialog
+      open={open}
+      onOpenChange={(next) => {
+        // React Query holds `error` until the next mutate, so without this
+        // the last refusal greets the next open.
+        if (!next) remove.reset();
+        onOpenChange(next);
+      }}
+      title={`Delete "${routine.name}"?`}
+      description={deleteRoutineDescription(routine, teams)}
+      confirmLabel="Delete"
+      pendingLabel="Deleting…"
+      pending={remove.isPending}
+      error={remove.error ? errorText(remove.error) : undefined}
+      onConfirm={() => remove.mutate(routine.id, {
+        onSuccess: () => {
+          onOpenChange(false);
+          onDeleted?.();
+        },
+      })}
+    />
   );
 }

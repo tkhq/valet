@@ -75,6 +75,7 @@ export function TriggerDialog({
   schedulesOnly = false,
   review = false,
   initialKind,
+  workspace,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -84,6 +85,9 @@ export function TriggerDialog({
   review?: boolean;
   /** The kind a new trigger starts as, when the caller already knows it. */
   initialKind?: TriggerKind;
+  /** The workspace key whose threads **Runs in** lists: `user` or a team
+   * id. An edit passes the routine owner's key. */
+  workspace?: string;
 }) {
   const isEditing = editing !== undefined;
   const lockedKind: TriggerKind | undefined = editing?.kind ?? (schedulesOnly ? "schedule" : undefined);
@@ -106,10 +110,10 @@ export function TriggerDialog({
   // thread…" is chosen and no thread is picked yet. Reset by the open effect.
   const [thread, setThread] = useState<AssistantThreadPolicy | null>({ mode: "own" });
   // A new assistant schedule posts no teamId, so it belongs to your personal
-  // workspace. An edit keeps its owner, which this dialog does not receive;
-  // the active workspace is the closest match.
+  // workspace. An edit keeps its owner: the caller passes the owner's key.
+  // Without it, the active workspace is the closest match.
   const scope = useWorkspaceScope();
-  const threadWorkspace = isEditing ? scope.key : PERSONAL;
+  const threadWorkspace = workspace ?? (isEditing ? scope.key : PERSONAL);
 
   // ── event fields ───────────────────────────────────────────────────────
   const [appearance, setAppearance] = useState<Appearance>({});

@@ -533,6 +533,9 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(r4Row.previousElementSibling?.className).toContain("bg-danger-500");
     const r1Row = within(acme).getByRole("link", { name: /^When a pull request review/ });
     expect(r1Row.previousElementSibling).toBeNull();
+    // The row keeps the picker behind one button; the banner shows it open.
+    expect(within(acme).queryByRole("group", { name: "Problem" })).toBeNull();
+    await userEvent.click(within(acme).getByRole("button", { name: "Pick another thread" }));
     const r4Fix = within(within(acme).getByRole("group", { name: "Problem" }));
     expect(r4Fix.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
     expect(r4Fix.getByRole("listbox", { name: "Threads" })).toBeTruthy();
@@ -573,6 +576,7 @@ describe("Presence hub acceptance (P1 to P12)", () => {
       "When a pull request review or a check completes on acme/api, work in one thread per pull request.",
       "When a check completes on acme/api, work in the Platform CI thread.",
     ]));
+    await userEvent.click(within(here).getByRole("button", { name: "Pick another thread" }));
     const inline = within(within(here).getByRole("group", { name: "Problem" }));
     expect(inline.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
     expect(await within(inline.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();

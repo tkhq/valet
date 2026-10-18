@@ -48,7 +48,7 @@ vi.mock("./thread-picker", () => ({
 import { AttentionBanner } from "./attention-banner";
 import { PIN_UNAVAILABLE } from "./problem-badge";
 import { PLATFORM_CI, line } from "./test-fixtures";
-import type { Fault } from "./use-faults";
+import { faultsOf, type Fault } from "./use-faults";
 import type { Routine } from "./routine-helpers";
 
 
@@ -164,5 +164,30 @@ describe("AttentionBanner", () => {
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", {
       thread: { mode: "existing", sessionId: "s-u", threadId: "t-ops" },
     }));
+  });
+
+  it("shows the picker open, where the row keeps it behind a button (INV-H6)", () => {
+    renderBanner(FAULTS.slice(0, 1));
+    expect(screen.queryByRole("button", { name: "Pick another thread" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Pick Platform Ops from user" })).toBeTruthy();
+  });
+
+  it("names the scheduler's fix for a routine whose workflow was deleted, with an Edit link (Review Focus 3)", () => {
+    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    const gone: Routine = { ...S2, workflowId: "wf-gone", detail: { ...S2.detail, targetKind: "workflow", disabledReason: reason } };
+    const [fault] = faultsOf({ rules: [], triggers: [gone], log: [], places: [], titles: {}, now: 0 }).faults;
+    if (fault === undefined) throw new Error("The routine has no fault.");
+    renderBanner([fault]);
+    const banner = screen.getByRole("region", { name: "Needs attention" });
+    expect(within(banner).getByText("Morning summary is off: Its workflow was deleted. Edit the routine and pick another workflow.")).toBeTruthy();
+    expect(within(banner).getByRole("link", { name: "Edit" }).getAttribute("href")).toBe("/presence/routines/S2");
+  });
+
+  it("names the team that may change a team line, in place of the picker", async () => {
+    renderBanner([{
+      kind: "line", sub: { ...R4, ownerType: "team", ownerId: "team-x" }, text: "Platform CI is archived. Pick another thread:", lead: "In acme/api,",
+    }]);
+    expect(await screen.findByText("Only members of the team can change this.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Pick Platform Ops/ })).toBeNull();
   });
 });

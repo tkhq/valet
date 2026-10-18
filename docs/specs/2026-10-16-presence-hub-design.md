@@ -246,10 +246,20 @@ Pass criterion: all steps, in one run, from a clean start.
 
    Conversational keys are Slack mentions, Slack messages, and GitHub
    comment keys (a key-level approximation; see Deviations).
-3. A problem renders inline under its row, never as a badge alone:
-   `<thread title> is archived. Pick another thread:` with the thread
-   picker; a pick patches the line and clears the problem. A paused
-   personal line reads `Paused: the team already listens for this.`
+3. A problem renders inline under its row, never as a badge alone. For an
+   archived pin, the row shows the danger mark and **Pick another thread**,
+   which opens `<thread title> is archived. Pick another thread:` with the
+   thread picker; the **Needs attention** banner shows the picker open. A
+   pick patches the line and clears the problem. A paused personal line
+   reads `Paused: <team name> already listens for this.` (`the team` when
+   the viewer's lines name no single team) with **Keep both**, which patches
+   `{ pauseOnOverlap: false, enabled: true }`. A team or org line carries a
+   `Team` or `Org` mark, and its Delete confirm names the owner. A proposal
+   reads `Proposed` in place of `Off`. A viewer outside the line's owner
+   reads who may change it: `Only members of <team name> can change this.`
+   or `Only its owner can change this.` The web mirrors the server's gate:
+   the owner of a personal line, the members of a team line, and any org
+   member for an org line.
 4. The **Listen for…** button opens the wizard (Part H) fixed on this place.
 5. **Threads**: `Active now` (threads waiting here), `Following` (Slack
    threads bound here), and for a repository or team `One thread per pull
@@ -267,10 +277,17 @@ Pass criterion: all steps, in one run, from a clean start.
 
 1. `/presence/rules/$id` shows a breadcrumb `Presence › <place> › <name>`,
    the sentence as the title, a fact strip (When, Do, Runs in, Appears as)
-   with **Edit** (the existing dialog, Runs in editable), the on/off
-   switch, the problem line when present, then **Deliveries** as sentences
+   with **Edit** (the existing dialog, Runs in editable) and **Delete**
+   (after a delete, the page opens `/presence`), the on/off switch, the
+   problem line when present, then **Deliveries** as sentences
    (`<event in words> → <outcome>, <time ago>`) and, for admins, receipt
-   stages under a disclosure.
+   stages under a disclosure. Do names the action only (`reply`, `work on
+   it`, or `run <workflow>`) and Runs in names the thread, so the strip says
+   each fact once.
+   A proposal (off, and carrying `replaces` or an untouched `proposal-` id)
+   opens with `Proposed by the assistant.`, then `Turning it on turns off
+   <name>.` when it replaces a line, **Turn on** (the edit dialog in review
+   mode) and **Delete**, in place of the switch.
 2. `EventSubscriptionWire` carries `problem?: string` (the pin text when
    the latest settled delivery since the line's last edit dead-lettered on
    its pin). The api offers `GET /api/event-subscriptions/:id/deliveries`
@@ -289,8 +306,10 @@ Pass criterion: all steps, in one run, from a clean start.
    place column.
 2. `/presence/routines/$id` shows a breadcrumb `Presence › On a schedule ›
    <name>`, the sentence as the title, a fact strip (When, Do, Runs in),
-   Edit, Fire now, the switch, the problem line from `disabledReason`, and
-   its run or delivery history.
+   Edit, Delete, Fire now, the switch, the problem line from
+   `disabledReason` (a reason with no picker carries **Edit the routine**),
+   and its run or delivery history. Edit's Runs in lists the routine
+   owner's threads.
 3. A routine is created through **Add** → `On a schedule`, or `+ New
    routine` on the group, both of which open the wizard (Part H) on the
    schedule step.
@@ -313,7 +332,9 @@ Pass criterion: all steps, in one run, from a clean start.
 2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
    filter the list: `All`, `Problems`, one per service, and a place search.
    Receipt stages and diagnostics sit under disclosures for admins. The
-   event page keeps payload and redeliver.
+   event page keeps payload and redeliver. Its title is `<event in words>
+   in <place>`, with the event's summary as a muted line under it, and each
+   delivery links its line's name to the line's page.
 3. A claim by a thread the viewer cannot open reads `claimed by another
    thread`; an archived thread renders a disabled link.
 4. The **Needs attention** banner lists the workspace's distinct faults:

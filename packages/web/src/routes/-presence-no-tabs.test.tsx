@@ -134,7 +134,7 @@ describe("INV-H5: no navigation under the top nav except the breadcrumb", () => 
     ["/presence/places/slack:T1%2FC900", "#incidents"],
     ["/presence/rules/sub-1", "When you mention Valet in #incidents, reply in a new thread."],
     ["/presence/routines/S1", "Every day at 9:00, Morning summary: work in its own thread."],
-    ["/presence/events/ev-1", "@Valet the deploy is failing"],
+    ["/presence/events/ev-1", "Mention in #incidents"],
   ])("%s has no tab list, and every navigation landmark is the breadcrumb", async (path, title) => {
     mountApp(path);
     await screen.findByRole("heading", { level: 1, name: title });

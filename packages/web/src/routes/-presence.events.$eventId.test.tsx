@@ -88,7 +88,7 @@ vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: []
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgId: "org-1", orgRole: "admin" }, error: null }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => ({ ownerType: "user", ownerId: "u1" }) }));
 
-import { EventDetailBody, eventCrumbs } from "./presence.events.$eventId";
+import { EventDetailBody, eventCrumbs, eventHeading } from "./presence.events.$eventId";
 
 beforeEach(() => {
   redeliverMutate.mockReset();
@@ -102,6 +102,18 @@ describe("EventDetailBody", () => {
       { label: "Opened pull request" },
     ]);
     expect(eventCrumbs(undefined).at(-1)).toEqual({ label: "Event" });
+  });
+
+  it("titles the page with the event in words and its place, and the summary under it", () => {
+    expect(eventHeading(detailData.event)).toEqual({ title: "Pr opened in acme/app", subtitle: "PR #7 opened: fix login" });
+    expect(eventHeading({ ...detailData.event, place: "acme/app#7" })).toEqual({ title: "Pr opened in acme/app#7", subtitle: "PR #7 opened: fix login" });
+    expect(eventHeading({ ...detailData.event, summary: " " })).toEqual({ title: "Pr opened in acme/app" });
+    expect(eventHeading(undefined)).toEqual({ title: "Event" });
+  });
+
+  it("links each delivery's line to its page", () => {
+    render(<EventDetailBody data={detailData} />);
+    expect(screen.getByRole("link", { name: "PR alerts" }).getAttribute("href")).toBe("/presence/rules/sub_1");
   });
 
   it("leads with the activity sentence, then the event's key, refs, and payload", () => {

@@ -43,7 +43,8 @@ describe("DeliveryList", () => {
     render(<DeliveryList deliveries={[claimed]} now={1_723_200_000_000} />);
     expect(screen.getByText("Skipped, claimed by another thread.")).toBeTruthy();
     expect(screen.queryByText(/th_inc/)).toBeNull();
-    expect(screen.queryByRole("link")).toBeNull();
+    // The only link is the line's own page.
+    expect(screen.getAllByRole("link").map((link) => link.textContent)).toEqual(["Incident mentions"]);
   });
 
   it("names the thread by the title its ref carries", () => {
@@ -71,6 +72,12 @@ describe("DeliveryList", () => {
     const dead: EventDeliveryWire = { ...base, id: "d4", status: "dead", lastError: text };
     render(<DeliveryList deliveries={[dead]} now={1_723_200_000_000} />);
     expect(screen.getByText(text)).toBeTruthy();
-    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getAllByRole("link").map((link) => link.textContent)).toEqual(["Incident mentions"]);
+  });
+
+  it("links the line's name to the line's page on one event's list", () => {
+    const delivered: EventDeliveryWire = { ...base, id: "d8", status: "delivered" };
+    render(<DeliveryList deliveries={[delivered]} now={0} />);
+    expect(screen.getByRole("link", { name: "Incident mentions" }).getAttribute("href")).toBe("/presence/rules/sub_1");
   });
 });

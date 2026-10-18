@@ -1,14 +1,15 @@
 /**
  * One routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
  * step 2): the sentence as the title, the fact strip (When, Do, Runs in),
- * edit, fire now, enable or disable, and the run or delivery history. A
+ * edit, delete, fire now, enable or disable, and the run or delivery
+ * history. Edit's **Runs in** lists the routine owner's threads. A
  * routine the scheduler turned off for an archived thread shows its problem
  * with the thread picker inline. A pick repins the routine and turns it on
  * again.
  */
 import { useState } from "react";
-import { Link } from "@tanstack/react-router";
-import type { TeamSummary, WorkflowRunSummary } from "@valet/api/wire";
+import { Link, useNavigate } from "@tanstack/react-router";
+import type { WorkflowRunSummary } from "@valet/api/wire";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
@@ -18,9 +19,13 @@ import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
+import { OwnerBadge } from "./presence-rows";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
-import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routine-helpers";
-import { routineDoes, runsInLabel, scheduleInWords, type ThreadTitles, type WorkflowNames } from "./sentences";
+import {
+  isRoutine, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineSentence, type Routine,
+} from "./routine-helpers";
+import { DeleteRoutineDialog } from "./routine-row";
+import { routineAction, runsInLabel, scheduleInWords, type WorkflowNames } from "./sentences";
 
 /** The run id prefix the scheduler gives a schedule's runs
  * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
@@ -28,25 +33,7 @@ export function scheduleRunPrefix(scheduleId: string): string {
   return `wfrun_sch_${scheduleId.replace(/-/g, "").slice(0, 8)}_`;
 }
 
-/**
- * Whether the viewer may NOT change this routine. It mirrors the server's
- * trigger access rule (`canAccessTriggerRow`): the owner of a personal
- * routine, or a member of the owning team. A routine that runs a workflow
- * may also be open to the people who may act on that workflow, which the
- * server checks; the page then leaves the controls on. Until the viewer and
- * the teams load, the routine reads as read-only.
- */
-export function routineReadOnly(
-  routine: Pick<Routine, "workflowId" | "detail">,
-  me: { id: string } | undefined,
-  teams: readonly Pick<TeamSummary, "id" | "callerRole">[] | undefined,
-): boolean {
-  if (me === undefined || teams === undefined) return true;
-  const { ownerType, ownerId } = routine.detail;
-  if (ownerType === "user" && ownerId === me.id) return false;
-  if (ownerType === "team" && teams.some((team) => team.id === ownerId && team.callerRole !== null)) return false;
-  return routine.workflowId === undefined;
-}
+export { routineReadOnly } from "./routine-helpers";
 
 export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
@@ -71,17 +58,17 @@ export function RoutinePage({ id }: { id: string }) {
   );
 }
 
-/** The fact strip's values (spec Part E step 2). A workflow routine starts
- * a run, not a thread, so it has no Runs in. */
+/** The fact strip's values (spec Part E step 2). Do names the action and
+ * Runs in names the thread, so the strip says each fact once. A workflow
+ * routine starts a run, not a thread, so it has no Runs in. */
 export function routineFacts(
   routine: Routine,
   workflows: WorkflowNames,
-  threads: ThreadTitles,
   pinTitle: string | undefined,
 ): readonly { term: string; value: string }[] {
   const facts = [
     { term: "When", value: scheduleInWords(routine.detail.cron, routine.detail.timezone) },
-    { term: "Do", value: routineDoes(routine, workflows, threads) },
+    { term: "Do", value: routineAction(routine, workflows) },
   ];
   if (routine.detail.targetKind === "assistant") {
     facts.push({ term: "Runs in", value: runsInLabel(routine.detail.thread ?? { mode: "own" }, null, "routine", pinTitle) });
@@ -98,11 +85,12 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const update = useUpdateSchedule();
   const me = useMe();
   const teams = useTeams();
-  const { ownerType, ownerId } = routine.detail;
+  const navigate = useNavigate();
   const readOnly = routineReadOnly(routine, me.data, teams.data?.teams);
-  // The picker lists the routine owner's threads, whatever the switcher shows.
-  const workspace = ownerType === "user" ? "user" : ownerType === "team" ? ownerId : undefined;
+  const readOnlyText = routineReadOnlyText(routine, teams.data?.teams);
+  const workspace = routineWorkspace(routine);
   const [editing, setEditing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
 
   function fireNow() {
@@ -123,18 +111,20 @@ function RoutineBody({ routine }: { routine: Routine }) {
       <section aria-label="Routine" className="space-y-3">
         <div className="flex flex-wrap items-start gap-3">
           <dl aria-label="Facts" className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
-            {routineFacts(routine, workflows.data?.workflows ?? [], pinTitles, pinThreadTitle).map((fact) => (
+            {routineFacts(routine, workflows.data?.workflows ?? [], pinThreadTitle).map((fact) => (
               <div key={fact.term} className="contents">
                 <dt className="text-muted">{fact.term}</dt>
                 <dd className="text-ink [overflow-wrap:anywhere]">{fact.value}</dd>
               </div>
             ))}
           </dl>
+          <OwnerBadge ownerType={routine.detail.ownerType} />
           <ProblemBadge problem={routine.detail.disabledReason} />
         </div>
         <p className="text-sm text-muted">{routineWhen(routine, ": ")}</p>
         <div className="flex flex-wrap items-center gap-3">
           <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setDeleting(true)}>Delete</Button>
           <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
           <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
             <Switch
@@ -146,7 +136,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
             {routine.enabled ? "On" : "Off"}
           </label>
         </div>
-        {readOnly && !routine.detail.disabledReason && <p className="text-xs text-muted">Only its owner can change this routine.</p>}
+        {readOnly && !routine.detail.disabledReason && <p className="text-xs text-muted">{readOnlyText}</p>}
         {message && (
           <p role={message.error ? "alert" : "status"} className={message.error ? "text-sm text-danger-500" : "text-sm text-muted"}>
             {message.text}
@@ -158,7 +148,11 @@ function RoutineBody({ routine }: { routine: Routine }) {
             threadTitle={pinThreadTitle}
             workspace={workspace}
             readOnly={readOnly}
+            readOnlyText={readOnlyText}
             onPick={(thread) => save({ thread, enabled: true })}
+            action={readOnly ? undefined : (
+              <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>Edit the routine</Button>
+            )}
             pending={update.isPending}
           />
         )}
@@ -168,7 +162,14 @@ function RoutineBody({ routine }: { routine: Routine }) {
         ? <RoutineRuns routine={routine} workflowId={routine.workflowId} />
         : <RoutineDeliveries routine={routine} />}
 
-      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly />}
+      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly workspace={workspace} />}
+      <DeleteRoutineDialog
+        routine={routine}
+        teams={teams.data?.teams}
+        open={deleting}
+        onOpenChange={setDeleting}
+        onDeleted={() => { void navigate({ to: "/presence" }); }}
+      />
     </div>
   );
 }

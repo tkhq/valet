@@ -11,6 +11,7 @@ import { usePinnedThreadTitles } from "~/api/rule";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
 import { formatDateTime } from "~/lib/format-when";
+import { teamName, type TeamLike } from "./presence-rows";
 import { routineDoes, routineSentence } from "./sentences";
 
 /** A schedule row of the triggers list. */
@@ -89,4 +90,45 @@ export function useRoutineActions(routine: Routine) {
   }
 
   return { fire, update, message, setMessage, fireNow, save, setEnabled: (enabled: boolean) => save({ enabled }) };
+}
+
+/**
+ * Whether the viewer may NOT change this routine. It mirrors the server's
+ * trigger access rule (`canAccessTriggerRow`): the owner of a personal
+ * routine, or a member of the owning team. A routine that runs a workflow
+ * may also be open to the people who may act on that workflow, which the
+ * server checks; the page then leaves the controls on. Until the viewer and
+ * the teams load, the routine reads as read-only.
+ */
+export function routineReadOnly(
+  routine: Pick<Routine, "workflowId" | "detail">,
+  me: { id: string } | undefined,
+  teams: readonly TeamLike[] | undefined,
+): boolean {
+  if (me === undefined || teams === undefined) return true;
+  const { ownerType, ownerId } = routine.detail;
+  if (ownerType === "user" && ownerId === me.id) return false;
+  if (ownerType === "team" && teams.some((team) => team.id === ownerId && team.callerRole !== null)) return false;
+  return routine.workflowId === undefined;
+}
+
+/** Who may change a routine, for a viewer who may not. */
+export function routineReadOnlyText(routine: Pick<Routine, "detail">, teams: readonly TeamLike[] | undefined): string {
+  return routine.detail.ownerType === "team"
+    ? `Only members of ${teamName(teams, routine.detail.ownerId)} can change this.`
+    : "Only its owner can change this routine.";
+}
+
+/** The workspace key whose threads a routine's picker lists: `user`, or the
+ * owning team's id. The picker follows the routine's owner, whatever the
+ * switcher shows. */
+export function routineWorkspace(routine: Pick<Routine, "detail">): string | undefined {
+  const { ownerType, ownerId } = routine.detail;
+  return ownerType === "user" ? "user" : ownerType === "team" ? ownerId : undefined;
+}
+
+/** The Delete confirm's description. A team routine names its team first. */
+export function deleteRoutineDescription(routine: Pick<Routine, "detail">, teams: readonly TeamLike[] | undefined): string {
+  const base = "Valet stops acting on this schedule. Its past runs stay.";
+  return routine.detail.ownerType === "team" ? `This is ${teamName(teams, routine.detail.ownerId)}'s routine. ${base}` : base;
 }

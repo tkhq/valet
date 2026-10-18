@@ -37,9 +37,15 @@ vi.mock("~/api/client", async (importOriginal) => {
     },
   };
 });
-vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
+vi.mock("~/api/settings", async () => ({
+  ...(await import("./test-fixtures")).memberSettings,
+  useTeams: () => ({ data: { teams: [{ id: "team-sre", name: "SRE", callerRole: "member" }] } }),
+}));
 vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ editing }: { editing?: { name: string } }) => <p>Editing {editing?.name}</p>,
+  TriggerDialog: ({ editing, workspace }: { editing?: { name: string }; workspace?: string }) => <p>Editing {editing?.name} in {workspace}</p>,
+}));
+vi.mock("./thread-picker", () => ({
+  ThreadPicker: ({ workspace }: { workspace: string }) => <button type="button">Pick from {workspace}</button>,
 }));
 
 import { routineWhen, type Routine } from "./routine-helpers";
@@ -122,5 +128,34 @@ describe("RoutineRosterRow", () => {
     expect(await screen.findByText("Fired Morning summary. It runs now.")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Edit", "Delete"]);
+  });
+
+  it("keeps an archived pin's picker behind Pick another thread", async () => {
+    renderRow(weekdayRoutine({ disabledReason: "Pick another thread in Presence.", thread: { mode: "existing", sessionId: "s", threadId: "t" } }));
+    const row = screen.getByRole("region", { name: "Morning summary" });
+    expect(row.querySelector(".bg-danger-500")).not.toBeNull();
+    expect(within(row).queryByRole("group", { name: "Problem" })).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Pick another thread" }));
+    expect(within(row).getByRole("button", { name: "Pick from user" })).toBeTruthy();
+  });
+
+  it("shows a scheduler reason as written, with no picker button", () => {
+    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    renderRow(weekdayRoutine({ disabledReason: reason }));
+    const row = screen.getByRole("region", { name: "Morning summary" });
+    expect(within(row).getByText(reason)).toBeTruthy();
+    expect(within(row).queryByRole("button", { name: "Pick another thread" })).toBeNull();
+  });
+
+  it("marks a team routine Team, scopes Edit to its team, and names the team in Delete", async () => {
+    renderRow(weekdayRoutine({ ownerType: "team", ownerId: "team-sre" }));
+    const row = screen.getByRole("region", { name: "Morning summary" });
+    expect(within(row).getByText("Team")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
+    expect(screen.getByText("Editing Morning summary in team-sre")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByText("This is SRE's routine. Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
   });
 });

@@ -4,7 +4,8 @@
  * and a muted heading. Each fault is one item with its fix inline. A line's
  * or a dead delivery's fault names its place first (`In acme/api,` or
  * `Everywhere in Slack,`). An archived pin shows the thread picker, which is
- * the same `ThreadProblem` the sentence row shows; a routine that is off shows its
+ * the same `ThreadProblem` the sentence row opens from `Pick another
+ * thread`, shown open here; a routine that is off shows its
  * reason and an `Edit` link; a dead delivery links its event. The banner
  * never shows a bare count, and it shows nothing when there is no fault.
  */
@@ -13,11 +14,10 @@ import { Link } from "@tanstack/react-router";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import { usePatchEventSubscription } from "~/api/events";
 import { usePinnedThreadTitle } from "~/api/rule";
-import { useMe } from "~/api/settings";
 import { textLinkClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { ThreadProblem } from "./problem-badge";
-import { lineReadOnly, lineWorkspace, pinnedTitle, storedPolicy } from "./presence-rows";
+import { lineWorkspace, pinnedTitle, storedPolicy, useLineAccess } from "./presence-rows";
 import type { Fault } from "./use-faults";
 
 /** A stable key per fault: one fault per line, routine, or line's dead delivery. */
@@ -68,7 +68,7 @@ function FaultItem({ fault }: { fault: Fault }) {
 
 /** A line with a problem: the problem text and its fix, as under the line's row. */
 function LineFault({ sub, lead }: { sub: EventSubscriptionWire; lead: string | undefined }) {
-  const me = useMe();
+  const { readOnly, readOnlyText } = useLineAccess(sub);
   const patch = usePatchEventSubscription();
   const titles = usePinnedThreadTitle(storedPolicy(sub));
   const [error, setError] = useState<string | null>(null);
@@ -79,7 +79,8 @@ function LineFault({ sub, lead }: { sub: EventSubscriptionWire; lead: string | u
       problem={sub.problem ?? ""}
       threadTitle={pinnedTitle(sub, titles)}
       workspace={lineWorkspace(sub)}
-      readOnly={lineReadOnly(sub, me.data?.id)}
+      readOnly={readOnly}
+      readOnlyText={readOnlyText}
       pending={patch.isPending}
       error={error}
       onPick={(thread) => {

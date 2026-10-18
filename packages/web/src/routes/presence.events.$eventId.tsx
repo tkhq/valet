@@ -13,7 +13,8 @@ import { formatWhen } from "~/lib/format-when";
 
 /**
  * `/presence/events/$eventId`: one event at its own URL. It replaces
- * `/events/$eventId`. The page shows the activity sentence, the deliveries,
+ * `/events/$eventId`. Its title is the event in words and its place, with
+ * the event's summary under it. The page shows the activity sentence, the deliveries,
  * the control that sends the event again, the receipt stages, and the
  * payload (docs/specs/2026-10-16-presence-hub-design.md Part E step 2).
  *
@@ -30,11 +31,24 @@ export function eventCrumbs(eventKey: string | undefined): PresenceCrumb[] {
   return [PRESENCE_CRUMB, { label: "Activity", to: "/presence/activity" }, { label: eventInWords(eventKey) }];
 }
 
+/**
+ * The page title and the muted line under it: `<event in words> in
+ * <place>`, as the Activity row leads, then the event's own summary. Until
+ * the event loads, the title reads `Event`.
+ */
+export function eventHeading(event: GetEventResponse["event"] | undefined): { title: string; subtitle?: string } {
+  if (event === undefined) return { title: "Event" };
+  const title = activityLead(event, event.place !== undefined ? { place: event.place } : {});
+  const summary = event.summary.trim();
+  return summary.length > 0 && summary !== title ? { title, subtitle: summary } : { title };
+}
+
 export function PresenceEventPage() {
   const { eventId } = Route.useParams();
   const { data, isLoading, error } = useEvent(eventId);
+  const heading = eventHeading(data?.event);
   return (
-    <PresenceDetailPage crumbs={eventCrumbs(data?.event.eventKey)} title={data?.event.summary || "Event"}>
+    <PresenceDetailPage crumbs={eventCrumbs(data?.event.eventKey)} title={heading.title} subtitle={heading.subtitle}>
       {isLoading && <LoadingRow label="Loading event…" />}
       {(error != null || (!isLoading && !data)) && (
         <ErrorRow>Could not load this event. Reload the page. If it still fails, open Activity and find the event again.</ErrorRow>

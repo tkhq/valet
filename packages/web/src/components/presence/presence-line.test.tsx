@@ -22,6 +22,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 const patchEventSubscription = vi.fn<(id: string, body: PatchEventSubscriptionRequest) => Promise<EventSubscriptionWire>>();
 const deleteEventSubscription = vi.fn<(id: string) => Promise<{ ok: true }>>();
+const listEventSubscriptions = vi.fn<() => Promise<{ subscriptions: EventSubscriptionWire[] }>>();
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
   return {
@@ -30,11 +31,16 @@ vi.mock("~/api/client", async (importOriginal) => {
       ...actual.api,
       patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) => patchEventSubscription(id, body),
       deleteEventSubscription: (id: string) => deleteEventSubscription(id),
+      listEventSubscriptions: () => listEventSubscriptions(),
     },
   };
 });
 vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: [] } }) }));
-vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
+let teams: { id: string; name: string; callerRole: "admin" | "member" | null }[] = [];
+vi.mock("~/api/settings", async () => ({
+  ...(await import("./test-fixtures")).memberSettings,
+  useTeams: () => ({ data: { teams } }),
+}));
 vi.mock("~/components/events/edit-subscription-dialog", () => ({
   EditSubscriptionDialog: ({ sub }: { sub: EventSubscriptionWire }) => <p>Editing {sub.name}</p>,
 }));
@@ -58,6 +64,9 @@ function renderLine(sub: EventSubscriptionWire) {
 }
 
 beforeEach(() => {
+  teams = [];
+  listEventSubscriptions.mockReset();
+  listEventSubscriptions.mockResolvedValue({ subscriptions: [] });
   patchEventSubscription.mockReset();
   deleteEventSubscription.mockReset();
   patchEventSubscription.mockImplementation(async (id, body) => ({ ...mention({}), id, enabled: body.enabled ?? true }));
@@ -99,5 +108,64 @@ describe("PresenceLine", () => {
     expect(screen.getByText("Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("R1"));
+  });
+
+  it("marks a team line Team and names the team in its Delete confirm", async () => {
+    teams = [{ id: "sre", name: "SRE", callerRole: "member" }];
+    renderLine(mention({ ownerType: "team", ownerId: "sre" }));
+    expect(screen.getByText("Team")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "More for Incident mentions" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByText("This is SRE's line. Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
+  });
+
+  it("marks an org line Org and a personal line not at all", () => {
+    renderLine(mention({ ownerType: "org", ownerId: "acme" }));
+    expect(screen.getByText("Org")).toBeTruthy();
+    cleanup();
+    renderLine(mention({}));
+    expect(screen.queryByText("Team")).toBeNull();
+    expect(screen.queryByText("Org")).toBeNull();
+  });
+
+  it("keeps a team line read-only for a viewer outside the team", async () => {
+    teams = [{ id: "sre", name: "SRE", callerRole: null }];
+    renderLine(mention({ ownerType: "team", ownerId: "sre" }));
+    expect(screen.getByRole("switch", { name: "Turn off Incident mentions" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("says Proposed, not Off, under a proposal", () => {
+    renderLine(mention({ id: "proposal-1", enabled: false, target: { kind: "assistant", replaces: "R0" } }));
+    expect(screen.getByText("Proposed")).toBeTruthy();
+    expect(screen.queryByText("Off")).toBeNull();
+  });
+
+  it("names the pausing team, and Keep both turns the line on and stops the pause", async () => {
+    teams = [{ id: "sre", name: "SRE", callerRole: "member" }];
+    const paused = mention({ enabled: false, target: { kind: "assistant", overlapPausedAt: 5, pauseOnOverlap: true } });
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [paused, line("T1", { ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"], target: { kind: "assistant", assistant: "team", teamId: "sre" } })],
+    });
+    renderLine(paused);
+    expect(await screen.findByText("Paused: SRE already listens for this.")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Keep both" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R1", { pauseOnOverlap: false, enabled: true }));
+  });
+
+  it("says the team when two teams could have paused the line", async () => {
+    teams = [{ id: "sre", name: "SRE", callerRole: "member" }, { id: "ops", name: "Ops", callerRole: "member" }];
+    const paused = mention({ enabled: false, target: { kind: "assistant", overlapPausedAt: 5 } });
+    const team = (id: string) => line(id, { ownerType: "team", ownerId: id, eventKeys: ["slack.app_mention"], target: { kind: "assistant", assistant: "team", teamId: id } });
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [paused, team("sre"), team("ops")] });
+    renderLine(paused);
+    await waitFor(() => expect(listEventSubscriptions).toHaveBeenCalled());
+    expect(screen.getByText("Paused: the team already listens for this.")).toBeTruthy();
+  });
+
+  it("keeps the picker behind Pick another thread under the row", async () => {
+    renderLine(mention({ problem: "Pick another thread in Presence.", target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }));
+    expect(screen.queryByRole("group", { name: "Problem" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Pick another thread" }));
+    expect(screen.getByRole("group", { name: "Problem" })).toBeTruthy();
   });
 });

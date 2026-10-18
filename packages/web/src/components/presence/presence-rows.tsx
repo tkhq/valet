@@ -4,9 +4,10 @@
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 2, Part D).
  */
 import { Link } from "@tanstack/react-router";
-import type { EventSubscriptionWire } from "@valet/api/wire";
+import type { EventSubscriptionWire, TeamSummary } from "@valet/api/wire";
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { usePinnedThreadTitles } from "~/api/rule";
+import { useMe, useTeams } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
 import { Badge, WorkRow } from "~/components/primitives";
 import { ProblemBadge } from "./problem-badge";
@@ -33,19 +34,115 @@ export function usePresenceSentence(
   return (sub, options) => presenceSentence(sub, catalog.data?.catalog, workflowNames, threads, names, options);
 }
 
-/** Coverage copy for a personal line that a team line paused (Part C step 3). */
-export const PAUSED_BY_TEAM = "Paused: the team already listens for this.";
+/** The teams fields the gates and owner names read. A team the viewer
+ * cannot see has no name here. */
+export type TeamLike = Pick<TeamSummary, "id" | "callerRole"> & Partial<Pick<TeamSummary, "name">>;
+
+/** A team's name, or `the team` when the viewer's team list does not name it. */
+export function teamName(teams: readonly TeamLike[] | undefined, teamId: string): string {
+  const name = teams?.find((team) => team.id === teamId)?.name?.trim();
+  return name !== undefined && name.length > 0 ? name : "the team";
+}
 
 /** True when a team line paused this personal line. */
 export function pausedByTeam(sub: EventSubscriptionWire): boolean {
   return !sub.enabled && sub.target.kind === "assistant" && sub.target.overlapPausedAt !== undefined;
 }
 
-/** Mirrors the server's mutation gate for a personal line: only its owner
- * changes it. The server checks a team or org line, and names the problem
- * when it refuses. */
-export function lineReadOnly(sub: EventSubscriptionWire, meId: string | undefined): boolean {
-  return sub.ownerType === "user" && meId !== undefined && sub.ownerId !== meId;
+/**
+ * The team whose line paused this personal line, when the viewer's lines
+ * name exactly one: an enabled team assistant line of the viewer's teams that
+ * listens for one of the same events. The server does not record the team,
+ * so more than one candidate reads as `the team`.
+ */
+export function pausingTeamId(
+  sub: EventSubscriptionWire,
+  subs: readonly EventSubscriptionWire[],
+  teams: readonly TeamLike[] | undefined,
+): string | undefined {
+  const mine = new Set((teams ?? []).filter((team) => team.callerRole !== null).map((team) => team.id));
+  const keys = new Set(sub.eventKeys);
+  const owners = new Set(
+    subs
+      .filter((other) => other.ownerType === "team" && other.enabled && other.target.kind === "assistant" && mine.has(other.ownerId))
+      .filter((other) => other.eventKeys.some((key) => keys.has(key)))
+      .map((other) => other.ownerId),
+  );
+  return owners.size === 1 ? [...owners][0] : undefined;
+}
+
+/** Coverage copy for a personal line that a team line paused (Part C step 3). */
+export function pausedByTeamText(team: string): string {
+  return `Paused: ${team} already listens for this.`;
+}
+
+/**
+ * Mirrors the server's mutation gate (`canMutateSubscription` in
+ * packages/api/src/routes/events.ts): a personal line belongs to its owner,
+ * a team line to the team's members, and any org member may change an org
+ * line. Until the viewer or the teams load, the line reads as editable; the
+ * server still refuses a change it does not allow.
+ */
+export function lineReadOnly(
+  sub: Pick<EventSubscriptionWire, "ownerType" | "ownerId">,
+  meId: string | undefined,
+  teams: readonly TeamLike[] | undefined,
+): boolean {
+  if (sub.ownerType === "user") return meId !== undefined && sub.ownerId !== meId;
+  if (sub.ownerType === "team") return teams !== undefined && !teams.some((team) => team.id === sub.ownerId && team.callerRole !== null);
+  return false;
+}
+
+/** Who may change a line, for a viewer who may not. */
+export function lineReadOnlyText(
+  sub: Pick<EventSubscriptionWire, "ownerType" | "ownerId">,
+  teams: readonly TeamLike[] | undefined,
+): string {
+  if (sub.ownerType === "team") return `Only members of ${teamName(teams, sub.ownerId)} can change this.`;
+  return "Only its owner can change this.";
+}
+
+/** The viewer's access to a line: read-only or not, the words that say
+ * who may change it, and the viewer's teams. */
+export function useLineAccess(sub: EventSubscriptionWire): {
+  readOnly: boolean;
+  readOnlyText: string;
+  teams: readonly TeamLike[] | undefined;
+} {
+  const me = useMe();
+  const teamsQ = useTeams();
+  const teams = teamsQ.data?.teams;
+  return { readOnly: lineReadOnly(sub, me.data?.id, teams), readOnlyText: lineReadOnlyText(sub, teams), teams };
+}
+
+/**
+ * True for a line the assistant proposed that no person has turned on yet.
+ * The api stores a proposal off, with a `proposal-` id, and with `replaces`
+ * when it updates another line. An enable clears `replaces`, and any edit
+ * moves `updatedAt`, so a proposal with no `replaces` stops reading as one
+ * once a person changed it.
+ */
+export function isProposal(sub: EventSubscriptionWire): boolean {
+  if (sub.enabled) return false;
+  if (sub.target.kind === "assistant" && sub.target.replaces !== undefined) return true;
+  return sub.id.startsWith("proposal-") && sub.updatedAt === sub.createdAt;
+}
+
+/** The Delete confirm's description. A team or org line names its owner first. */
+export function deleteLineDescription(
+  sub: Pick<EventSubscriptionWire, "ownerType" | "ownerId">,
+  teams: readonly TeamLike[] | undefined,
+): string {
+  const base = "Valet stops listening for this here. Its past activity stays.";
+  if (sub.ownerType === "team") return `This is ${teamName(teams, sub.ownerId)}'s line. ${base}`;
+  if (sub.ownerType === "org") return `This is the organization's line. ${base}`;
+  return base;
+}
+
+/** A team or org line says whose it is. A personal line shows nothing. */
+export function OwnerBadge({ ownerType }: { ownerType: "user" | "team" | "org" }) {
+  if (ownerType === "user") return null;
+  return <Badge variant="neutral">{ownerType === "team" ? "Team" : "Org"}</Badge>;
 }
 
 /** The workspace key whose threads the picker lists: `user` or a team id.
@@ -88,7 +185,8 @@ export function targetLabel(sub: EventSubscriptionWire, workflowName: string | u
 
 /** A paused line says so beside its sentence. */
 export function PausedBadge({ sub }: { sub: EventSubscriptionWire }) {
-  return sub.enabled ? null : <Badge variant="neutral">Paused</Badge>;
+  if (sub.enabled) return null;
+  return isProposal(sub) ? <Badge variant="accent">Proposed</Badge> : <Badge variant="neutral">Paused</Badge>;
 }
 
 /** A line's badges in every list: paused, and a problem such as an

@@ -58,8 +58,8 @@ vi.mock("~/api/workflows", () => ({
 
 // The thread picker reads the network; emit one fixed pick instead.
 vi.mock("~/components/presence/thread-picker", () => ({
-  ThreadPicker: ({ onPick }: { onPick: (p: { mode: "existing"; sessionId: string; threadId: string }, title: string) => void }) => (
-    <button type="button" onClick={() => onPick({ mode: "existing", sessionId: "s1", threadId: "t1" }, "Deploys")}>Pick Deploys</button>
+  ThreadPicker: ({ workspace, onPick }: { workspace: string; onPick: (p: { mode: "existing"; sessionId: string; threadId: string }, title: string) => void }) => (
+    <button type="button" data-workspace={workspace} onClick={() => onPick({ mode: "existing", sessionId: "s1", threadId: "t1" }, "Deploys")}>Pick Deploys</button>
   ),
 }));
 
@@ -126,6 +126,18 @@ describe("TriggerDialog", () => {
     await waitFor(() =>
       expect(updateScheduleMutateAsync).toHaveBeenCalledWith({ id: "sch_a", body: { thread: { mode: "new" } } }),
     );
+  });
+
+  it("lists the routine owner's threads in Runs in when the caller names the owner", () => {
+    const item: WorkflowTriggerItem = {
+      kind: "schedule", id: "sch_t", name: "Team digest", enabled: true,
+      detail: {
+        cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "summarize", nextFireAt: 1, lastFiredAt: null,
+        ownerType: "team", ownerId: "team-sre", thread: { mode: "existing", sessionId: "s1", threadId: "t1" },
+      },
+    };
+    render(<TriggerDialog open onOpenChange={() => {}} editing={item} workspace="team-sre" />);
+    expect(screen.getByRole("button", { name: "Pick Deploys" }).getAttribute("data-workspace")).toBe("team-sre");
   });
 
   it("shows the server's corrective error on failure", async () => {

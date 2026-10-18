@@ -23,8 +23,10 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const navigate = vi.fn<(to: { to: string }) => Promise<void>>();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  useNavigate: () => navigate,
   Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children: ReactNode; className?: string }) => {
     const href = Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to);
     return <a href={href} className={className}>{children}</a>;
@@ -38,6 +40,7 @@ const listEventReceipts = vi.fn<(params: { subscriptionId?: string }) => Promise
 const listThreads = vi.fn<(sessionId: string, opts?: ListThreadsOpts) => Promise<ListThreadsResponse>>();
 const getThreadAddress = vi.fn<(id: string) => Promise<ThreadAddress>>();
 const patchEventSubscription = vi.fn<(id: string, body: PatchEventSubscriptionRequest) => Promise<EventSubscriptionWire>>();
+const deleteEventSubscription = vi.fn<(id: string) => Promise<{ ok: true }>>();
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
   return {
@@ -50,6 +53,7 @@ vi.mock("~/api/client", async (importOriginal) => {
       listThreads: (sessionId: string, opts?: ListThreadsOpts) => listThreads(sessionId, opts),
       getThreadAddress: (id: string) => getThreadAddress(id),
       patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) => patchEventSubscription(id, body),
+      deleteEventSubscription: (id: string) => deleteEventSubscription(id),
       listPresencePlaces: async () => ({ places: [] }),
     },
   };
@@ -61,15 +65,19 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 let orgRole: "admin" | "member" = "admin";
+let teams: { id: string; name: string; callerRole: "admin" | "member" | null }[] = [{ id: "sre", name: "SRE", callerRole: "member" }];
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole } }),
   useOrgDirectory: () => ({ data: { users: [] } }),
+  useTeams: () => ({ data: { teams } }),
 }));
 
-/** The dialog is its own suite's (its Runs in is tested there); here it
- * records the listener it opened on. */
+/** The dialog is its own suite's (its Runs in and review copy are tested
+ * there); here it records the line it opened on and how. */
 vi.mock("~/components/events/edit-subscription-dialog", () => ({
-  EditSubscriptionDialog: ({ sub }: { sub: EventSubscriptionWire }) => <p>Editing {sub.name}</p>,
+  EditSubscriptionDialog: ({ sub, review, replacesNote }: { sub: EventSubscriptionWire; review?: boolean; replacesNote?: string }) => (
+    <p>{review ? `Reviewing ${sub.name}${replacesNote ? `, replaces ${replacesNote}` : ""}` : `Editing ${sub.name}`}</p>
+  ),
 }));
 
 /** The picker lists real threads in its own suite; here one pick stands in. */
@@ -117,9 +125,12 @@ function renderPage(id = "R4") {
 
 beforeEach(() => {
   orgRole = "admin";
-  for (const mock of [listEventSubscriptions, listSubscriptionDeliveries, listEventReceipts, listThreads, getThreadAddress, patchEventSubscription]) {
+  teams = [{ id: "sre", name: "SRE", callerRole: "member" }];
+  navigate.mockReset();
+  for (const mock of [listEventSubscriptions, listSubscriptionDeliveries, listEventReceipts, listThreads, getThreadAddress, patchEventSubscription, deleteEventSubscription]) {
     mock.mockReset();
   }
+  deleteEventSubscription.mockResolvedValue({ ok: true });
   listSubscriptionDeliveries.mockResolvedValue({ deliveries: [] });
   listEventReceipts.mockResolvedValue({ receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 });
   listThreads.mockImplementation(async (_sessionId, opts) => ({
@@ -184,9 +195,10 @@ describe("RulePage", () => {
     const facts = screen.getByLabelText("Facts");
     expect(title.compareDocumentPosition(facts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const pairs = [...facts.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+    // Do names the action and Runs in names the thread: each fact once.
     expect(pairs).toEqual([
       ["When", "Completed check"],
-      ["Do", "work in the Platform CI thread"],
+      ["Do", "work on it"],
       ["Runs in", "The thread Platform CI"],
       ["Appears as", "Valet"],
     ]);
@@ -204,6 +216,7 @@ describe("RulePage", () => {
     const facts = await screen.findByLabelText("Facts");
     const value = (term: string) => [...facts.querySelectorAll("dt")].find((dt) => dt.textContent === term)?.nextElementSibling?.textContent;
     expect(value("When")).toMatch(/ or /);
+    expect(value("Do")).toBe("work on it");
     expect(value("Runs in")).toBe("A new thread each time");
     expect(value("Appears as")).toBe("SRE Bot");
   });
@@ -315,6 +328,95 @@ describe("RulePage", () => {
     });
     renderPage();
     expect(await screen.findByText("Paused: the team already listens for this.")).toBeTruthy();
+  });
+
+  it("names the team that paused the line, and Keep both turns it on and stops the pause", async () => {
+    const paused = listener({ enabled: false, target: { kind: "assistant", thread: { mode: "new" }, overlapPausedAt: 5, pauseOnOverlap: true } });
+    const teamLine = listener({ id: "T1", name: "SRE checks", ownerType: "team", ownerId: "sre", target: { kind: "assistant", assistant: "team", teamId: "sre" } });
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [paused, teamLine] });
+    renderPage();
+    expect(await screen.findByText("Paused: SRE already listens for this.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep both" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", { pauseOnOverlap: false, enabled: true }));
+  });
+
+  it("deletes the line after the confirm, then opens Presence", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("R4"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence" }));
+  });
+
+  it("names the team in a team line's Delete confirm and marks the line Team", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ ownerType: "team", ownerId: "sre" })] });
+    renderPage();
+    expect(await screen.findByText("Team")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("This is SRE's line. Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
+  });
+
+  it("keeps a team line read-only for a viewer outside the team and names who can change it", async () => {
+    teams = [{ id: "sre", name: "SRE", callerRole: null }];
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ ownerType: "team", ownerId: "sre" })] });
+    renderPage();
+    expect(await screen.findByText("Only members of SRE can change this.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Delete" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("switch", { name: "Turn off Failed checks" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("names the team when its picker is hidden from a viewer outside the team", async () => {
+    teams = [];
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ ownerType: "team", ownerId: "sre", problem: PIN_TEXT })] });
+    renderPage();
+    expect(await screen.findByText("Only members of the team can change this.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Pick Platform Ops/ })).toBeNull();
+  });
+
+  it("lets any member change an org line, as the server does", async () => {
+    orgRole = "member";
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [listener({ ownerType: "org", ownerId: "acme", createdBy: "u-002", target: { kind: "assistant", assistant: "org" } })],
+    });
+    renderPage();
+    expect(await screen.findByText("Org")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("This is the organization's line. Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
+  });
+
+  it("reviews a proposal: what it turns off, Turn on in review, and Delete", async () => {
+    const live = listener({ id: "R1", name: "Incident replies" });
+    const proposal = listener({
+      id: "proposal-abc", name: "Incident replies v2", enabled: false,
+      target: { kind: "assistant", thread: { mode: "new" }, replaces: "R1" },
+    });
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [live, proposal] });
+    renderPage("proposal-abc");
+    const section = await screen.findByRole("region", { name: "Proposal" });
+    expect(within(section).getByText("Proposed by the assistant.")).toBeTruthy();
+    expect(section.textContent).toContain("Turning it on turns off Incident replies.");
+    expect(within(section).getByRole("link", { name: "Incident replies" }).getAttribute("href")).toBe("/presence/rules/R1");
+    // The proposal sits above the fact strip, and its switch gives way to Turn on.
+    const facts = screen.getByLabelText("Facts");
+    expect(section.compareDocumentPosition(facts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("switch")).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "Turn on" }));
+    expect(screen.getByText("Reviewing Incident replies v2, replaces Incident replies")).toBeTruthy();
+    fireEvent.click(within(section).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("proposal-abc"));
+  });
+
+  it("reads a line that is only off as off, not as a proposal", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ enabled: false, updatedAt: 9 })] });
+    renderPage();
+    await screen.findByRole("switch", { name: "Turn on Failed checks" });
+    expect(screen.queryByRole("region", { name: "Proposal" })).toBeNull();
   });
 
   it("names the fix when the listener is not in the list", async () => {
