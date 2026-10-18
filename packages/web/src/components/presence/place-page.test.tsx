@@ -208,17 +208,17 @@ describe("PlacePage", () => {
     let fail: (err: Error) => void = () => {};
     getPresencePlace.mockReturnValue(new Promise((_resolve, reject) => { fail = reject; }));
     renderPage("slack:T1/C900");
-    expect(screen.getByRole("heading", { level: 2, name: "Loading…" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1, name: "Loading…" })).toBeTruthy();
     expect(screen.queryByText("slack:T1/C900")).toBeNull();
     fail(new Error("boom"));
-    expect(await screen.findByRole("heading", { level: 2, name: "Not available" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { level: 1, name: "Not available" })).toBeTruthy();
     expect(screen.queryByText("slack:T1/C900")).toBeNull();
   });
 
   it("shows the header, Valet here, Threads, and Recent activity in order (P3)", async () => {
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
-    const heading = await screen.findByRole("heading", { level: 2, name: "acme/api" });
+    const heading = await screen.findByRole("heading", { level: 1, name: "acme/api" });
     expect(getPresencePlace).toHaveBeenCalledWith("user", "github:acme/api");
     // The subtitle is the service alone.
     expect(screen.getByText("GitHub")).toBeTruthy();
@@ -281,7 +281,7 @@ describe("PlacePage", () => {
     scopeTeamId = "sre";
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
-    await screen.findByRole("heading", { level: 2, name: "#incidents" });
+    await screen.findByRole("heading", { level: 1, name: "#incidents" });
     expect(getPresencePlace).toHaveBeenCalledWith("sre", "slack:T1/C900");
 
     const [here, , appearsAs] = sectionsInOrder(["Valet here", "Threads", "Appears as", "Recent activity"]);

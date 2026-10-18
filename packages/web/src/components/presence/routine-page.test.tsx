@@ -84,6 +84,7 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
+import { routineWhen } from "./routine-helpers";
 import { RoutinePage, routineReadOnly } from "./routine-page";
 
 const PIN_TEXT = "Pick another thread for this rule in Presence.";
@@ -161,7 +162,7 @@ describe("RoutinePage", () => {
 
   it("titles the page with the sentence under Presence › On a schedule › <name>", async () => {
     wrap(<RoutinePage id="S1" />);
-    const title = await screen.findByRole("heading", { level: 2, name: "Every day at 9:00, Morning summary: work in its own thread." });
+    const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
     expect(title).toBeTruthy();
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›On a schedule›Morning summary");
@@ -254,6 +255,20 @@ describe("RoutinePage", () => {
     const org = routine("S3", { detail: { ownerType: "org", ownerId: "acme" } });
     expect(routineReadOnly(org, { id: "u-001" }, member)).toBe(true);
     expect(routineReadOnly({ ...org, workflowId: "wf-1" }, { id: "u-001" }, member)).toBe(false);
+  });
+
+  it("reads Next as a date and a time without seconds", async () => {
+    const now = Date.UTC(2026, 9, 19, 15, 0, 0);
+    const at = Date.UTC(2026, 9, 19, 16, 0, 0);
+    const next = routine("S1", { detail: { nextFireAt: at } });
+    expect(routineWhen(next, now, { locale: "en-US", timeZone: "UTC" })).toBe("Next: Oct 19, 2026, 4:00 PM");
+    expect(routineWhen(routine("S1", { detail: { nextFireAt: now } }), now)).toBe("Due now");
+    expect(routineWhen(routine("S1", { enabled: false }), now)).toBe("Off");
+    // The page renders the same form: no seconds.
+    listWorkflowTriggers.mockResolvedValue({ triggers: [S1] });
+    wrap(<RoutinePage id="S1" />);
+    const line = await screen.findByText(/^Next: /);
+    expect(line.textContent).not.toMatch(/\d:\d\d:\d\d/);
   });
 
   it("lists a workflow routine's runs", async () => {

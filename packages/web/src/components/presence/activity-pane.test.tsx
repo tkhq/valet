@@ -263,7 +263,7 @@ describe("ActivityPane page", () => {
     expect(crumbs.textContent).toBe("Presence›Activity");
     expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
     expect(within(crumbs).getByText("Activity").getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("heading", { level: 2, name: "Activity" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1, name: "Activity" })).toBeTruthy();
   });
 });
 

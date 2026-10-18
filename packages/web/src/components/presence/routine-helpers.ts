@@ -10,6 +10,7 @@ import type { UpdateWorkflowScheduleRequest, WorkflowTriggerItem } from "@valet/
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { formatDateTime } from "~/lib/format-when";
 import { routineDoes, routineSentence } from "./sentences";
 
 /** A schedule row of the triggers list. */
@@ -36,11 +37,17 @@ export function useRoutineDoes(routines: readonly Routine[]): (routine: Routine)
   return (routine) => routineDoes(routine, names, pinned);
 }
 
-/** When the routine fires next (spec Part E step 1: `Next: <time>`), or that it is off. */
-export function routineWhen(routine: Routine, now: number = Date.now()): string {
+/** When the routine fires next (spec Part E step 1: `Next: <time>`, a date
+ * and a time without seconds), or that it is off. `format` pins the locale
+ * and the time zone in tests. */
+export function routineWhen(
+  routine: Pick<Routine, "enabled" | "detail">,
+  now: number = Date.now(),
+  format: { locale?: string; timeZone?: string } = {},
+): string {
   if (!routine.enabled) return "Off";
   const next = routine.detail.nextFireAt;
-  return next - now <= 0 ? "Due now" : `Next: ${new Date(next).toLocaleString()}`;
+  return next - now <= 0 ? "Due now" : `Next: ${formatDateTime(next, format)}`;
 }
 
 /** A row's message: the result of Fire now, or a refusal. */

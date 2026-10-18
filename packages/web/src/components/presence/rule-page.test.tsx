@@ -174,7 +174,7 @@ describe("RulePage", () => {
   it("shows the place breadcrumb, the sentence as the title, and the fact strip (P7)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    const title = await screen.findByRole("heading", { level: 2, name: "When a check completes on acme/api, work in the Platform CI thread." });
+    const title = await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." });
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›acme/api›Failed checks");
     expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
@@ -224,7 +224,7 @@ describe("RulePage", () => {
   it("puts only Presence before the line for a line with no one place", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ filters: [] })] });
     renderPage();
-    await screen.findByRole("heading", { level: 2, name: /^When a check completes on any repository/ });
+    await screen.findByRole("heading", { level: 1, name: /^When a check completes on any repository/ });
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›Failed checks");
     expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
