@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The Presence hub acceptance scenario, P1 to P12, revision 3
- * (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
+ * The Presence hub acceptance scenario, P1 to P17, revision 3 and the UX
+ * fixes (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
  *
  * The test renders the app's real route tree (`routeTree.gen.ts`, with the
  * root layout, the nav, and the workspace switcher) under a memory history.
@@ -19,6 +19,11 @@
  * P11 renders the thread context card's background section on its own
  * router, because the thread page needs a live session socket. The thread
  * header's place label is a pure function, so P11 asserts it directly.
+ *
+ * P13 to P17 each start from their own mount, because each needs a
+ * universe the walk does not hold: a proposal, a viewer outside `sre`, a
+ * routine the scheduler turned off, or no connected service. P15 seeds the
+ * routine's `disabledReason`; the api suite covers the scheduler that sets it.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
@@ -63,6 +68,8 @@ const SRE: TeamSummary = {
   id: "sre", orgId: "acme", name: "SRE", origin: "local", externalId: null, createdAt: 1,
   memberCount: 3, callerRole: "member", defaultModel: null,
 };
+/** The teams the viewer reads. P14 sets `sre` with no caller role: a viewer outside it. */
+let teamsNow: TeamSummary[] = [SRE];
 
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
@@ -70,7 +77,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     ...actual,
     useMe: () => ({ data: ME, isLoading: false, isFetching: false, error: null, isError: false, isSuccess: true }),
     useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true }, plugins: [] }, isLoading: false, error: null }),
-    useTeams: () => ({ data: { teams: [SRE] }, isLoading: false, error: null }),
+    useTeams: () => ({ data: { teams: teamsNow }, isLoading: false, error: null }),
   };
 });
 
@@ -100,12 +107,16 @@ import { place } from "~/components/presence/test-fixtures";
 
 const NOW = Date.now();
 /** The connected services the wizard's When step reads: all three. */
-const PLUGINS: ListPluginsResponse = {
-  plugins: ["slack", "github", "linear"].map((name) => ({
-    name, version: "1", actionCount: 0,
-    services: [{ service: name, type: "oauth2", configKeys: [], connected: true, connect: "oauth", actions: [] }],
-  })),
-};
+function plugins(connected: boolean): ListPluginsResponse {
+  return {
+    plugins: ["slack", "github", "linear"].map((name) => ({
+      name, version: "1", actionCount: 0,
+      services: [{ service: name, type: "oauth2", configKeys: [], connected, connect: "oauth", actions: [] }],
+    })),
+  };
+}
+/** The plugins read. P16 turns every service off. */
+let pluginsNow: ListPluginsResponse = plugins(true);
 /** The org members a sentence may name. */
 const DIRECTORY: OrgDirectoryResponse = { users: [{ userId: "u-001", email: "u@acme.test", name: "U One", avatarUrl: null }] };
 
@@ -139,6 +150,11 @@ const M = line("M", {
   name: "Incident mentions", ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"], filters: INCIDENTS_CHANNEL,
   target: { kind: "assistant", assistant: "team", teamId: "sre", appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
 });
+/** The assistant's proposal to replace R1 (Part D step 1): off, with `replaces`. */
+const PROPOSAL = line("proposal-1", {
+  name: "Checks only", enabled: false, eventKeys: ["github.check_run.completed"], filters: ACME_REPO,
+  target: { kind: "assistant", thread: { mode: "subject" }, replaces: "R1" },
+});
 const P = line("P", {
   name: "Channel watch", ownerType: "team", ownerId: "sre", eventKeys: ["slack.message"], filters: INCIDENTS_CHANNEL,
   target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "existing", sessionId: "s-sre", threadId: "t-inc" } },
@@ -170,6 +186,12 @@ const C2_MENTION: EventSummaryWire = {
   occurredAt: NOW - 30_000, receivedAt: NOW - 30_000,
 };
 
+const C15_CHECK: EventSummaryWire = {
+  id: "ev-15", service: "github", eventKey: "github.check_run.completed", summary: "CI failed on acme/api#15",
+  refs: { repo: "acme/api", number: "15" }, actor: { externalId: "alice", login: "alice" },
+  occurredAt: NOW - 30_000, receivedAt: NOW - 30_000,
+};
+
 /** The place pages, by `<workspace> <place key>`. The lines come from `rules` at read time. */
 const PLACE_DETAIL: Record<string, Omit<PresencePlaceDetailResponse, "listeners">> = {
   "user github:acme/api": {
@@ -179,7 +201,7 @@ const PLACE_DETAIL: Record<string, Omit<PresencePlaceDetailResponse, "listeners"
       following: [],
       active: [conversation("s-u", "t-12", "acme/api#12")],
     },
-    activity: [],
+    activity: [C15_CHECK],
   },
   "sre slack:T1/C900": {
     place: INCIDENTS_SRE,
@@ -197,6 +219,15 @@ const S1: WorkflowTriggerItem = {
   detail: {
     cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "Summarize the night.",
     thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+  },
+};
+/** P15: a routine the scheduler turned off because its workflow was deleted. */
+const DELETED_WORKFLOW = "Its workflow was deleted. Edit the routine and pick another workflow.";
+const S_OFF: WorkflowTriggerItem = {
+  kind: "schedule", id: "S-off", workflowId: "wf-gone", name: "Nightly report", enabled: false,
+  detail: {
+    cron: "0 2 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: NOW + 7_200_000, lastFiredAt: null,
+    ownerType: "user", ownerId: "u-001", disabledReason: DELETED_WORKFLOW,
   },
 };
 const WF_LINE = line("R-wf", {
@@ -228,10 +259,12 @@ const RUNS: ListAllWorkflowRunsResponse = {
 function delivery(over: Partial<EventDeliveryWire>): EventDeliveryWire {
   return { id: "d-1", subscriptionId: "M", subscriptionName: "Incident mentions", status: "delivered", attempts: 1, lastError: null, deliveredAt: NOW, ...over };
 }
-function logEvent(id: string, service: string, eventKey: string, placeName: string, deliveries: EventDeliveryWire[], status: EventLogItem["status"]): EventLogItem {
+function logEvent(
+  id: string, service: string, eventKey: string, placeName: string, deliveries: EventDeliveryWire[], status: EventLogItem["status"], placeKey?: string,
+): EventLogItem {
   return {
     kind: "event", id, at: NOW - 30_000, status, service, eventKey, summary: `summary of ${id}`, actor: "alice",
-    reason: null, detail: null, deliveryCount: deliveries.length, place: placeName, deliveries,
+    reason: null, detail: null, deliveryCount: deliveries.length, place: placeName, deliveries, ...(placeKey !== undefined ? { placeKey } : {}),
   };
 }
 const T_INC = { sessionId: "s-sre", threadId: "t-inc", title: "t-inc" };
@@ -240,6 +273,18 @@ const C2_ROW = logEvent("ev-c2", "slack", "slack.app_mention", "#incidents", [de
 const DEAD_ROW = logEvent("ev-14", "github", "github.check_run.completed", "acme/api#14", [
   delivery({ id: "d-14", subscriptionId: "R4", subscriptionName: "CI failures", status: "dead", attempts: 3, lastError: PIN_UNAVAILABLE, deliveredAt: null }),
 ], "failed");
+
+/** The personal Log: a check in acme/api#15 and one in acme/web, which P17's place filter drops. */
+const API_ROW = logEvent("ev-15", "github", "github.check_run.completed", "acme/api#15", [
+  delivery({ id: "d-15", subscriptionId: "R1", subscriptionName: "Reviews and checks" }),
+], "delivered", "github:acme/api#15");
+const WEB_ROW = logEvent("ev-w1", "github", "github.check_run.completed", "acme/web", [], "no_match", "github:acme/web");
+
+/** True when a Log row lies in the place or inside it, as the api's `place` filter reads it. */
+function rowInPlace(row: EventLogItem, placeKey: string): boolean {
+  const key = row.kind === "event" ? row.placeKey : undefined;
+  return key !== undefined && (key === placeKey || key.startsWith(`${placeKey}#`) || key.startsWith(`${placeKey}/`));
+}
 
 function logPage(items: EventLogItem[]): EventLogResponse {
   return { items, nextCursor: null, lastEventAt: NOW - 30_000, windowDays: 30 };
@@ -337,10 +382,21 @@ function answerWrite(method: string, path: string, body: string | undefined): Re
       if (current === undefined) continue;
       // A pin change clears the problem (spec Deviations, Problem state source).
       const { problem: _cleared, ...rest } = current;
-      // The scenario's one write pins a thread; null (clear the pin) is not in it.
-      const next: EventSubscriptionWire = request.thread !== undefined && request.thread !== null && current.target.kind === "assistant"
+      // The scenario pins a thread and turns a proposal on; null (clear the pin) is not in it.
+      let next: EventSubscriptionWire = request.thread !== undefined && request.thread !== null && current.target.kind === "assistant"
         ? { ...rest, target: { ...current.target, thread: request.thread } }
         : current;
+      if (request.enabled === true && next.target.kind === "assistant" && next.target.replaces !== undefined) {
+        // As the api does: turning a proposal on clears `replaces` and turns the replaced line off.
+        const { replaces, ...target } = next.target;
+        next = { ...next, target };
+        for (const owned of Object.values(rules)) {
+          const at = owned.findIndex((sub) => sub.id === replaces);
+          const replaced = owned[at];
+          if (replaced !== undefined) owned[at] = { ...replaced, enabled: false };
+        }
+      }
+      if (request.enabled !== undefined) next = { ...next, enabled: request.enabled };
       list[index] = next;
       return json(next);
     }
@@ -409,7 +465,12 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
   }
   if (/^\/api\/event-subscriptions\/[^/]+\/deliveries$/.test(path)) return json({ deliveries: [] });
   if (path === "/api/events/log") {
-    if (scopeOf(q) !== "sre") return json(logPage([]));
+    if (scopeOf(q) !== "sre") {
+      if (q.get("problems") === "1") return json(logPage([]));
+      const placeKey = q.get("place");
+      const rows = [API_ROW, WEB_ROW];
+      return json(logPage(placeKey === null ? rows : rows.filter((row) => rowInPlace(row, placeKey))));
+    }
     return json(logPage(q.get("problems") === "1" ? [DEAD_ROW] : [C2_ROW, DEAD_ROW]));
   }
   if (path === "/api/events/receipts") return json({ receipts: [], nextCursor: null, lastReceiptAt: null, retentionDays: 7 });
@@ -418,7 +479,7 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
   if (path === "/api/events/catalog") return json(EVENT_CATALOG);
   if (path === "/api/events/filter-options") return json({ options: [], reason: "Connect Slack first." });
   if (path === "/api/me/identity-links") return json(IDENTITY_LINKS);
-  if (path === "/api/plugins") return json(PLUGINS);
+  if (path === "/api/plugins") return json(pluginsNow);
   if (path === "/api/org/directory") return json(DIRECTORY);
   if (/^\/api\/sessions\/[^/]+\/threads$/.test(path)) return json(THREADS);
   if (/^\/api\/sessions\/[^/]+\/wakeups$/.test(path)) return json(WAKEUPS);
@@ -431,6 +492,8 @@ beforeEach(() => {
   rules.sre = [M, P];
   routines.user = [S1];
   routines.sre = [];
+  teamsNow = [SRE];
+  pluginsNow = plugins(true);
   created.length = 0;
   createdRoutines.length = 0;
   patches.length = 0;
@@ -489,7 +552,7 @@ async function crumbToOverview(router: ReturnType<typeof mountApp>) {
   await screen.findByRole("heading", { level: 1, name: "Presence" });
 }
 
-describe("Presence hub acceptance (P1 to P12)", () => {
+describe("Presence hub acceptance (P1 to P17)", () => {
   it("walks the scenario in one run", { timeout: 90_000 }, async () => {
     const router = mountApp("/");
 
@@ -518,8 +581,15 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(attention.getAllByRole("listitem")).toHaveLength(1);
     await waitFor(() => expect(attention.getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:"));
     expect(await within(attention.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
+    // The item's place is a reference token that links the place page (Part K).
+    const attentionPlace = attention.getByRole("link", { name: "acme/api" });
+    expect(attentionPlace.getAttribute("data-ref")).toBe("place");
+    expect(attentionPlace.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
 
     expect(groupNames()).toEqual(["GitHub", "On a schedule"]);
+    // Each group heading leads with its service mark (Part B step 3).
+    expect(screen.getByRole("heading", { level: 2, name: "GitHub" }).querySelector('[data-service="github"][data-size="md"]')).not.toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: "On a schedule" }).querySelector('[data-service="schedule"]')).not.toBeNull();
     const github = screen.getByRole("region", { name: "GitHub" });
     const acme = within(github).getByRole("region", { name: "acme/api" });
     expect(within(acme).getByText("1 active thread").querySelector(".bg-moss")).not.toBeNull();
@@ -769,5 +839,113 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     // The thread header renders inside the thread page, which needs a live
     // socket; its place label is the pure `subjectPlaceLabel`.
     expect(subjectPlaceLabel("subject:github:acme/api#12")).toEqual({ subject: "github:acme/api#12", label: "acme/api#12" });
+  });
+
+  it("P13: a proposal opened from its Proposed row turns on and turns off the line it replaces", { timeout: 30_000 }, async () => {
+    rules.user = [R1, R4_BROKEN, PROPOSAL];
+    const router = mountApp("/presence");
+    const acme = await screen.findByRole("region", { name: "acme/api" });
+    const row = await waitFor(() => {
+      const found = acme.querySelector<HTMLElement>('[data-presence-line="proposal-1"]');
+      if (found === null) throw new Error("The proposal has no row yet.");
+      return found;
+    });
+    expect(within(row).getByText("Proposed")).toBeTruthy();
+    await userEvent.click(within(row).getByRole("link", { name: "When a check completes, work in one thread per pull request." }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/proposal-1"));
+
+    const proposal = within(await screen.findByRole("region", { name: "Proposal" }));
+    expect(proposal.getByText("Proposed by the assistant.")).toBeTruthy();
+    const replaces = proposal.getByText(/^Turning it on turns off/);
+    expect(replaces.textContent).toBe("Turning it on turns off Reviews and checks.");
+    expect(within(replaces).getByRole("link", { name: "Reviews and checks" }).getAttribute("href")).toBe("/presence/rules/R1");
+    // A proposal shows Turn on and Delete in place of the switch.
+    expect(screen.queryByRole("switch", { name: "Turn on Checks only" })).toBeNull();
+
+    await userEvent.click(proposal.getByRole("button", { name: "Turn on" }));
+    const review = within(await screen.findByRole("dialog", { name: "Review Checks only" }));
+    await userEvent.click(review.getByRole("button", { name: "Turn on Checks only" }));
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0]).toMatchObject({ id: "proposal-1", body: { enabled: true } });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review Checks only" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Proposal" })).toBeNull());
+    expect(await screen.findByRole("switch", { name: "Turn off Checks only" })).toBeTruthy();
+
+    await crumbToOverview(router);
+    const acmeAfter = await screen.findByRole("region", { name: "acme/api" });
+    const on = acmeAfter.querySelector<HTMLElement>('[data-presence-line="proposal-1"]');
+    const replaced = acmeAfter.querySelector<HTMLElement>('[data-presence-line="R1"]');
+    if (on === null || replaced === null) throw new Error("The acme/api row lost a line.");
+    await waitFor(() => expect(within(on).queryByText("Proposed")).toBeNull());
+    expect(within(on).getByRole("link", { name: "When a check completes, work in one thread per pull request." })).toBeTruthy();
+    expect(within(replaced).getByText("Off")).toBeTruthy();
+    expect(within(replaced).getByRole("switch", { name: "Turn on Reviews and checks" })).toBeTruthy();
+  });
+
+  it("P14: a team line is read-only to a viewer outside the team", { timeout: 30_000 }, async () => {
+    teamsNow = [{ ...SRE, callerRole: null }];
+    mountApp("/presence?workspace=sre");
+    const incidents = await screen.findByRole("region", { name: "#incidents" });
+    await waitFor(() => expect(within(incidents).getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true));
+    await userEvent.click(within(incidents).getByRole("button", { name: "More for Incident mentions" }));
+    const menu = within(await screen.findByRole("menu"));
+    for (const item of ["Edit", "Appears as", "Delete"]) {
+      expect(menu.getByRole("menuitem", { name: item }).getAttribute("aria-disabled")).toBe("true");
+    }
+    await userEvent.keyboard("{Escape}");
+
+    await userEvent.click(within(incidents).getByRole("link", { name: "When someone mentions Valet, reply in a new thread." }));
+    const line = within(await screen.findByRole("region", { name: "Incident mentions" }));
+    expect(line.getByText("Team")).toBeTruthy();
+    expect(line.getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true);
+    expect(line.getByRole("button", { name: "Edit" })).toHaveProperty("disabled", true);
+    expect(line.getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
+    expect(line.getByText("Only members of SRE can change this.")).toBeTruthy();
+  });
+
+  it("P15: a routine turned off for a deleted workflow reads its reason and its fix in Needs attention", async () => {
+    routines.user = [S1, S_OFF];
+    mountApp("/presence");
+    const attention = within(await screen.findByRole("region", { name: "Needs attention" }));
+    const item = await attention.findByText(`Nightly report is off: ${DELETED_WORKFLOW}`);
+    const edit = within(item.parentElement ?? item).getByRole("link", { name: "Edit" });
+    expect(edit.getAttribute("href")).toBe("/presence/routines/S-off");
+  });
+
+  it("P16: with no service connected, Add opens on a schedule and each service names its fix", async () => {
+    pluginsNow = plugins(false);
+    mountApp("/presence");
+    await screen.findByRole("region", { name: "acme/api" });
+    await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
+    const when = within(within(await screen.findByRole("dialog")).getByRole("group", { name: "When" }));
+    await waitFor(() => expect(when.getByLabelText("On a schedule")).toHaveProperty("checked", true));
+    for (const [choice, service] of [
+      ["Something happens in Slack", "Slack"],
+      ["Something happens on GitHub", "GitHub"],
+      ["Something happens in Linear", "Linear"],
+    ] as const) {
+      const radio = when.getByLabelText(choice);
+      expect(radio).toHaveProperty("disabled", true);
+      const choiceRow = radio.closest("label")?.parentElement;
+      if (choiceRow == null) throw new Error(`${choice} has no row.`);
+      expect(within(choiceRow).getByRole("link", { name: `Connect ${service} first` }).getAttribute("href")).toBe("/integrations");
+    }
+  });
+
+  it("P17: View all on the acme/api page lists only that place's events under a removable chip", { timeout: 30_000 }, async () => {
+    const router = mountApp("/presence/places/github%3Aacme%2Fapi");
+    const recent = await screen.findByRole("region", { name: "Recent activity" });
+    await userEvent.click(await within(recent).findByRole("link", { name: "View all" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/presence/activity"));
+    expect(router.state.location.search).toEqual({ place: "github:acme/api" });
+    expect(await screen.findByText("In acme/api")).toBeTruthy();
+    expect(await screen.findByRole("link", { name: "Completed check in acme/api#15" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /in acme\/web$/ })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove the place filter In acme/api" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(await screen.findByRole("link", { name: /in acme\/web$/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Completed check in acme/api#15" })).toBeTruthy();
+    expect(screen.queryByText("In acme/api")).toBeNull();
   });
 });
