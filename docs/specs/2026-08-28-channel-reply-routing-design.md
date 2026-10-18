@@ -582,8 +582,11 @@ code span stays literal, and a shortcode with a letter or digit on either side
 stays text, so `10:30:45` keeps its colons. Slack accepts an element with an
 unknown name, so a typo does not lose the message (verified 2026-10-14).
 Header cells are plain text. An empty cell holds a single space, because Slack
-rejects an empty rich text cell and drops the whole message. Every column wraps,
-and the delimiter row sets column alignment.
+rejects an empty rich text cell and drops the whole message. The delimiter row
+sets column alignment. A column wraps only when one of its cells holds a `<br>`
+line break; every other column keeps one line per row, so a wide table stays
+flat and Slack scrolls it sideways (2026-10-18; before, every column wrapped and
+a long description turned each row into a tall block).
 
 Each cell line is parsed as CommonMark under the same synchronous work budget as
 optional autolinking: 12,000 characters and 256 punctuation characters per line.

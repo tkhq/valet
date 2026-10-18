@@ -10,7 +10,7 @@ describe("GitHub references in content blocks", () => {
       { type: "markdown", text: "**Releases**\n\n- [tkhq/gitops#5169](https://github.com/tkhq/gitops/issues/5169)\n- `tkhq/mono#8158`" },
       {
         type: "table",
-        column_settings: [{ align: "left", is_wrapped: true }, { align: "left", is_wrapped: true }],
+        column_settings: [{ align: "left", is_wrapped: false }, { align: "left", is_wrapped: false }],
         rows: [
           [{ type: "raw_text", text: "State" }, { type: "raw_text", text: "Count" }],
           [
@@ -48,7 +48,9 @@ describe("native table blocks", () => {
   const plain = (value: string, style?: Record<string, boolean>) => (style ? { type: "text", text: value, style } : { type: "text", text: value });
   const link = (url: string, label: string) => ({ type: "link", url, text: label });
   const lineBreak = plain("\n");
-  const column = { align: "left", is_wrapped: true };
+  const column = { align: "left", is_wrapped: false };
+  // A column with a `<br>` line break wraps; others stay one line per row.
+  const wrappedColumn = { align: "left", is_wrapped: true };
   const types = (blocks: Record<string, unknown>[]) => blocks.map((block) => block.type);
 
   it("renders a pipe table as a table block with the prose around it as Markdown blocks", () => {
@@ -57,7 +59,7 @@ describe("native table blocks", () => {
       { type: "markdown", text: "**Release notes**" },
       {
         type: "table",
-        column_settings: [column, column],
+        column_settings: [column, wrappedColumn],
         rows: [
           [raw("PR"), raw("Related")],
           [cell(link("https://x/1", "mono#1")), cell(link("https://x/2", "mono#2"), lineBreak, link("https://x/3", "mono#3"))],
@@ -71,7 +73,7 @@ describe("native table blocks", () => {
     const markdown = "| Notes |\n|---|\n| first<br>second <br/> third |";
     expect(blocksFor(markdown)).toEqual([{
       type: "table",
-      column_settings: [column],
+      column_settings: [wrappedColumn],
       rows: [[raw("Notes")], [cell(plain("first"), lineBreak, plain("second"), lineBreak, plain("third"))]],
     }]);
   });
