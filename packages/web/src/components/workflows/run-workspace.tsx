@@ -5,11 +5,14 @@ import { SessionView } from "~/components/session/session-view";
 type Conversation = NonNullable<WorkflowRunDetail["conversations"]>[number];
 
 /** Run conversations use the same transcript, composer, files and gates as chat. */
-export function RunWorkspace({ conversations, view, conversationId, onSelect, children }: {
+export function RunWorkspace({ conversations, view, conversationId, onSelect, back, children }: {
   conversations: Conversation[];
   view?: "conversation" | "details";
   conversationId?: string;
   onSelect: (view: "conversation" | "details", conversationId?: string) => void;
+  /** The link back to the workflow, shown in the tab bar so it stays on
+   *  screen on the conversation tab too. */
+  back?: ReactNode;
   children: ReactNode;
 }) {
   const tabId = useId();
@@ -19,6 +22,7 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ch
   const showChat = view !== "details" && !!selected;
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-4 sm:px-6">
+      {back && <div className="mr-2 min-w-0 max-w-full">{back}</div>}
       <div role="tablist" aria-label="Automation run view" className="flex gap-4" onKeyDown={event => {
         if (!selected || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();

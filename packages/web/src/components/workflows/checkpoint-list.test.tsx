@@ -182,6 +182,26 @@ describe("CheckpointList", () => {
     expect(group.querySelector("details")?.open).toBe(true);
   });
 
+  it("times a running step from its first start, not from a rewritten intent", () => {
+    render(<CheckpointList now={10_000} checkpoints={[
+      { nodeId: "summarize", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 7_000 },
+    ]} />);
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("9.0s so far");
+  });
+
+  it("labels a step a retry reused instead of timing it", () => {
+    render(<CheckpointList now={0} checkpoints={[
+      { nodeId: "inventory", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 61_000, reused: true },
+      { nodeId: "qualify_batch", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 2_000, reused: true },
+      { nodeId: "qualify_batch", iteration: 1, status: "completed", startedAt: 5_000, createdAt: 6_500 },
+    ]} nodeOrder={["inventory", "qualify_batch"]} />);
+    const [inventory, group] = screen.getAllByRole("listitem");
+    expect(inventory.textContent).toContain("Reused");
+    expect(inventory.textContent).not.toContain("1m 00s");
+    expect(group.textContent).toContain("2 items · 2 completed · 1 reused");
+    expect(group.textContent).toContain("1.5s");
+  });
+
   it("offers a copy button for a step's result", () => {
     render(<CheckpointList checkpoints={[{ nodeId: "fetch", iteration: 0, status: "completed", result: { rows: 12 } }]} />);
     expect(screen.getByRole("button", { name: "Copy result" })).toBeTruthy();

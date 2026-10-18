@@ -573,16 +573,18 @@ export class PgWorkflowStore implements WorkflowStore {
         }
       }
       await tx.query(
-        `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at)
-         VALUES ($1,$2,$3,$4,'intent',$5,$6,$7,$8)
+        `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at, started_at)
+         VALUES ($1,$2,$3,$4,'intent',$5,$6,$7,$8,$9)
          ON CONFLICT (run_id, node_id, iteration) DO UPDATE SET
            attempt = EXCLUDED.attempt,
            status = 'intent',
            result = EXCLUDED.result,
            effects = EXCLUDED.effects,
            error = EXCLUDED.error,
-           created_at = EXCLUDED.created_at`,
-        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonbToParam(cp.result), jsonbToParam(cp.effects), cp.error ?? null, cp.createdAt],
+           created_at = EXCLUDED.created_at,
+           -- The first intent write is when the step began; a rewrite keeps it.
+           started_at = COALESCE(workflow_checkpoints.started_at, workflow_checkpoints.created_at)`,
+        [cp.runId, cp.nodeId, cp.iteration, cp.attempt, jsonbToParam(cp.result), jsonbToParam(cp.effects), cp.error ?? null, cp.createdAt, cp.startedAt ?? cp.createdAt],
       );
     });
   }
@@ -613,8 +615,8 @@ export class PgWorkflowStore implements WorkflowStore {
   /** Raw upsert of a terminal checkpoint row — caller has already validated the fence (and locked the row, where applicable). */
   private async writeTerminalCheckpoint(q: PgQueryable, terminal: NodeCheckpoint): Promise<void> {
     await q.query(
-      `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO workflow_checkpoints (run_id, node_id, iteration, attempt, status, result, effects, error, created_at, started_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (run_id, node_id, iteration) DO UPDATE SET
          attempt = EXCLUDED.attempt,
          status = EXCLUDED.status,
@@ -622,9 +624,10 @@ export class PgWorkflowStore implements WorkflowStore {
          effects = EXCLUDED.effects,
          error = EXCLUDED.error,
          created_at = EXCLUDED.created_at,
-         -- The intent row's time is when the step began; keep it.
+         -- The intent row's start is when the step began; keep it.
          started_at = CASE WHEN workflow_checkpoints.status = 'intent'
-           THEN workflow_checkpoints.created_at ELSE workflow_checkpoints.started_at END`,
+           THEN COALESCE(workflow_checkpoints.started_at, workflow_checkpoints.created_at)
+           ELSE workflow_checkpoints.started_at END`,
       [
         terminal.runId,
         terminal.nodeId,
@@ -635,6 +638,7 @@ export class PgWorkflowStore implements WorkflowStore {
         jsonbToParam(terminal.effects),
         terminal.error ?? null,
         terminal.createdAt,
+        terminal.startedAt ?? null,
       ],
     );
   }

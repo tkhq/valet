@@ -80,16 +80,22 @@ function RunDetailPage() {
     );
   }
 
+  // With conversations, the tab bar holds the back link: the details
+  // header is hidden while the conversation tab is open.
+  const hasConversations = (data.conversations ?? []).length > 0;
+  const back = workflowName
+    ? <Link to="/workflows/$workflowId" params={{ workflowId: data.run.workflowId }} className="inline-flex min-h-11 max-w-full items-center truncate text-xs text-muted hover:text-ink sm:min-h-0" title={workflowName}>← {workflowName}</Link>
+    : <Link to="/workflows" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">← Workflows</Link>;
+
   return (
     <div className="min-w-0 flex-1 flex flex-col min-h-0">
       <RunWorkspace conversations={data.conversations ?? []} view={search.view} conversationId={search.conversation}
+        back={hasConversations ? back : undefined}
         onSelect={(view, conversation) => void navigate({ to: "/workflows/runs/$runId", params: { runId }, search: { view, conversation }, replace: true })}>
       <RunDetailBody
         runId={runId}
         data={data}
-        back={workflowName
-          ? <Link to="/workflows/$workflowId" params={{ workflowId: data.run.workflowId }} className="inline-flex min-h-11 max-w-full items-center truncate text-xs text-muted hover:text-ink sm:min-h-0" title={workflowName}>← {workflowName}</Link>
-          : <Link to="/workflows" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">← Workflows</Link>}
+        back={hasConversations ? undefined : back}
         onCancel={() => cancelRun.mutate()}
         cancelPending={cancelRun.isPending}
         onRetry={(from) => {

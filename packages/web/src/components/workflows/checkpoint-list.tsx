@@ -19,10 +19,12 @@ export interface CheckpointLike {
   childRunId?: string;
   threadId?: string;
   queueItemId?: string;
-  /** For a running step, when it began; otherwise when it finished. */
+  /** For a running step, its latest intent write; otherwise when it finished. */
   createdAt?: number;
-  /** When a finished step began. */
+  /** When the step began. */
   startedAt?: number;
+  /** Copied from an earlier run by a retry: it did not run again. */
+  reused?: boolean;
 }
 
 /** The run's start and end (or now), for each step's timing bar. */
@@ -31,11 +33,15 @@ export interface RunTimeline {
   end: number;
 }
 
-/** When a step ran: a running step runs until `now`. Undefined for a step
- * recorded before start times were kept. */
+/** When a step ran: a running step runs until `now`. Undefined for a step a
+ * retry reused (its times belong to the earlier run) and for a step recorded
+ * before start times were kept. */
 export function stepSpan(checkpoint: CheckpointLike, now: number): { start: number; end: number } | undefined {
-  if (checkpoint.createdAt === undefined) return undefined;
-  if (checkpoint.status === "intent") return { start: checkpoint.createdAt, end: Math.max(now, checkpoint.createdAt) };
+  if (checkpoint.createdAt === undefined || checkpoint.reused) return undefined;
+  if (checkpoint.status === "intent") {
+    const start = checkpoint.startedAt ?? checkpoint.createdAt;
+    return { start, end: Math.max(now, start) };
+  }
   if (checkpoint.startedAt === undefined) return undefined;
   return { start: checkpoint.startedAt, end: checkpoint.createdAt };
 }
@@ -187,9 +193,12 @@ function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }
     totalTokens: itemCosts.reduce((sum, cost) => sum + cost.totalTokens, 0),
     models,
   } : undefined;
-  const summary = (["succeeded", "failed", "running", "waiting", "skipped", "pending"] as const)
-    .flatMap((status) => counts.has(status) ? [`${counts.get(status)} ${LABEL[status].toLowerCase()}`] : [])
-    .join(" · ");
+  const reused = items.filter((cp) => cp.reused).length;
+  const summary = [
+    ...(["succeeded", "failed", "running", "waiting", "skipped", "pending"] as const)
+      .flatMap((status) => counts.has(status) ? [`${counts.get(status)} ${LABEL[status].toLowerCase()}`] : []),
+    ...(reused > 0 ? [`${reused} reused`] : []),
+  ].join(" · ");
   const open = overall === "failed" || overall === "running" || overall === "waiting";
   return (
     <li className="min-w-0 bg-paper">
@@ -283,6 +292,7 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
             {span && timeline && <TimingBar span={span} timeline={timeline} status={status} />}
           </span>
           {!item && checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Item {checkpoint.iteration + 1}</span>}
+          {checkpoint.reused && <span className="shrink-0 text-xs text-muted" title="This retry reused the step's result from the earlier run.">Reused</span>}
           {span && <StepDuration span={span} running={status === "running" || waiting} />}
           {cost && <StepCost cost={cost} />}
           {/* On a phone the ✓ alone says Completed, so that label gives the

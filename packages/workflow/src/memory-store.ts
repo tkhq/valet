@@ -254,7 +254,9 @@ export class InMemoryWorkflowStore implements WorkflowStore {
         throw new WorkflowFenceError(cp.runId, cp.attempt, existing.attempt);
       }
     }
-    this.checkpoints.set(key, structuredClone({ ...cp, status: 'intent' }));
+    // The first intent write is when the step began; a rewrite keeps it.
+    const startedAt = existing ? existing.startedAt ?? existing.createdAt : cp.startedAt ?? cp.createdAt;
+    this.checkpoints.set(key, structuredClone({ ...cp, status: 'intent', startedAt }));
   }
 
   async completeCheckpoint(
@@ -275,7 +277,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     if (existing && existing.attempt > attempt) {
       throw new WorkflowFenceError(runId, attempt, existing.attempt);
     }
-    this.checkpoints.set(key, structuredClone(existing ? { ...terminal, startedAt: existing.createdAt } : terminal));
+    this.checkpoints.set(key, structuredClone(withIntentStart(terminal, existing)));
   }
 
   async getCheckpoints(runId: string): Promise<NodeCheckpoint[]> {
@@ -325,7 +327,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       // lower-attempt (zombie) terminal write.
       throw new WorkflowFenceError(checkpoint.runId, checkpoint.attempt, existingCp.attempt);
     }
-    this.checkpoints.set(key, structuredClone(checkpoint));
+    this.checkpoints.set(key, structuredClone(withIntentStart(checkpoint, existingCp)));
     signal.consumedAt = this.clock();
     signal.consumedBy = consumedBy;
   }
@@ -346,4 +348,10 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     signal.consumedAt = undefined;
     signal.consumedBy = undefined;
   }
+}
+
+/** A terminal row keeps the start of the intent row it replaces. */
+function withIntentStart(terminal: NodeCheckpoint, existing: NodeCheckpoint | undefined): NodeCheckpoint {
+  if (existing?.status !== 'intent') return terminal;
+  return { ...terminal, startedAt: existing.startedAt ?? existing.createdAt };
 }

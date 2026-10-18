@@ -1721,6 +1721,9 @@ export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
     error: cp.error,
     createdAt: cp.createdAt,
     ...(cp.startedAt !== undefined ? { startedAt: cp.startedAt } : {}),
+    // A retry seeds the steps it reuses as attempt 0; a claimed run writes
+    // attempt 1 and up.
+    ...(cp.attempt === 0 ? { reused: true as const } : {}),
     sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
     childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
     // A `session` or `orchestrator` node's dispatch receipt names the THREAD

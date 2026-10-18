@@ -199,6 +199,19 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
       ]);
     });
 
+    it('a rewritten intent keeps the first intent time as the step start', async () => {
+      // A schema repair or a dispatch receipt rewrites the intent mid-step.
+      const store = await setup();
+      await store.putIntent(intent({ createdAt: 100 }));
+      await store.putIntent(intent({ createdAt: 160, effects: { repairAttempted: true } }));
+      let [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.startedAt).toBe(100);
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ createdAt: 220 }));
+      [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.startedAt).toBe(100);
+      expect(cp.createdAt).toBe(220);
+    });
+
     it('a terminal write keeps the intent row time as startedAt', async () => {
       const store = await setup();
       await store.putIntent(intent({ createdAt: 100 }));

@@ -42,4 +42,10 @@ describe("automation run workspace", () => {
     expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
     expect(screen.queryByTestId("chat")).toBeNull();
   });
+
+  it("keeps the back link on screen while the conversation tab is open", () => {
+    render(<RunWorkspace conversations={[{ sessionId: "s1", threadId: "t1", nodeId: "assemble", title: "Assemble" }]} onSelect={vi.fn()}
+      back={<a href="/workflows/wf_1">← Release report</a>}><button>Retry run</button></RunWorkspace>);
+    expect(screen.getByRole("link", { name: "← Release report" })).toBeTruthy();
+  });
 });

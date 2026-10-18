@@ -103,7 +103,7 @@ describe('LocalRunHost seeded start', () => {
     };
     const seed = [
       cp('trigger', 'completed', 0, { data: {} }),
-      cp('first', 'completed', 0, { from: 'old run' }),
+      { ...cp('first', 'completed', 0, { from: 'old run' }), startedAt: 10, createdAt: 40 },
     ];
     host.startHost();
     try {
@@ -117,7 +117,8 @@ describe('LocalRunHost seeded start', () => {
     const run = await store.getRun('retry');
     expect(run?.outcome).toBe('completed');
     const byNode = new Map((await store.getCheckpoints('retry')).map((c) => [c.nodeId, c]));
-    expect(byNode.get('first')).toMatchObject({ runId: 'retry', attempt: 0, result: { from: 'old run' } });
+    // A reused step keeps the time it took in the earlier run.
+    expect(byNode.get('first')).toMatchObject({ runId: 'retry', attempt: 0, result: { from: 'old run' }, startedAt: 10, createdAt: 40 });
     expect(byNode.get('second')).toMatchObject({ status: 'completed', result: { saw: 'old run' } });
   });
 });
