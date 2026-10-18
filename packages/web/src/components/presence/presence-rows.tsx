@@ -65,6 +65,17 @@ export function pinnedTitle(sub: EventSubscriptionWire, titles: ThreadTitles): s
   return pin?.mode === "existing" ? titles[pin.threadId]?.title ?? undefined : undefined;
 }
 
+/** True when a line sets an appearance: a display name or an avatar. */
+export function hasAppearance(sub: EventSubscriptionWire): boolean {
+  const appearance = sub.target.appearance;
+  return Boolean(appearance?.displayName?.trim() || appearance?.avatarUrl?.trim());
+}
+
+/** The name a line appears as. A line that sets only an avatar appears as Valet. */
+export function appearanceName(sub: EventSubscriptionWire): string {
+  return sub.target.appearance?.displayName?.trim() || "Valet";
+}
+
 /** What a workflow target or an assistant target does, for the edit dialog's read-only line. */
 export function targetLabel(sub: EventSubscriptionWire, workflowName: string | undefined): string {
   if (sub.target.kind === "workflow") return `Runs ${workflowName ?? "a workflow"}`;

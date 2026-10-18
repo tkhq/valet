@@ -1,17 +1,17 @@
 /**
  * The onboarding empty state (docs/specs/2026-10-16-presence-hub-design.md
- * Part B step 9). A workspace with no place block and no routine sees, in
- * place of the overview's groups, where to start: connect a service, or
- * **Add** to listen somewhere or to run on a schedule. Activity still shows
- * it until the overview owns it alone.
+ * Part B step 9). A workspace with no place row and no routine sees, in
+ * place of the overview's groups, where to start: **Add** to act on a
+ * schedule, or connect a service to listen somewhere too. Activity shows it
+ * as well, with its own **Add**.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { Button, cardClass } from "~/components/primitives";
-import { cn } from "~/lib/cn";
+import { Plus } from "lucide-react";
+import { Button, textLinkClass } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
 import { isRoutine } from "./routines-pane";
 
@@ -26,30 +26,29 @@ export function useNotPresentAnywhere(): boolean {
     && triggersQ.isSuccess && triggersQ.data.triggers.filter(isRoutine).length === 0;
 }
 
-const SERVICES = ["Slack", "GitHub", "Linear"] as const;
-
-export function Onboarding() {
+/**
+ * The empty state: `Valet is not present anywhere yet.` and one paragraph
+ * with Slack, GitHub, and Linear as links to Integrations. The overview's
+ * header carries **Add**. A page without that header passes `withAdd`, so
+ * the paragraph's Add exists on the page.
+ */
+export function Onboarding({ withAdd = false }: { withAdd?: boolean }) {
   const [creating, setCreating] = useState(false);
   return (
-    <section aria-labelledby="presence-onboarding" className="space-y-4">
-      <h3 id="presence-onboarding" className="text-base font-medium text-ink">Valet is not present anywhere yet.</h3>
-      <ul className="grid gap-3 sm:grid-cols-3">
-        {SERVICES.map((service) => (
-          <li key={service}>
-            <Link
-              to="/integrations"
-              className={cn(cardClass, "flex min-h-11 items-center px-4 py-3 text-sm text-ink transition-colors hover:border-muted")}
-            >
-              Connect {service}
-            </Link>
-          </li>
-        ))}
-      </ul>
-      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-muted">
-        or{" "}
-        <Button size="sm" variant="secondary" onClick={() => setCreating(true)}>Add</Button>
-        {" "}to listen somewhere, or run on a schedule.
+    <section aria-label="Getting started" className="max-w-prose">
+      <p className="text-base text-ink">Valet is not present anywhere yet.</p>
+      <p className="mt-4 text-[15px] text-muted">
+        Choose Add to have Valet act on a schedule. To have it listen somewhere too, connect{" "}
+        <Link to="/integrations" className={textLinkClass}>Slack</Link>,{" "}
+        <Link to="/integrations" className={textLinkClass}>GitHub</Link>, or{" "}
+        <Link to="/integrations" className={textLinkClass}>Linear</Link> and Add again.
       </p>
+      {withAdd && (
+        <Button className="mt-4" onClick={() => setCreating(true)}>
+          <Plus aria-hidden className="h-3.5 w-3.5" />
+          Add
+        </Button>
+      )}
       {creating && <AutomationWizard open onOpenChange={setCreating} />}
     </section>
   );

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 /**
- * A place block on the overview (docs/specs/2026-10-16-presence-hub-design.md
- * Part B steps 4 and 5): the header links the place and shows the active
- * mark and the last activity; each row is the sentence without its place
- * clause, with the switch, the overflow menu, the inline problem, and the
- * paused line; `+ Listen for…` opens the wizard fixed on the place.
+ * A place row of the overview roster (docs/specs/2026-10-16-presence-hub-design.md
+ * Part B steps 4, 5, 7, and 11): the place column links the place and
+ * stacks the active threads and the last activity; the sentence column
+ * holds one sentence row per line without its place clause, the
+ * appearance line, and `+ Listen for…`. No element of the row is a card.
  *
  * The api client is mocked at the transport, so the real query hooks run.
  */
@@ -66,7 +66,7 @@ vi.mock("./thread-picker", () => ({
   ),
 }));
 
-import { PlaceBlock } from "./place-block";
+import { PlaceRow } from "./place-row";
 import type { PlaceBlockData } from "./overview-groups";
 
 const PIN = "Pick another thread for this rule in Presence.";
@@ -83,13 +83,13 @@ const R1 = line("R1", {
   name: "Reviews and checks",
   eventKeys: ["github.pull_request_review.submitted", "github.check_run.completed"],
   filters: ACME,
-  target: { kind: "assistant", thread: { mode: "subject" } },
+  target: { kind: "assistant", thread: { mode: "subject" }, appearance: { displayName: "Ops Bot" } },
 });
 const R4 = line("R4", {
   name: "CI failures",
   eventKeys: ["github.check_run.completed"],
   filters: ACME,
-  target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" } },
+  target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" }, appearance: { displayName: "Ops Bot" } },
   problem: PIN,
 });
 const PAUSED = line("R5", {
@@ -99,6 +99,13 @@ const PAUSED = line("R5", {
   enabled: false,
   target: { kind: "assistant", thread: { mode: "own" }, overlapPausedAt: 1 },
 });
+const OFF = line("R6", {
+  name: "Old checks",
+  eventKeys: ["github.check_run.completed"],
+  filters: ACME,
+  enabled: false,
+  target: { kind: "assistant", thread: { mode: "own" } },
+});
 
 function block(over: Partial<PlaceBlockData>): PlaceBlockData {
   return {
@@ -107,9 +114,22 @@ function block(over: Partial<PlaceBlockData>): PlaceBlockData {
   };
 }
 
-function renderBlock(data: PlaceBlockData) {
+function renderRow(data: PlaceBlockData) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><PlaceBlock block={data} /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><PlaceRow block={data} /></QueryClientProvider>);
+}
+
+/** The sentence row that holds a sentence link. */
+function rowOf(sentence: HTMLElement): HTMLElement {
+  const row = sentence.closest("[data-presence-line]");
+  if (!(row instanceof HTMLElement)) throw new Error("The sentence is not in a sentence row.");
+  return row;
+}
+
+/** True when an element draws a card: a border on all four sides and rounded corners. */
+function isCard(element: Element): boolean {
+  const classes = [...element.classList];
+  return classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
 }
 
 beforeEach(() => {
@@ -124,48 +144,100 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("PlaceBlock", () => {
-  it("heads the block with the place link, the active mark, and the last activity", () => {
-    renderBlock(block({}));
+describe("PlaceRow", () => {
+  it("sets the place as one row of the two-column grid, one column at phone width, with no card", () => {
+    renderRow(block({}));
     const region = screen.getByRole("region", { name: "acme/api" });
-    expect(within(region).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github:acme/api");
-    expect(within(region).getByText("2 active")).toBeTruthy();
-    expect(within(region).getByText("5m ago")).toBeTruthy();
+    for (const name of ["grid", "grid-cols-[200px_minmax(0,1fr)]", "max-sm:grid-cols-1", "border-b", "border-line", "last:border-0"]) {
+      expect(region.classList.contains(name)).toBe(true);
+    }
+    expect([region, ...region.querySelectorAll("*")].filter(isCard)).toEqual([]);
   });
 
-  it("reads each line without its place clause, with the switch and the overflow menu", async () => {
-    renderBlock(block({}));
-    expect(screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request." })).toBeTruthy();
+  it("stacks the place link, the active threads, and the last activity in the place column", () => {
+    renderRow(block({}));
+    const region = screen.getByRole("region", { name: "acme/api" });
+    const name = within(region).getByRole("link", { name: "acme/api" });
+    expect(name.getAttribute("href")).toBe("/presence/places/github:acme/api");
+    expect(name.className).toContain("text-[15px]");
+    const active = within(region).getByText("2 active threads");
+    const ago = within(region).getByText("5m ago");
+    expect(active.parentElement).toBe(ago.parentElement);
+    expect(active.parentElement?.className).toContain("tabular-nums");
+  });
+
+  it("reads one active thread, and No active thread when none waits", () => {
+    renderRow(block({ activeThreadCount: 1 }));
+    expect(screen.getByText("1 active thread")).toBeTruthy();
+    cleanup();
+    renderRow(block({ activeThreadCount: 0 }));
+    expect(screen.getByText("No active thread")).toBeTruthy();
+  });
+
+  it("reads each line without its place clause, with the small switch and the overflow menu", async () => {
+    renderRow(block({}));
+    const sentence = screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request." });
+    expect(sentence.className).toContain("text-base");
+    expect(within(rowOf(sentence)).getByText("Reviews and checks").className).toContain("text-muted");
     expect(await screen.findByRole("link", { name: "When a check completes, work in the Platform CI thread." })).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "Turn off Reviews and checks" })).toBeTruthy();
+    const toggle = screen.getByRole("switch", { name: "Turn off Reviews and checks" });
+    expect(toggle.classList.contains("w-7")).toBe(true);
     await userEvent.click(screen.getByRole("button", { name: "More for Reviews and checks" }));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Edit", "Appears as", "Delete"]);
   });
 
-  it("shows the problem under its row, and a pick patches the line", async () => {
-    renderBlock(block({}));
-    expect(await screen.findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Pick Platform Ops from user" }));
+  it("mutes an off line and says Off under it", () => {
+    renderRow(block({ lines: [OFF] }));
+    const sentence = screen.getByRole("link", { name: "When a check completes, work in its own thread." });
+    expect(sentence.className).toContain("text-muted");
+    expect(within(rowOf(sentence)).getByText("Off")).toBeTruthy();
+  });
+
+  it("marks a faulted line before its sentence and shows its fix under the row; a pick patches the line", async () => {
+    renderRow(block({}));
+    const sentence = await screen.findByRole("link", { name: "When a check completes, work in the Platform CI thread." });
+    const row = rowOf(sentence);
+    const mark = row.querySelector(".bg-danger-500");
+    expect(mark).not.toBeNull();
+    expect(mark?.getAttribute("aria-hidden")).toBe("true");
+    expect(within(row).getByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    // A line with no fault carries no mark.
+    const calm = screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request." });
+    expect(rowOf(calm).querySelector(".bg-danger-500")).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Pick Platform Ops from user" }));
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", {
       thread: { mode: "existing", sessionId: "s-u", threadId: "t-ops" },
     }));
   });
 
-  it("says a line is paused by the team", () => {
-    renderBlock(block({}));
-    expect(screen.getByText("Paused: the team already listens for this.")).toBeTruthy();
+  it("says a line is paused by the team, in place of Off", () => {
+    renderRow(block({}));
+    const sentence = screen.getByRole("link", { name: "When a check completes, work in its own thread." });
+    expect(within(rowOf(sentence)).getByText("Paused: the team already listens for this.")).toBeTruthy();
+    expect(within(rowOf(sentence)).queryByText("Off")).toBeNull();
   });
 
-  it("opens the wizard fixed on the place from + Listen for…", () => {
-    renderBlock(block({}));
-    fireEvent.click(screen.getByRole("button", { name: "+ Listen for…" }));
+  it("shows one Appears as line after the sentences when a line sets an appearance", () => {
+    renderRow(block({}));
+    expect(screen.getAllByText("Appears as Ops Bot")).toHaveLength(1);
+    cleanup();
+    renderRow(block({ lines: [OFF] }));
+    expect(screen.queryByText(/^Appears as/)).toBeNull();
+  });
+
+  it("opens the wizard fixed on the place from a quiet + Listen for…", () => {
+    renderRow(block({}));
+    const add = screen.getByRole("button", { name: "+ Listen for…" });
+    expect(add.className).toContain("text-xs");
+    expect(add.className).toContain("text-muted");
+    fireEvent.click(add);
     expect(screen.getByText("Wizard for acme/api")).toBeTruthy();
     expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
       preselectedPlace: { subject: "github:acme/api", service: "github", label: "acme/api" },
     }));
   });
 
-  it("heads a Slack service block with no Slack row as text, and keeps a named channel list", () => {
+  it("names a Slack service place with no Slack row as text, and keeps a named channel list", () => {
     const twoChannels = line("B", {
       name: "Two rooms",
       eventKeys: ["slack.app_mention"],
@@ -173,7 +245,7 @@ describe("PlaceBlock", () => {
       target: { kind: "assistant", thread: { mode: "new" } },
     });
     const anywhere = line("A", { name: "Anywhere", eventKeys: ["slack.app_mention"], target: { kind: "assistant", thread: { mode: "new" } } });
-    renderBlock(block({
+    renderRow(block({
       subject: "slack:*", label: "Everywhere in Slack", service: "slack", serviceWide: true,
       lines: [anywhere, twoChannels], activeThreadCount: 0, lastActivityAt: null,
     }));

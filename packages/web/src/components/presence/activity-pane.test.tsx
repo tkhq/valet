@@ -255,11 +255,12 @@ describe("ActivityPane receipts", () => {
 });
 
 describe("ActivityPane onboarding (Part C step 8)", () => {
-  it("shows the cards with no place and no routine", () => {
+  it("shows the empty state with its own Add with no place and no routine", () => {
     places = [];
     triggers = [];
     renderTab();
-    expect(screen.getByRole("heading", { level: 3, name: "Valet is not present anywhere yet." })).toBeTruthy();
+    expect(screen.getByText("Valet is not present anywhere yet.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
     expect(screen.queryByRole("group", { name: "Show" })).toBeNull();
   });
 

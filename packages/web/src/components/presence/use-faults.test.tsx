@@ -104,6 +104,8 @@ describe("useFaults", () => {
       ["delivery", "Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver"],
     ]);
     expect([...result.current.faultedPlaces]).toEqual(["slack:T1/C900", "slack:T1"]);
+    // A line that names one place carries its name for the banner's lead; a service-wide line has none.
+    expect(result.current.faults.map((fault) => (fault.kind === "line" ? fault.place : null))).toEqual(["#incidents", undefined, null, null]);
     expect(result.current.isPending).toBe(false);
     expect(logCalls.at(-1)?.problems).toBe(true);
   });

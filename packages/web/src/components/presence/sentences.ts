@@ -301,6 +301,8 @@ export function followsSlackThread(sub: Pick<EventSubscriptionWire, "eventKeys" 
 export interface PresenceSentenceOptions {
   /** False omits the `<in|on> <place>` clause. Default true. */
   place?: boolean;
+  /** False omits the `, as <appearance>` clause. Default true. */
+  appearance?: boolean;
 }
 
 /**
@@ -313,7 +315,9 @@ export interface PresenceSentenceOptions {
  *
  * With `{ place: false }` the sentence omits its `<in|on> <place>` clause
  * (and a followed thread's `in <channel>`), because the overview's place
- * block already names the place (spec Part B step 5). The rest stays.
+ * block already names the place (spec Part B step 5). With `{ appearance:
+ * false }` it omits `, as <appearance>`, because the place's `Appears as`
+ * line already names it. The rest stays.
  */
 export function presenceSentence(
   sub: EventSubscriptionWire,
@@ -323,11 +327,12 @@ export function presenceSentence(
   options: PresenceSentenceOptions = {},
 ): string {
   const withPlace = options.place ?? true;
+  const as = (options.appearance ?? true) ? appearancePart(sub.target.appearance) : "";
   if (followsSlackThread(sub)) {
     const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
     const values = channel === undefined || !withPlace ? [] : filterValues(channel);
     const where = values.length > 0 ? ` in ${joinOr(values)}` : "";
-    return `When someone replies in the Slack thread${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
+    return `When someone replies in the Slack thread${where}, ${presenceDoes(sub, workflows, threads)}${as}.`;
   }
   const service = serviceOf(sub.eventKeys);
   const place = withPlace ? presencePlace(service, sub.filters) : null;
@@ -335,7 +340,7 @@ export function presenceSentence(
   const sender = senderFilter(sub.eventKeys, sub.filters);
   const from = sender === null ? "" : ` from ${sender}`;
   const events = eventsInWords(sub.eventKeys, catalog);
-  return `When ${events}${from}${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
+  return `When ${events}${from}${where}, ${presenceDoes(sub, workflows, threads)}${as}.`;
 }
 
 // ── Routines ────────────────────────────────────────────────────────────
@@ -413,10 +418,16 @@ export function routineDoes(routine: RoutineLike, workflows: WorkflowNames, thre
   }
 }
 
+/** The timezone a schedule names, or undefined when it is UTC or absent. */
+export function scheduleZone(timezone: string | undefined): string | undefined {
+  return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? undefined : timezone;
+}
+
 /** The schedule in words, with the timezone in parentheses when it is not UTC. */
 export function scheduleInWords(cron: string, timezone: string | undefined): string {
   const words = cronInWords(cron);
-  return timezone === undefined || timezone === "UTC" || timezone === "Etc/UTC" ? words : `${words} (${timezone})`;
+  const zone = scheduleZone(timezone);
+  return zone === undefined ? words : `${words} (${zone})`;
 }
 
 /** A routine as one sentence: `<schedule in words>, <name>: <do>.` */

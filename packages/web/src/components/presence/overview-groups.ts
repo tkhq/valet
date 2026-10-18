@@ -30,6 +30,11 @@ export interface OverviewGroup {
 /** Past this many blocks, the groups collapse and the filter box shows. */
 export const COLLAPSE_THRESHOLD = 10;
 
+/** A group heading's count: `1 place`, `2 places`, `1 routine`, `2 routines`. */
+export function countText(count: number, noun: "place" | "routine"): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 const SERVICES: readonly OverviewService[] = ["slack", "github", "linear"];
 
 /** The header of a service block. */
@@ -81,6 +86,11 @@ function namedPlace(line: Pick<EventSubscriptionWire, "filters">, places: readon
   return slack.find((place) => SLACK_CHANNEL.exec(place.subject)?.[1] === value)
     ?? slack.find((place) => place.label === value || (filter.label !== undefined && place.label === filter.label))
     ?? null;
+}
+
+/** The name of the one mid-grain place a line names, or null for a line that names no single place. */
+export function namedPlaceLabel(line: Pick<EventSubscriptionWire, "filters">, places: readonly PresencePlaceWire[]): string | null {
+  return namedPlace(line, places)?.label ?? null;
 }
 
 /** The service root row of the places list, if it has one. */

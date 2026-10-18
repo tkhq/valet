@@ -46,8 +46,11 @@ export function ThreadProblem({
   error,
   readOnly = false,
   variant = "box",
+  lead,
 }: {
   problem: string;
+  /** Muted words before the problem text, such as `In acme/api,`. */
+  lead?: string;
   /** The archived pin's title, when the caller knows it. */
   threadTitle?: string;
   /** The viewer may not change the rule: no picker, and the text names who can. */
@@ -65,7 +68,10 @@ export function ThreadProblem({
   const text = pin ? pinProblemText(threadTitle) : problem;
   const body = (
     <>
-      <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">{text}</p>
+      <p role="alert" className="text-sm text-danger-600 dark:text-danger-500">
+        {lead !== undefined && <span className="text-muted">{`${lead} `}</span>}
+        {text}
+      </p>
       {pin && readOnly && <p className="text-xs text-muted">Only its owner can change this.</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (

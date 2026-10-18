@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { EventSubscriptionFilterWire, EventSubscriptionWire, PresencePlaceWire } from "@valet/api/wire";
-import { blockSubjectFor, overviewGroups } from "./overview-groups";
+import { blockSubjectFor, countText, namedPlaceLabel, overviewGroups } from "./overview-groups";
 
 function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, lastActivityAt: number | null, activeThreadCount = 0): PresencePlaceWire {
   return { subject, label, service, parent, listenerCount: 1, activeThreadCount, lastActivityAt };
@@ -93,5 +93,21 @@ describe("overviewGroups", () => {
   it("marks the blocks in the faulted set", () => {
     const groups = overviewGroups(PLACES, [mention("a", "C900"), mention("b", "C901")], new Set(["slack:T1/C901"]));
     expect(groups[0]!.blocks.map((b) => [b.label, b.hasFault])).toEqual([["#deploys", true], ["#incidents", false]]);
+  });
+});
+
+describe("countText", () => {
+  it("counts places and routines for a group heading", () => {
+    expect(countText(1, "place")).toBe("1 place");
+    expect(countText(2, "place")).toBe("2 places");
+    expect(countText(1, "routine")).toBe("1 routine");
+    expect(countText(3, "routine")).toBe("3 routines");
+  });
+});
+
+describe("namedPlaceLabel", () => {
+  it("names the one place a line names, and nothing for a line that names none", () => {
+    expect(namedPlaceLabel(mention("a", "C900"), PLACES)).toBe("#incidents");
+    expect(namedPlaceLabel({ filters: [] }, PLACES)).toBeNull();
   });
 });

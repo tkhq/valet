@@ -14,7 +14,7 @@ import { usePresencePlaces } from "~/api/presence";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
-import { blockSubjectFor } from "./overview-groups";
+import { blockSubjectFor, namedPlaceLabel } from "./overview-groups";
 import { PIN_UNAVAILABLE, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routines-pane";
 import { activitySentence, type ThreadTitles } from "./sentences";
@@ -23,7 +23,8 @@ import { activitySentence, type ThreadTitles } from "./sentences";
 export const FAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export type Fault =
-  | { kind: "line"; sub: EventSubscriptionWire; text: string }
+  /** `place` names the one place the line names, for the banner's `In <place>,` lead. */
+  | { kind: "line"; sub: EventSubscriptionWire; text: string; place?: string }
   | { kind: "routine"; routine: Routine; text: string }
   | { kind: "delivery"; eventId: string; subscriptionId: string; text: string };
 
@@ -56,7 +57,10 @@ export function faultsOf(input: {
   const listed = new Set(broken.map((rule) => rule.id));
   const editedAt = new Map(input.rules.map((rule) => [rule.id, rule.updatedAt]));
   const faults: Fault[] = [
-    ...broken.map((sub): Fault => ({ kind: "line", sub, text: lineFaultText(sub, input.titles) })),
+    ...broken.map((sub): Fault => {
+      const place = namedPlaceLabel(sub, input.places);
+      return { kind: "line", sub, text: lineFaultText(sub, input.titles), ...(place !== null ? { place } : {}) };
+    }),
     ...offRoutines.map((routine): Fault => ({
       kind: "routine", routine, text: `${routine.name} is off: ${routine.detail.disabledReason ?? ""}`,
     })),

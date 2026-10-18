@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
-import type { WorkflowTriggerItem } from "@valet/api/wire";
+import type { UpdateWorkflowScheduleRequest, WorkflowTriggerItem } from "@valet/api/wire";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
@@ -16,7 +16,7 @@ import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } 
 import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { ProblemBadge } from "./problem-badge";
-import { routineSentence } from "./sentences";
+import { routineDoes, routineSentence } from "./sentences";
 
 /** A schedule row of the triggers list: what the Routines pane lists. */
 export type Routine = Extract<WorkflowTriggerItem, { kind: "schedule" }>;
@@ -32,6 +32,14 @@ export function useRoutineSentence(routines: readonly Routine[]): (routine: Rout
   const pinned = usePinnedThreadTitles(routines.map((r) => r.detail.thread));
   const names = workflows.data?.workflows ?? [];
   return (routine) => routineSentence(routine, names, pinned);
+}
+
+/** The `<do>` of each routine. It reads the workflow names and the titles of pinned threads. */
+export function useRoutineDoes(routines: readonly Routine[]): (routine: Routine) => string {
+  const workflows = useWorkflows();
+  const pinned = usePinnedThreadTitles(routines.map((r) => r.detail.thread));
+  const names = workflows.data?.workflows ?? [];
+  return (routine) => routineDoes(routine, names, pinned);
 }
 
 /** When the routine fires next (spec Part E step 1: `Next: <time>`), or that it is off. */
@@ -74,15 +82,20 @@ export function RoutinesPane() {
   );
 }
 
+/** A row's message: the result of Fire now, or a refusal. */
+export interface RoutineMessage {
+  text: string;
+  error: boolean;
+}
+
 /**
- * One routine as a row (spec Part E step 1): the sentence linked to its
- * page, `Next: <time>` or `Off`, an on/off switch, and **Fire now**. The
- * row shows the result of Fire now and any refusal under itself.
+ * Fire now and the on/off switch for one routine row. A refusal and the
+ * result of Fire now go to `message`, which the row shows under itself.
  */
-export function RoutineRow({ routine, sentence }: { routine: Routine; sentence: string }) {
+export function useRoutineActions(routine: Routine) {
   const fire = useRunScheduleNow();
   const update = useUpdateSchedule();
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [message, setMessage] = useState<RoutineMessage | null>(null);
 
   function fireNow() {
     setMessage(null);
@@ -92,12 +105,23 @@ export function RoutineRow({ routine, sentence }: { routine: Routine; sentence: 
     });
   }
 
-  function setEnabled(enabled: boolean) {
+  function save(body: UpdateWorkflowScheduleRequest) {
     setMessage(null);
-    update.mutate({ id: routine.id, body: { enabled } }, {
+    update.mutate({ id: routine.id, body }, {
       onError: (err) => setMessage({ text: errorText(err), error: true }),
     });
   }
+
+  return { fire, update, message, setMessage, fireNow, save, setEnabled: (enabled: boolean) => save({ enabled }) };
+}
+
+/**
+ * One routine as a row (spec Part E step 1): the sentence linked to its
+ * page, `Next: <time>` or `Off`, an on/off switch, and **Fire now**. The
+ * row shows the result of Fire now and any refusal under itself.
+ */
+export function RoutineRow({ routine, sentence }: { routine: Routine; sentence: string }) {
+  const { fire, update, message, fireNow, setEnabled } = useRoutineActions(routine);
 
   return (
     <div>

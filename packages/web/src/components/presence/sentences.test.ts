@@ -317,6 +317,16 @@ describe("presenceSentence without the place clause (spec Part B step 5)", () =>
     );
   });
 
+  it("omits , as <appearance> when the place's Appears as line names it", () => {
+    const slack = sub({
+      filters: [incidents],
+      target: { kind: "assistant", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
+    });
+    expect(presenceSentence(slack, catalog, workflows, threads, { place: false, appearance: false })).toBe(
+      "When someone mentions Valet, reply in a new thread.",
+    );
+  });
+
   it("omits the service-wide place too", () => {
     const anywhere = sub({ filters: [], target: { kind: "assistant", thread: { mode: "new" } } });
     expect(presenceSentence(anywhere, catalog, workflows, threads, noPlace)).toBe(

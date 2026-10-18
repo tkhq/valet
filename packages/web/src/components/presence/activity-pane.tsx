@@ -4,7 +4,7 @@
  * chips write `status` (`problems`) or `service`, and the Place box writes
  * `q`, the name the old Log used, so a redirected `/events` link opens the
  * same view. With no place and no routine, the pane shows the onboarding
- * cards instead (Part C step 8).
+ * paragraphs instead (Part C step 8).
  */
 import { EventLog, type LogFilter, type LogService } from "~/components/events/event-log";
 import { textParam } from "~/lib/search-params";
@@ -47,7 +47,7 @@ export function ActivityPane({ search, onSearchChange }: {
   onSearchChange: (next: ActivitySearch) => void;
 }) {
   const notPresent = useNotPresentAnywhere();
-  if (notPresent) return <Onboarding />;
+  if (notPresent) return <Onboarding withAdd />;
   // A blank box clears q. The draft keeps its spaces, so the box's own echo matches it.
   const keepQ = (q: string | undefined) => (q !== undefined && q.trim() !== "" ? { q } : {});
   const onFilterChange = (filter: LogFilter) => onSearchChange({

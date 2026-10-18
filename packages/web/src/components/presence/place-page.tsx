@@ -17,7 +17,7 @@ import { AutomationWizard } from "~/components/events/automation-wizard";
 import { errorText } from "~/lib/error-text";
 import { PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
-import { usePresenceSentence } from "./presence-rows";
+import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
 import { PlaceThreads } from "./place-threads";
 import { placeSearchTerm, SERVICE_NAMES } from "./places";
 import { eventInWords, eventPlace, type ThreadTitles } from "./sentences";
@@ -71,7 +71,11 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
         )}
       >
         {listeners.length === 0 && <EmptyRow className="px-4 py-3">Nothing is set up here yet.</EmptyRow>}
-        {listeners.map((sub) => <PresenceLine key={sub.id} sub={sub} sentence={sentence(sub)} />)}
+        {listeners.length > 0 && (
+          <div className="grid gap-0.5 px-4 py-2">
+            {listeners.map((sub) => <PresenceLine key={sub.id} sub={sub} sentence={sentence(sub)} />)}
+          </div>
+        )}
       </WorkSection>
       {adding && (
         <AutomationWizard
@@ -103,14 +107,9 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
   );
 }
 
-function hasAppearance(sub: EventSubscriptionWire): boolean {
-  const appearance = sub.target.appearance;
-  return Boolean(appearance?.displayName?.trim() || appearance?.avatarUrl?.trim());
-}
-
 function AppearanceRow({ sub }: { sub: EventSubscriptionWire }) {
   const appearance = sub.target.appearance ?? {};
-  const name = appearance.displayName?.trim() || "Valet";
+  const name = appearanceName(sub);
   return (
     <WorkRow
       title={(

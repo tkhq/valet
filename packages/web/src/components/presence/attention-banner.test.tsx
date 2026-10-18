@@ -68,7 +68,7 @@ const S2 = {
 const S2_ROUTINE: Routine = S2;
 
 const FAULTS: Fault[] = [
-  { kind: "line", sub: R4, text: "Platform CI is archived. Pick another thread:" },
+  { kind: "line", sub: R4, text: "Platform CI is archived. Pick another thread:", place: "acme/api" },
   { kind: "routine", routine: S2_ROUTINE, text: "Morning summary is off: The pinned thread is archived." },
   {
     kind: "delivery", eventId: "ev-14", subscriptionId: "R7",
@@ -96,6 +96,24 @@ describe("AttentionBanner", () => {
   it("renders nothing with no fault", () => {
     const { container } = renderBanner([]);
     expect(container.textContent).toBe("");
+  });
+
+  it("is a ruled section with a danger mark and a muted heading, not a box", () => {
+    renderBanner(FAULTS);
+    const banner = screen.getByRole("region", { name: "Needs attention" });
+    for (const name of ["border-t", "border-line", "pt-3.5"]) expect(banner.classList.contains(name)).toBe(true);
+    for (const name of ["border", "rounded-md", "bg-danger-wash"]) expect(banner.classList.contains(name)).toBe(false);
+    const heading = within(banner).getByRole("heading", { name: "Needs attention" });
+    expect(heading.className).toContain("text-xs");
+    expect(heading.className).toContain("text-muted");
+    expect(heading.querySelector(".bg-danger-500")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("names the place before a line's fault", async () => {
+    renderBanner(FAULTS.slice(0, 1));
+    const problem = await screen.findByText("Platform CI is archived. Pick another thread:");
+    expect(problem.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
+    expect(within(problem).getByText("In acme/api,").className).toContain("text-muted");
   });
 
   it("renders each fault with its fix, and no bare count", async () => {

@@ -602,10 +602,19 @@ Revision 2 deviations that still hold:
   delivery. So a line's problem and the dead delivery that caused it are
   one item, and a pick that fixes the line removes the item at once.
 - **The empty state reads places and routines (Part B step 9).** The
-  overview shows the onboarding cards only when the workspace has no
-  block and no routine. A workspace with a routine is not empty: Valet
-  already does something there on a schedule. The cards show only after
-  both reads load.
+  overview shows the empty state only when the workspace has no place
+  row and no routine. A workspace with a routine is not empty: Valet
+  already does something there on a schedule. The empty state shows only
+  after both reads load. Activity shows the same empty state with its own
+  **Add**, because Activity has no header pair.
+- **One appearance, said once (Part B step 5).** When a line appears as
+  the name and avatar that the place's `Appears as` line shows, its
+  sentence drops `, as <appearance>`. A line with another appearance keeps
+  the clause, so no line hides who it appears as.
+- **The schedule group collapses too (Part B step 8).** Past ten places,
+  `On a schedule` collapses with the other groups and stays open while a
+  routine is off with a reason. The filter reads place names, so it never
+  hides the schedule group.
 - **The thread card says `wait` (INV-H2).** The background section of the
   thread context card names an event wakeup a `wait`, because `active`
   reads as a state and not a thing to count. The card is outside Presence,

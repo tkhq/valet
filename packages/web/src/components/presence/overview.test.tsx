@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The Presence overview (docs/specs/2026-10-16-presence-hub-design.md Part
- * B; plan Review Focus 1 to 4). The test renders the app's real route tree
+ * The Presence overview as a roster (docs/specs/2026-10-16-presence-hub-design.md
+ * Part B; plan Review Focus 1 to 4). The test renders the app's real route tree
  * at `/presence` under a memory history. The network is a `fetch` stub that
  * answers each api path with a fixture typed by the wire types and keeps
  * the one write the overview makes here (a pick), so every query hook and
@@ -198,9 +198,16 @@ function mountOverview() {
   return router;
 }
 
-/** The text of every `h2` group heading or collapsed group summary, in order. */
+/** The text of every `h2` group heading, in order. */
 function groupNames(): string[] {
   return screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent ?? "").filter((name) => name !== "Needs attention");
+}
+
+/** The count at the right of each group heading, in order. */
+function groupCounts(): string[] {
+  return screen.getAllByRole("heading", { level: 2 })
+    .filter((heading) => heading.textContent !== "Needs attention")
+    .map((heading) => heading.nextElementSibling?.textContent ?? "");
 }
 
 /** A sentence link's text, for the rows of a region. */
@@ -217,32 +224,62 @@ function detailsOf(summary: HTMLElement): HTMLDetailsElement {
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe("Presence overview", () => {
-  it("lands on the groups in order, with blocks, sentences, routines, and the Activity link", async () => {
+  it("pairs Activity and Add at the header's right, with no other link to Activity", async () => {
     mountOverview();
     await screen.findByRole("heading", { level: 2, name: "On a schedule" });
-    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
+    const add = screen.getByRole("button", { name: "Add" });
+    const activity = screen.getByRole("link", { name: "Activity" });
+    expect(activity.getAttribute("href")).toBe("/presence/activity");
+    expect(activity.parentElement).toBe(add.parentElement);
+    expect(screen.getAllByRole("link", { name: "Activity" })).toHaveLength(1);
+    // The pair sits in the header row with the title, not under the groups.
+    const header = screen.getByRole("heading", { level: 1, name: "Presence" }).closest(".justify-between");
+    expect(header?.contains(add)).toBe(true);
+  });
+
+  it("lands on the groups in order, with place rows, sentences, and routines", async () => {
+    mountOverview();
+    await screen.findByRole("heading", { level: 2, name: "On a schedule" });
     expect(groupNames()).toEqual(["Slack", "GitHub", "Linear", "On a schedule"]);
+    expect(groupCounts()).toEqual(["1 place", "1 place", "1 place", "1 routine"]);
 
     const acme = screen.getByRole("region", { name: "acme/api" });
     expect(within(acme).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
-    expect(within(acme).getByText("1 active")).toBeTruthy();
+    expect(within(acme).getByText("1 active thread")).toBeTruthy();
     await waitFor(() => expect(sentences(acme)).toEqual([
       "When a pull request review or a check completes, work in one thread per pull request.",
       "When a check completes, work in the Platform CI thread.",
     ]));
-    // No pull request block and no block for a place without a line.
+    // No pull request row and no row for a place without a line.
     expect(screen.queryByRole("region", { name: "acme/api#12" })).toBeNull();
     expect(screen.queryByRole("region", { name: "#incidents" })).toBeNull();
     expect(screen.getByRole("region", { name: "ENG" })).toBeTruthy();
 
     const schedule = screen.getByRole("region", { name: "On a schedule" });
-    expect(sentences(schedule)).toEqual(["Every day at 9:00, Morning summary: work in its own thread."]);
-    expect(within(schedule).getByText(/^Next: /)).toBeTruthy();
-    expect(within(schedule).getByRole("button", { name: "Fire Morning summary now" })).toBeTruthy();
-    expect(within(schedule).getByRole("button", { name: "+ New routine" })).toBeTruthy();
-
-    expect(screen.getByRole("link", { name: "Activity" }).getAttribute("href")).toBe("/presence/activity");
+    const routine = within(schedule).getByRole("region", { name: "Every day at 9:00" });
+    expect(within(routine).getByRole("link", { name: "Morning summary: work in its own thread." }).getAttribute("href")).toBe("/presence/routines/S1");
+    expect(within(routine).getByText("Summarize the night.")).toBeTruthy();
+    expect(within(routine).getByText(/^Next /)).toBeTruthy();
+    expect(within(routine).getByRole("button", { name: "Fire Morning summary now" })).toBeTruthy();
+    expect(within(routine).getByRole("button", { name: "+ New routine" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Presence" })).toBeNull();
+  });
+
+  it("draws no card in the roster: no element has a border on all sides with rounded corners", async () => {
+    mountOverview();
+    const schedule = await screen.findByRole("region", { name: "On a schedule" });
+    const roster = schedule.parentElement;
+    if (roster === null) throw new Error("The groups have no container.");
+    // The thread picker in a fix is a form control, not a place's frame.
+    const cards = [roster, ...roster.querySelectorAll("*")].filter((element) => {
+      if (element.closest('[role="group"][aria-label="Problem"]') !== null) return false;
+      const classes = [...element.classList];
+      return classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+    });
+    expect(cards).toEqual([]);
+    const heading = within(schedule).getByRole("heading", { level: 2, name: "On a schedule" });
+    expect(heading.className).toContain("text-xs");
+    expect(heading.parentElement?.className).toContain("border-b");
   });
 
   it("shows only the schedule group for a workspace with a routine and no place (Review Focus 1)", async () => {
@@ -254,13 +291,18 @@ describe("Presence overview", () => {
     expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
   });
 
-  it("shows the onboarding cards for a workspace with no place and no routine (Review Focus 1)", async () => {
+  it("shows the empty state for a workspace with no place and no routine, with Add and no Activity (Review Focus 1)", async () => {
     places = [];
     rules = [];
     routines = [];
     mountOverview();
-    expect(await screen.findByRole("heading", { name: "Valet is not present anywhere yet." })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Connect Slack" })).toBeTruthy();
+    expect(await screen.findByText("Valet is not present anywhere yet.")).toBeTruthy();
+    expect(screen.getByText(/^Choose Add to have Valet act on a schedule\./)).toBeTruthy();
+    for (const name of ["Slack", "GitHub", "Linear"]) {
+      expect(screen.getByRole("link", { name }).getAttribute("href")).toBe("/integrations");
+    }
+    expect(screen.getAllByRole("button", { name: "Add" })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: "Activity" })).toBeNull();
     expect(screen.queryByRole("heading", { level: 2, name: "On a schedule" })).toBeNull();
   });
 
@@ -272,7 +314,7 @@ describe("Presence overview", () => {
     expect(alert.getAttribute("role")).toBe("alert");
   });
 
-  it("puts a line that names no place in the service block, once (Review Focus 2)", async () => {
+  it("puts a line that names no place in the service row, once (Review Focus 2)", async () => {
     mountOverview();
     const slack = await screen.findByRole("region", { name: "Everywhere in Slack" });
     expect(within(slack).getByRole("link", { name: "Everywhere in Slack" }).getAttribute("href")).toBe("/presence/places/slack%3AT1");
@@ -284,7 +326,8 @@ describe("Presence overview", () => {
   it("fixes a line from the banner: the item and the row's problem line go (Review Focus 3, INV-H6)", async () => {
     mountOverview();
     const banner = await screen.findByRole("region", { name: "Needs attention" });
-    expect(await within(banner).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
+    const lead = await within(banner).findByText("Platform CI is archived. Pick another thread:");
+    expect(lead.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     const acme = screen.getByRole("region", { name: "acme/api" });
     expect(await within(acme).findByText("Platform CI is archived. Pick another thread:")).toBeTruthy();
 
@@ -295,7 +338,7 @@ describe("Presence overview", () => {
     expect(sentences(acme)).toContain("When a check completes, work in the Platform Ops thread.");
   });
 
-  it("collapses past ten blocks, keeps a faulted group open, and opens a group on a match (Review Focus 4)", async () => {
+  it("collapses past ten places, keeps a faulted group open, and opens a group on a match (Review Focus 4)", async () => {
     const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
     places = [SLACK_ROOT, ...channels, ACME_API];
     rules = [
@@ -306,16 +349,21 @@ describe("Presence overview", () => {
     ];
     mountOverview();
     const filter = await screen.findByRole("searchbox", { name: "Filter places" });
-    const slack = screen.getByText("Slack · 10");
-    const github = screen.getByText("GitHub · 1");
+    const slack = screen.getByRole("heading", { level: 2, name: "Slack" });
+    const github = screen.getByRole("heading", { level: 2, name: "GitHub" });
+    expect(slack.closest("summary")).not.toBeNull();
+    expect(groupCounts()).toEqual(["10 places", "1 place", "1 routine"]);
     await waitFor(() => expect(detailsOf(github).open).toBe(true));
     expect(detailsOf(slack).open).toBe(false);
+    expect(detailsOf(screen.getByRole("heading", { level: 2, name: "On a schedule" })).open).toBe(false);
 
     await userEvent.type(filter, "chan-3");
-    await waitFor(() => expect(detailsOf(screen.getByText("Slack · 1")).open).toBe(true));
+    await waitFor(() => expect(detailsOf(screen.getByRole("heading", { level: 2, name: "Slack" })).open).toBe(true));
+    // The filter reads place names; the schedule group stays, still collapsed.
+    expect(groupCounts()).toEqual(["1 place", "1 routine"]);
     expect(screen.getByRole("region", { name: "#chan-3" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "#chan-4" })).toBeNull();
-    expect(screen.queryByText(/^GitHub · /)).toBeNull();
+    expect(screen.queryByRole("heading", { level: 2, name: "GitHub" })).toBeNull();
   });
 
   it("opens the wizard on When with all four choices from Add", async () => {

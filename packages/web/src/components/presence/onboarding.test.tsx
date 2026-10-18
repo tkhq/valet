@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 /**
  * The onboarding empty state (docs/specs/2026-10-16-presence-hub-design.md
- * Part B step 9): with no place and no routine, the overview names where to start.
+ * Part B step 9): with no place and no routine, two paragraphs say where to
+ * start, with Slack, GitHub, and Linear as links to Integrations. The
+ * overview's header carries Add; the Activity pane, which has no Add of its
+ * own, asks for one here.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -18,18 +21,23 @@ import { Onboarding } from "./onboarding";
 
 afterEach(cleanup);
 
+const COPY = "Choose Add to have Valet act on a schedule. To have it listen somewhere too, connect Slack, GitHub, or Linear and Add again.";
+
 describe("Onboarding", () => {
-  it("names the state and links each service to Integrations", () => {
+  it("names the state in two paragraphs and links each service to Integrations", () => {
     render(<Onboarding />);
-    expect(screen.getByRole("heading", { level: 3, name: "Valet is not present anywhere yet." })).toBeTruthy();
-    for (const name of ["Connect Slack", "Connect GitHub", "Connect Linear"]) {
-      expect(screen.getByRole("link", { name: new RegExp(`^${name}`) }).getAttribute("href")).toBe("/integrations");
+    expect(screen.getByText("Valet is not present anywhere yet.").tagName).toBe("P");
+    const quiet = screen.getByText((_content, element) => element?.tagName === "P" && element.textContent === COPY);
+    expect(quiet.className).toContain("text-muted");
+    for (const name of ["Slack", "GitHub", "Linear"]) {
+      expect(screen.getByRole("link", { name }).getAttribute("href")).toBe("/integrations");
     }
+    expect(screen.queryByRole("link", { name: /^Connect/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });
 
-  it("opens the wizard on When from Add", () => {
-    render(<Onboarding />);
-    expect(screen.getByText(/^or/).textContent).toBe("or Add to listen somewhere, or run on a schedule.");
+  it("offers its own Add, which opens the wizard on When, where the page has none", () => {
+    render(<Onboarding withAdd />);
     expect(screen.queryByText("Other dialog")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
     expect(screen.getByText("Other dialog")).toBeTruthy();
