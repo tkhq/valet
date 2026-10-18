@@ -44,7 +44,11 @@ import { cn } from "~/lib/cn";
 export function presenceListAfterSwitch(
   pathname: string,
 ): "/presence" | "/presence/activity" | "/workflows" | "/workflows/runs" | undefined {
-  if (pathname.startsWith("/presence/places/") || pathname.startsWith("/presence/rules/")) return "/presence";
+  if (
+    pathname.startsWith("/presence/places/")
+    || pathname.startsWith("/presence/rules/")
+    || pathname.startsWith("/presence/routines/")
+  ) return "/presence";
   if (pathname.startsWith("/presence/events/")) return "/presence/activity";
   if (pathname === "/workflows" || (pathname.startsWith("/workflows/") && !pathname.startsWith("/workflows/runs"))) return "/workflows";
   if (pathname.startsWith("/workflows/runs/")) return "/workflows/runs";

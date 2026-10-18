@@ -132,7 +132,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
           </dl>
           <ProblemBadge problem={routine.detail.disabledReason} />
         </div>
-        <p className="text-sm text-muted">{routineWhen(routine)}</p>
+        <p className="text-sm text-muted">{routineWhen(routine, ": ")}</p>
         <div className="flex flex-wrap items-center gap-3">
           <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
           <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>

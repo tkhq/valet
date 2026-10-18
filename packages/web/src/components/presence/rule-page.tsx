@@ -64,7 +64,7 @@ export function RulePage({ id }: { id: string }) {
         <ErrorRow>{errorText(subsQ.error, "Could not load this page. Reload the page to try again.")}</ErrorRow>
       )}
       {subsQ.isSuccess && (
-        <EmptyRow>This page does not exist, or you cannot see it. Pick a place from the rail.</EmptyRow>
+        <EmptyRow>This page does not exist, or you cannot see it. Open Presence and pick the place again.</EmptyRow>
       )}
     </PresenceDetailPage>
   );

@@ -86,32 +86,10 @@ vi.mock("./thread-picker", () => ({
 
 import { routineWhen } from "./routine-helpers";
 import { RoutinePage, routineReadOnly } from "./routine-page";
+import { routine } from "./test-fixtures";
 
 const PIN_TEXT = "Pick another thread for this rule in Presence.";
 
-type Schedule = Extract<WorkflowTriggerItem, { kind: "schedule" }>;
-
-function routine(id: string, over: Partial<Omit<Schedule, "kind" | "detail">> & { detail?: Partial<Schedule["detail"]> } = {}): Schedule {
-  const { detail, ...rest } = over;
-  return {
-    kind: "schedule",
-    id,
-    name: "Morning summary",
-    enabled: true,
-    ...rest,
-    detail: {
-      cron: "0 9 * * *",
-      timezone: "UTC",
-      targetKind: "assistant",
-      prompt: "Summarize",
-      nextFireAt: Date.now() + 3_600_000,
-      lastFiredAt: null,
-      ownerType: "user",
-      ownerId: "u-001",
-      ...detail,
-    },
-  };
-}
 
 const S1 = routine("S1");
 const DENVER = routine("S2", { name: "Standup", detail: { cron: "30 8 * * 1-5", timezone: "America/Denver", thread: { mode: "new" } } });
@@ -257,13 +235,16 @@ describe("RoutinePage", () => {
     expect(routineReadOnly({ ...org, workflowId: "wf-1" }, { id: "u-001" }, member)).toBe(false);
   });
 
-  it("reads Next as a date and a time without seconds", async () => {
+  it("reads Next as a date and a time without seconds, in the schedule's timezone", async () => {
     const now = Date.UTC(2026, 9, 19, 15, 0, 0);
     const at = Date.UTC(2026, 9, 19, 16, 0, 0);
     const next = routine("S1", { detail: { nextFireAt: at } });
-    expect(routineWhen(next, now, { locale: "en-US", timeZone: "UTC" })).toBe("Next: Oct 19, 2026, 4:00 PM");
-    expect(routineWhen(routine("S1", { detail: { nextFireAt: now } }), now)).toBe("Due now");
-    expect(routineWhen(routine("S1", { enabled: false }), now)).toBe("Off");
+    // ICU may put U+202F before PM; `\s` covers it.
+    expect(routineWhen(next, ": ", now, "en-US")).toMatch(/^Next: Oct 19, 2026, 4:00\sPM$/);
+    const denver = routine("S2", { detail: { nextFireAt: at, timezone: "America/Denver" } });
+    expect(routineWhen(denver, ": ", now, "en-US")).toMatch(/^Next: Oct 19, 2026, 10:00\sAM$/);
+    expect(routineWhen(routine("S1", { detail: { nextFireAt: now } }), ": ", now)).toBe("Due now");
+    expect(routineWhen(routine("S1", { enabled: false }), ": ", now)).toBe("Off");
     // The page renders the same form: no seconds.
     listWorkflowTriggers.mockResolvedValue({ triggers: [S1] });
     wrap(<RoutinePage id="S1" />);

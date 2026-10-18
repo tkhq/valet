@@ -2,7 +2,8 @@
  * Shared fixtures for the Presence component tests. Test files only import
  * this module; the app never does.
  */
-import type { EventSubscriptionWire, ThreadSummary } from "@valet/api/wire";
+import type { EventSubscriptionWire, PresencePlaceWire, ThreadSummary } from "@valet/api/wire";
+import type { Routine } from "./routine-helpers";
 
 /** The viewer in the tests: a member who owns the `u-001` lines. */
 export const ME_MEMBER = { id: "u-001", orgId: "acme", orgRole: "member" } as const;
@@ -34,3 +35,40 @@ export const PLATFORM_CI: ThreadSummary = {
 export const PLATFORM_OPS: ThreadSummary = {
   id: "t-ops", sessionId: "s-u", title: "Platform Ops", createdAt: 1, lastUserActivityAt: 1,
 };
+
+/** A place with one line, no active thread, and no activity, with `over` on top. */
+export function place(
+  subject: string,
+  label: string,
+  service: PresencePlaceWire["service"],
+  parent: string | null = null,
+  over: Partial<PresencePlaceWire> = {},
+): PresencePlaceWire {
+  return { subject, label, service, parent, listenerCount: 1, activeThreadCount: 0, lastActivityAt: null, ...over };
+}
+
+/** A routine owned by `u-001`: `Morning summary`, every day at 9:00 UTC, due in an hour. `detail` merges into the default detail. */
+export function routine(
+  id: string,
+  over: Partial<Omit<Routine, "kind" | "detail">> & { detail?: Partial<Routine["detail"]> } = {},
+): Routine {
+  const { detail, ...rest } = over;
+  return {
+    kind: "schedule",
+    id,
+    name: "Morning summary",
+    enabled: true,
+    ...rest,
+    detail: {
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      targetKind: "assistant",
+      prompt: "Summarize",
+      nextFireAt: Date.now() + 3_600_000,
+      lastFiredAt: null,
+      ownerType: "user",
+      ownerId: "u-001",
+      ...detail,
+    },
+  };
+}

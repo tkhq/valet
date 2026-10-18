@@ -33,7 +33,7 @@ export function PlacePage({ subject }: { subject: string }) {
     <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
-        <ErrorRow>{errorText(detail.error, "Could not load this place. Pick it from the rail again.")}</ErrorRow>
+        <ErrorRow>{errorText(detail.error, "Could not load this place. Open Presence and pick the place again.")}</ErrorRow>
       )}
       {detail.data && <PlaceBody data={detail.data} />}
     </PresenceDetailPage>

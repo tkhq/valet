@@ -215,6 +215,12 @@ describe("PlacePage", () => {
     expect(screen.queryByText("slack:T1/C900")).toBeNull();
   });
 
+  it("sends the reader back to Presence when the place does not load", async () => {
+    getPresencePlace.mockReturnValue(Promise.reject("offline"));
+    renderPage("slack:T1/C900");
+    expect(await screen.findByText("Could not load this place. Open Presence and pick the place again.")).toBeTruthy();
+  });
+
   it("shows the header, Valet here, Threads, and Recent activity in order (P3)", async () => {
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");

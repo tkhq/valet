@@ -12,7 +12,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { UpdateWorkflowScheduleRequest, WorkflowScheduleResponse, WorkflowTriggerItem } from "@valet/api/wire";
+import type { UpdateWorkflowScheduleRequest, WorkflowScheduleResponse } from "@valet/api/wire";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -42,22 +42,23 @@ vi.mock("~/components/workflows/trigger-dialog", () => ({
   TriggerDialog: ({ editing }: { editing?: { name: string } }) => <p>Editing {editing?.name}</p>,
 }));
 
-import { RoutineRosterRow, routineNext } from "./routine-row";
+import { routineWhen, type Routine } from "./routine-helpers";
+import { RoutineRosterRow } from "./routine-row";
+import { routine } from "./test-fixtures";
 import { formatDateTime } from "~/lib/format-when";
-import type { Routine } from "./routine-helpers";
 
 const NEXT = Date.UTC(2026, 9, 19, 16, 0);
 
-function routine(over: Partial<Routine["detail"]> & { enabled?: boolean } = {}): Routine {
+/** The row's routine: weekdays at 9:00 in Los Angeles, next at `NEXT`. `over` changes its detail or turns it off. */
+function weekdayRoutine(over: Partial<Routine["detail"]> & { enabled?: boolean } = {}): Routine {
   const { enabled = true, ...detail } = over;
-  const item = {
-    kind: "schedule", id: "S1", name: "Morning summary", enabled,
+  return routine("S1", {
+    enabled,
     detail: {
-      cron: "0 9 * * 1-5", timezone: "America/Los_Angeles", targetKind: "assistant", prompt: "Summarize the night's incidents.",
-      thread: { mode: "own" }, nextFireAt: NEXT, lastFiredAt: null, ownerType: "user", ownerId: "u-001", ...detail,
+      cron: "0 9 * * 1-5", timezone: "America/Los_Angeles", prompt: "Summarize the night's incidents.",
+      thread: { mode: "own" }, nextFireAt: NEXT, ...detail,
     },
-  } satisfies WorkflowTriggerItem;
-  return item;
+  });
 }
 
 function renderRow(item: Routine) {
@@ -79,25 +80,29 @@ afterEach(cleanup);
 
 describe("RoutineRosterRow", () => {
   it("puts the schedule, the timezone, and the next time in the place column", () => {
-    renderRow(routine());
+    renderRow(weekdayRoutine());
     const row = screen.getByRole("region", { name: "Morning summary" });
     expect(row.classList.contains("grid-cols-[200px_minmax(0,1fr)]")).toBe(true);
     const name = within(row).getByText("Every weekday at 9:00");
     expect(name.className).toContain("text-[15px]");
     const zone = within(row).getByText("America/Los_Angeles");
-    const next = within(row).getByText(`Next ${formatDateTime(NEXT)}`);
+    const next = within(row).getByText(`Next ${formatDateTime(NEXT, { timeZone: "America/Los_Angeles" })}`);
     expect(zone.parentElement).toBe(next.parentElement);
   });
 
-  it("formats Next as a date and a time without seconds", () => {
+  it("formats Next as a date and a time without seconds, in the schedule's timezone", () => {
     const now = NEXT - 3_600_000;
-    expect(routineNext(routine(), now, { locale: "en-US", timeZone: "UTC" })).toBe("Next Oct 19, 2026, 4:00 PM");
-    expect(routineNext(routine({ nextFireAt: now }), now)).toBe("Due now");
-    expect(routineNext(routine({ enabled: false }), now)).toBe("Off");
+    // 16:00 UTC is 9:00 AM in Los Angeles. ICU may put U+202F before AM; `\s` covers it.
+    const next = routineWhen(weekdayRoutine(), " ", now, "en-US");
+    expect(next).toBe(`Next ${formatDateTime(NEXT, { locale: "en-US", timeZone: "America/Los_Angeles" })}`);
+    expect(next).toMatch(/^Next Oct 19, 2026, 9:00\sAM$/);
+    expect(routineWhen(weekdayRoutine({ timezone: "UTC" }), " ", now, "en-US")).toMatch(/^Next Oct 19, 2026, 4:00\sPM$/);
+    expect(routineWhen(weekdayRoutine({ nextFireAt: now }), " ", now)).toBe("Due now");
+    expect(routineWhen(weekdayRoutine({ enabled: false }), " ", now)).toBe("Off");
   });
 
   it("leaves out a UTC timezone and reads Off for a routine that is off", () => {
-    renderRow(routine({ timezone: "UTC", enabled: false }));
+    renderRow(weekdayRoutine({ timezone: "UTC", enabled: false }));
     const row = screen.getByRole("region", { name: "Morning summary" });
     expect(within(row).queryByText("UTC")).toBeNull();
     expect(within(row).getByText("Off")).toBeTruthy();
@@ -106,7 +111,7 @@ describe("RoutineRosterRow", () => {
   });
 
   it("reads the sentence with the prompt under it, and the controls on the row", async () => {
-    renderRow(routine());
+    renderRow(weekdayRoutine());
     const sentence = screen.getByRole("link", { name: "Morning summary: work in its own thread." });
     expect(sentence.getAttribute("href")).toBe("/presence/routines/S1");
     expect(sentence.className).toContain("text-base");

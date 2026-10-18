@@ -8,10 +8,8 @@
 import { describe, expect, it } from "vitest";
 import type { EventSubscriptionFilterWire, EventSubscriptionWire, PresencePlaceWire } from "@valet/api/wire";
 import { blockSubjectFor, countText, namedPlaceLabel, overviewGroups } from "./overview-groups";
+import { place } from "./test-fixtures";
 
-function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, lastActivityAt: number | null, activeThreadCount = 0): PresencePlaceWire {
-  return { subject, label, service, parent, listenerCount: 1, activeThreadCount, lastActivityAt };
-}
 
 function line(id: string, eventKeys: string[], filters: EventSubscriptionFilterWire[] = []): EventSubscriptionWire {
   return {
@@ -20,14 +18,14 @@ function line(id: string, eventKeys: string[], filters: EventSubscriptionFilterW
   };
 }
 
-const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, null);
-const INCIDENTS = place("slack:T1/C900", "#incidents", "slack", "slack:T1", 1_000, 2);
-const DEPLOYS = place("slack:T1/C901", "#deploys", "slack", "slack:T1", 5_000);
-const ALERTS = place("slack:T1/C902", "#alerts", "slack", "slack:T1", null);
-const ACME_API = place("github:acme/api", "acme/api", "github", null, 3_000, 1);
-const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", 9_000, 1);
-const ENG = place("linear:team/ENG", "ENG", "linear", "linear:*", null);
-const LINEAR_ROOT = place("linear:*", "Linear", "linear", null, null);
+const SLACK_ROOT = place("slack:T1", "Slack", "slack");
+const INCIDENTS = place("slack:T1/C900", "#incidents", "slack", "slack:T1", { lastActivityAt: 1_000, activeThreadCount: 2 });
+const DEPLOYS = place("slack:T1/C901", "#deploys", "slack", "slack:T1", { lastActivityAt: 5_000 });
+const ALERTS = place("slack:T1/C902", "#alerts", "slack", "slack:T1");
+const ACME_API = place("github:acme/api", "acme/api", "github", null, { lastActivityAt: 3_000, activeThreadCount: 1 });
+const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", { lastActivityAt: 9_000, activeThreadCount: 1 });
+const ENG = place("linear:team/ENG", "ENG", "linear", "linear:*");
+const LINEAR_ROOT = place("linear:*", "Linear", "linear");
 
 const PLACES = [SLACK_ROOT, INCIDENTS, DEPLOYS, ALERTS, ACME_API, ACME_API_12, LINEAR_ROOT, ENG];
 

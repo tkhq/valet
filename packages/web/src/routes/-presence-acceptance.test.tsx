@@ -91,6 +91,8 @@ import { routeTree } from "../routeTree.gen";
 import { BackgroundWorkSection } from "~/components/session/background-work";
 import { subjectPlaceLabel } from "~/components/session/session-header";
 import { TooltipProvider } from "~/components/primitives";
+import { clearCreated } from "~/components/presence/created-highlight";
+import { place } from "~/components/presence/test-fixtures";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -130,15 +132,16 @@ const P = line("P", {
   target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "existing", sessionId: "s-sre", threadId: "t-inc" } },
 });
 
-function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, listenerCount: number, activeThreadCount: number): PresencePlaceWire {
-  return { subject, label, service, parent, listenerCount, activeThreadCount, lastActivityAt: NOW - 60_000 };
+/** The place's line and active thread counts, last active a minute ago. */
+function counts(listenerCount: number, activeThreadCount: number): Partial<PresencePlaceWire> {
+  return { listenerCount, activeThreadCount, lastActivityAt: NOW - 60_000 };
 }
 
-const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, 0, 0);
-const INCIDENTS_USER = place("slack:T1/C900", "#incidents", "slack", "slack:T1", 0, 0);
-const INCIDENTS_SRE = place("slack:T1/C900", "#incidents", "slack", "slack:T1", 2, 1);
-const ACME_API = place("github:acme/api", "acme/api", "github", null, 2, 1);
-const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", 0, 0);
+const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, counts(0, 0));
+const INCIDENTS_USER = place("slack:T1/C900", "#incidents", "slack", "slack:T1", counts(0, 0));
+const INCIDENTS_SRE = place("slack:T1/C900", "#incidents", "slack", "slack:T1", counts(2, 1));
+const ACME_API = place("github:acme/api", "acme/api", "github", null, counts(2, 1));
+const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", counts(0, 0));
 
 const PLACES: Record<string, ListPresencePlacesResponse> = {
   user: { places: [SLACK_ROOT, INCIDENTS_USER, ACME_API, ACME_API_12] },
@@ -430,6 +433,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The Create highlight keeps its target in a module store; a later walk must not inherit it.
+  clearCreated();
   vi.unstubAllGlobals();
 });
 
@@ -530,13 +535,17 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     expect(screen.queryByRole("navigation", { name: "Presence" })).toBeNull();
     expect(screen.queryByRole("region", { name: "acme/api#12" })).toBeNull();
     // No card in the roster: no element has a border on all sides with
-    // rounded corners. The thread picker in a fix is a form control.
+    // rounded corners, and none has a shadow. The thread picker in a fix is
+    // a form control.
     const roster = schedule.parentElement;
     if (roster === null) throw new Error("The groups have no container.");
     const cards = [roster, ...roster.querySelectorAll("*")].filter((element) => {
       if (element.closest('[role="group"][aria-label="Problem"]') !== null) return false;
       const classes = [...element.classList];
-      return classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+      const framed = classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+      // A switch's thumb carries a shadow; it is a control, not a frame.
+      const shadowed = element.closest('[role="switch"]') === null && classes.some((name) => /^(?:[\w-]+:)*shadow(?:-|$)/.test(name));
+      return framed || shadowed;
     });
     expect(cards).toEqual([]);
 

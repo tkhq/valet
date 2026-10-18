@@ -74,7 +74,7 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
                 <ProblemBadge problem={routine.detail.disabledReason} />
               </>
             )}
-            detail={routineWhen(routine)}
+            detail={routineWhen(routine, ": ")}
           />
         ))}
       </WorkSection>

@@ -37,17 +37,25 @@ export function useRoutineDoes(routines: readonly Routine[]): (routine: Routine)
   return (routine) => routineDoes(routine, names, pinned);
 }
 
-/** When the routine fires next (spec Part E step 1: `Next: <time>`, a date
- * and a time without seconds), or that it is off. `format` pins the locale
- * and the time zone in tests. */
+/**
+ * When the routine fires next, or that it is off: `Next<separator><date and
+ * time>`, `Due now`, or `Off`. The time has no seconds and reads in the
+ * schedule's timezone, so it agrees with the zone the row shows. The overview
+ * row uses `" "` (spec Part B step 6); the routine page and the Workflows
+ * drawer use `": "` (Part E step 1). `locale` pins the reader's locale in
+ * tests.
+ */
 export function routineWhen(
   routine: Pick<Routine, "enabled" | "detail">,
+  separator: " " | ": ",
   now: number = Date.now(),
-  format: { locale?: string; timeZone?: string } = {},
+  locale?: string,
 ): string {
   if (!routine.enabled) return "Off";
   const next = routine.detail.nextFireAt;
-  return next - now <= 0 ? "Due now" : `Next: ${formatDateTime(next, format)}`;
+  if (next - now <= 0) return "Due now";
+  const timeZone = routine.detail.timezone.trim();
+  return `Next${separator}${formatDateTime(next, { locale, ...(timeZone !== "" ? { timeZone } : {}) })}`;
 }
 
 /** A row's message: the result of Fire now, or a refusal. */

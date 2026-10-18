@@ -633,6 +633,11 @@ Revision 3 deviations:
   fault clears or the filter empties, so a fix in progress or an open
   dialog stays in view. The reader's own toggle wins while the overview
   stays open.
+- **A group the filter hides loses its open state (Part B step 8).** When
+  the filter text matches no place in a group, the group leaves the page.
+  When the text changes and the group comes back, it is collapsed again
+  unless it has a fault. When the text matches no place at all, the
+  overview shows `No place matches.` under the filter box.
 - **A routine fault leads with the routine's name (Part B step 2).** A
   routine has no place, so its banner item reads `<name> is off: <reason>`
   with an `Edit` link. A line fault leads with `In <place>,` or with its
@@ -646,7 +651,9 @@ Revision 3 deviations:
   6).** The place column reads `Every weekday at 9:00`, the timezone when
   it is not UTC, and `Next <date and time>`. So the sentence column reads
   `<name>: <do>.`, with the prompt as a muted line under it. The routine
-  page and the Workflows panel keep the full Part E sentence.
+  page and the Workflows panel keep the full Part E sentence. `Next` reads
+  in the schedule's timezone on the row and on the routine page, so it
+  agrees with the zone the row shows.
 - **Activity offers Add only to an empty workspace (Part B step 9, Part F
   step 2).** The overview owns the onboarding paragraphs. Activity always
   shows its log. When the workspace has no place and no routine, Activity

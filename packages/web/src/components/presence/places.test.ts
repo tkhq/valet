@@ -1,14 +1,12 @@
 /**
- * The place helpers the Presence rail reads (spec Part B): the mid grain,
+ * The place helpers the Presence overview and pages read (spec Part B): the mid grain,
  * the service-wide row, and the places a line of presence names.
  */
 import type { EventSubscriptionFilterWire, PresencePlaceWire } from "@valet/api/wire";
 import { describe, expect, it } from "vitest";
 import { isMidGrain, isServiceRoot, placeSearchTerm, placeSubjectsForRule } from "./places";
+import { place } from "./test-fixtures";
 
-function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null = null): PresencePlaceWire {
-  return { subject, label, service, parent, listenerCount: 1, activeThreadCount: 0, lastActivityAt: null };
-}
 
 describe("isMidGrain", () => {
   it.each(["slack:T1/C900", "github:acme/api", "linear:team/ENG"])("reads %s as the mid grain", (subject) => {

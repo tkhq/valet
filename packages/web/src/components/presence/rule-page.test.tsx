@@ -319,6 +319,6 @@ describe("RulePage", () => {
   it("names the fix when the listener is not in the list", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [] });
     renderPage("gone");
-    expect(await screen.findByText("This page does not exist, or you cannot see it. Pick a place from the rail.")).toBeTruthy();
+    expect(await screen.findByText("This page does not exist, or you cannot see it. Open Presence and pick the place again.")).toBeTruthy();
   });
 });

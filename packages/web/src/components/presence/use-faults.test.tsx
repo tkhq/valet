@@ -16,7 +16,7 @@ import type {
 } from "@valet/api/wire";
 import { describe, expect, it, vi } from "vitest";
 import { PIN_UNAVAILABLE } from "./problem-badge";
-import { line } from "./test-fixtures";
+import { line, routine } from "./test-fixtures";
 
 const NOW = Date.now();
 
@@ -24,14 +24,13 @@ function rule(id: string, over: Partial<EventSubscriptionWire> = {}): EventSubsc
   return line(id, { eventKeys: ["slack.app_mention"], ...over });
 }
 
-function routine(id: string, disabledReason?: string): WorkflowTriggerItem {
-  return {
-    kind: "schedule", id, name: id, enabled: disabledReason === undefined,
-    detail: {
-      cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "Hi.", nextFireAt: NOW, lastFiredAt: null,
-      ownerType: "user", ownerId: "u-001", ...(disabledReason !== undefined ? { disabledReason } : {}),
-    },
-  };
+/** A routine named by its id. With a `disabledReason`, the scheduler turned it off. */
+function namedRoutine(id: string, disabledReason?: string): WorkflowTriggerItem {
+  return routine(id, {
+    name: id,
+    enabled: disabledReason === undefined,
+    detail: { nextFireAt: NOW, ...(disabledReason !== undefined ? { disabledReason } : {}) },
+  });
 }
 
 function delivery(status: EventDeliveryWire["status"], subscriptionId = "R1"): EventDeliveryWire {
@@ -61,8 +60,8 @@ const RULES = [
   rule("R3", { problem: "Reconnect Slack in Integrations." }),
 ];
 const TRIGGERS = [
-  routine("S1"),
-  routine("S2", "The pinned thread is archived."),
+  namedRoutine("S1"),
+  namedRoutine("S2", "The pinned thread is archived."),
   { kind: "event", id: "E1", workflowId: "wf-1", name: "E1", enabled: true, detail: { eventKeys: [], filters: [] } } satisfies WorkflowTriggerItem,
 ];
 const LOG = [
@@ -116,7 +115,7 @@ describe("faultsOf", () => {
   const base = { triggers: [], places: PLACES, titles: {}, now: NOW };
 
   it("lists nothing with no problem, an empty problem, or an empty disabledReason", () => {
-    expect(faultsOf({ ...base, rules: [rule("R2"), rule("R4", { problem: "" })], triggers: [routine("S1"), routine("S3", "")], log: [] }).faults).toEqual([]);
+    expect(faultsOf({ ...base, rules: [rule("R2"), rule("R4", { problem: "" })], triggers: [namedRoutine("S1"), namedRoutine("S3", "")], log: [] }).faults).toEqual([]);
   });
 
   it("lists one fault once: a line's problem and the dead delivery that caused it", () => {

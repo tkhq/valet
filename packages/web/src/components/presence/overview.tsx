@@ -192,6 +192,7 @@ function OverviewBody({ groups, routines }: {
           aria-label="Filter places"
         />
       )}
+      {filtering && shown.length === 0 && <p className="text-sm text-muted">No place matches.</p>}
       {shown.map((group) => (
         <Group
           key={group.service}

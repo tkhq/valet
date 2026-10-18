@@ -23,11 +23,11 @@ import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-r
 import { SERVICE_NAMES } from "./places";
 import { SENTENCE_PLACE_FIELD_SET } from "./sentences";
 
-/** The roster's grid: a 200px place column and the sentence column; one column at phone width. */
 /** The mark on a row or a group that a Create just added to (spec Part H
  * step 9). It is a color, not motion, so reduced motion needs no case. */
 export const CREATED_HIGHLIGHT_CLASS = "bg-moss-wash";
 
+/** The roster's grid: a 200px place column and the sentence column; one column at phone width. */
 export const ROSTER_ROW_CLASS =
   "grid grid-cols-[200px_minmax(0,1fr)] gap-x-8 gap-y-1 border-b border-line py-4 last:border-0 max-sm:grid-cols-1 max-sm:gap-y-2";
 

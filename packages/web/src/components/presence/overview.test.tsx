@@ -59,15 +59,14 @@ vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
 import { routeTree } from "../../routeTree.gen";
 import { announceCreated, clearCreated } from "./created-highlight";
 import { PIN_UNAVAILABLE } from "./problem-badge";
-import { PLATFORM_CI, PLATFORM_OPS, line } from "./test-fixtures";
+import { PLATFORM_CI, PLATFORM_OPS, line, place } from "./test-fixtures";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 const NOW = Date.now();
 
-function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, activeThreadCount = 0, lastActivityAt: number | null = NOW - 60_000): PresencePlaceWire {
-  return { subject, label, service, parent, listenerCount: 1, activeThreadCount, lastActivityAt };
-}
+/** Last active a minute ago. */
+const RECENT = { lastActivityAt: NOW - 60_000 };
 
 const ACME_REPO = [{ field: "repo", op: "eq" as const, value: "acme/api" }];
 const R1 = line("R1", {
@@ -91,11 +90,11 @@ const ENG_LINE = line("L", {
   target: { kind: "assistant", thread: { mode: "own" } },
 });
 
-const SLACK_ROOT = place("slack:T1", "Slack", "slack", null, 0, null);
-const INCIDENTS = place("slack:T1/C900", "#incidents", "slack", "slack:T1");
-const ACME_API = place("github:acme/api", "acme/api", "github", null, 1);
-const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", 1);
-const ENG = place("linear:team/ENG", "ENG", "linear", null);
+const SLACK_ROOT = place("slack:T1", "Slack", "slack");
+const INCIDENTS = place("slack:T1/C900", "#incidents", "slack", "slack:T1", RECENT);
+const ACME_API = place("github:acme/api", "acme/api", "github", null, { ...RECENT, activeThreadCount: 1 });
+const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", { ...RECENT, activeThreadCount: 1 });
+const ENG = place("linear:team/ENG", "ENG", "linear", null, RECENT);
 
 const S1: WorkflowTriggerItem = {
   kind: "schedule", id: "S1", name: "Morning summary", enabled: true,
@@ -295,7 +294,7 @@ describe("Presence overview", () => {
     expect(screen.queryByRole("navigation", { name: "Presence" })).toBeNull();
   });
 
-  it("draws no card in the roster: no element has a border on all sides with rounded corners", async () => {
+  it("draws no card in the roster: no element has a border on all sides with rounded corners, or a shadow", async () => {
     mountOverview();
     const schedule = await screen.findByRole("region", { name: "On a schedule" });
     const roster = schedule.parentElement;
@@ -304,7 +303,10 @@ describe("Presence overview", () => {
     const cards = [roster, ...roster.querySelectorAll("*")].filter((element) => {
       if (element.closest('[role="group"][aria-label="Problem"]') !== null) return false;
       const classes = [...element.classList];
-      return classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+      const framed = classes.includes("border") && classes.some((name) => name.startsWith("rounded"));
+      // A switch's thumb carries a shadow; it is a control, not a frame.
+      const shadowed = element.closest('[role="switch"]') === null && classes.some((name) => /^(?:[\w-]+:)*shadow(?:-|$)/.test(name));
+      return framed || shadowed;
     });
     expect(cards).toEqual([]);
     const heading = within(schedule).getByRole("heading", { level: 2, name: "On a schedule" });
@@ -369,7 +371,7 @@ describe("Presence overview", () => {
   });
 
   it("collapses past ten places, keeps a faulted group open, and opens a group on a match (Review Focus 4)", async () => {
-    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
     places = [SLACK_ROOT, ...channels, ACME_API];
     rules = [
       ...channels.map((channel, index) => line(`M${index}`, {
@@ -396,8 +398,51 @@ describe("Presence overview", () => {
     expect(screen.queryByRole("heading", { level: 2, name: "GitHub" })).toBeNull();
   });
 
+  it("says No place matches when the filter matches no place, and keeps the schedule group", async () => {
+    const channels = Array.from({ length: 11 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
+    places = [SLACK_ROOT, ...channels];
+    rules = channels.map((_channel, index) => line(`M${index}`, {
+      name: `Mentions ${index}`, eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C${index}` }],
+    }));
+    mountOverview();
+    const filter = await screen.findByRole("searchbox", { name: "Filter places" });
+    expect(screen.queryByText("No place matches.")).toBeNull();
+    await userEvent.type(filter, "nowhere");
+    expect(await screen.findByText("No place matches.")).toBeTruthy();
+    expect(groupNames()).toEqual(["On a schedule"]);
+    await userEvent.clear(filter);
+    await waitFor(() => expect(screen.queryByText("No place matches.")).toBeNull());
+  });
+
+  it("keeps a group the reader closed shut when a new fault arrives (the reader's toggle wins)", async () => {
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
+    places = [SLACK_ROOT, ...channels, ACME_API];
+    rules = [
+      ...channels.map((_channel, index) => line(`M${index}`, {
+        name: `Mentions ${index}`, eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C${index}` }],
+      })),
+      R1,
+    ];
+    const { queryClient } = mountOverview();
+    await screen.findByRole("searchbox", { name: "Filter places" });
+    const github = screen.getByRole("heading", { level: 2, name: "GitHub" });
+    const details = detailsOf(github);
+    expect(details.open).toBe(false);
+    // The reader opens the group, then closes it again.
+    await userEvent.click(github);
+    await waitFor(() => expect(details.open).toBe(true));
+    await userEvent.click(github);
+    await waitFor(() => expect(details.open).toBe(false));
+
+    rules = [...rules.filter((sub) => sub.id !== "R1"), R1, R4];
+    await act(async () => { await queryClient.invalidateQueries(); });
+    expect(await screen.findByRole("region", { name: "Needs attention" })).toBeTruthy();
+    expect(detailsOf(screen.getByRole("heading", { level: 2, name: "GitHub" }))).toBe(details);
+    expect(details.open).toBe(false);
+  });
+
   it("keeps a collapsed group open when its only fault is a dead delivery (Part B step 8)", async () => {
-    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
     places = [SLACK_ROOT, ...channels, ACME_API];
     rules = [
       ...channels.map((channel, index) => line(`M${index}`, {
@@ -419,7 +464,7 @@ describe("Presence overview", () => {
   });
 
   it("leaves a collapsed group open after a pick fixes its last fault", async () => {
-    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
     places = [SLACK_ROOT, ...channels, ACME_API];
     rules = [
       ...channels.map((channel, index) => line(`M${index}`, {

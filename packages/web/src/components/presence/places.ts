@@ -1,9 +1,8 @@
 /**
- * Place helpers the Presence rail and pages share
+ * Place helpers the Presence overview and pages share
  * (docs/specs/2026-10-16-presence-hub-design.md Part B). The places API
- * returns every grain. The rail shows the service-wide row as its group
- * header and the mid grain as rows: Slack channels, GitHub repositories, and
- * Linear teams.
+ * returns every grain. The overview keeps the service-wide rows and the mid
+ * grain: Slack channels, GitHub repositories, and Linear teams.
  */
 import type { EventSubscriptionFilterWire, PresencePlaceService, PresencePlaceWire } from "@valet/api/wire";
 
@@ -64,8 +63,7 @@ function exactValues(filters: readonly EventSubscriptionFilterWire[], field: str
 /**
  * The mid-grain places of `places` that a line of presence names by its
  * `channel`, `repo`, or `team` filter. A channel filter holds the channel
- * id, so it matches the place key, not the label. The rail marks these
- * places when the line has a problem.
+ * id, so it matches the place key, not the label.
  */
 export function placeSubjectsForRule(
   rule: { filters: readonly EventSubscriptionFilterWire[] },
