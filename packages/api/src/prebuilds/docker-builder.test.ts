@@ -430,6 +430,9 @@ function dockerAvailable(): boolean {
 
 const describeDocker = dockerAvailable() ? describe : describe.skip;
 
+/** A registry pull refused for rate or data limits, as BuildKit reports it. */
+const REGISTRY_RATE_LIMIT = /429 Too Many Requests|toomanyrequests/;
+
 describeDocker("DockerImageBuilder (live docker)", () => {
   const imagesToClean: string[] = [];
 
@@ -439,7 +442,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
     }
   });
 
-  it("builds a trivial public-repo spec end-to-end and pushes to the local daemon", async () => {
+  it("builds a trivial public-repo spec end-to-end and pushes to the local daemon", async (ctx) => {
     const imageRef = `valet-prebuild-test/hello-world:${Date.now()}`;
     imagesToClean.push(imageRef);
     const builder = new DockerImageBuilder();
@@ -467,6 +470,12 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       status = await builder.status(buildId);
     }
 
+    // Shared CI runners exceed ECR Public's anonymous data limit on some
+    // days. That is an external outage, not a builder failure, so the test
+    // reports a skip with the reason instead of a red build.
+    if (status.state === "failed" && REGISTRY_RATE_LIMIT.test(status.logTail ?? "")) {
+      ctx.skip("the base image registry rate-limited this runner (429)");
+    }
     expect(status.state, JSON.stringify(status)).toBe("pushed");
 
     const inspect = spawnSync("docker", ["image", "inspect", imageRef], { stdio: "pipe" });
