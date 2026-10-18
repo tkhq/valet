@@ -4,6 +4,7 @@ import { displayThreadPolicy, subjectKindForKeys } from "~/components/presence/t
 import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { Sentence } from "~/components/presence/sentence";
 import {
+  isCreatorScopeFilter,
   presenceSentenceParts,
   presenceWhenParts,
   runsInLabel,
@@ -67,12 +68,14 @@ import {
 import { buildSubscriptionPatch } from "./subscription-patch";
 
 /**
- * True for the creator scope row: the unlabeled `user` filter the server adds
- * to a personal, org, or workflow mention line (api events/mention-scope.ts).
+ * The stored line's creator scope row, if it has one. It is read from the
+ * stored line, not the draft, so it stays hidden while the reader changes
+ * events.
  */
-function isCreatorScope(row: UiFilterRow, sub: EventSubscriptionWire, keys: ReadonlySet<string>): boolean {
+function creatorScopeRow(sub: EventSubscriptionWire, rows: readonly UiFilterRow[]): UiFilterRow | undefined {
   const team = sub.target.kind === "assistant" && sub.target.assistant === "team";
-  return !team && selectsSlackMention([...keys]) && row.field === "user" && row.op === "eq" && !row.label?.trim();
+  if (team || !selectsSlackMention(sub.eventKeys)) return undefined;
+  return rows.find((row) => toWireFilters([row]).some(isCreatorScopeFilter));
 }
 
 export function EditSubscriptionDialog({
@@ -117,8 +120,11 @@ export function EditSubscriptionDialog({
   });
   const [appearance, setAppearance] = useState<Appearance>(sub.target.appearance ?? {});
   const [name, setName] = useState(sub.name);
+  // Rows made once at mount (open time), so the creator scope row keeps its id.
+  const [storedRows] = useState(() => fromWireFilters(sub.filters));
+  const [creatorRowId] = useState(() => creatorScopeRow(sub, storedRows)?.id);
   const { keys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
-    services, sub.eventKeys, () => fromWireFilters(sub.filters),
+    services, sub.eventKeys, () => storedRows,
   );
   const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub.eventKeys, sub.filters));
   // Seeded from the stored target at mount, which is open time (see the
@@ -137,7 +143,7 @@ export function EditSubscriptionDialog({
   // has no workspace key, so an org rule cannot pin a thread here.
   const threadWorkspace = sub.ownerType === "user" ? "user" : sub.ownerType === "team" ? sub.ownerId : undefined;
   // The creator scope stays on the line but out of the filter editor.
-  const creatorRow = filterRows.find((row) => isCreatorScope(row, sub, keys));
+  const creatorRow = creatorRowId === undefined ? undefined : filterRows.find((row) => row.id === creatorRowId);
   const editableRows = creatorRow === undefined ? filterRows : filterRows.filter((row) => row.id !== creatorRow.id);
   const scopeWho = names.me !== undefined && names.me !== sub.createdBy
     ? `Only mentions by ${names.members?.[sub.createdBy] ?? "the person who set this up"}`
@@ -274,7 +280,7 @@ export function EditSubscriptionDialog({
           {creatorRow !== undefined && (
             <p data-testid="creator-scope" className="text-sm text-ink">
               {scopeWho}
-              <span className="block text-xs text-muted">Valet set this when the line was made. It cannot be changed.</span>
+              <span className="block text-xs text-muted">Valet added this when you made the line. It cannot be changed.</span>
             </p>
           )}
 

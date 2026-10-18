@@ -50,6 +50,6 @@ export function timeZoneOptions(include: readonly string[] = []): readonly { val
     }
     cached = zones.map((value) => ({ value, label: zoneLabel(value) }));
   }
-  const missing = include.filter((zone) => zone.length > 0 && !cached?.some((o) => o.value === zone));
+  const missing = [...new Set(include)].filter((zone) => zone.length > 0 && !cached?.some((o) => o.value === zone));
   return [...missing.map((value) => ({ value, label: zoneLabel(value) })), ...cached];
 }

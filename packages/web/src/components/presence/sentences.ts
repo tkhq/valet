@@ -219,6 +219,11 @@ const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; on
   "linear.reaction.remove": { when: ["someone", "removes a reaction"], one: "Removed reaction" },
 };
 
+/** True when the table names the key. A key that is not named falls back to derived words. */
+export function hasEventWords(key: string): boolean {
+  return EVENT_WORDS[key] !== undefined;
+}
+
 /**
  * The events the What step lists first, per service, in order. The rest of
  * the service's events sit under `More events`.
@@ -325,8 +330,20 @@ function isMentionKey(key: string): boolean {
   return key === "slack.app_mention" || key === "slack.*";
 }
 
+/**
+ * True for the creator scope filter the server adds to a personal, org, or
+ * workflow mention line (api events/mention-scope.ts): an unlabeled `user`
+ * filter with one value, as `eq` or a one-value `in`. The edit dialog uses
+ * the same test to keep the filter out of its editor.
+ */
+export function isCreatorScopeFilter(filter: EventSubscriptionFilterWire): boolean {
+  if (filter.field !== "user") return false;
+  const oneValue = filter.op === "eq" || (filter.op === "in" && Array.isArray(filter.value) && filter.value.length === 1);
+  return oneValue && !hasText(filter.label) && !(filter.labels?.some(hasText) ?? false);
+}
+
 function hasCreatorScope(filters: readonly EventSubscriptionFilterWire[]): boolean {
-  return filters.some((f) => f.field === "user" && (f.op === "eq" || f.op === "in") && !hasText(f.label) && !(f.labels?.some(hasText) ?? false));
+  return filters.some(isCreatorScopeFilter);
 }
 
 function mentionActor(sub: Pick<EventSubscriptionWire, "target" | "filters" | "createdBy">, names: SentenceNames): MentionActor {

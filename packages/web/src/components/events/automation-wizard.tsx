@@ -5,11 +5,12 @@ import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { placeFilter, type PreselectedPlace } from "~/components/presence/place-filter";
 import { runsInLabel, type SentencePart } from "~/components/presence/sentences";
 import { Sentence } from "~/components/presence/sentence";
-import { ServiceMark, SERVICE_NAMES } from "~/components/presence/service-mark";
 import { SentenceReview, type ReviewFact } from "./automation-review";
 import { wizardDraft, wizardSentenceParts, wizardWhenParts, type WhenService } from "./wizard-preview";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-preset";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
+import { EVENT_SERVICES, WhenDoStep, connectedServices, isWhenService, type Outcome } from "./when-do-step";
+import { ScheduleMatchStep, WEEKDAYS, cronFromDayAndTime } from "./schedule-step";
 /**
  * AutomationWizard — one flow for the creation surfaces that used to be
  * separate: an event subscription, a workflow event trigger, and a schedule.
@@ -54,8 +55,7 @@ import type {
   EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
 } from "@valet/api/wire";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { PluginSummary } from "@valet/api/wire";
+import { useEffect, useRef, useState } from "react";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { usePlugins } from "~/api/integrations";
 import { useIdentityLinks } from "~/api/queries";
@@ -81,7 +81,7 @@ import {
 } from "~/components/primitives";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { errorText } from "~/lib/error-text";
-import { browserTimeZone, timeZoneOptions } from "~/lib/time-zones";
+import { browserTimeZone } from "~/lib/time-zones";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
 import { useActiveWorkspace } from "~/components/workspace-clause";
@@ -93,9 +93,6 @@ interface SelectedChannel {
   label: string;
 }
 
-/** The outcome the reader picks first. It decides the steps and the store. */
-type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule" | "thread";
-
 /** The workspace that owns the event rule or scheduled prompt. */
 type AssistantChoice =
   | { kind: "assistant"; assistant: "user" }
@@ -105,47 +102,6 @@ type AssistantChoice =
 type TargetChoice = AssistantChoice | { kind: "workflow"; workflowId: string };
 
 type Step = 1 | 2 | 3 | 4;
-
-/** The services the When step offers, in the order a default is picked. */
-const EVENT_SERVICES: readonly WhenService[] = ["slack", "github", "linear"];
-
-/**
- * The When services that are connected, or null while unknown (loading or a
- * failed read). A service counts as connected when the reader connected it
- * or the organization's credential provides it, the same rule the
- * Integrations page groups by.
- */
-export function connectedServices(plugins: readonly PluginSummary[] | undefined): ReadonlySet<WhenService> | null {
-  if (plugins === undefined) return null;
-  const connected = new Set<WhenService>();
-  for (const plugin of plugins) {
-    const service = EVENT_SERVICES.find((s) => s === plugin.name);
-    if (service !== undefined && plugin.services.some((s) => s.connected || s.connect === "org")) connected.add(service);
-  }
-  return connected;
-}
-
-/** Days of the week as cron numbers, Monday first. */
-const WEEK: readonly { day: number; label: string }[] = [
-  { day: 1, label: "Mon" }, { day: 2, label: "Tue" }, { day: 3, label: "Wed" }, { day: 4, label: "Thu" },
-  { day: 5, label: "Fri" }, { day: 6, label: "Sat" }, { day: 0, label: "Sun" },
-];
-const WEEKDAYS: readonly number[] = [1, 2, 3, 4, 5];
-
-/**
- * The cron for days of the week and a time: `0 9 * * 1-5` for weekdays at
- * 09:00. Empty when no day is picked or the time does not parse.
- */
-export function cronFromDayAndTime(days: ReadonlySet<number>, time: string): string {
-  const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
-  if (match === null || days.size === 0) return "";
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  if (hour > 23 || minute > 59) return "";
-  const sorted = [...days].sort((a, b) => a - b);
-  const dow = sorted.length === 7 ? "*" : sorted.join(",") === WEEKDAYS.join(",") ? "1-5" : sorted.join(",");
-  return `${minute} ${hour} * * ${dow}`;
-}
 
 /** The wizard's first target: the active workspace's assistant. The store
  * stamps the owner off the target, so this is how a rule is born in the
@@ -165,32 +121,20 @@ function threadWorkspaceFor(target: TargetChoice): string | undefined {
   return undefined;
 }
 
+/**
+ * The steps of a flow. Every flow has four, so the count the header shows
+ * never changes while the reader moves between choices or steps. A reply
+ * gives Runs in its own step.
+ */
 function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
   if (outcome === "reply") {
-    return { labels: ["When", "Reply", "Review"], count: 3 };
+    return { labels: ["When", "Reply", "Runs in", "Review"], count: 4 };
   }
   if (outcome === "schedule") {
     return { labels: ["When", "Schedule", "Do", "Review"], count: 4 };
   }
   return { labels: ["When", "What", "Do", "Review"], count: 4 };
 }
-
-/** The Do choices. `reply` and `thread` are Slack only. */
-type DoChoice = "reply" | "thread" | "notify" | "workflow";
-
-const WHEN_CHOICES: { value: WhenService | "schedule"; title: string }[] = [
-  { value: "slack", title: "Something happens in Slack" },
-  { value: "github", title: "Something happens on GitHub" },
-  { value: "linear", title: "Something happens in Linear" },
-  { value: "schedule", title: "On a schedule" },
-];
-
-const DO_CHOICES: { value: DoChoice; title: string; slackOnly: boolean }[] = [
-  { value: "reply", title: "Reply", slackOnly: true },
-  { value: "thread", title: "Follow a Slack thread", slackOnly: true },
-  { value: "notify", title: "Work on it", slackOnly: false },
-  { value: "workflow", title: "Run a workflow", slackOnly: false },
-];
 
 /** The outcome the wizard opens on. A routine opens on the schedule, a
  * preselected workflow on a workflow rule, and a place outside Slack on a
@@ -449,11 +393,13 @@ export function AutomationWizard({
   const ruleKind = isSchedule ? "routine" : "presence";
   // The picked thread's title names an existing pin in the sentences.
   const pinTitle = threadPolicy?.mode === "existing" ? threadChoice?.title : undefined;
+  const pickThread = (policy: AssistantThreadPolicy | null, title?: string) =>
+    setThreadChoice({ policy, workspace: threadWorkspace, ...(title !== undefined ? { title } : {}) });
   const runsIn = (idPrefix: string) => runsInOpen ? (
     <RunsInField
       idPrefix={idPrefix}
       value={threadPolicy}
-      onChange={(policy, title) => setThreadChoice({ policy, workspace: threadWorkspace, ...(title !== undefined ? { title } : {}) })}
+      onChange={pickThread}
       subjectKind={subjectKind}
       ruleKind={ruleKind}
       workspace={threadWorkspace}
@@ -505,7 +451,8 @@ export function AutomationWizard({
   function canAdvance(): boolean {
     if (step === 1) return true; // An outcome always has a value.
     if (outcome === "reply") {
-      return step === 2 && replyScoped && threadReady && (!replyTeam || targetReady);
+      if (step === 2) return replyScoped && (!replyTeam || targetReady);
+      return step === 3 && threadReady;
     }
     if (step === 2) {
       if (outcome === "thread") return threadPreset !== null;
@@ -697,7 +644,7 @@ export function AutomationWizard({
         description={replyTeam ? `Choose where ${replyTeam.name} replies and which assistant answers.` : "Choose when Valet acts and what it does."}
         className="max-w-lg"
       >
-        {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 2 · {step === 2 ? "Reply" : "Review"}</p> : <StepHeader step={step} plan={plan} />}
+        {replyTeam ? <p className="mb-4 text-xs text-muted">Step {step - 1} of 3 · {plan.labels[step - 1]}</p> : <StepHeader step={step} plan={plan} />}
         <p aria-live="polite" data-testid="wizard-preview" className="mb-4 mt-2 rounded-md border border-line px-3 py-2 text-sm leading-relaxed text-ink">
           <Sentence parts={previewParts} links={false} />
         </p>
@@ -734,7 +681,17 @@ export function AutomationWizard({
               onPromptTemplatesChange={setPromptTemplates}
             />
           )}
-          {step === 2 && outcome === "reply" && runsIn("automation-reply")}
+          {step === 3 && outcome === "reply" && (
+            <RunsInField
+              idPrefix="automation-reply"
+              value={threadPolicy}
+              onChange={pickThread}
+              subjectKind={subjectKind}
+              ruleKind={ruleKind}
+              workspace={threadWorkspace}
+              eventKeys={[SLACK_APP_MENTION]}
+            />
+          )}
 
           {step === 2 && outcome === "thread" && <div className="space-y-2">
             <Label htmlFor="slack-thread-link">Slack thread link</Label>
@@ -887,84 +844,6 @@ function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; coun
     <p className="text-xs font-medium text-muted">
       Step {step} of {plan.count} — {plan.labels[step - 1]}
     </p>
-  );
-}
-
-function isWhenService(service: string): service is WhenService {
-  return EVENT_SERVICES.some((s) => s === service);
-}
-
-/**
- * Step 1: When, then Do. Each When choice shows its service mark. A service
- * that is not connected is greyed and disabled, with a link to connect it.
- * Advanced picks raw events under a disclosure.
- */
-function WhenDoStep({ outcome, service, fixedService, fixedWorkflow, connected, onWhenChange, onDoChange, onAdvanced }: {
-  outcome: Outcome;
-  service: WhenService;
-  /** A place's service: the only When choice, selected. */
-  fixedService: WhenService | undefined;
-  /** A preselected workflow fixes Do on Run a workflow. */
-  fixedWorkflow: boolean;
-  /** The connected services, or null while unknown. */
-  connected: ReadonlySet<WhenService> | null;
-  onWhenChange: (next: WhenService | "schedule") => void;
-  onDoChange: (next: Outcome) => void;
-  onAdvanced: () => void;
-}) {
-  const when = outcome === "schedule" ? "schedule" : outcome === "advanced" ? null : service;
-  const whenChoices = fixedService !== undefined ? WHEN_CHOICES.filter((c) => c.value === fixedService) : WHEN_CHOICES;
-  const doChoices = DO_CHOICES.filter((c) => service === "slack" || !c.slackOnly);
-  return (
-    <div className="space-y-4">
-      <fieldset className="space-y-2">
-        <legend className="mb-1 text-sm font-medium text-ink">When</legend>
-        {whenChoices.map((c) => {
-          // A place's own service stays open: the place exists, so its events arrive.
-          const off = c.value !== "schedule" && fixedService === undefined && connected !== null && !connected.has(c.value);
-          return (
-            <div key={c.value} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 sm:min-h-0">
-              <label className={`flex items-center gap-3 text-sm ${off ? "text-muted" : "text-ink"}`}>
-                <input type="radio" name="wizard-when" checked={when === c.value} disabled={off} onChange={() => onWhenChange(c.value)} />
-                <ServiceMark service={c.value} size="lg" className={off ? "opacity-60" : undefined} />
-                {c.title}
-              </label>
-              {off && c.value !== "schedule" && (
-                <Link to="/integrations" className="ml-auto text-xs text-muted underline hover:text-ink">
-                  Connect {SERVICE_NAMES[c.value]} first
-                </Link>
-              )}
-            </div>
-          );
-        })}
-      </fieldset>
-      {when !== "schedule" && (
-        <fieldset className="space-y-2">
-          <legend className="mb-1 text-sm font-medium text-ink">Do</legend>
-          {doChoices.map((c) => (
-            <label key={c.value} className="flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
-              <input
-                type="radio"
-                name="wizard-do"
-                checked={outcome === c.value}
-                disabled={fixedWorkflow && c.value !== "workflow"}
-                onChange={() => onDoChange(c.value)}
-              />
-              {c.title}
-            </label>
-          ))}
-        </fieldset>
-      )}
-      <details open={outcome === "advanced"} className="text-sm text-ink">
-        <summary className="cursor-pointer text-sm text-muted">Advanced: pick events and filters</summary>
-        <div className="mt-2 space-y-1">
-          <p className="text-xs text-muted">Pick raw event keys and filters, then what Valet does.</p>
-          <Button type="button" variant="secondary" size="sm" aria-pressed={outcome === "advanced"} disabled={fixedWorkflow} onClick={onAdvanced}>
-            Pick raw events
-          </Button>
-        </div>
-      </details>
-    </div>
   );
 }
 
@@ -1314,95 +1193,6 @@ function ChannelMultiSelect({
   );
 }
 
-/**
- * The schedule step: days of the week and a time in a timezone make the
- * cron. A cron typed under Advanced replaces them.
- */
-function ScheduleMatchStep({
-  days,
-  onDaysChange,
-  time,
-  onTimeChange,
-  cron,
-  cronOverride,
-  onCronChange,
-  timezone,
-  onTimezoneChange,
-}: {
-  days: ReadonlySet<number>;
-  onDaysChange: (v: ReadonlySet<number>) => void;
-  time: string;
-  onTimeChange: (v: string) => void;
-  /** The effective cron: the override, else the one the days and time make. */
-  cron: string;
-  cronOverride: string | null;
-  onCronChange: (v: string) => void;
-  timezone: string;
-  onTimezoneChange: (v: string) => void;
-}) {
-  const zones = useMemo(() => timeZoneOptions([timezone, "UTC"]), [timezone]);
-  function toggle(day: number) {
-    const next = new Set(days);
-    if (next.has(day)) next.delete(day);
-    else next.add(day);
-    onDaysChange(next);
-  }
-  return (
-    <div className="space-y-4">
-      <fieldset className="space-y-3" disabled={cronOverride !== null}>
-        <legend className="mb-1 text-sm font-medium text-ink">Day and time</legend>
-        <div role="group" aria-label="Days" className="flex flex-wrap gap-x-3 gap-y-1">
-          {WEEK.map(({ day, label }) => (
-            <label key={day} className="flex min-h-11 items-center gap-1.5 text-sm text-ink sm:min-h-0">
-              <input type="checkbox" checked={days.has(day)} onChange={() => toggle(day)} />
-              {label}
-            </label>
-          ))}
-        </div>
-        {days.size === 0 && cronOverride === null && <p className="text-xs text-danger-500">Pick at least one day.</p>}
-        <div className="grid gap-1">
-          <Label htmlFor="automation-time">Time</Label>
-          <Input id="automation-time" type="time" value={time} onChange={(e) => onTimeChange(e.target.value)} className="w-32" />
-        </div>
-      </fieldset>
-      {/* The timezone applies to an Advanced cron too, so it stays open when one is typed. */}
-      <div className="grid min-w-0 gap-1">
-        <Label htmlFor="automation-timezone">Timezone</Label>
-        <select
-          id="automation-timezone"
-          value={timezone}
-          onChange={(e) => onTimezoneChange(e.target.value)}
-          className="min-h-11 w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
-        >
-          {zones.map((zone) => (
-            <option key={zone.value} value={zone.value}>{zone.label}</option>
-          ))}
-        </select>
-      </div>
-      <details open={cronOverride !== null} className="text-sm text-ink">
-        <summary className="cursor-pointer text-sm text-muted">Advanced</summary>
-        <div className="mt-2 grid gap-1">
-          <Label htmlFor="automation-cron">Cron</Label>
-          <Input
-            id="automation-cron"
-            value={cron}
-            onChange={(e) => onCronChange(e.target.value)}
-            placeholder="0 9 * * 1-5"
-          />
-          <p className="text-xs text-muted">
-            Five fields: minute hour day-of-month month day-of-week. A cron you type here replaces the day and time.
-          </p>
-          {cronOverride !== null && (
-            <Button type="button" variant="ghost" size="sm" className="justify-self-start" onClick={() => onCronChange("")}>
-              Use the day and time
-            </Button>
-          )}
-        </div>
-      </details>
-    </div>
-  );
-}
-
 function ThenStep({
   target,
   onTargetChange,
@@ -1454,7 +1244,7 @@ function ThenStep({
                   onTargetChange({ kind: "assistant", assistant: "team", teamId: scopedTeam.id })
                 }
               />
-              {scopedTeam.name}&rsquo;s assistant
+              {scopedTeam.name}'s assistant
             </label>
           )}
 
@@ -1465,7 +1255,7 @@ function ThenStep({
               checked={target.kind === "assistant" && target.assistant === "org"}
               onChange={() => onTargetChange({ kind: "assistant", assistant: "org" })}
             />
-            The organization&rsquo;s assistant
+            The organization's assistant
           </label>
         </>
       )}

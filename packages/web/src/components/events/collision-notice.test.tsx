@@ -11,18 +11,20 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ),
 }));
 
+import { line } from "~/components/presence/test-fixtures";
 import { CollisionNotice } from "./collision-notice";
 
-function line(id: string, over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
-  return {
-    id, name: id, ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"],
+/** A team mention line in #incidents that carries a raw user filter. */
+function teamMention(id: string): EventSubscriptionWire {
+  return line(id, {
+    ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"],
     filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }, { field: "user", op: "eq", value: "U0ABC" }],
-    target: { kind: "assistant", assistant: "team", teamId: "sre" }, enabled: true, createdBy: "u-1", createdAt: 1, updatedAt: 1, ...over,
-  };
+    target: { kind: "assistant", assistant: "team", teamId: "sre" },
+  });
 }
 
 const blocking: EventSubscriptionCollisionsWire = {
-  blocking: [{ subscription: line("Incident mentions"), relation: "equal", sharedKeys: ["slack.app_mention"] }],
+  blocking: [{ subscription: teamMention("Incident mentions"), relation: "equal", sharedKeys: ["slack.app_mention"] }],
   overlapping: [],
 };
 

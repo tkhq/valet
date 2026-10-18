@@ -34,6 +34,7 @@ import {
   type WorkflowNames,
 } from "~/components/presence/sentences";
 import type { WizardOutcome } from "~/components/presence/thread-policy-copy";
+import { SERVICE_NAMES } from "~/components/presence/service-mark";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-preset";
 
 /** The service a line listens to, as the wizard's When step names it. */
@@ -168,7 +169,6 @@ export function wizardDraft(state: WizardState): WizardDraft {
   return { kind: "presence", sub, service: state.service };
 }
 
-const SERVICE_NAMES: Readonly<Record<WhenService, string>> = { slack: "Slack", github: "GitHub", linear: "Linear" };
 
 /** The filter fields that name a place a token can link to. */
 const PLACE_FIELDS = new Set(["channel", "repo", "team", "identifier"]);

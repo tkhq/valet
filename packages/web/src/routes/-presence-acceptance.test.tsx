@@ -613,6 +613,9 @@ describe("Presence hub acceptance (P1 to P12)", () => {
     await userEvent.click(wizard.getByRole("button", { name: "Next" }));
     expect(wizard.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
     await userEvent.click(wizard.getByRole("button", { name: "Next" }));
+    // A reply has four steps like every flow: Runs in has its own.
+    expect(wizard.getByText("Step 3 of 4 — Runs in")).toBeTruthy();
+    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
     await userEvent.type(wizard.getByLabelText("Name"), "Incident replies");
     await userEvent.click(wizard.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(created).toHaveLength(1));

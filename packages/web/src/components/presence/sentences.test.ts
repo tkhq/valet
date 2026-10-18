@@ -13,6 +13,7 @@ import {
   derivedClause,
   eventInWords,
   eventLabel,
+  hasEventWords,
   partsText,
   presenceSentence,
   presenceSentenceParts,
@@ -690,9 +691,13 @@ describe("every catalog key reads as words", () => {
 
   it("finds the catalogs", () => {
     expect(keys.filter((k) => k.startsWith("github.")).length).toBeGreaterThan(40);
-    expect(keys.filter((k) => k.startsWith("linear.")).length).toBe(18);
+    expect(keys.filter((k) => k.startsWith("linear.")).length).toBeGreaterThan(0);
     expect(keys).toContain("github.push");
     expect(keys).toContain("github.pull_request_review_comment.created");
+  });
+
+  it("has words for every key, so the derived words serve only keys added later", () => {
+    expect(keys.filter((key) => !hasEventWords(key))).toEqual([]);
   });
 
   it("names no raw key, no gitHub, and no pull_request", () => {

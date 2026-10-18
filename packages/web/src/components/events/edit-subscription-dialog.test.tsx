@@ -209,6 +209,16 @@ describe("EditSubscriptionDialog in words", () => {
     expect(patch.mock.calls[0][0].body).toMatchObject({ anyChannel: true, filters: [{ field: "user", op: "eq", value: "U0ABC" }] });
   });
 
+  it("hides a one-value in scope too, and keeps it hidden when the mention event is unchecked", () => {
+    edit({ ...scoped, filters: [scoped.filters[0]!, { field: "user", op: "in", value: ["U0ABC"] }] });
+    expect(screen.getByTestId("creator-scope")).toBeTruthy();
+    expect(screen.getAllByLabelText("Filter field")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone posts a message" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Someone mentions Valet" }));
+    expect(screen.getAllByLabelText("Filter field")).toHaveLength(1);
+    expect(screen.queryByDisplayValue("U0ABC")).toBeNull();
+  });
+
   it("names the creator when the viewer is someone else", () => {
     const close = vi.fn();
     render(
