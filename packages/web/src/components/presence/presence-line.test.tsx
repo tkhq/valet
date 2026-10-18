@@ -34,18 +34,18 @@ vi.mock("~/api/client", async (importOriginal) => {
   };
 });
 vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: [] } }) }));
-vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }) }));
+vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
 vi.mock("~/components/events/edit-subscription-dialog", () => ({
   EditSubscriptionDialog: ({ sub }: { sub: EventSubscriptionWire }) => <p>Editing {sub.name}</p>,
 }));
 
 import { PresenceLine } from "./presence-line";
+import { line } from "./test-fixtures";
 
-function line(over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
-  return {
-    id: "R1", name: "Incident mentions", ownerType: "user", ownerId: "u-001", eventKeys: ["slack.app_mention"], filters: [],
-    target: { kind: "assistant", thread: { mode: "new" } }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, ...over,
-  };
+function mention(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
+  return line("R1", {
+    name: "Incident mentions", eventKeys: ["slack.app_mention"], target: { kind: "assistant", thread: { mode: "new" } }, ...over,
+  });
 }
 
 function renderLine(sub: EventSubscriptionWire) {
@@ -60,7 +60,7 @@ function renderLine(sub: EventSubscriptionWire) {
 beforeEach(() => {
   patchEventSubscription.mockReset();
   deleteEventSubscription.mockReset();
-  patchEventSubscription.mockImplementation(async (id, body) => ({ ...line({}), id, enabled: body.enabled ?? true }));
+  patchEventSubscription.mockImplementation(async (id, body) => ({ ...mention({}), id, enabled: body.enabled ?? true }));
   deleteEventSubscription.mockResolvedValue({ ok: true });
 });
 
@@ -68,7 +68,7 @@ afterEach(cleanup);
 
 describe("PresenceLine", () => {
   it("sets the sentence and its controls as a two-column row with the ink wash on hover", () => {
-    renderLine(line({}));
+    renderLine(mention({}));
     const sentence = screen.getByRole("link", { name: "When someone mentions Valet, reply in a new thread." });
     expect(sentence.getAttribute("href")).toBe("/presence/rules/R1");
     const row = sentence.closest("[data-presence-line]");
@@ -80,20 +80,20 @@ describe("PresenceLine", () => {
   });
 
   it("turns the line off from the small switch", async () => {
-    renderLine(line({}));
+    renderLine(mention({}));
     await userEvent.click(screen.getByRole("switch", { name: "Turn off Incident mentions" }));
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R1", { enabled: false }));
   });
 
   it("keeps another member's personal line read-only", async () => {
-    renderLine(line({ ownerId: "u-002" }));
+    renderLine(mention({ ownerId: "u-002" }));
     expect(screen.getByRole("switch", { name: "Turn off Incident mentions" }).hasAttribute("disabled")).toBe(true);
     await userEvent.click(screen.getByRole("button", { name: "More for Incident mentions" }));
     for (const item of screen.getAllByRole("menuitem")) expect(item.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("deletes the line after the confirm", async () => {
-    renderLine(line({}));
+    renderLine(mention({}));
     await userEvent.click(screen.getByRole("button", { name: "More for Incident mentions" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(screen.getByText("Valet stops listening for this here. Its past activity stays.")).toBeTruthy();

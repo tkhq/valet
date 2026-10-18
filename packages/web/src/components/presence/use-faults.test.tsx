@@ -15,15 +15,13 @@ import type {
   WorkflowTriggerItem,
 } from "@valet/api/wire";
 import { describe, expect, it, vi } from "vitest";
+import { PIN_UNAVAILABLE } from "./problem-badge";
+import { line } from "./test-fixtures";
 
 const NOW = Date.now();
-const PIN = "Pick another thread for this rule in Presence.";
 
 function rule(id: string, over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
-  return {
-    id, name: id, ownerType: "user", ownerId: "u-001", eventKeys: ["slack.app_mention"], filters: [],
-    target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, ...over,
-  };
+  return line(id, { eventKeys: ["slack.app_mention"], ...over });
 }
 
 function routine(id: string, disabledReason?: string): WorkflowTriggerItem {
@@ -57,7 +55,7 @@ const RULES = [
   rule("R1", {
     filters: [{ field: "channel", op: "eq", value: "C900" }],
     target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" } },
-    problem: PIN,
+    problem: PIN_UNAVAILABLE,
   }),
   rule("R2", { eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/api" }] }),
   rule("R3", { problem: "Reconnect Slack in Integrations." }),
@@ -103,9 +101,12 @@ describe("useFaults", () => {
       ["routine", "S2 is off: The pinned thread is archived."],
       ["delivery", "Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver"],
     ]);
-    expect([...result.current.faultedPlaces]).toEqual(["slack:T1/C900", "slack:T1"]);
-    // A line that names one place carries its name for the banner's lead; a service-wide line has none.
-    expect(result.current.faults.map((fault) => (fault.kind === "line" ? fault.place : null))).toEqual(["#incidents", undefined, null, null]);
+    // A dead delivery marks its line's place row too, so a collapsed group with only that fault stays open.
+    expect([...result.current.faultedPlaces]).toEqual(["slack:T1/C900", "slack:T1", "github:acme/api"]);
+    // Each line or delivery fault leads with its place: the place it names, else its service row.
+    expect(result.current.faults.map((fault) => (fault.kind === "routine" ? null : fault.lead))).toEqual([
+      "In #incidents,", "Everywhere in Slack,", null, "In acme/api,",
+    ]);
     expect(result.current.isPending).toBe(false);
     expect(logCalls.at(-1)?.problems).toBe(true);
   });
@@ -119,7 +120,7 @@ describe("faultsOf", () => {
   });
 
   it("lists one fault once: a line's problem and the dead delivery that caused it", () => {
-    const broken = rule("R4", { problem: PIN, updatedAt: 1 });
+    const broken = rule("R4", { problem: PIN_UNAVAILABLE, updatedAt: 1 });
     const log = [logItem("ev-1", NOW - 60_000, [delivery("dead", "R4")]), logItem("ev-2", NOW - 30_000, [delivery("dead", "R4")])];
     const { faults } = faultsOf({ ...base, rules: [broken], log });
     expect(faults.map((fault) => fault.kind)).toEqual(["line"]);
@@ -143,5 +144,7 @@ describe("faultsOf", () => {
       ["R5", "ev-2"],
       ["R-other", "ev-2"],
     ]);
+    // A line this list does not hold leads with the event's place.
+    expect(faults.map((fault) => (fault.kind === "delivery" ? fault.lead : null))).toEqual(["Everywhere in Slack,", "In acme/api#14,"]);
   });
 });

@@ -1,6 +1,6 @@
 /** Labels for the problem reasons ingest, the webhook routes, and the
  * channel host record, and the stage each one happens in. An unknown reason
- * falls back to its raw string rather than hiding. Used by the Activity tab. */
+ * falls back to its raw string rather than hiding. Used by the Activity page. */
 const REASON_LABEL: Record<string, string> = {
   slack_classifier_rejected: "Classification rejected",
   no_subscription_match: "No one listening",

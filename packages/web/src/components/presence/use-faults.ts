@@ -14,7 +14,7 @@ import { usePresencePlaces } from "~/api/presence";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
-import { blockSubjectFor, namedPlaceLabel } from "./overview-groups";
+import { blockSubjectFor, faultLead } from "./overview-groups";
 import { PIN_UNAVAILABLE, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routines-pane";
 import { activitySentence, type ThreadTitles } from "./sentences";
@@ -23,10 +23,10 @@ import { activitySentence, type ThreadTitles } from "./sentences";
 export const FAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export type Fault =
-  /** `place` names the one place the line names, for the banner's `In <place>,` lead. */
-  | { kind: "line"; sub: EventSubscriptionWire; text: string; place?: string }
+  /** `lead` names the line's place before the fault: `In acme/api,` or `Everywhere in Slack,`. */
+  | { kind: "line"; sub: EventSubscriptionWire; text: string; lead?: string }
   | { kind: "routine"; routine: Routine; text: string }
-  | { kind: "delivery"; eventId: string; subscriptionId: string; text: string };
+  | { kind: "delivery"; eventId: string; subscriptionId: string; text: string; lead?: string };
 
 export interface Faults {
   faults: Fault[];
@@ -56,10 +56,13 @@ export function faultsOf(input: {
   const offRoutines = input.triggers.filter(isRoutine).filter((routine) => (routine.detail.disabledReason ?? "") !== "");
   const listed = new Set(broken.map((rule) => rule.id));
   const editedAt = new Map(input.rules.map((rule) => [rule.id, rule.updatedAt]));
+  const byId = new Map(input.rules.map((rule) => [rule.id, rule]));
+  // The lines whose fault marks their place row, so a collapsed group with a fault stays open.
+  const faultedLines: EventSubscriptionWire[] = [...broken];
   const faults: Fault[] = [
     ...broken.map((sub): Fault => {
-      const place = namedPlaceLabel(sub, input.places);
-      return { kind: "line", sub, text: lineFaultText(sub, input.titles), ...(place !== null ? { place } : {}) };
+      const lead = faultLead(sub, input.places);
+      return { kind: "line", sub, text: lineFaultText(sub, input.titles), ...(lead !== null ? { lead } : {}) };
     }),
     ...offRoutines.map((routine): Fault => ({
       kind: "routine", routine, text: `${routine.name} is off: ${routine.detail.disabledReason ?? ""}`,
@@ -76,16 +79,21 @@ export function faultsOf(input: {
       const edited = editedAt.get(delivery.subscriptionId);
       if (edited !== undefined && edited >= (delivery.deliveredAt ?? item.at)) continue;
       listed.add(delivery.subscriptionId);
+      const line = byId.get(delivery.subscriptionId);
+      if (line !== undefined) faultedLines.push(line);
+      // The line's place leads; a line this list does not hold falls back to the event's place.
+      const lead = line !== undefined ? faultLead(line, input.places) : item.place !== undefined ? `In ${item.place},` : null;
       faults.push({
         kind: "delivery",
         eventId: item.id,
         subscriptionId: delivery.subscriptionId,
         text: activitySentence({ eventKey: item.eventKey }, delivery, item.place !== undefined ? { place: item.place } : {}),
+        ...(lead !== null ? { lead } : {}),
       });
     }
   }
   const faultedPlaces = new Set<string>();
-  for (const sub of broken) {
+  for (const sub of faultedLines) {
     const subject = blockSubjectFor(sub, input.places);
     if (subject !== null) faultedPlaces.add(subject);
   }

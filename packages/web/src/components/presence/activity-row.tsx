@@ -1,5 +1,5 @@
 /**
- * One stored event in the Activity tab, as one sentence
+ * One stored event on the Activity page, as one sentence
  * (docs/specs/2026-10-16-presence-hub-design.md Part E step 1):
  * `<event in words> in <place> → <outcome>`. A thread in the outcome links
  * to the thread, and a disclosure keeps the deliveries and the receipt

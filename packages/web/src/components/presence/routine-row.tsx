@@ -20,17 +20,22 @@ import {
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
+import { formatDateTime } from "~/lib/format-when";
 import { PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
 import { ThreadProblem } from "./problem-badge";
 import { routineReadOnly } from "./routine-page";
 import { useRoutineActions, type Routine } from "./routines-pane";
 import { cronInWords, scheduleZone } from "./sentences";
 
-/** `Next <time>`, `Due now`, or `Off` (spec Part B step 6). */
-export function routineNext(routine: Routine, now: number = Date.now()): string {
+/** `Next <date and time>`, `Due now`, or `Off` (spec Part B step 6). `format` pins the locale and zone in tests. */
+export function routineNext(
+  routine: Pick<Routine, "enabled" | "detail">,
+  now: number = Date.now(),
+  format: { locale?: string; timeZone?: string } = {},
+): string {
   if (!routine.enabled) return "Off";
   const next = routine.detail.nextFireAt;
-  return next - now <= 0 ? "Due now" : `Next ${new Date(next).toLocaleString()}`;
+  return next - now <= 0 ? "Due now" : `Next ${formatDateTime(next, format)}`;
 }
 
 export function RoutineRosterRow({ routine, sentence, now, children }: {
@@ -60,7 +65,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
   const prompt = routine.detail.prompt?.trim() ?? "";
 
   return (
-    <section aria-label={schedule} className={ROSTER_ROW_CLASS}>
+    <section aria-label={routine.name} className={ROSTER_ROW_CLASS}>
       <div className="min-w-0 pt-0.5">
         <p className={PLACE_NAME_CLASS}>{schedule}</p>
         <div className={PLACE_META_CLASS}>

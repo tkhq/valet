@@ -12,7 +12,7 @@
  * collapses to its heading and count. A group with a fault stays open, and
  * so does every place group while the filter has text.
  */
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
@@ -105,17 +105,15 @@ export function Overview() {
         <OverviewBody
           groups={overviewGroups(data.places, data.lines, faultedPlaces)}
           routines={data.triggers.filter(isRoutine)}
-          faultedPlaces={faultedPlaces}
         />
       )}
     </div>
   );
 }
 
-function OverviewBody({ groups, routines, faultedPlaces }: {
+function OverviewBody({ groups, routines }: {
   groups: OverviewGroup[];
   routines: Routine[];
-  faultedPlaces: ReadonlySet<string>;
 }) {
   const [filter, setFilter] = useState("");
   if (groups.length === 0 && routines.length === 0) return <Onboarding />;
@@ -141,7 +139,7 @@ function OverviewBody({ groups, routines, faultedPlaces }: {
           name={SERVICE_NAMES[group.service]}
           count={countText(group.blocks.length, "place")}
           collapsing={collapsing}
-          open={filtering || group.blocks.some((block) => faultedPlaces.has(block.subject))}
+          open={filtering || group.blocks.some((block) => block.hasFault)}
         >
           {group.blocks.map((block) => <PlaceRow key={block.subject} block={block} />)}
         </Group>
@@ -173,9 +171,10 @@ function GroupHeading({ id, name, count }: { id: string; name: string; count: st
 
 /**
  * One group of the roster (spec Part B steps 3 and 8). Past the threshold
- * the group is a disclosure whose summary is its heading. `open` follows
- * the faults and the filter, and the reader's own toggle wins until `open`
- * changes.
+ * the group is a disclosure whose summary is its heading. `open` is true
+ * while the group has a fault or the filter has text. The disclosure opens
+ * when `open` turns true, until the reader toggles it. It never closes on
+ * its own: a fix inside it, or a dialog it holds, must not vanish.
  */
 function Group({ id, name, count, collapsing, open, children }: {
   id: string;
@@ -185,6 +184,11 @@ function Group({ id, name, count, collapsing, open, children }: {
   open: boolean;
   children: ReactNode;
 }) {
+  const [shown, setShown] = useState(open);
+  const userTouched = useRef(false);
+  useEffect(() => {
+    if (open && !userTouched.current) setShown(true);
+  }, [open]);
   if (!collapsing) {
     return (
       <section aria-labelledby={id}>
@@ -195,8 +199,16 @@ function Group({ id, name, count, collapsing, open, children }: {
   }
   return (
     <section aria-labelledby={id}>
-      {/* The key remounts the element when `open` changes, so the new value applies. */}
-      <details key={String(open)} open={open}>
+      <details
+        open={shown}
+        onToggle={(event) => {
+          // The browser also fires `toggle` when `shown` changes the element, so only a change is the reader's.
+          const next = event.currentTarget.open;
+          if (next === shown) return;
+          userTouched.current = true;
+          setShown(next);
+        }}
+      >
         <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
           <GroupHeading id={id} name={name} count={count} />
         </summary>

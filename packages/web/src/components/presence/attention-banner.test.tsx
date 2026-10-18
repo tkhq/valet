@@ -33,7 +33,7 @@ vi.mock("~/api/client", async (importOriginal) => {
     },
   };
 });
-vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }) }));
+vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
 vi.mock("./thread-picker", () => ({
   ThreadPicker: ({ workspace, onPick }: {
     workspace: string;
@@ -46,17 +46,18 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { AttentionBanner } from "./attention-banner";
+import { PIN_UNAVAILABLE } from "./problem-badge";
+import { PLATFORM_CI, line } from "./test-fixtures";
 import type { Fault } from "./use-faults";
 import type { Routine } from "./routines-pane";
 
-const PIN = "Pick another thread for this rule in Presence.";
 
-const R4: EventSubscriptionWire = {
-  id: "R4", name: "CI failures", ownerType: "user", ownerId: "u-001", eventKeys: ["github.check_run.completed"],
+const R4 = line("R4", {
+  name: "CI failures", eventKeys: ["github.check_run.completed"],
   filters: [{ field: "repo", op: "eq", value: "acme/api" }],
   target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" } },
-  enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, problem: PIN,
-};
+  problem: PIN_UNAVAILABLE,
+});
 
 const S2 = {
   kind: "schedule", id: "S2", name: "Morning summary", enabled: false,
@@ -68,7 +69,7 @@ const S2 = {
 const S2_ROUTINE: Routine = S2;
 
 const FAULTS: Fault[] = [
-  { kind: "line", sub: R4, text: "Platform CI is archived. Pick another thread:", place: "acme/api" },
+  { kind: "line", sub: R4, text: "Platform CI is archived. Pick another thread:", lead: "In acme/api," },
   { kind: "routine", routine: S2_ROUTINE, text: "Morning summary is off: The pinned thread is archived." },
   {
     kind: "delivery", eventId: "ev-14", subscriptionId: "R7",
@@ -85,7 +86,7 @@ beforeEach(() => {
   listThreads.mockReset();
   patchEventSubscription.mockReset();
   listThreads.mockImplementation(async (_sessionId, opts) => ({
-    threads: opts?.archived ? [{ id: "t-ci", sessionId: "s-u", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1, archivedAt: 2 }] : [],
+    threads: opts?.archived ? [PLATFORM_CI] : [],
   }));
   patchEventSubscription.mockImplementation(async (id) => ({ ...R4, id, problem: undefined }));
 });
@@ -114,6 +115,27 @@ describe("AttentionBanner", () => {
     const problem = await screen.findByText("Platform CI is archived. Pick another thread:");
     expect(problem.textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     expect(within(problem).getByText("In acme/api,").className).toContain("text-muted");
+  });
+
+  it("leads a service-wide line with its service row, and a dead delivery with its place", async () => {
+    const anywhere = line("A", {
+      name: "Mentions anywhere", eventKeys: ["slack.app_mention"], problem: "Reconnect Slack in Integrations.",
+    });
+    renderBanner([
+      { kind: "line", sub: anywhere, text: "Reconnect Slack in Integrations.", lead: "Everywhere in Slack," },
+      {
+        kind: "delivery", eventId: "ev-14", subscriptionId: "R7", lead: "In acme/api,",
+        text: "Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver",
+      },
+    ]);
+    const items = within(screen.getByRole("region", { name: "Needs attention" })).getAllByRole("listitem");
+    expect((await within(items[0]!).findByText("Reconnect Slack in Integrations.")).textContent)
+      .toBe("Everywhere in Slack, Reconnect Slack in Integrations.");
+    expect(items[1]!.textContent).toBe("In acme/api, Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver");
+    expect(within(items[1]!).getByText("In acme/api,").className).toContain("text-muted");
+    expect(within(items[1]!).getByRole("link").textContent).toBe(
+      "Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver",
+    );
   });
 
   it("renders each fault with its fix, and no bare count", async () => {

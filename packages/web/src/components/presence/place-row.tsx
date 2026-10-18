@@ -19,9 +19,7 @@ import type { PlaceBlockData } from "./overview-groups";
 import { PresenceLine } from "./presence-line";
 import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
 import { SERVICE_NAMES } from "./places";
-
-/** The filter fields that name a place in a sentence. */
-const PLACE_FIELDS = new Set(["channel", "repo", "team", "identifier"]);
+import { SENTENCE_PLACE_FIELD_SET } from "./sentences";
 
 /** The roster's grid: a 200px place column and the sentence column; one column at phone width. */
 export const ROSTER_ROW_CLASS =
@@ -43,7 +41,7 @@ export const PLACE_META_CLASS = "mt-1.5 grid gap-0.5 text-xs tabular-nums text-m
  * there that names places (`in #a or #b`) keeps them.
  */
 export function keepsPlaceClause(block: Pick<PlaceBlockData, "serviceWide">, line: Pick<EventSubscriptionWire, "filters">): boolean {
-  return block.serviceWide && line.filters.some((filter) => PLACE_FIELDS.has(filter.field) && (filter.op === "eq" || filter.op === "in"));
+  return block.serviceWide && line.filters.some((filter) => SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in"));
 }
 
 /** The service row for Slack with no Slack row in the places list has no page to open. */

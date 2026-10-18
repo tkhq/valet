@@ -37,15 +37,13 @@ vi.mock("~/api/client", async (importOriginal) => {
     },
   };
 });
-vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }),
-  useTeams: () => ({ data: { teams: [] } }),
-}));
+vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
 vi.mock("~/components/workflows/trigger-dialog", () => ({
   TriggerDialog: ({ editing }: { editing?: { name: string } }) => <p>Editing {editing?.name}</p>,
 }));
 
-import { RoutineRosterRow } from "./routine-row";
+import { RoutineRosterRow, routineNext } from "./routine-row";
+import { formatDateTime } from "~/lib/format-when";
 import type { Routine } from "./routines-pane";
 
 const NEXT = Date.UTC(2026, 9, 19, 16, 0);
@@ -82,18 +80,25 @@ afterEach(cleanup);
 describe("RoutineRosterRow", () => {
   it("puts the schedule, the timezone, and the next time in the place column", () => {
     renderRow(routine());
-    const row = screen.getByRole("region", { name: "Every weekday at 9:00" });
+    const row = screen.getByRole("region", { name: "Morning summary" });
     expect(row.classList.contains("grid-cols-[200px_minmax(0,1fr)]")).toBe(true);
     const name = within(row).getByText("Every weekday at 9:00");
     expect(name.className).toContain("text-[15px]");
     const zone = within(row).getByText("America/Los_Angeles");
-    const next = within(row).getByText(`Next ${new Date(NEXT).toLocaleString()}`);
+    const next = within(row).getByText(`Next ${formatDateTime(NEXT)}`);
     expect(zone.parentElement).toBe(next.parentElement);
+  });
+
+  it("formats Next as a date and a time without seconds", () => {
+    const now = NEXT - 3_600_000;
+    expect(routineNext(routine(), now, { locale: "en-US", timeZone: "UTC" })).toBe("Next Oct 19, 2026, 4:00 PM");
+    expect(routineNext(routine({ nextFireAt: now }), now)).toBe("Due now");
+    expect(routineNext(routine({ enabled: false }), now)).toBe("Off");
   });
 
   it("leaves out a UTC timezone and reads Off for a routine that is off", () => {
     renderRow(routine({ timezone: "UTC", enabled: false }));
-    const row = screen.getByRole("region", { name: "Every weekday at 9:00" });
+    const row = screen.getByRole("region", { name: "Morning summary" });
     expect(within(row).queryByText("UTC")).toBeNull();
     expect(within(row).getByText("Off")).toBeTruthy();
     expect(within(row).queryByText(/^Next /)).toBeNull();

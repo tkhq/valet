@@ -51,8 +51,12 @@ export const SYNTHETIC_ROOTS: Readonly<Record<OverviewService, string>> = {
   linear: "linear:*",
 };
 
-/** The filter fields that name one mid-grain place. */
-const PLACE_FIELDS = new Set(["channel", "repo", "team"]);
+/**
+ * The filter fields that name one mid-grain place: a row of the overview.
+ * Linear's `identifier` is not here, though a sentence reads it as a place
+ * (`SENTENCE_PLACE_FIELD_SET`), because it names an issue, which never gets a row.
+ */
+const MID_GRAIN_PLACE_FIELDS = new Set(["channel", "repo", "team"]);
 
 /** The service a line listens to, from its first event key. */
 export function lineService(line: Pick<EventSubscriptionWire, "eventKeys">): OverviewService | null {
@@ -72,7 +76,7 @@ const SLACK_CHANNEL = /^slack:[^/]+\/([^/]+)$/;
  * and a string value, and the places list has that place.
  */
 function namedPlace(line: Pick<EventSubscriptionWire, "filters">, places: readonly PresencePlaceWire[]): PresencePlaceWire | null {
-  const filters = line.filters.filter((filter) => PLACE_FIELDS.has(filter.field));
+  const filters = line.filters.filter((filter) => MID_GRAIN_PLACE_FIELDS.has(filter.field));
   if (filters.length !== 1) return null;
   const filter = filters[0]!;
   if (filter.op !== "eq" || typeof filter.value !== "string" || filter.value === "") return null;
@@ -91,6 +95,18 @@ function namedPlace(line: Pick<EventSubscriptionWire, "filters">, places: readon
 /** The name of the one mid-grain place a line names, or null for a line that names no single place. */
 export function namedPlaceLabel(line: Pick<EventSubscriptionWire, "filters">, places: readonly PresencePlaceWire[]): string | null {
   return namedPlace(line, places)?.label ?? null;
+}
+
+/**
+ * The words that lead a line's fault in the banner (spec Part B step 2):
+ * `In <place>,` for a line that names one place, else its service row's
+ * name (`Everywhere in Slack,`). A line with no known service has none.
+ */
+export function faultLead(line: Pick<EventSubscriptionWire, "eventKeys" | "filters">, places: readonly PresencePlaceWire[]): string | null {
+  const named = namedPlaceLabel(line, places);
+  if (named !== null) return `In ${named},`;
+  const service = lineService(line);
+  return service === null ? null : `${SERVICE_BLOCK_LABELS[service]},`;
 }
 
 /** The service root row of the places list, if it has one. */

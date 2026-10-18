@@ -43,7 +43,7 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
   useWorkflows: () => ({ data: { workflows: [] } }),
 }));
-vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }) }));
+vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
 
 const wizardProps = vi.fn();
 vi.mock("~/components/events/automation-wizard", () => ({
@@ -67,17 +67,11 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { PlaceRow } from "./place-row";
+import { PIN_UNAVAILABLE } from "./problem-badge";
+import { PLATFORM_CI, line } from "./test-fixtures";
 import type { PlaceBlockData } from "./overview-groups";
 
-const PIN = "Pick another thread for this rule in Presence.";
 const ACME = [{ field: "repo", op: "eq" as const, value: "acme/api" }];
-
-function line(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
-  return {
-    id, name: id, ownerType: "user", ownerId: "u-001", eventKeys: [], filters: [],
-    target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, ...over,
-  };
-}
 
 const R1 = line("R1", {
   name: "Reviews and checks",
@@ -90,7 +84,7 @@ const R4 = line("R4", {
   eventKeys: ["github.check_run.completed"],
   filters: ACME,
   target: { kind: "assistant", thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" }, appearance: { displayName: "Ops Bot" } },
-  problem: PIN,
+  problem: PIN_UNAVAILABLE,
 });
 const PAUSED = line("R5", {
   name: "Quiet checks",
@@ -137,7 +131,7 @@ beforeEach(() => {
   patchEventSubscription.mockReset();
   wizardProps.mockReset();
   listThreads.mockImplementation(async (_sessionId, opts) => ({
-    threads: opts?.archived ? [{ id: "t-ci", sessionId: "s-u", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1, archivedAt: 2 }] : [],
+    threads: opts?.archived ? [PLATFORM_CI] : [],
   }));
   patchEventSubscription.mockImplementation(async (id) => ({ ...R4, id, problem: undefined }));
 });

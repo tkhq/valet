@@ -187,12 +187,19 @@ function serviceOf(keys: readonly string[]): Service | null {
   return null;
 }
 
-/** Filter fields that name a place, per service, most specific first. */
-const PLACE_FIELDS: Readonly<Record<Service, readonly string[]>> = {
+/**
+ * The filter fields a sentence reads as its `<place>`, per service, most
+ * specific first. Linear's `identifier` names one issue, so a sentence can
+ * say `in ENG-12`, though no overview row exists for an issue.
+ */
+const SENTENCE_PLACE_FIELDS: Readonly<Record<Service, readonly string[]>> = {
   slack: ["channel"],
   github: ["repo"],
   linear: ["identifier", "team"],
 };
+
+/** Every filter field a sentence reads as its place, across services. */
+export const SENTENCE_PLACE_FIELD_SET: ReadonlySet<string> = new Set(Object.values(SENTENCE_PLACE_FIELDS).flat());
 
 /** The place a line listens in when no filter names one. */
 const ANY_PLACE: Readonly<Record<Service, string>> = {
@@ -213,7 +220,7 @@ function filterValues(filter: EventSubscriptionFilterWire): string[] {
 
 function presencePlace(service: Service | null, filters: readonly EventSubscriptionFilterWire[]): string | null {
   if (service === null) return null;
-  for (const field of PLACE_FIELDS[service]) {
+  for (const field of SENTENCE_PLACE_FIELDS[service]) {
     const filter = filters.find((f) => f.field === field && (f.op === "eq" || f.op === "in"));
     if (filter) {
       const values = filterValues(filter);

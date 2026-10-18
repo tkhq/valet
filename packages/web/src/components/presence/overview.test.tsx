@@ -13,6 +13,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import type {
   EnsureWorkspaceRuntimeResponse,
+  EventLogItem,
   EventLogResponse,
   EventSubscriptionWire,
   GetWorkflowTriggerCatalogResponse,
@@ -54,18 +55,12 @@ vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
 });
 
 import { routeTree } from "../../routeTree.gen";
+import { PIN_UNAVAILABLE } from "./problem-badge";
+import { PLATFORM_CI, PLATFORM_OPS, line } from "./test-fixtures";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 const NOW = Date.now();
-const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
-
-function line(id: string, over: Partial<EventSubscriptionWire>): EventSubscriptionWire {
-  return {
-    id, name: id, ownerType: "user", ownerId: "u-001", eventKeys: [], filters: [],
-    target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1, ...over,
-  };
-}
 
 function place(subject: string, label: string, service: PresencePlaceWire["service"], parent: string | null, activeThreadCount = 0, lastActivityAt: number | null = NOW - 60_000): PresencePlaceWire {
   return { subject, label, service, parent, listenerCount: 1, activeThreadCount, lastActivityAt };
@@ -109,8 +104,8 @@ const S1: WorkflowTriggerItem = {
 
 const THREADS: ListThreadsResponse = {
   threads: [
-    { id: "t-ci", sessionId: "s-u", title: "Platform CI", createdAt: 1, lastUserActivityAt: 1, archivedAt: NOW - 86_400_000 },
-    { id: "t-ops", sessionId: "s-u", title: "Platform Ops", createdAt: 1, lastUserActivityAt: NOW - 1_000 },
+    { ...PLATFORM_CI, archivedAt: NOW - 86_400_000 },
+    { ...PLATFORM_OPS, lastUserActivityAt: NOW - 1_000 },
   ],
 };
 const WORKFLOWS: ListWorkflowsResponse = { workflows: [] };
@@ -122,6 +117,7 @@ let places: PresencePlaceWire[] = [];
 let rules: EventSubscriptionWire[] = [];
 let routines: WorkflowTriggerItem[] = [];
 let placesFail = false;
+let logItems: EventLogItem[] = [];
 const patches: Array<{ id: string; body: PatchEventSubscriptionRequest }> = [];
 
 function json(body: unknown, status = 200): Response {
@@ -165,7 +161,7 @@ function answer(method: string, url: URL, body: string | undefined): Response {
   if (path === "/api/workflows/trigger-catalog") return json(TRIGGER_CATALOG);
   if (path === "/api/workflows") return json(WORKFLOWS);
   if (path === "/api/events/log") {
-    return json({ items: [], nextCursor: null, lastEventAt: null, windowDays: 30 } satisfies EventLogResponse);
+    return json({ items: logItems, nextCursor: null, lastEventAt: null, windowDays: 30 } satisfies EventLogResponse);
   }
   if (/^\/api\/sessions\/[^/]+\/threads$/.test(path)) return json(THREADS);
   return json({ error: "not in this test" }, 404);
@@ -176,6 +172,7 @@ beforeEach(() => {
   rules = [R1, R4, ANYWHERE, ENG_LINE];
   routines = [S1];
   placesFail = false;
+  logItems = [];
   patches.length = 0;
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -256,7 +253,7 @@ describe("Presence overview", () => {
     expect(screen.getByRole("region", { name: "ENG" })).toBeTruthy();
 
     const schedule = screen.getByRole("region", { name: "On a schedule" });
-    const routine = within(schedule).getByRole("region", { name: "Every day at 9:00" });
+    const routine = within(schedule).getByRole("region", { name: "Morning summary" });
     expect(within(routine).getByRole("link", { name: "Morning summary: work in its own thread." }).getAttribute("href")).toBe("/presence/routines/S1");
     expect(within(routine).getByText("Summarize the night.")).toBeTruthy();
     expect(within(routine).getByText(/^Next /)).toBeTruthy();
@@ -364,6 +361,50 @@ describe("Presence overview", () => {
     expect(screen.getByRole("region", { name: "#chan-3" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "#chan-4" })).toBeNull();
     expect(screen.queryByRole("heading", { level: 2, name: "GitHub" })).toBeNull();
+  });
+
+  it("keeps a collapsed group open when its only fault is a dead delivery (Part B step 8)", async () => {
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
+    places = [SLACK_ROOT, ...channels, ACME_API];
+    rules = [
+      ...channels.map((channel, index) => line(`M${index}`, {
+        name: `Mentions ${index}`, eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C${index}` }],
+      })),
+      R1,
+    ];
+    logItems = [{
+      kind: "event", id: "ev-14", at: NOW - 60_000, status: "failed", service: "github", eventKey: "github.check_run.completed",
+      summary: "ev-14", actor: null, reason: null, detail: null, deliveryCount: 1, place: "acme/api#14",
+      deliveries: [{ id: "d-1", subscriptionId: "R1", status: "dead", attempts: 3, lastError: null, deliveredAt: null }],
+    }];
+    mountOverview();
+    await screen.findByRole("searchbox", { name: "Filter places" });
+    const banner = await screen.findByRole("region", { name: "Needs attention" });
+    expect(within(banner).getByText("In acme/api,")).toBeTruthy();
+    await waitFor(() => expect(detailsOf(screen.getByRole("heading", { level: 2, name: "GitHub" })).open).toBe(true));
+    expect(detailsOf(screen.getByRole("heading", { level: 2, name: "Slack" })).open).toBe(false);
+  });
+
+  it("leaves a collapsed group open after a pick fixes its last fault", async () => {
+    const channels = Array.from({ length: 10 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1"));
+    places = [SLACK_ROOT, ...channels, ACME_API];
+    rules = [
+      ...channels.map((channel, index) => line(`M${index}`, {
+        name: `Mentions ${index}`, eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C${index}` }],
+      })),
+      R4,
+    ];
+    mountOverview();
+    const banner = await screen.findByRole("region", { name: "Needs attention" });
+    const github = screen.getByRole("heading", { level: 2, name: "GitHub" });
+    await waitFor(() => expect(detailsOf(github).open).toBe(true));
+    const details = detailsOf(github);
+    await userEvent.click(await within(banner).findByRole("option", { name: /Platform Ops/ }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull());
+    // The same element, still open: no remount, no snap shut.
+    expect(detailsOf(screen.getByRole("heading", { level: 2, name: "GitHub" }))).toBe(details);
+    expect(details.open).toBe(true);
+    expect(sentences(screen.getByRole("region", { name: "acme/api" }))).toContain("When a check completes, work in the Platform Ops thread.");
   });
 
   it("opens the wizard on When with all four choices from Add", async () => {

@@ -32,7 +32,7 @@ export function PresenceEventPage() {
     <PresenceDetailPage crumbs={[{ label: "Activity", to: "/presence/activity" }, { label: data?.event.summary || "Event" }]} title={data?.event.summary || "Event"}>
       {isLoading && <LoadingRow label="Loading event…" />}
       {(error != null || (!isLoading && !data)) && (
-        <ErrorRow>Could not load this event. Reload the page, or find the event again on the Activity tab.</ErrorRow>
+        <ErrorRow>Could not load this event. Reload the page. If it still fails, open Activity and find the event again.</ErrorRow>
       )}
       {data && <EventDetailBody data={data} />}
     </PresenceDetailPage>

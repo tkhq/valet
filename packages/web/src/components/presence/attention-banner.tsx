@@ -1,9 +1,10 @@
 /**
  * The **Needs attention** banner (docs/specs/2026-10-16-presence-hub-design.md
  * Part B step 2, Part F step 4, INV-H6): a ruled section with a danger mark
- * and a muted heading. Each fault is one item with its fix inline, and a
- * line's fault names its place first (`In acme/api,`): an archived pin shows the thread picker, which is the same
- * `ThreadProblem` the sentence row shows; a routine that is off shows its
+ * and a muted heading. Each fault is one item with its fix inline. A line's
+ * or a dead delivery's fault names its place first (`In acme/api,` or
+ * `Everywhere in Slack,`). An archived pin shows the thread picker, which is
+ * the same `ThreadProblem` the sentence row shows; a routine that is off shows its
  * reason and an `Edit` link; a dead delivery links its event. The banner
  * never shows a bare count, and it shows nothing when there is no fault.
  */
@@ -46,7 +47,7 @@ export function AttentionBanner({ faults }: { faults: Fault[] }) {
 }
 
 function FaultItem({ fault }: { fault: Fault }) {
-  if (fault.kind === "line") return <LineFault sub={fault.sub} place={fault.place} />;
+  if (fault.kind === "line") return <LineFault sub={fault.sub} lead={fault.lead} />;
   if (fault.kind === "routine") {
     return (
       <p className="flex flex-wrap items-baseline gap-x-2 [overflow-wrap:anywhere]">
@@ -56,14 +57,17 @@ function FaultItem({ fault }: { fault: Fault }) {
     );
   }
   return (
-    <Link to="/presence/events/$eventId" params={{ eventId: fault.eventId }} className="text-danger-600 [overflow-wrap:anywhere] hover:underline dark:text-danger-500">
-      {fault.text}
-    </Link>
+    <p className="[overflow-wrap:anywhere]">
+      {fault.lead !== undefined && <span className="text-muted">{`${fault.lead} `}</span>}
+      <Link to="/presence/events/$eventId" params={{ eventId: fault.eventId }} className="text-danger-600 hover:underline dark:text-danger-500">
+        {fault.text}
+      </Link>
+    </p>
   );
 }
 
 /** A line with a problem: the problem text and its fix, as under the line's row. */
-function LineFault({ sub, place }: { sub: EventSubscriptionWire; place: string | undefined }) {
+function LineFault({ sub, lead }: { sub: EventSubscriptionWire; lead: string | undefined }) {
   const me = useMe();
   const patch = usePatchEventSubscription();
   const titles = usePinnedThreadTitle(storedPolicy(sub));
@@ -71,7 +75,7 @@ function LineFault({ sub, place }: { sub: EventSubscriptionWire; place: string |
   return (
     <ThreadProblem
       variant="inline"
-      lead={place === undefined ? undefined : `In ${place},`}
+      lead={lead}
       problem={sub.problem ?? ""}
       threadTitle={pinnedTitle(sub, titles)}
       workspace={lineWorkspace(sub)}
