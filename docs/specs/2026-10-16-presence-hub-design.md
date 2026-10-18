@@ -84,7 +84,7 @@ happened.
 
 Universe: org `acme`, user `u-001` in the personal workspace, team `sre`
 with team workspace scope. Slack channel `C900` is named `#incidents`.
-Repository `acme/api` exists. The rules R1, R2, R4, S1 and threads from the
+Repository `acme/api` exists. Team `sre` is named `SRE`. The rules R1, R2, R4, S1 and threads from the
 delivery threads spec Scenario T exist for `u-001`, plus thread `t-inc` from
 Scenario C for `sre`. One `sre` delivery has dead-lettered on R4's archived
 pin.
@@ -104,10 +104,10 @@ pin.
 | P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names its place, `acme/api#12`. |
 | P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/routines`, `/presence/routines?routine=<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, `/presence/routines` to `/presence`, `/presence/routines?routine=<id>` to `/presence/routines/<id>`, the last two to `/workflows`. No URL returns a 404. |
 | P13 | Open a proposal from its `Proposed` row and press **Turn on**. | The page shows `Proposed by the assistant.` and, when the proposal replaces a line, `Turning it on turns off <name>.` **Turn on** opens the edit dialog in review mode. After the reader confirms, the line is on, its row reads its sentence without `Proposed`, and the line it replaces is off. |
-| P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | The line carries the `Team` mark. The switch, **Edit**, **Delete**, and the thread picker are disabled, and the page reads `Only members of sre can change this.` |
+| P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | On the overview row, the switch and the row menu's Edit, Appears as, and Delete are disabled. The line's page shows the `Team` mark, disables the switch, **Edit**, **Delete**, and the thread picker, and reads `Only members of SRE can change this.` |
 | P15 | Delete the workflow of a routine that runs a workflow, then let the routine fire. | The routine is off. The **Needs attention** banner reads `<name> is off: Its workflow was deleted. Edit the routine and pick another workflow.` with an `Edit` link to `/presence/routines/<id>`. |
 | P16 | With Slack, GitHub, and Linear all not connected, click **Add**. | The When step opens on `On a schedule`. `Something happens in Slack`, `Something happens on GitHub`, and `Something happens in Linear` are disabled, each with `Connect Slack first`, `Connect GitHub first`, or `Connect Linear first` linking to Integrations. |
-| P17 | On the `acme/api` place page, click **View all** under **Recent activity**. | Activity opens with the removable chip `In acme/api` and lists only events whose place is `acme/api` or inside it. Removing the chip lists every event again. |
+| P17 | On the `acme/api` place page, click **View all** under **Recent activity**. | `/presence/activity?place=github:acme/api` opens with the removable chip `In acme/api` and lists only events whose place is `acme/api` or inside it. Removing the chip lists every event again. |
 
 Pass criterion: all steps, in one run, from a clean start.
 
@@ -167,9 +167,11 @@ Pass criterion: all steps, in one run, from a clean start.
    names the place (`In acme/api,`), states the fault, and carries its fix
    inline (an archived pin shows the thread picker open; a dead delivery
    links its event). A routine item reads `<name> is off: <reason>` with an
-   `Edit` link to the routine's page. Each item renders through `Sentence`
-   (Part K), so its place, thread, and workflow read as tokens. The banner
-   never shows a bare count.
+   `Edit` link to the routine's page. A line's or a dead delivery's lead
+   renders through `Sentence` (Part K), so its place reads as a token that
+   links the place page, and an archived pin's thread reads as a thread
+   token. A routine item is plain text. The banner never shows a bare
+   count.
 3. Groups, in order: `Slack`, `GitHub`, `Linear`, `On a schedule`. A group
    heading is a small muted label on a hairline rule, led by the service's
    `ServiceMark size="md"` (Part K; the clock for `On a schedule`), with
@@ -188,9 +190,11 @@ Pass criterion: all steps, in one run, from a clean start.
    `Everywhere in Slack`, `Across GitHub`, or `Across Linear`, which links
    to the service page (Part C). These three names are the only names of
    the service-wide places: the row, the page title, and the Activity chip
-   use them. In a team workspace, the Slack service-wide row and each Slack
-   place row's overflow menu offer `Choose channels`, which opens the team
-   channel dialog.
+   use them. In a team workspace, each Slack row (the service-wide row and
+   each channel) carries an overflow menu `More for <place>` beside the
+   place name. Its one item, `Choose channels`, opens the team channel
+   dialog (`TeamSlackSetupModal`, the same dialog that the team
+   dashboard's setup card opens).
 5. A **sentence row** is the Part C step 2 sentence without its `<in|on>
    <place>` clause (the place column names it), set as the largest running
    text on the page and linked to the line's page, with the line's name
@@ -349,8 +353,10 @@ Pass criterion: all steps, in one run, from a clean start.
 1. A routine row is one sentence: `<schedule in words>, <name>: <do>.` with
    `<do>` as `work in its own thread`, `work in a new thread each time`,
    `work in the <title> thread`, or `run <workflow>`; plus `Next: <time>`
-   or `Off`, an on/off switch, and **Fire now**. The timezone follows the
-   schedule words when it is not UTC. The rows live in the overview's `On
+   or `Off`, an on/off switch, and **Fire now**. The timezone's long name
+   (`Pacific Daylight Time`) follows the schedule words when it is not
+   UTC, in the row, the routine page title, the When fact, and the wizard
+   preview. The rows live in the overview's `On
    a schedule` group (Part B step 6), where `Next <time>` sits in the
    place column.
 2. `/presence/routines/$id` shows a breadcrumb `Presence › On a schedule ›
@@ -381,10 +387,14 @@ Pass criterion: all steps, in one run, from a clean start.
 2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
    filter the list: `All`, `Problems`, and one per service, each service
    chip led by its `ServiceMark size="sm"` (Part K). A text box labeled
-   `Search` sends `q`. The search param `place=<place key>` asks `GET
-   /api/events/log?place=` for the events whose natural subject's place is
-   that key or lies inside it, and shows a removable chip `In <place
-   name>`. Rows render through `Sentence` (Part K).
+   `Search`, with the placeholder `Search activity`, sends `q`. The search
+   param `place=<place key>` asks `GET /api/events/log?place=` for the
+   events whose natural subject's place is that key or lies inside it. The
+   page then shows a removable chip above the list: `In <place name>`, or
+   the service-wide place's own name (`Across GitHub`). A key that the
+   places list does not hold reads by its last part (`In api`). Its remove
+   button reads `Remove the place filter <chip text>`. Rows render through
+   `Sentence` (Part K); the place token sits inside the row's link.
    Receipt stages and diagnostics sit under disclosures for admins. The
    event page keeps payload and redeliver. Its title is `<event in words>
    in <place>`, with the event's summary as a muted line under it, and each
@@ -472,8 +482,8 @@ Pass criterion: all steps, in one run, from a clean start.
 *Conformance: web.*
 
 1. The thread context card's background section (event wakeups spec Part H)
-   shows `Fed by: <names>`, each name a `Ref` token (Part K) with its
-   link, for every thread that a line or
+   shows `Fed by: <names>`, each name a `line` token (`Ref kind="line"`,
+   Part K) that links the line's or the routine's page, for every thread that a line or
    routine feeds (its `own` thread, an `existing` pin, or a place's thread),
    whether or not the thread holds a waiter.
 2. A place's thread header names its place and links to it.
@@ -520,21 +530,28 @@ Pass criterion: all steps, in one run, from a clean start.
 
    A mark is decoration: it is hidden from assistive technology unless it
    carries a label.
-2. A **reference token** (`Ref`) names one thing inside a sentence: a
-   place, a thread, a workflow, or a person (the proposal section also
-   names a line). The token sits in the line of text at the text's size,
+2. A **reference token** (`Ref`) names one thing inside a sentence. Its
+   kinds are `place`, `thread`, `workflow`, `person`, and `line`. A `line`
+   token names a line of presence or a routine: the proposal section's
+   `Turning it on turns off <name>.` and the thread card's `Fed by` names
+   use it. The token sits in the line of text at the text's size,
    in medium weight, on the ink wash, after a 12px mark for its kind. A
    place's mark is its service glyph in the service's hue, with no tile.
-   A token is a link only when the thing has a page the viewer can open;
-   otherwise it is plain text on its wash.
+   A token is a link only when the thing has a page the viewer can open,
+   and only outside a link or a dialog; otherwise it is plain text on its
+   wash. A person has no page. A thread links only when the sentence knows
+   its id.
 3. `Sentence` renders a list of sentence parts: text parts and token
    parts. The sentence functions (`presenceSentenceParts`,
-   `routineSentenceParts`) return the parts, and the string functions
-   (`presenceSentence`, `routineSentence`) return `partsText` of those parts. So a
+   `routineSentenceParts`, `activitySentenceParts`, `activityLeadParts`,
+   `outcomeParts`) return the parts, and the string functions
+   (`presenceSentence`, `routineSentence`, `activitySentence`) return
+   `partsText` of those parts. So a
    test, a title, or an accessible name that reads the string reads the
    same words the page shows (INV-H7).
 4. Marks appear on the overview group headings, the place page header, the
-   wizard's When choices, and the Activity service chips. Marks do not
+   wizard's When choices, the event picker's group headings, and the
+   Activity service chips. Marks do not
    appear on place rows, because the group heading carries the mark, or on
    routine names, because a routine is not a workflow and has no token
    kind of its own.
@@ -863,12 +880,26 @@ UX fixes (2026-10-18):
   Two rows from the same millisecond keep the fault in view, which errs
   toward showing a fault.
 - **The thread card says `active` (INV-H2).** The background section of the
-  thread context card reads `1 active` and `Active: <name>`, and no longer
-  says `wait` or `Event waiter`. This retires the revision 2 deviation that
-  kept `wait`.
+  thread context card reads `Active: <name>`, and the composer's background
+  status line counts `1 active` or `2 active`. Neither says `Event waiter`.
+  The status line still names the oldest active thread's place as `waiting
+  on <place>`, a verb and not the retired noun. This retires the revision
+  2 deviation that kept the noun `wait`.
 - **View all filters by place on the server (Part C step 7).** `View all`
   sends `place` and no longer searches a Slack channel by its id through
   `q`. This retires the revision 2 deviation for that search.
+- **Tokens inside a linked row are not links (Part K).** A sentence row's
+  sentence, an Activity row's lead, and a place page's activity row each
+  sit inside one link. Their tokens render with `links={false}`, because an
+  anchor inside an anchor is invalid HTML and splits the click target. The
+  tokens in a page title, a **Needs attention** item, an Activity outcome,
+  and `Fed by` do link.
+- **Sentence links and headings carry a plain-sentence aria-label (Part
+  K).** A token is an `inline-flex` box, so browsers and jsdom compute the
+  accessible name of a token sentence with stray spaces (`acme/api ,`). A
+  sentence link and a page `h1` that render tokens carry the sentence's
+  `partsText` as `aria-label`, so a screen reader and a test read the
+  plain sentence.
 
 Revision 1 deviations that revision 2 retired: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the
