@@ -419,7 +419,7 @@ describe("POST /api/channels/slack/webhook", () => {
     const rows = await api.providers.db.select().from(eventDropLog)
       .where(and(eq(eventDropLog.orgId, "local-org"), eq(eventDropLog.eventKey, "slack.message")));
     expect(rows.map((row) => row.detail)).toEqual(expect.arrayContaining([
-      expect.stringContaining("every subscription"),
+      expect.stringContaining("every line"),
       expect.stringContaining("bot message"),
     ]));
   });
