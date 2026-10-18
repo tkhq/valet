@@ -293,6 +293,49 @@ describe("presenceSentence parts", () => {
   });
 });
 
+describe("presenceSentence without the place clause (spec Part B step 5)", () => {
+  const noPlace = { place: false } as const;
+
+  it("omits <in|on> <place> and keeps the events, the sender, the do, and the appearance", () => {
+    const slack = sub({
+      filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
+      target: { kind: "assistant", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
+    });
+    expect(presenceSentence(slack, catalog, workflows, threads, noPlace)).toBe(
+      "When someone mentions Valet from Alice, reply in a new thread, as Ops Bot.",
+    );
+    const github = sub({
+      eventKeys: ["github.check_run.completed"],
+      filters: [acmeApi],
+      target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } },
+    });
+    expect(presenceSentence(github, catalog, workflows, threads, noPlace)).toBe(
+      "When a check completes, work in the Platform CI thread.",
+    );
+    expect(presenceSentence(github, catalog, workflows, threads)).toBe(
+      "When a check completes on acme/api, work in the Platform CI thread.",
+    );
+  });
+
+  it("omits the service-wide place too", () => {
+    const anywhere = sub({ filters: [], target: { kind: "assistant", thread: { mode: "new" } } });
+    expect(presenceSentence(anywhere, catalog, workflows, threads, noPlace)).toBe(
+      "When someone mentions Valet, reply in a new thread.",
+    );
+  });
+
+  it("keeps the thread-follow form without its channel", () => {
+    const follow = sub({
+      eventKeys: ["slack.message"],
+      filters: [incidents, { field: "thread_ts", op: "eq", value: "1750000000.123456" }],
+      target: { kind: "assistant", thread: { mode: "own" } },
+    });
+    expect(presenceSentence(follow, catalog, workflows, threads, noPlace)).toBe(
+      "When someone replies in the Slack thread, work in its own thread.",
+    );
+  });
+});
+
 function routine(over: Partial<RoutineLike["detail"]>, workflowId?: string): RoutineLike {
   return {
     name: "Morning summary",

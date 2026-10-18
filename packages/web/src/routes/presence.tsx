@@ -1,13 +1,12 @@
 import { Outlet, createFileRoute } from "@tanstack/react-router";
 import { pageClass } from "~/components/primitives";
-import { PresenceRail } from "~/components/presence/presence-rail";
 import { WorkspaceClause } from "~/components/workspace-clause";
 
 /**
  * `/presence` layout: where Valet is, and what it does there (spec Part A).
- * It is a two-pane shell: the rail of places on the left and a pane on the
- * right. There are no tabs (INV-H5). Activity, Routines, a place, a line of
- * presence, and an event all render in the pane, so the rail stays visible.
+ * It is one column: the title, the workspace clause, the subtitle, and the
+ * page. There is no rail and there are no tabs (INV-H5). `/presence` lands
+ * on the overview; every other page is a drill-in with a breadcrumb.
  * Workflows and Runs have their own top-nav entry at `/workflows` (spec
  * Part G).
  */
@@ -24,11 +23,8 @@ export function PresenceLayout() {
           <WorkspaceClause />
         </div>
         <p className="mt-1 text-sm text-muted">Where Valet is, and what it does there.</p>
-        <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:gap-10">
-          <PresenceRail />
-          <div className="min-w-0 flex-1">
-            <Outlet />
-          </div>
+        <div className="mt-6 min-w-0">
+          <Outlet />
         </div>
       </div>
     </div>

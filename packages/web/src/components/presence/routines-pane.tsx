@@ -46,25 +46,7 @@ export function RoutinesPane() {
   const triggersQ = useWorkflowTriggers(undefined, owner, { enabled: owner !== undefined });
   const routines = (triggersQ.data?.triggers ?? []).filter(isRoutine);
   const sentence = useRoutineSentence(routines);
-  const fire = useRunScheduleNow();
-  const update = useUpdateSchedule();
   const [creating, setCreating] = useState(false);
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
-
-  function fireNow(routine: Routine) {
-    setMessage(null);
-    fire.mutate(routine.id, {
-      onSuccess: () => setMessage({ text: `Fired ${routine.name}. It runs now.`, error: false }),
-      onError: (err) => setMessage({ text: errorText(err), error: true }),
-    });
-  }
-
-  function setEnabled(routine: Routine, enabled: boolean) {
-    setMessage(null);
-    update.mutate({ id: routine.id, body: { enabled } }, {
-      onError: (err) => setMessage({ text: errorText(err), error: true }),
-    });
-  }
 
   return (
     <div className="space-y-3">
@@ -85,35 +67,64 @@ export function RoutinesPane() {
         {triggersQ.isSuccess && routines.length === 0 && (
           <EmptyRow className="px-4 py-3">No routine yet. Select New routine to have Valet act at a set time.</EmptyRow>
         )}
-        {routines.map((routine) => (
-          <WorkRow
-            key={routine.id}
-            title={<Link to="/presence/routines" search={{ routine: routine.id }}>{sentence(routine)}</Link>}
-            // The second line already says Off for a routine that is off.
-            badge={<ProblemBadge problem={routine.detail.disabledReason} />}
-            detail={routineWhen(routine)}
-            actions={(
-              <>
-                <Switch
-                  checked={routine.enabled}
-                  disabled={update.isPending}
-                  onCheckedChange={(enabled) => setEnabled(routine, enabled)}
-                  aria-label={`${routine.enabled ? "Turn off" : "Turn on"} ${routine.name}`}
-                />
-                <Button size="sm" variant="ghost" disabled={fire.isPending} onClick={() => fireNow(routine)} aria-label={`Fire ${routine.name} now`}>
-                  Fire now
-                </Button>
-              </>
-            )}
-          />
-        ))}
+        {routines.map((routine) => <RoutineRow key={routine.id} routine={routine} sentence={sentence(routine)} />)}
       </WorkSection>
+      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
+    </div>
+  );
+}
+
+/**
+ * One routine as a row (spec Part E step 1): the sentence linked to its
+ * page, `Next: <time>` or `Off`, an on/off switch, and **Fire now**. The
+ * row shows the result of Fire now and any refusal under itself.
+ */
+export function RoutineRow({ routine, sentence }: { routine: Routine; sentence: string }) {
+  const fire = useRunScheduleNow();
+  const update = useUpdateSchedule();
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+
+  function fireNow() {
+    setMessage(null);
+    fire.mutate(routine.id, {
+      onSuccess: () => setMessage({ text: `Fired ${routine.name}. It runs now.`, error: false }),
+      onError: (err) => setMessage({ text: errorText(err), error: true }),
+    });
+  }
+
+  function setEnabled(enabled: boolean) {
+    setMessage(null);
+    update.mutate({ id: routine.id, body: { enabled } }, {
+      onError: (err) => setMessage({ text: errorText(err), error: true }),
+    });
+  }
+
+  return (
+    <div>
+      <WorkRow
+        title={<Link to="/presence/routines" search={{ routine: routine.id }}>{sentence}</Link>}
+        // The second line already says Off for a routine that is off.
+        badge={<ProblemBadge problem={routine.detail.disabledReason} />}
+        detail={routineWhen(routine)}
+        actions={(
+          <>
+            <Switch
+              checked={routine.enabled}
+              disabled={update.isPending}
+              onCheckedChange={setEnabled}
+              aria-label={`${routine.enabled ? "Turn off" : "Turn on"} ${routine.name}`}
+            />
+            <Button size="sm" variant="ghost" disabled={fire.isPending} onClick={fireNow} aria-label={`Fire ${routine.name} now`}>
+              Fire now
+            </Button>
+          </>
+        )}
+      />
       {message && (
-        <p role={message.error ? "alert" : "status"} className={message.error ? "text-sm text-danger-500" : "text-sm text-muted"}>
+        <p role={message.error ? "alert" : "status"} className={`px-4 pb-3 text-sm sm:pl-5 ${message.error ? "text-danger-500" : "text-muted"}`}>
           {message.text}
         </p>
       )}
-      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
     </div>
   );
 }

@@ -298,6 +298,11 @@ export function followsSlackThread(sub: Pick<EventSubscriptionWire, "eventKeys" 
   );
 }
 
+export interface PresenceSentenceOptions {
+  /** False omits the `<in|on> <place>` clause. Default true. */
+  place?: boolean;
+}
+
 /**
  * A line of presence as one sentence:
  * `When <events>[ from <sender>] <in|on> <place>, <do>[, as <appearance>].`
@@ -305,21 +310,27 @@ export function followsSlackThread(sub: Pick<EventSubscriptionWire, "eventKeys" 
  * `When <events>[ from <sender>], <do>[, as <appearance>].`
  * A line that follows one Slack thread reads
  * `When someone replies in the Slack thread[ in <channel>], <do>[, as <appearance>].`
+ *
+ * With `{ place: false }` the sentence omits its `<in|on> <place>` clause
+ * (and a followed thread's `in <channel>`), because the overview's place
+ * block already names the place (spec Part B step 5). The rest stays.
  */
 export function presenceSentence(
   sub: EventSubscriptionWire,
   catalog: Catalog | undefined,
   workflows: WorkflowNames,
   threads: ThreadTitles,
+  options: PresenceSentenceOptions = {},
 ): string {
+  const withPlace = options.place ?? true;
   if (followsSlackThread(sub)) {
     const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
-    const values = channel === undefined ? [] : filterValues(channel);
+    const values = channel === undefined || !withPlace ? [] : filterValues(channel);
     const where = values.length > 0 ? ` in ${joinOr(values)}` : "";
     return `When someone replies in the Slack thread${where}, ${presenceDoes(sub, workflows, threads)}${appearancePart(sub.target.appearance)}.`;
   }
   const service = serviceOf(sub.eventKeys);
-  const place = presencePlace(service, sub.filters);
+  const place = withPlace ? presencePlace(service, sub.filters) : null;
   const where = place === null ? "" : ` ${service === "github" ? "on" : "in"} ${place}`;
   const sender = senderFilter(sub.eventKeys, sub.filters);
   const from = sender === null ? "" : ` from ${sender}`;

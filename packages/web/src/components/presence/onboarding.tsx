@@ -1,21 +1,21 @@
 /**
  * The onboarding empty state (docs/specs/2026-10-16-presence-hub-design.md
- * Part C step 8). A workspace with no place and no routine sees, in the
- * Activity pane, where to start: connect a service, or add a routine. A
- * workspace with a place but no routine sees the Log; the Routines pane has
- * its own empty state.
+ * Part B step 9). A workspace with no place block and no routine sees, in
+ * place of the overview's groups, where to start: connect a service, or
+ * **Add** to listen somewhere or to run on a schedule. Activity still shows
+ * it until the overview owns it alone.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { cardClass } from "~/components/primitives";
+import { Button, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useListOwner } from "~/lib/use-list-owner";
 import { isRoutine } from "./routines-pane";
 
-/** True once the places and the routines (the rail's reads) have loaded and
+/** True once the places and the routines have loaded and
  * both are empty. While either loads, or after an error, it is false, so
  * the Log shows. */
 export function useNotPresentAnywhere(): boolean {
@@ -45,13 +45,12 @@ export function Onboarding() {
           </li>
         ))}
       </ul>
-      <p className="text-sm text-muted">
+      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm text-muted">
         or{" "}
-        <button type="button" className="text-ink underline-offset-2 hover:underline" onClick={() => setCreating(true)}>
-          add a routine
-        </button>
+        <Button size="sm" variant="secondary" onClick={() => setCreating(true)}>Add</Button>
+        {" "}to listen somewhere, or run on a schedule.
       </p>
-      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} />}
     </section>
   );
 }

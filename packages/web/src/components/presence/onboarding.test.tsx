@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The onboarding empty state (docs/specs/2026-10-16-presence-hub-design.md
- * Part C step 8): with no place and no routine, Activity names where to start.
+ * Part B step 9): with no place and no routine, the overview names where to start.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -27,11 +27,11 @@ describe("Onboarding", () => {
     }
   });
 
-  it("opens the routine dialog from or add a routine", () => {
+  it("opens the wizard on When from Add", () => {
     render(<Onboarding />);
-    expect(screen.getByText(/^or/).textContent).toBe("or add a routine");
-    expect(screen.queryByText("New routine dialog")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "add a routine" }));
-    expect(screen.getByText("New routine dialog")).toBeTruthy();
+    expect(screen.getByText(/^or/).textContent).toBe("or Add to listen somewhere, or run on a schedule.");
+    expect(screen.queryByText("Other dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByText("Other dialog")).toBeTruthy();
   });
 });

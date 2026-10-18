@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 /**
  * INV-H5 (docs/specs/2026-10-16-presence-hub-design.md): no level of
- * navigation sits under the top nav except the rail. The test renders the
- * app's real route tree at each Presence route and expects the rail and no
- * tab list. It also checks that `/presence` lands on Activity (Part A
- * step 5), and that the revision 1 rule URL redirects.
+ * navigation sits under the top nav. The test renders the app's real route
+ * tree at each Presence route and expects no tab list, and no navigation
+ * landmark except the top nav (`Primary`) and the breadcrumb. It also checks that
+ * `/presence` lands on the overview (Part A step 5), and that the revision
+ * 1 rule URL redirects.
  *
  * The network is a `fetch` stub. It answers the reads the shell and its
- * panes make with small fixtures, and every other read with an empty 404.
+ * pages make with small fixtures, and every other read with an empty 404.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
@@ -106,28 +107,34 @@ function mountApp(initial: string) {
   return router;
 }
 
-describe("INV-H5: the rail is the only navigation under the top nav", () => {
+describe("INV-H5: no navigation under the top nav except the breadcrumb", () => {
   it.each([
-    "/presence",
-    "/presence/activity",
-    "/presence/routines",
-    "/presence/places/slack:T1%2FC900",
-    "/presence/rules/sub-1",
-  ])("%s shows the rail and no tab list", async (path) => {
+    ["/presence", "Slack"],
+    ["/presence/activity", undefined],
+    ["/presence/places/slack:T1%2FC900", "#incidents"],
+    ["/presence/rules/sub-1", "When someone mentions Valet in #incidents, reply in a new thread."],
+  ])("%s has no tab list, and every navigation landmark is the breadcrumb", async (path, heading) => {
     mountApp(path);
-    await screen.findByRole("navigation", { name: "Presence" });
     await screen.findByRole("heading", { level: 1, name: "Presence" });
+    if (heading !== undefined) await screen.findByRole("heading", { level: 2, name: heading });
+    else await screen.findByRole("searchbox", { name: "Place" });
     expect(screen.queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("tabpanel")).toBeNull();
+    // The top nav is `Primary`. Every other navigation landmark is a breadcrumb.
+    const names = screen.queryAllByRole("navigation").map((nav) => nav.getAttribute("aria-label"));
+    expect(names.filter((name) => name !== "Primary").every((name) => name === "Breadcrumb")).toBe(true);
+    expect(names.filter((name) => name === "Primary")).toHaveLength(1);
   });
 
-  it("lands /presence on Activity", async () => {
+  it("lands /presence on the overview", async () => {
     mountApp("/presence");
-    expect(await screen.findByRole("searchbox", { name: "Place" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Activity" }).getAttribute("aria-current")).toBe("page");
+    expect(await screen.findByRole("region", { name: "#incidents" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Activity" }).getAttribute("href")).toBe("/presence/activity");
+    expect(screen.queryByRole("searchbox", { name: "Place" })).toBeNull();
   });
 
-  it("opens a place page in the pane with a breadcrumb", async () => {
+  it("opens a place page with a breadcrumb", async () => {
     mountApp("/presence/places/slack:T1%2FC900");
     expect(await screen.findByRole("heading", { level: 2, name: "#incidents" })).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe("Presence›#incidents");
