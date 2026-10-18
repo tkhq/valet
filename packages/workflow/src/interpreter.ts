@@ -262,7 +262,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     const cancelSignal = signals.find((s) => s.signalType === 'cancel');
     if (cancelSignal) {
-      return await cancelRun(run, attempt, deps);
+      return await cancelRun(run, attempt, deps, parkedWaits());
     }
 
     const graph = compile(definition);
@@ -393,7 +393,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(deps, run.runId, attempt, parkedWaits(), finalOutcome);
+      return await terminateSettle(deps, run.runId, attempt, await inFlightWaits(store, run, parkedWaits()), finalOutcome);
     }
     if (waitingOn.length > 0) {
       // Another node in this wave finished: run what it unblocked before
@@ -430,9 +430,9 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
-async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
+async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps, parkedThisDrive: RunWaitCondition[]): Promise<RunParkState> {
   const { store, engine, clock } = deps;
-  for (const wait of run.waitingOn) {
+  for (const wait of await inFlightWaits(store, run, parkedThisDrive)) {
     if (wait.kind === 'submission') {
       await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
     }
@@ -441,6 +441,36 @@ async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDep
     }
   }
   return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
+}
+
+/**
+ * Every submission and child run the run may still have in flight: its
+ * saved waits, the waits nodes parked in this drive before the run saved
+ * them, and what each unfinished node's intent checkpoint records. A drive
+ * keeps running other nodes after one parks, so a cancel or a stop can come
+ * before the run saves its waits; the checkpoints also cover a host crash
+ * in that window.
+ */
+async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisDrive: RunWaitCondition[]): Promise<RunWaitCondition[]> {
+  const waits = new Map<string, RunWaitCondition>();
+  const add = (wait: RunWaitCondition): void => {
+    if (wait.kind === 'submission') waits.set(`submission:${wait.queueItemId}`, wait);
+    else if (wait.kind === 'run') waits.set(`run:${wait.runId}`, wait);
+  };
+  for (const wait of [...run.waitingOn, ...parkedThisDrive]) add(wait);
+  for (const cp of await store.getCheckpoints(run.runId)) {
+    if (cp.status !== 'intent' || !cp.effects) continue;
+    const { sessionId, receipt, childRunId } = cp.effects;
+    if (typeof sessionId === 'string' && typeof receipt === 'object' && receipt !== null) {
+      const threadId: unknown = Reflect.get(receipt, 'threadId');
+      const queueItemId: unknown = Reflect.get(receipt, 'queueItemId');
+      if (typeof threadId === 'string' && typeof queueItemId === 'string') {
+        add({ kind: 'submission', nodeId: cp.nodeId, sessionId, threadId, queueItemId });
+      }
+    }
+    if (typeof childRunId === 'string') add({ kind: 'run', nodeId: cp.nodeId, runId: childRunId });
+  }
+  return [...waits.values()];
 }
 
 /** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */

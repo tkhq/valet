@@ -96,6 +96,8 @@ When no node is runnable, the interpreter parks by persisting the run's wake con
 
 A node that parks in a drive is not run again in that drive, and its wait conditions accumulate. The other nodes keep going, so an approval or a session on one branch does not hold a ready step on another branch. The run parks with every accumulated wait once nothing else is runnable. Until 2026-10-18 the interpreter parked right after the first wave in which any node parked, even when another node in that wave had unblocked more work; in production a step with 1.5 seconds of work waited 14 to 19 hours behind an unrelated approval.
 
+Because a drive now runs past a parked node, a cancel or a `stop` can arrive before the run saves its waits. Cancel and stop therefore abort every submission and child run in flight: the run's saved waits, the waits parked in the current drive, and what each unfinished node's intent checkpoint records (`effects.sessionId` with `effects.receipt`, or `effects.childRunId`). The checkpoints also cover a host crash in that window. A `stop` on a short branch can now end the run while an agent on another branch is still working; a stop ends the run, so the agent is aborted.
+
 ```typescript
 interface RunParkState {
   runId: string;

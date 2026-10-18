@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { NodeErrorPolicy, TriggerNode, WaitNode } from './dag/nodes.js';
+import type { NodeErrorPolicy, SetNode, TriggerNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
 import type { WorkflowEngineDeps, WorkflowInvokeActionResult } from './engine-deps.js';
 import { driveUntilPark, type InterpreterDeps } from './interpreter.js';
@@ -1031,5 +1031,82 @@ describe('driveUntilPark: a parked branch does not hold independent work', () =>
     const run = await store.getRun('run-branches');
     expect(run?.waitingOn).toEqual([expect.objectContaining({ kind: 'timer', nodeId: 'w' })]);
     expect(run?.wakeAt).toBe(clock.now() + 3_600_000);
+  });
+});
+
+describe('driveUntilPark: in-flight work when a drive keeps going past a parked node', () => {
+  /** A `wait`-typed stand-in for an agent step: records its dispatch receipt
+   * on the intent, as submission nodes do, and parks on the submission. */
+  const parkingAgent = (id: string): NodeExecutor<WaitNode> => ({
+    async execute(args): Promise<NodeExecuteResult> {
+      await args.store.putIntent({
+        runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'intent', attempt: args.attempt,
+        createdAt: args.clock(), effects: { sessionId: `session-${id}`, receipt: { threadId: `thread-${id}`, queueItemId: `queue-${id}` } },
+      });
+      return { status: 'parked', waitingOn: [{ kind: 'submission', nodeId: args.node.id, sessionId: `session-${id}`, threadId: `thread-${id}`, queueItemId: `queue-${id}` }] };
+    },
+  });
+
+  it('aborts an agent that parked earlier in the drive when a cancel arrives before the run parks', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const defaults = createDefaultNodeExecutors();
+    const setExecutor = defaults.set;
+    if (!setExecutor) throw new Error('default set executor missing');
+    // The cancel lands while the sibling branch runs, before the drive
+    // would have saved the agent's wait on the run.
+    const cancellingSet: NodeExecutor<SetNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        if (args.node.id === 'x') {
+          await args.store.insertSignal({ runId: args.run.runId, signalId: 'cancel', signalType: 'cancel', createdAt: args.clock() });
+        }
+        return setExecutor.execute(args);
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...defaults, wait: parkingAgent('mid'), set: cancellingSet };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'y', type: 'set', values: { b: 2 } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'y' }],
+    };
+    await store.createRun('run-cancel-mid', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-cancel-mid');
+
+    const park = await driveUntilPark('run-cancel-mid', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-mid', 'thread-mid', 'queue-mid');
+  });
+
+  it('aborts a parked agent when a stop on another branch ends the run in a later wave', async () => {
+    // A stop ends the run. Now that a drive runs past a parked node, a
+    // short sibling branch can reach its stop before the agent finishes.
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('late') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }],
+    };
+    await store.createRun('run-stop-late', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-stop-late');
+
+    const park = await driveUntilPark('run-stop-late', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('completed');
+    expect(engine.abort).toHaveBeenCalledWith('session-late', 'thread-late', 'queue-late');
   });
 });
