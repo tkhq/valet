@@ -6,8 +6,8 @@ import { DeliveryList } from "~/components/events/delivery-list";
 import { EventReceiptStages } from "~/components/events/receipts-panel";
 import { RedeliverButton } from "~/components/events/redeliver-button";
 import { ActivitySentence, useWorkflowsByListener } from "~/components/presence/activity-row";
-import { PresenceDetailPage } from "~/components/presence/page-shell";
-import { activityLead, activityOutcomes } from "~/components/presence/sentences";
+import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "~/components/presence/page-shell";
+import { activityLead, activityOutcomes, eventInWords } from "~/components/presence/sentences";
 import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 
@@ -25,11 +25,16 @@ export const Route = createFileRoute("/presence/events/$eventId")({
   component: PresenceEventPage,
 });
 
+/** `Presence › Activity › <event in words>`. Until the event loads, the last crumb reads `Event`. */
+export function eventCrumbs(eventKey: string | undefined): PresenceCrumb[] {
+  return [PRESENCE_CRUMB, { label: "Activity", to: "/presence/activity" }, { label: eventInWords(eventKey) }];
+}
+
 export function PresenceEventPage() {
   const { eventId } = Route.useParams();
   const { data, isLoading, error } = useEvent(eventId);
   return (
-    <PresenceDetailPage crumbs={[{ label: "Activity", to: "/presence/activity" }, { label: data?.event.summary || "Event" }]} title={data?.event.summary || "Event"}>
+    <PresenceDetailPage crumbs={eventCrumbs(data?.event.eventKey)} title={data?.event.summary || "Event"}>
       {isLoading && <LoadingRow label="Loading event…" />}
       {(error != null || (!isLoading && !data)) && (
         <ErrorRow>Could not load this event. Reload the page. If it still fails, open Activity and find the event again.</ErrorRow>

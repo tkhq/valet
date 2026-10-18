@@ -16,7 +16,7 @@ import { useWorkflowTriggers } from "~/api/workflows";
 import { useListOwner } from "~/lib/use-list-owner";
 import { blockSubjectFor, faultLead } from "./overview-groups";
 import { PIN_UNAVAILABLE, pinProblemText } from "./problem-badge";
-import { isRoutine, type Routine } from "./routines-pane";
+import { isRoutine, type Routine } from "./routine-helpers";
 import { activitySentence, type ThreadTitles } from "./sentences";
 
 /** How far back a dead delivery counts. */

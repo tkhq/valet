@@ -2,13 +2,20 @@ import { Fragment, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import type { AppPath } from "~/components/primitives";
 
-/** One step of a detail page's breadcrumb. The last step names the page and has no `to`. */
+/** One step of a detail page's breadcrumb. The last step names the page and
+ * has no `to`. Every detail page's first step is `Presence`, a link to the
+ * overview. `hash` lands the link on an anchor, such as `schedule` for the
+ * overview's `On a schedule` group. */
 export interface PresenceCrumb {
   label: string;
   to?: AppPath;
   params?: Record<string, string>;
   search?: Record<string, unknown>;
+  hash?: string;
 }
+
+/** The first crumb of every Presence detail page. */
+export const PRESENCE_CRUMB: PresenceCrumb = { label: "Presence", to: "/presence" };
 
 /**
  * A Presence detail page in the pane: a breadcrumb, a title (an `h2` under
@@ -51,6 +58,7 @@ export function Breadcrumb({ crumbs }: { crumbs: readonly PresenceCrumb[] }) {
                     to={crumb.to}
                     params={crumb.params}
                     search={crumb.search}
+                    hash={crumb.hash}
                     className="inline-flex min-h-11 items-center hover:text-ink sm:min-h-0"
                   >
                     {crumb.label}

@@ -14,7 +14,9 @@ import { Link } from "@tanstack/react-router";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Avatar, AvatarFallback, AvatarImage, Button } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
+import { announceCreated } from "./created-highlight";
 import type { PlaceBlockData } from "./overview-groups";
 import { PresenceLine } from "./presence-line";
 import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
@@ -22,6 +24,10 @@ import { SERVICE_NAMES } from "./places";
 import { SENTENCE_PLACE_FIELD_SET } from "./sentences";
 
 /** The roster's grid: a 200px place column and the sentence column; one column at phone width. */
+/** The mark on a row or a group that a Create just added to (spec Part H
+ * step 9). It is a color, not motion, so reduced motion needs no case. */
+export const CREATED_HIGHLIGHT_CLASS = "bg-moss-wash";
+
 export const ROSTER_ROW_CLASS =
   "grid grid-cols-[200px_minmax(0,1fr)] gap-x-8 gap-y-1 border-b border-line py-4 last:border-0 max-sm:grid-cols-1 max-sm:gap-y-2";
 
@@ -55,13 +61,21 @@ export function activeThreadsText(count: number): string {
   return count === 1 ? "1 active thread" : `${count} active threads`;
 }
 
-export function PlaceRow({ block }: { block: PlaceBlockData }) {
+export function PlaceRow({ block, highlighted = false }: {
+  block: PlaceBlockData;
+  /** True for two seconds after a Create adds a line to this place. */
+  highlighted?: boolean;
+}) {
   const [adding, setAdding] = useState(false);
   const sentence = usePresenceSentence(block.lines);
   const wizardLabel = block.serviceWide ? SERVICE_NAMES[block.service] : block.label;
   const appearing = block.lines.find(hasAppearance);
   return (
-    <section aria-label={block.label} className={ROSTER_ROW_CLASS}>
+    <section
+      aria-label={block.label}
+      data-highlight={highlighted ? "true" : undefined}
+      className={cn(ROSTER_ROW_CLASS, "transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS)}
+    >
       <div className="min-w-0 pt-0.5">
         {hasPage(block)
           ? (
@@ -95,6 +109,7 @@ export function PlaceRow({ block }: { block: PlaceBlockData }) {
         <AutomationWizard
           open
           onOpenChange={setAdding}
+          onCreated={announceCreated}
           preselectedPlace={{ subject: block.subject, service: block.service, label: wizardLabel }}
         />
       )}

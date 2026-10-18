@@ -10,7 +10,9 @@ import { redirect } from "@tanstack/react-router";
  * `/workflows*` nav entry (spec Part A, Part G). `/presence/workflows*` and
  * `/presence/runs*` are now the legacy side, redirecting to `/workflows*`.
  * Revision 2 also moved one line of presence from `/presence/listeners/$id`
- * to `/presence/rules/$id`.
+ * to `/presence/rules/$id`. Revision 3 removed the Routines pane: the
+ * overview lists the routines, and one routine has its own page at
+ * `/presence/routines/$id`.
  *
  * `/workflows` is a live page and a legacy route at once. Before revision 1,
  * its `?tab=scheduled` and `?tab=triggers` opened schedules and `?tab=runs`
@@ -34,6 +36,7 @@ export type LegacyRoute =
   | "/presence/runs"
   | "/presence/runs/$runId"
   | "/presence/listeners/$id"
+  | "/presence/routines"
   | "/channel";
 
 /** A route that receives a redirect from a legacy URL. */
@@ -41,7 +44,7 @@ export type PresencePath =
   | "/presence"
   | "/presence/places/$subject"
   | "/presence/rules/$id"
-  | "/presence/routines"
+  | "/presence/routines/$id"
   | "/presence/activity"
   | "/presence/events/$eventId"
   | "/workflows"
@@ -121,16 +124,16 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     from: "/workflows",
     when: "a Scheduled or Triggers review link",
     matches: (search) => tabIs(...SCHEDULE_TABS)(search) && text(search, "review") !== undefined,
-    to: "/presence/routines",
-    mapParams: noParams,
-    mapSearch: (search) => ({ ...without(search, "tab", "review"), routine: text(search, "review") ?? "" }),
+    to: "/presence/routines/$id",
+    mapParams: (_params, search) => ({ id: text(search, "review") ?? "" }),
+    mapSearch: (search) => without(search, "tab", "review"),
     example: { params: {}, search: { tab: "triggers", review: "sched-1" } },
   },
   {
     from: "/workflows",
     when: "the Scheduled or Triggers tab",
     matches: tabIs(...SCHEDULE_TABS),
-    to: "/presence/routines",
+    to: "/presence",
     mapParams: noParams,
     mapSearch: (search) => without(search, "tab", "review"),
     example: { params: {}, search: { tab: "scheduled" } },
@@ -217,6 +220,23 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     mapParams: sameParams,
     mapSearch: (search) => search,
     example: { params: { id: "sub-1" }, search: {} },
+  },
+  {
+    from: "/presence/routines",
+    when: "one routine",
+    matches: (search) => text(search, "routine") !== undefined,
+    to: "/presence/routines/$id",
+    mapParams: (_params, search) => ({ id: text(search, "routine") ?? "" }),
+    mapSearch: (search) => without(search, "routine"),
+    example: { params: {}, search: { routine: "sched-1" } },
+  },
+  {
+    from: "/presence/routines",
+    when: "the Routines pane",
+    to: "/presence",
+    mapParams: noParams,
+    mapSearch: (search) => without(search, "routine"),
+    example: { params: {}, search: {} },
   },
   {
     from: "/channel",

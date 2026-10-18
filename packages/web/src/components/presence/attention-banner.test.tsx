@@ -49,7 +49,7 @@ import { AttentionBanner } from "./attention-banner";
 import { PIN_UNAVAILABLE } from "./problem-badge";
 import { PLATFORM_CI, line } from "./test-fixtures";
 import type { Fault } from "./use-faults";
-import type { Routine } from "./routines-pane";
+import type { Routine } from "./routine-helpers";
 
 
 const R4 = line("R4", {

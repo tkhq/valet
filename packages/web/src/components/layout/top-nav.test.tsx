@@ -94,7 +94,7 @@ function renderNav(opts: { withSidebar?: boolean; workspace?: string; path?: str
     "/presence",
     "/presence/places/$subject",
     "/presence/rules/$id",
-    "/presence/routines",
+    "/presence/routines/$id",
     "/presence/activity",
     "/presence/events/$eventId",
     "/workflows",

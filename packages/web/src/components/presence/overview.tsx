@@ -11,28 +11,57 @@
  * Past `COLLAPSE_THRESHOLD` places, a filter box shows and each group
  * collapses to its heading and count. A group with a fault stays open, and
  * so does every place group while the filter has text.
+ *
+ * After a Create in one of the overview's wizards, the overview waits until
+ * its lists hold the new id, then scrolls the new line's place row, or the
+ * `On a schedule` group for a routine, into view and marks it for two
+ * seconds (spec Part H step 9).
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
+import type { CreatedTarget } from "~/components/events/automation-wizard";
 import { useEventSubscriptions } from "~/api/events";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Button, Input } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { useListOwner } from "~/lib/use-list-owner";
 import { AttentionBanner } from "./attention-banner";
+import { announceCreated, clearCreated, useCreatedTarget } from "./created-highlight";
 import { Onboarding } from "./onboarding";
 import { COLLAPSE_THRESHOLD, countText, overviewGroups, type OverviewGroup } from "./overview-groups";
-import { PlaceRow, QUIET_ADD_CLASS } from "./place-row";
+import { CREATED_HIGHLIGHT_CLASS, PlaceRow, QUIET_ADD_CLASS } from "./place-row";
 import { SERVICE_NAMES } from "./places";
 import { RoutineRosterRow } from "./routine-row";
-import { isRoutine, useRoutineDoes, type Routine } from "./routines-pane";
+import { isRoutine, useRoutineDoes, type Routine } from "./routine-helpers";
 import { useFaults } from "./use-faults";
 
 /** The reads refresh at this interval (spec Part B step 10). */
 const REFRESH_MS = 60_000;
+
+/** How long a new row stays marked (spec Part H step 9). */
+export const HIGHLIGHT_MS = 2_000;
+
+/** The `On a schedule` group's anchor. The routine page's `On a schedule` crumb links `/presence#schedule`. */
+export const SCHEDULE_ANCHOR = "schedule";
+
+/** What a Create marks: the place row that holds the new line, by subject,
+ * or the schedule group for a routine. Undefined until the lists hold the id. */
+export function highlightKey(
+  created: CreatedTarget,
+  groups: readonly OverviewGroup[],
+  routines: readonly Routine[],
+): string | undefined {
+  if (created.kind === "routine") return routines.some((routine) => routine.id === created.id) ? SCHEDULE_ANCHOR : undefined;
+  for (const group of groups) {
+    const block = group.blocks.find((candidate) => candidate.lines.some((line) => line.id === created.id));
+    if (block !== undefined) return block.subject;
+  }
+  return undefined;
+}
 
 /** The groups whose places match the filter text, by name. An empty text keeps every place. */
 export function filterGroups(groups: readonly OverviewGroup[], text: string): OverviewGroup[] {
@@ -86,7 +115,7 @@ export function OverviewActions() {
         <Plus aria-hidden className="h-3.5 w-3.5" />
         Add
       </Button>
-      {adding && <AutomationWizard open onOpenChange={setAdding} />}
+      {adding && <AutomationWizard open onOpenChange={setAdding} onCreated={announceCreated} />}
     </div>
   );
 }
@@ -111,18 +140,49 @@ export function Overview() {
   );
 }
 
+/**
+ * Marks what a Create added. The mark waits until the lists hold the new
+ * id, so it lands after the refetch. Each mark is a new object, so a second
+ * Create in the same place restarts the two seconds.
+ */
+function useCreatedHighlight(groups: readonly OverviewGroup[], routines: readonly Routine[]) {
+  const created = useCreatedTarget();
+  const [highlight, setHighlight] = useState<{ key: string } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const target = created === null ? undefined : highlightKey(created, groups, routines);
+  useEffect(() => {
+    if (target === undefined) return;
+    clearCreated();
+    setHighlight({ key: target });
+  }, [target]);
+  useEffect(() => {
+    if (highlight === null) return;
+    // On the next frame, so a collapsed group the mark opened has opened.
+    const frame = requestAnimationFrame(() => {
+      rootRef.current?.querySelector('[data-highlight="true"]')?.scrollIntoView({ block: "center" });
+    });
+    const timer = setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [highlight]);
+  return { highlighted: highlight?.key, rootRef };
+}
+
 function OverviewBody({ groups, routines }: {
   groups: OverviewGroup[];
   routines: Routine[];
 }) {
   const [filter, setFilter] = useState("");
+  const { highlighted, rootRef } = useCreatedHighlight(groups, routines);
   if (groups.length === 0 && routines.length === 0) return <Onboarding />;
   const placeCount = groups.reduce((sum, group) => sum + group.blocks.length, 0);
   const collapsing = placeCount > COLLAPSE_THRESHOLD;
   const shown = collapsing ? filterGroups(groups, filter) : groups;
   const filtering = collapsing && filter.trim() !== "";
   return (
-    <div className="space-y-9">
+    <div ref={rootRef} className="space-y-9">
       {collapsing && (
         <Input
           type="search"
@@ -139,18 +199,19 @@ function OverviewBody({ groups, routines }: {
           name={SERVICE_NAMES[group.service]}
           count={countText(group.blocks.length, "place")}
           collapsing={collapsing}
-          open={filtering || group.blocks.some((block) => block.hasFault)}
+          open={filtering || group.blocks.some((block) => block.hasFault || block.subject === highlighted)}
         >
-          {group.blocks.map((block) => <PlaceRow key={block.subject} block={block} />)}
+          {group.blocks.map((block) => <PlaceRow key={block.subject} block={block} highlighted={block.subject === highlighted} />)}
         </Group>
       ))}
       {routines.length > 0 && (
         <Group
-          id="presence-group-schedule"
+          id={SCHEDULE_ANCHOR}
           name="On a schedule"
           count={countText(routines.length, "routine")}
           collapsing={collapsing}
-          open={routines.some((routine) => (routine.detail.disabledReason ?? "") !== "")}
+          open={highlighted === SCHEDULE_ANCHOR || routines.some((routine) => (routine.detail.disabledReason ?? "") !== "")}
+          highlighted={highlighted === SCHEDULE_ANCHOR}
         >
           <ScheduleRows routines={routines} />
         </Group>
@@ -176,12 +237,14 @@ function GroupHeading({ id, name, count }: { id: string; name: string; count: st
  * when `open` turns true, until the reader toggles it. It never closes on
  * its own: a fix inside it, or a dialog it holds, must not vanish.
  */
-function Group({ id, name, count, collapsing, open, children }: {
+function Group({ id, name, count, collapsing, open, highlighted = false, children }: {
   id: string;
   name: string;
   count: string;
   collapsing: boolean;
   open: boolean;
+  /** True for two seconds after a Create adds a routine to this group. */
+  highlighted?: boolean;
   children: ReactNode;
 }) {
   const [shown, setShown] = useState(open);
@@ -189,16 +252,17 @@ function Group({ id, name, count, collapsing, open, children }: {
   useEffect(() => {
     if (open && !userTouched.current) setShown(true);
   }, [open]);
+  const mark = { "data-highlight": highlighted ? "true" : undefined, className: cn("transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS) };
   if (!collapsing) {
     return (
-      <section aria-labelledby={id}>
+      <section aria-labelledby={id} {...mark}>
         <GroupHeading id={id} name={name} count={count} />
         <div>{children}</div>
       </section>
     );
   }
   return (
-    <section aria-labelledby={id}>
+    <section aria-labelledby={id} {...mark}>
       <details
         open={shown}
         onToggle={(event) => {
@@ -234,7 +298,7 @@ function ScheduleRows({ routines }: { routines: Routine[] }) {
           )}
         </RoutineRosterRow>
       ))}
-      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" onCreated={announceCreated} />}
     </>
   );
 }

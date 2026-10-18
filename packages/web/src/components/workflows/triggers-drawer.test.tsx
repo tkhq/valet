@@ -146,8 +146,8 @@ describe("TriggersPanel: listeners and routines", () => {
   it("renders a routine as its sentence, linked to its page", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
     const link = screen.getByText("Every day at 9:00, Nightly: run Deploy pipeline.").closest("a");
-    expect(link?.getAttribute("data-to")).toBe("/presence/routines");
-    expect(link?.getAttribute("data-search")).toBe(JSON.stringify({ routine: "sched_1" }));
+    expect(link?.getAttribute("data-to")).toBe("/presence/routines/$id");
+    expect(link?.getAttribute("data-params")).toBe(JSON.stringify({ id: "sched_1" }));
   });
 
   it("renders a listener that runs this workflow as its sentence, linked to its page", () => {

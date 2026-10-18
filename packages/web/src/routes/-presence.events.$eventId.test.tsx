@@ -88,13 +88,22 @@ vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: []
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgId: "org-1", orgRole: "admin" }, error: null }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => ({ ownerType: "user", ownerId: "u1" }) }));
 
-import { EventDetailBody } from "./presence.events.$eventId";
+import { EventDetailBody, eventCrumbs } from "./presence.events.$eventId";
 
 beforeEach(() => {
   redeliverMutate.mockReset();
 });
 
 describe("EventDetailBody", () => {
+  it("puts the page under Presence › Activity, named by its event in words", () => {
+    expect(eventCrumbs("github.pull_request.opened")).toEqual([
+      { label: "Presence", to: "/presence" },
+      { label: "Activity", to: "/presence/activity" },
+      { label: "Opened pull request" },
+    ]);
+    expect(eventCrumbs(undefined).at(-1)).toEqual({ label: "Event" });
+  });
+
   it("leads with the activity sentence, then the event's key, refs, and payload", () => {
     render(<EventDetailBody data={detailData} />);
     expect(screen.getByRole("link", { name: "Pr opened in acme/app" }).getAttribute("href")).toBe("/presence/events/evt_1");

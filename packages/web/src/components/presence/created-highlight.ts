@@ -1,0 +1,40 @@
+/**
+ * The handoff from a wizard's Create to the overview (spec Part H step 9).
+ * The overview's wizards call `announceCreated` with the stored id. The
+ * header's **Add** sits in the section layout, outside the overview, so the
+ * handoff is a small module store, not a prop. The overview reads it with
+ * `useCreatedTarget`, waits until its lists hold the id, then marks that
+ * row and calls `clearCreated`.
+ */
+import { useSyncExternalStore } from "react";
+import type { CreatedTarget } from "~/components/events/automation-wizard";
+
+let pending: CreatedTarget | null = null;
+const listeners = new Set<() => void>();
+
+function emit(): void {
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Records what a Create stored, for the overview to mark. */
+export function announceCreated(created: CreatedTarget): void {
+  pending = created;
+  emit();
+}
+
+/** Forgets the recorded Create, once the overview marked it. */
+export function clearCreated(): void {
+  if (pending === null) return;
+  pending = null;
+  emit();
+}
+
+/** The Create the overview has not marked yet, or null. */
+export function useCreatedTarget(): CreatedTarget | null {
+  return useSyncExternalStore(subscribe, () => pending, () => null);
+}

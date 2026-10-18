@@ -288,8 +288,7 @@ function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefine
               {link.name}
             </Link>
           ) : (
-            // A routine's page is the Routines tab's `routine` search param (spec Part D step 2).
-            <Link to="/presence/routines" search={{ routine: link.id }} className="text-moss hover:underline">
+            <Link to="/presence/routines/$id" params={{ id: link.id }} className="text-moss hover:underline">
               {link.name}
             </Link>
           )}

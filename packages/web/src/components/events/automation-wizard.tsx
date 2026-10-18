@@ -177,6 +177,12 @@ function placeFilterRows(place: PreselectedPlace | undefined): UiFilterRow[] {
   return [{ id: crypto.randomUUID(), field: filter.field, op: "eq", value: filter.value, label: filter.label }];
 }
 
+/** What a Create stored: a line of presence or a routine, by its id. */
+export interface CreatedTarget {
+  kind: "line" | "routine";
+  id: string;
+}
+
 export function AutomationWizard({
   open,
   onOpenChange,
@@ -185,6 +191,7 @@ export function AutomationWizard({
   preselectedPlace,
   preselectedWorkflowId,
   startOn = "event",
+  onCreated,
 }: {
   replyTeam?: { id: string; name: string };
   onCloseAutoFocus?: (event: Event) => void;
@@ -200,6 +207,10 @@ export function AutomationWizard({
   /** The flow the wizard opens on: an event (a line of presence) or a
    * routine (a schedule). Read at mount. */
   startOn?: "event" | "routine";
+  /** Called once the server stores the line or the routine, with its id.
+   * The overview uses it to scroll to the new row and mark it (spec Part H
+   * step 9). A line that saved with an overlap counts as created. */
+  onCreated?: (created: CreatedTarget) => void;
 }) {
   const catalogQ = useEventCatalog();
   const allServices = catalogQ.data?.services ?? [];
@@ -479,7 +490,8 @@ export function AutomationWizard({
     // colliding rules with a "Create anyway" path; a committed write that
     // still overlaps renders the warning before the dialog closes.
     const subscriptionHandlers = {
-      onSuccess: (resp: { collisions?: EventSubscriptionCollisionsWire }) => {
+      onSuccess: (resp: { id: string; collisions?: EventSubscriptionCollisionsWire }) => {
+        onCreated?.({ kind: "line", id: resp.id });
         if (resp.collisions !== undefined) {
           setCollisions({ report: resp.collisions, committed: true });
           return;
@@ -575,7 +587,10 @@ export function AutomationWizard({
       createSchedule.mutate(
         { ...base, target: { kind: "workflow", workflowId: target.workflowId } },
         {
-          onSuccess: () => onOpenChange(false),
+          onSuccess: (resp) => {
+            onCreated?.({ kind: "routine", id: resp.schedule.scheduleId });
+            onOpenChange(false);
+          },
           onError: (err) => setError(errorText(err)),
         },
       );
@@ -597,7 +612,10 @@ export function AutomationWizard({
           ...(target.assistant === "team" ? { teamId: target.teamId } : {}),
         },
         {
-          onSuccess: () => onOpenChange(false),
+          onSuccess: (resp) => {
+            onCreated?.({ kind: "routine", id: resp.schedule.scheduleId });
+            onOpenChange(false);
+          },
           onError: (err) => setError(errorText(err)),
         },
       );

@@ -1029,6 +1029,48 @@ describe("AutomationWizard", () => {
     expect(screen.queryByText(/automation|trigger|subscription/i)).toBeNull();
   });
 
+  it("hands the new line's id to onCreated (spec Part H step 9)", () => {
+    const onCreated = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: object) => void }) => {
+        handlers.onSuccess({ id: "sub_new" });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={() => {}} onCreated={onCreated} />);
+    createReplyRule("Clean rule");
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(onCreated).toHaveBeenCalledWith({ kind: "line", id: "sub_new" });
+  });
+
+  it("hands a line that saved with an overlap to onCreated too", () => {
+    const onCreated = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: object) => void }) => {
+        handlers.onSuccess({ id: "sub_overlap", collisions: collisionPayload("overlapping") });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={() => {}} onCreated={onCreated} />);
+    createReplyRule("Narrow rule");
+    expect(onCreated).toHaveBeenCalledWith({ kind: "line", id: "sub_overlap" });
+  });
+
+  it("hands the new routine's id to onCreated", () => {
+    const onCreated = vi.fn();
+    createSchedule.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: object) => void }) => {
+        handlers.onSuccess({ schedule: { scheduleId: "sch_new" } });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={() => {}} onCreated={onCreated} startOn="routine" />);
+    fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * 1-5" } });
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Daily digest" } });
+    clickNext();
+    fireEvent.change(screen.getByLabelText("Routine name"), { target: { value: "Morning digest" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(onCreated).toHaveBeenCalledWith({ kind: "routine", id: "sch_new" });
+  });
+
   it("a clean create still closes the dialog", () => {
     const onOpenChange = vi.fn();
     createSubscription.mockImplementation(

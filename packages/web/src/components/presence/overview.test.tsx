@@ -9,7 +9,7 @@
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRouter } from "@tanstack/react-router";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
   EnsureWorkspaceRuntimeResponse,
@@ -22,8 +22,10 @@ import type {
   ListThreadsResponse,
   ListWorkflowTriggersResponse,
   ListWorkflowsResponse,
+  CreateWorkflowScheduleRequest,
   PatchEventSubscriptionRequest,
   PresencePlaceWire,
+  WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
 import type { ReactNode } from "react";
@@ -55,6 +57,7 @@ vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
 });
 
 import { routeTree } from "../../routeTree.gen";
+import { announceCreated, clearCreated } from "./created-highlight";
 import { PIN_UNAVAILABLE } from "./problem-badge";
 import { PLATFORM_CI, PLATFORM_OPS, line } from "./test-fixtures";
 
@@ -147,6 +150,23 @@ function answer(method: string, url: URL, body: string | undefined): Response {
     rules = rules.map((sub) => (sub.id === id ? next : sub));
     return json(next);
   }
+  if (method === "POST" && path === "/api/workflows/schedules") {
+    // The created routine joins the list the next read returns, as the server stores it.
+    const request = readBody<CreateWorkflowScheduleRequest>(body);
+    const prompt = request.target.kind === "assistant" ? request.target.prompt : "";
+    const schedule: WorkflowScheduleResponse["schedule"] = {
+      scheduleId: "S-new", targetKind: "assistant", prompt,
+      name: request.name, cron: request.cron, timezone: request.timezone ?? "UTC", enabled: true, lastFiredAt: null, nextFireAt: NOW + 3_600_000,
+    };
+    routines = [...routines, {
+      kind: "schedule", id: schedule.scheduleId, name: schedule.name, enabled: true,
+      detail: {
+        cron: schedule.cron, timezone: schedule.timezone, targetKind: "assistant", prompt,
+        thread: { mode: "own" }, nextFireAt: schedule.nextFireAt, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+      },
+    }];
+    return json({ schedule } satisfies WorkflowScheduleResponse);
+  }
   if (method === "POST" && /^\/api\/workspaces\/[^/]+\/runtime$/.test(path)) {
     const ensured: EnsureWorkspaceRuntimeResponse = { sessionId: "s-u" };
     return json(ensured);
@@ -185,6 +205,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearCreated();
+  Element.prototype.scrollIntoView = ORIGINAL_SCROLL;
   vi.unstubAllGlobals();
 });
 
@@ -192,7 +214,18 @@ function mountOverview() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createRouter({ routeTree, context: { queryClient }, history: createMemoryHistory({ initialEntries: ["/presence"] }) });
   render(<QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>);
-  return router;
+  return { router, queryClient };
+}
+
+const ORIGINAL_SCROLL = Element.prototype.scrollIntoView;
+
+/** Records each element the overview scrolls into view. jsdom has no layout, so the method is a stub. */
+function spyScroll(): HTMLElement[] {
+  const scrolled: HTMLElement[] = [];
+  Element.prototype.scrollIntoView = function scrollIntoView(this: HTMLElement) {
+    scrolled.push(this);
+  };
+  return scrolled;
 }
 
 /** The text of every `h2` group heading, in order. */
@@ -415,5 +448,53 @@ describe("Presence overview", () => {
     expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
       "Someone mentions Valet in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
     ]);
+  });
+
+  it("anchors the On a schedule group at #schedule for the routine page's crumb", async () => {
+    mountOverview();
+    const heading = await screen.findByRole("heading", { level: 2, name: "On a schedule" });
+    expect(heading.id).toBe("schedule");
+  });
+
+  it("after Create from Add, scrolls to the schedule group and marks it for two seconds (Part H step 9)", async () => {
+    const scrolled = spyScroll();
+    mountOverview();
+    await screen.findByRole("heading", { level: 2, name: "On a schedule" });
+    await userEvent.click(screen.getByRole("button", { name: "Add" }));
+    await userEvent.click(within(await screen.findByRole("group", { name: "When" })).getByLabelText("On a schedule"));
+    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
+    await userEvent.type(screen.getByLabelText("Cron"), "0 9 * * 1-5");
+    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
+    await userEvent.type(screen.getByLabelText("Prompt"), "Daily digest");
+    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
+    await userEvent.type(screen.getByLabelText("Routine name"), "Evening digest");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    const schedule = screen.getByRole("region", { name: "On a schedule" });
+    await waitFor(() => expect(within(schedule).getByRole("region", { name: "Evening digest" })).toBeTruthy());
+    await waitFor(() => expect(schedule.getAttribute("data-highlight")).toBe("true"));
+    expect(schedule.className).toContain("bg-moss-wash");
+    await waitFor(() => expect(scrolled).toContain(schedule));
+    await waitFor(() => expect(schedule.getAttribute("data-highlight")).toBeNull(), { timeout: 3_000 });
+    expect(schedule.className).not.toContain("bg-moss-wash");
+  });
+
+  it("marks a new line's place only once the refetched list holds it", async () => {
+    const scrolled = spyScroll();
+    const { queryClient } = mountOverview();
+    const eng = await screen.findByRole("region", { name: "ENG" });
+    act(() => announceCreated({ kind: "line", id: "L2" }));
+    // The list does not hold L2 yet, so nothing is marked.
+    expect(document.querySelector('[data-highlight="true"]')).toBeNull();
+
+    rules = [...rules, line("L2", {
+      name: "Closed ENG issues", eventKeys: ["linear.issue.update"], filters: [{ field: "team", op: "eq", value: "ENG" }],
+      target: { kind: "assistant", thread: { mode: "own" } },
+    })];
+    await act(() => queryClient.invalidateQueries());
+    await waitFor(() => expect(eng.getAttribute("data-highlight")).toBe("true"));
+    expect(eng.className).toContain("bg-moss-wash");
+    await waitFor(() => expect(scrolled).toEqual([eng]));
+    expect(screen.getByRole("region", { name: "acme/api" }).getAttribute("data-highlight")).toBeNull();
   });
 });

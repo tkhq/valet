@@ -44,7 +44,7 @@ vi.mock("~/components/workflows/trigger-dialog", () => ({
 
 import { RoutineRosterRow, routineNext } from "./routine-row";
 import { formatDateTime } from "~/lib/format-when";
-import type { Routine } from "./routines-pane";
+import type { Routine } from "./routine-helpers";
 
 const NEXT = Date.UTC(2026, 9, 19, 16, 0);
 

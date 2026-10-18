@@ -15,7 +15,7 @@ import {
 } from "~/components/primitives";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { errorText } from "~/lib/error-text";
-import { PresenceDetailPage } from "./page-shell";
+import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
 import { appearanceName, hasAppearance, usePresenceSentence } from "./presence-rows";
 import { PlaceThreads } from "./place-threads";
@@ -30,7 +30,7 @@ export function PlacePage({ subject }: { subject: string }) {
   // place's concrete name.
   const title = place?.label ?? (detail.isError ? "Not available" : "Loading…");
   return (
-    <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title} subtitle={subtitle}>
+    <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title} subtitle={subtitle}>
       {detail.isPending && <LoadingRow />}
       {detail.isError && (
         <ErrorRow>{errorText(detail.error, "Could not load this place. Pick it from the rail again.")}</ErrorRow>

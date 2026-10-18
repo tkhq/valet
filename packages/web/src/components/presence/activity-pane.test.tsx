@@ -4,8 +4,10 @@
  * leads with `<event in words> in <place> → <outcome>`, a thread in the
  * outcome links to the thread, and the deliveries and receipt stages stay
  * under a disclosure. The chips (`All`, `Problems`, one per service) and the
- * Place box live in the URL; receipts sit under a disclosure for admins. With
- * no place and no routine, the pane shows the onboarding cards (Part C step 8).
+ * Place box live in the URL; receipts sit under a disclosure for admins. The
+ * page sits under the breadcrumb `Presence › Activity`. The overview owns the
+ * onboarding paragraphs; with no place and no routine, Activity keeps the log
+ * and offers its own Add.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -254,43 +256,55 @@ describe("ActivityPane receipts", () => {
   });
 });
 
-describe("ActivityPane onboarding (Part C step 8)", () => {
-  it("shows the empty state with its own Add with no place and no routine", () => {
-    places = [];
-    triggers = [];
+describe("ActivityPane page", () => {
+  it("sits under the breadcrumb Presence › Activity, titled Activity", () => {
     renderTab();
-    expect(screen.getByText("Valet is not present anywhere yet.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
-    expect(screen.queryByRole("group", { name: "Show" })).toBeNull();
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(crumbs.textContent).toBe("Presence›Activity");
+    expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
+    expect(within(crumbs).getByText("Activity").getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2, name: "Activity" })).toBeTruthy();
   });
+});
 
-  it("shows the log with a place and no routine (Review Focus 1)", () => {
-    places = [ONE_PLACE];
+describe("ActivityPane with no place and no routine", () => {
+  it("keeps the log, shows no onboarding paragraphs, and offers its own Add", () => {
+    places = [];
     triggers = [];
     renderTab();
     expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
     expect(screen.getByRole("group", { name: "Show" })).toBeTruthy();
+    expect(screen.queryByText("Other dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByText("Other dialog")).toBeTruthy();
   });
 
-  it("shows the log with a routine and no place", () => {
+  it("offers no Add with a place (Review Focus 1)", () => {
+    places = [ONE_PLACE];
+    triggers = [];
+    renderTab();
+    expect(screen.getByRole("group", { name: "Show" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+  });
+
+  it("offers no Add with a routine and no place", () => {
     places = [];
     triggers = [{ kind: "schedule", id: "S1", name: "Morning summary", enabled: true, detail: {
       cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1",
     } }];
     renderTab();
-    expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
-    expect(screen.getByRole("group", { name: "Show" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });
 
-  it("shows the log while the places or the routines load", () => {
+  it("offers no Add while the places or the routines load", () => {
     places = undefined;
     triggers = [];
     renderTab();
-    expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
     cleanup();
     places = [];
     triggers = undefined;
     renderTab();
-    expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });
 });

@@ -3,12 +3,18 @@
  * the Log of `/events`, with each stored event read as one sentence. The
  * chips write `status` (`problems`) or `service`, and the Place box writes
  * `q`, the name the old Log used, so a redirected `/events` link opens the
- * same view. With no place and no routine, the pane shows the onboarding
- * paragraphs instead (Part C step 8).
+ * same view. The page is a drill-in under the breadcrumb `Presence ›
+ * Activity` (Part F step 2). The overview owns the onboarding paragraphs; with
+ * no place and no routine, Activity keeps the log and offers its own Add.
  */
+import { useState } from "react";
+import { Plus } from "lucide-react";
+import { AutomationWizard } from "~/components/events/automation-wizard";
 import { EventLog, type LogFilter, type LogService } from "~/components/events/event-log";
+import { Button } from "~/components/primitives";
 import { textParam } from "~/lib/search-params";
-import { Onboarding, useNotPresentAnywhere } from "./onboarding";
+import { useNotPresentAnywhere } from "./onboarding";
+import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 
 export interface ActivitySearch {
   status?: "problems";
@@ -47,7 +53,7 @@ export function ActivityPane({ search, onSearchChange }: {
   onSearchChange: (next: ActivitySearch) => void;
 }) {
   const notPresent = useNotPresentAnywhere();
-  if (notPresent) return <Onboarding withAdd />;
+  const [adding, setAdding] = useState(false);
   // A blank box clears q. The draft keeps its spaces, so the box's own echo matches it.
   const keepQ = (q: string | undefined) => (q !== undefined && q.trim() !== "" ? { q } : {});
   const onFilterChange = (filter: LogFilter) => onSearchChange({
@@ -61,11 +67,21 @@ export function ActivityPane({ search, onSearchChange }: {
     ...keepQ(q),
   });
   return (
-    <EventLog
-      filter={activityFilter(search)}
-      onFilterChange={onFilterChange}
-      query={search.q ?? ""}
-      onQueryChange={onQueryChange}
-    />
+    <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: "Activity" }]} title="Activity">
+      {/* This page has no header Add, so a workspace that is not present anywhere gets one here. */}
+      {notPresent && (
+        <Button className="mb-4" onClick={() => setAdding(true)}>
+          <Plus aria-hidden className="h-3.5 w-3.5" />
+          Add
+        </Button>
+      )}
+      <EventLog
+        filter={activityFilter(search)}
+        onFilterChange={onFilterChange}
+        query={search.q ?? ""}
+        onQueryChange={onQueryChange}
+      />
+      {adding && <AutomationWizard open onOpenChange={setAdding} />}
+    </PresenceDetailPage>
   );
 }

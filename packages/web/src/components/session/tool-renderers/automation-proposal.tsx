@@ -27,7 +27,7 @@ function ProposalBody({ result }: ToolRendererProps) {
       result={String(target?.userPromptTemplate ?? config?.prompt ?? (workflowId ? "Run workflow" : "Deliver matching events to the assistant"))}
       destination={workflowId ?? "Workspace assistant"} />
     <p className="text-xs text-muted">Open the saved configuration to review its current settings. This preview does not grant permissions.</p>
-    {schedule ? <Link className="text-sm text-moss underline" to="/presence/routines" search={{ routine: proposal.id }}>Review routine</Link>
+    {schedule ? <Link className="text-sm text-moss underline" to="/presence/routines/$id" params={{ id: proposal.id }}>Review routine</Link>
       : <Link className="text-sm text-moss underline" to="/presence/rules/$id" params={{ id: proposal.id }}>Review</Link>}
   </div>;
 }

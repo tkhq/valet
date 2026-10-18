@@ -26,7 +26,7 @@ import {
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
-import { PresenceDetailPage, type PresenceCrumb } from "./page-shell";
+import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
 import { ThreadProblem } from "./problem-badge";
 import {
   PAUSED_BY_TEAM, lineReadOnly, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel,
@@ -58,7 +58,7 @@ export function RulePage({ id }: { id: string }) {
   if (sub !== undefined) return <RuleBody sub={sub} />;
   const title = subsQ.isPending ? "Loading…" : "Not available";
   return (
-    <PresenceDetailPage crumbs={[{ label: "Presence", to: "/presence" }, { label: title }]} title={title}>
+    <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: title }]} title={title}>
       {subsQ.isPending && <LoadingRow />}
       {subsQ.isError && (
         <ErrorRow>{errorText(subsQ.error, "Could not load this page. Reload the page to try again.")}</ErrorRow>
@@ -108,9 +108,10 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   const readOnly = lineReadOnly(sub, me.data?.id);
   const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
   const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
-  const parent: PresenceCrumb = place === null
-    ? { label: "Presence", to: "/presence" }
-    : { label: place.label, to: "/presence/places/$subject", params: { subject: placeKey } };
+  // `Presence`, then the line's place when it has one place, then the line.
+  const crumbs: PresenceCrumb[] = place === null
+    ? [PRESENCE_CRUMB, { label: sub.name }]
+    : [PRESENCE_CRUMB, { label: place.label, to: "/presence/places/$subject", params: { subject: placeKey } }, { label: sub.name }];
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
@@ -118,7 +119,7 @@ function RuleBody({ sub }: { sub: EventSubscriptionWire }) {
   }
 
   return (
-    <PresenceDetailPage crumbs={[parent, { label: sub.name }]} title={sentence}>
+    <PresenceDetailPage crumbs={crumbs} title={sentence}>
       <div className="space-y-8">
         <section aria-label={sub.name} className="space-y-3">
           <div className="flex flex-wrap items-start gap-3">

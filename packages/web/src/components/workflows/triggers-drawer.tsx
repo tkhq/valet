@@ -6,7 +6,7 @@ import { useWorkflowTriggers } from "~/api/workflows";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { PresenceRow, usePresenceSentence } from "~/components/presence/presence-rows";
 import { ProblemBadge } from "~/components/presence/problem-badge";
-import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routines-pane";
+import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routine-helpers";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { WebhookSection } from "./webhook-section";
@@ -67,7 +67,7 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
         {routines.map((routine) => (
           <WorkRow
             key={routine.id}
-            title={<Link to="/presence/routines" search={{ routine: routine.id }}>{routineSentence(routine)}</Link>}
+            title={<Link to="/presence/routines/$id" params={{ id: routine.id }}>{routineSentence(routine)}</Link>}
             badge={(
               <>
                 {!routine.enabled && <Badge variant="neutral">Off</Badge>}

@@ -24,7 +24,7 @@ import { formatDateTime } from "~/lib/format-when";
 import { PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
 import { ThreadProblem } from "./problem-badge";
 import { routineReadOnly } from "./routine-page";
-import { useRoutineActions, type Routine } from "./routines-pane";
+import { useRoutineActions, type Routine } from "./routine-helpers";
 import { cronInWords, scheduleZone } from "./sentences";
 
 /** `Next <date and time>`, `Due now`, or `Off` (spec Part B step 6). `format` pins the locale and zone in tests. */

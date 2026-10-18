@@ -425,7 +425,7 @@ describe("BackgroundWorkSection", () => {
       const listener = section.getByRole("link", { name: "Per pull request" });
       expect(listener.getAttribute("href")).toBe("/presence/rules/r-1");
       const routine = section.getByRole("link", { name: "Morning summary" });
-      expect(routine.getAttribute("href")).toBe("/presence/routines?routine=s-1");
+      expect(routine.getAttribute("href")).toBe("/presence/routines/s-1");
     });
 
     it("shows the line once per thread when the thread holds several event waiters", async () => {

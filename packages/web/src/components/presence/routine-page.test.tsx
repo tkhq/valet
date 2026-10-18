@@ -23,12 +23,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
-  Link: ({ to, params, search, children, className, "aria-label": label }: {
-    to: string; params?: Record<string, string>; search?: Record<string, string>; children: ReactNode; className?: string; "aria-label"?: string;
+  Link: ({ to, params, search, hash, children, className, "aria-label": label }: {
+    to: string; params?: Record<string, string>; search?: Record<string, string>; hash?: string; children: ReactNode; className?: string; "aria-label"?: string;
   }) => {
     const path = Object.entries(params ?? {}).reduce((p, [key, value]) => p.replace(`$${key}`, value), to);
     const query = new URLSearchParams(search ?? {}).toString();
-    return <a href={query ? `${path}?${query}` : path} className={className} aria-label={label}>{children}</a>;
+    const href = `${query ? `${path}?${query}` : path}${hash ? `#${hash}` : ""}`;
+    return <a href={href} className={className} aria-label={label}>{children}</a>;
   },
 }));
 
@@ -158,13 +159,15 @@ describe("RoutinePage", () => {
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", { enabled: false }));
   });
 
-  it("titles the page with the sentence under a Routines breadcrumb", async () => {
+  it("titles the page with the sentence under Presence › On a schedule › <name>", async () => {
     wrap(<RoutinePage id="S1" />);
     const title = await screen.findByRole("heading", { level: 2, name: "Every day at 9:00, Morning summary: work in its own thread." });
     expect(title).toBeTruthy();
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
-    expect(within(crumbs).getByRole("link", { name: "Routines" }).getAttribute("href")).toBe("/presence/routines");
-    expect(within(crumbs).getByText("Morning summary")).toBeTruthy();
+    expect(crumbs.textContent).toBe("Presence›On a schedule›Morning summary");
+    expect(within(crumbs).getByRole("link", { name: "Presence" }).getAttribute("href")).toBe("/presence");
+    expect(within(crumbs).getByRole("link", { name: "On a schedule" }).getAttribute("href")).toBe("/presence#schedule");
+    expect(within(crumbs).getByText("Morning summary").getAttribute("aria-current")).toBe("page");
   });
 
   it("shows When, Do, and Runs in for an assistant routine, with the timezone when not UTC", async () => {
@@ -276,6 +279,6 @@ describe("RoutinePage", () => {
 
   it("names the fix for a routine that is not in the list", async () => {
     wrap(<RoutinePage id="gone" />);
-    expect(await screen.findByText("This routine does not exist, or you cannot see it. Open Routines and pick a routine.")).toBeTruthy();
+    expect(await screen.findByText("This routine does not exist, or you cannot see it. Open Presence and pick a routine.")).toBeTruthy();
   });
 });

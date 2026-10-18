@@ -17,9 +17,9 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
-import { PresenceDetailPage } from "./page-shell";
+import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { ProblemBadge, ThreadProblem } from "./problem-badge";
-import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routines-pane";
+import { isRoutine, routineWhen, useRoutineSentence, type Routine } from "./routine-helpers";
 import { routineDoes, runsInLabel, scheduleInWords, type ThreadTitles, type WorkflowNames } from "./sentences";
 
 /** The run id prefix the scheduler gives a schedule's runs
@@ -56,7 +56,7 @@ export function RoutinePage({ id }: { id: string }) {
   const name = routine?.name ?? "Routine";
   return (
     <PresenceDetailPage
-      crumbs={[{ label: "Routines", to: "/presence/routines" }, { label: name }]}
+      crumbs={[PRESENCE_CRUMB, { label: "On a schedule", to: "/presence", hash: "schedule" }, { label: name }]}
       title={routine === undefined ? name : sentenceFor(routine)}
     >
       {triggersQ.isPending && <LoadingRow />}
@@ -64,7 +64,7 @@ export function RoutinePage({ id }: { id: string }) {
         <ErrorRow>{errorText(triggersQ.error, "Could not load this routine. Reload the page to try again.")}</ErrorRow>
       )}
       {triggersQ.isSuccess && routine === undefined && (
-        <EmptyRow>This routine does not exist, or you cannot see it. Open Routines and pick a routine.</EmptyRow>
+        <EmptyRow>This routine does not exist, or you cannot see it. Open Presence and pick a routine.</EmptyRow>
       )}
       {routine !== undefined && <RoutineBody routine={routine} />}
     </PresenceDetailPage>

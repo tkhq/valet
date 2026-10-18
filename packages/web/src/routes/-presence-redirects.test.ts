@@ -1,5 +1,5 @@
 /**
- * Every old Events, Automation, Workflows tab, and channel URL redirects to
+ * Every old Events, Automation, Workflows tab, Routines, and channel URL redirects to
  * its new URL and keeps its search params (spec Part A step 4, INV-H1). One
  * test per row of the table, one per legacy `tab` value, one for a
  * `/workflows` URL that no row takes, and one for the thrown redirect each
@@ -27,6 +27,7 @@ describe("presence redirect table", () => {
       "/events",
       "/events/$eventId",
       "/presence/listeners/$id",
+      "/presence/routines",
       "/presence/runs",
       "/presence/runs/$runId",
       "/presence/workflows",
@@ -133,19 +134,19 @@ describe("presence redirect table", () => {
   });
 
   describe("pre-revision-1 Workflows tabs", () => {
-    it.each(["scheduled", "triggers"])("tab=%s opens Routines and keeps the workspace", (tab) => {
+    it.each(["scheduled", "triggers"])("tab=%s opens Presence and keeps the workspace", (tab) => {
       expect(target("/workflows", {}, { tab, workspace: "t1" })).toEqual({
-        to: "/presence/routines",
+        to: "/presence",
         params: {},
         search: { workspace: "t1" },
       });
     });
 
-    it.each(["scheduled", "triggers"])("tab=%s with a review opens that routine", (tab) => {
+    it.each(["scheduled", "triggers"])("tab=%s with a review opens that routine's page", (tab) => {
       expect(target("/workflows", {}, { tab, review: "sched-1", workspace: "t1" })).toEqual({
-        to: "/presence/routines",
-        params: {},
-        search: { routine: "sched-1", workspace: "t1" },
+        to: "/presence/routines/$id",
+        params: { id: "sched-1" },
+        search: { workspace: "t1" },
       });
     });
 
@@ -162,6 +163,34 @@ describe("presence redirect table", () => {
       expect(target("/workflows", {}, { workspace: "t1" })).toBeUndefined();
       expect(target("/workflows", {}, { tab: "workflows" })).toBeUndefined();
       expect(target("/workflows", {}, { review: "sched-1" })).toBeUndefined();
+    });
+  });
+
+  it("sends both old routine links to the routine's page (Review Focus 5)", () => {
+    expect(target("/presence/routines", {}, { routine: "sch-1", workspace: "team-1" })).toEqual({
+      to: "/presence/routines/$id",
+      params: { id: "sch-1" },
+      search: { workspace: "team-1" },
+    });
+    expect(target("/workflows", {}, { tab: "scheduled", review: "sch-1" })).toEqual({
+      to: "/presence/routines/$id",
+      params: { id: "sch-1" },
+      search: {},
+    });
+  });
+
+  describe("the revision 2 Routines pane", () => {
+    it("sends /presence/routines?routine= to the routine's page and keeps the workspace", () => {
+      expect(target("/presence/routines", {}, { routine: "sched-1", workspace: "t1" })).toEqual({
+        to: "/presence/routines/$id",
+        params: { id: "sched-1" },
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("sends /presence/routines without a routine to Presence", () => {
+      expect(target("/presence/routines", {}, { workspace: "t1" })).toEqual({ to: "/presence", params: {}, search: { workspace: "t1" } });
+      expect(target("/presence/routines", {}, { routine: "" })).toEqual({ to: "/presence", params: {}, search: {} });
     });
   });
 
@@ -209,7 +238,7 @@ describe("redirectToPresence", () => {
     }
     expect(isRedirect(thrown)).toBe(true);
     if (!isRedirect(thrown)) return;
-    expect(thrown.options).toMatchObject({ to: "/presence/routines", search: { routine: "sched-1" }, replace: true });
+    expect(thrown.options).toMatchObject({ to: "/presence/routines/$id", params: { id: "sched-1" }, search: {}, replace: true });
   });
 
   it("throws a replace redirect built from the table", () => {

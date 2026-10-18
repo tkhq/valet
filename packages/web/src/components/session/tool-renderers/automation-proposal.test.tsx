@@ -27,6 +27,6 @@ describe("automation proposal renderer", () => {
   it("links a schedule proposal to its routine page", () => {
     const Body = automationProposalRenderer.Body;
     render(<Body args={{}} toolName="call_tool" status="completed" result={JSON.stringify({ proposal: { kind: "schedule", id: "proposal-2", config: { cron: "0 9 * * *", timezone: "UTC", prompt: "Summarize" } } })} />);
-    expect(screen.getByRole("link", { name: "Review routine" }).getAttribute("href")).toBe("/presence/routines?routine=proposal-2");
+    expect(screen.getByRole("link", { name: "Review routine" }).getAttribute("href")).toBe("/presence/routines/proposal-2");
   });
 });
