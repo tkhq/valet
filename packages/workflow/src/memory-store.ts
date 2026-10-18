@@ -275,7 +275,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     if (existing && existing.attempt > attempt) {
       throw new WorkflowFenceError(runId, attempt, existing.attempt);
     }
-    this.checkpoints.set(key, structuredClone(terminal));
+    this.checkpoints.set(key, structuredClone(existing ? { ...terminal, startedAt: existing.createdAt } : terminal));
   }
 
   async getCheckpoints(runId: string): Promise<NodeCheckpoint[]> {

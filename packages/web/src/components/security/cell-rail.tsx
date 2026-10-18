@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Archive, ExternalLink } from "lucide-react";
 import type { SecurityCellWire } from "@valet/api/wire";
 import { Badge, Tooltip } from "~/components/primitives";
 import { cn } from "~/lib/cn";
+import { useNow } from "~/lib/use-now";
 
 /**
  * The engagement's ordered cells (valet-security design §engagement panel):
@@ -70,17 +70,6 @@ export function elapsedLabel(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-/** A slow clock for elapsed/over-age labels: one shared 30s tick instead of
- * a timer per cell. */
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
-}
-
 export function CellRail({
   cells,
   onOpenChild,
@@ -88,7 +77,8 @@ export function CellRail({
   cells: SecurityCellWire[];
   onOpenChild?: (childId: string) => void;
 }) {
-  const now = useNow();
+  // A slow clock for elapsed/over-age labels: one 30s tick for every cell.
+  const now = useNow(30_000);
   if (cells.length === 0) {
     return (
       <div className="px-4 py-3 text-xs text-muted">

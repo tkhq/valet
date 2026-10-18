@@ -1720,6 +1720,7 @@ export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
     result: cp.result,
     error: cp.error,
     createdAt: cp.createdAt,
+    ...(cp.startedAt !== undefined ? { startedAt: cp.startedAt } : {}),
     sessionId: typeof effects?.sessionId === "string" ? effects.sessionId : undefined,
     childRunId: typeof effects?.childRunId === "string" ? effects.childRunId : undefined,
     // A `session` or `orchestrator` node's dispatch receipt names the THREAD
@@ -2312,6 +2313,11 @@ async function projectWorkflowRun(
       waitingOn: run.waitingOn,
       definition: run.definition,
       params: run.params,
+      // The run page labels a run "Manual run" or "Automatic run" from
+      // these, the same way the run list does.
+      ...(run.actorUserId ? { actorUserId: run.actorUserId } : {}),
+      ...(run.params.parentRunId !== undefined ? { parentRunId: run.params.parentRunId } : {}),
+      ...(run.params.parentIteration !== undefined ? { parentIteration: run.params.parentIteration } : {}),
     },
     // Guaranteed non-null by the authorization guard at the top. The web run
     // page adopts this into the workspace switcher. The store types

@@ -2112,6 +2112,9 @@ export interface WorkflowRunCheckpoint {
   result?: unknown;
   error?: string;
   createdAt: number;
+  /** When the step began. Absent for a step that is still running (its
+   * `createdAt` is its start) and for steps recorded before this field. */
+  startedAt?: number;
   /** The session a session/orchestrator node drove. Present on a failed
    * node too — that is where the failure is readable. */
   sessionId?: string;

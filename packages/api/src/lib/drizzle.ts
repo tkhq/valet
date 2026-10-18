@@ -397,6 +397,7 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "workflow step start times", probe: { kind: "column", table: "workflow_checkpoints", column: "started_at" }, sql: 'ALTER TABLE "workflow_checkpoints" ADD COLUMN "started_at" bigint' },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,
