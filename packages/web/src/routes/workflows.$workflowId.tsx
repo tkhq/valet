@@ -25,6 +25,7 @@ import {
   type UpdateWorkflowMutation,
 } from "~/api/workflows";
 import {
+  BackLink,
   Button,
   ConfirmDialog,
   Dialog,
@@ -384,9 +385,7 @@ function WorkflowEditorPane({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 flex-col gap-2 border-b border-line px-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:px-6 lg:py-4">
         <div className="flex min-w-0 flex-1 flex-col gap-1 lg:flex-row lg:items-center lg:gap-3">
-          <Link to="/workflows" className="inline-flex min-h-11 shrink-0 items-center text-xs text-muted hover:text-ink sm:min-h-0">
-            ← Workflows
-          </Link>
+          <BackLink to="/workflows" className="shrink-0">Workflows</BackLink>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}

@@ -29,7 +29,7 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
-import { FilterChips, Select, pageClass } from "~/components/primitives";
+import { FilterChips, PageHeader, Select, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatUsdPrecise } from "~/lib/format-usage";
 
@@ -380,17 +380,13 @@ export function UsagePage() {
       <div className={cn(pageClass, "space-y-10")}>
         {/* Header — the workspace clause names the active scope, same as the
             other scoped list pages. */}
-        <div>
-          <h1 className="font-display text-2xl text-ink flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            Usage
-            <WorkspaceClause />
-          </h1>
-          <p className="mt-1 text-sm text-muted">
-            {scope === "team"
-              ? "Spend across all Valet use cases for this team."
-              : "Spend across all Valet use cases for your account."}
-          </p>
-        </div>
+        <PageHeader
+          title="Usage"
+          clause={<WorkspaceClause />}
+          description={scope === "team"
+            ? "Spend across all Valet use cases for this team."
+            : "Spend across all Valet use cases for your account."}
+        />
 
         <nav aria-label="Usage views" className="flex gap-1 border-b border-line">
           {(["overview", "breakdown", "activity"] as const).map((item) => (

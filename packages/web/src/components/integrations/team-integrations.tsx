@@ -1,5 +1,5 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
-import { ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
+import { ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { IntegrationLimitNotice } from "./integration-limit-notice";
 import { Section } from "~/components/settings/section";
@@ -30,8 +30,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={cn(pageClass, "max-w-3xl")}>
-        <h1 className="text-2xl font-medium text-ink">Integrations</h1>
-        {team && <p className="mt-1 text-sm text-muted">{team.name} workspace</p>}
+        <PageHeader title="Integrations" description={team && `${team.name} workspace`} />
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
         <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
         <div className="mt-8 space-y-10">

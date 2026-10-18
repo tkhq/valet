@@ -97,6 +97,8 @@ Use these primitives instead of hand-written classes:
 
 - `Select` is a native `<select>` with the field surface and focus ring of `Input`. Use `size="sm"` in a compact filter row. It has no default width, so pass `w-full` for a form field.
 - `Callout` is a tinted notice box. Set `tone` to `neutral`, `warning`, `danger`, or `success`. If the notice can appear after the first paint, add `role="alert"` or `role="status"`. Use `asChild` to put its classes on a `label` or a `ul`.
+- `PageHeader` is the top of a page: the `h1` title, an optional `clause` such as `WorkspaceClause`, the `actions` on the right, and an optional `description`. Pass one element as `actions`, and wrap two or more actions in a `div`.
+- `BackLink` is a "← label" link to the parent page. It takes the props of `Link`, so the route and its params stay typed. Pass it to `PageHeader` as `back`, or use it alone in a toolbar.
 
 ### Accepting `className` for composition
 
