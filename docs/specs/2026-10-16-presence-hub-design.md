@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary). Status: implemented (revision 2).
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing). Status: revision 2 implemented; revision 3 proposed.
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -21,21 +21,39 @@ the other. A schedule that prompts the assistant was created from the
 Events wizard and listed only under Workflows. Revision 1 of this spec
 merged both pages into one section with five tabs. That put a second
 level of navigation under the top nav, and it kept a category noun
-("listener") that no person uses. Users could not answer the question
-they have: where is Valet, and what does it do there?
+("listener") that no person uses. Revision 2 replaced the tabs with a rail
+of places beside an Activity log. That inverted the page: the log, which a
+person reads rarely, filled the pane, while the places and what Valet does
+in each, which the page promises, sat in a rail as bare labels. The main
+creation flow was not on the landing at all. Users still could not answer
+the question they have: where is Valet, and what does it do there?
 
 ## Thesis
 
-**Presence** is Valet listening somewhere. One section, Presence, shows
-the places Valet is in, what it listens for and does in each, how it
-appears there, which threads are active there, and what it does on its
-own schedule (a **routine**). The places are the navigation. Every line is
-a sentence, and the UI uses six nouns.
+**Presence** is Valet listening somewhere. One section, Presence, lands on
+the map: every place Valet is in, what it does there as sentences, whether
+it is working, and what it does on its own schedule (a **routine**). The
+things a person set up are the page. History is a drill-in. One **Add**
+starts everything. Every line is a sentence, and the UI uses six nouns.
 
 ## Requirement language
 
 MUST, MUST NOT, SHOULD, and MAY follow RFC 2119. A sentence without one of
 these words is informative.
+
+## Journeys (informative)
+
+| Journey | Frequency | What the person must see first |
+|---|---|---|
+| Set up: "make Valet answer in #incidents" | first visit, then rarely | one **Add** button and a wizard that reads back as a sentence |
+| Glance: "is Valet doing what I think? anything broken?" | most visits | the places, their sentences, on or off, an attention banner |
+| Adjust: "turn that off", "move it to another thread" | sometimes | the sentence row with its switch and inline fix |
+| Investigate: "why did Valet not reply yesterday?" | occasionally | activity scoped to a place or a line; the global log last |
+| Routines: "what runs on a schedule, and when next" | sometimes | the `On a schedule` group with `Next` and `Fire now` |
+
+The overview (Part B) serves the first three journeys without a click. The
+place page (Part C), the line page (Part D), and Activity (Part F) serve the
+rest.
 
 ## Terminology
 
@@ -45,15 +63,16 @@ the system specs.
 
 | User-facing | System |
 |---|---|
-| **Presence**: Valet listening somewhere; also the section | the hub; an event subscription is one line of a place's presence |
+| **Presence**: Valet listening somewhere; also the section and its landing page | the hub; an event subscription is one line of a place's presence |
 | **place**: a Slack channel, a GitHub repository, a Linear team; also a service as a whole (`Everywhere in Slack`). Copy names the concrete thing (`#incidents`, `acme/api`) and uses "place" only as a column header | a subject at the mid grain; a pull request or issue is a thread inside its repository's page |
 | a line of presence has no category noun; copy uses its sentence, or its own name where a noun is unavoidable (breadcrumb, Fed by) | an event subscription with any target |
-| **routine**: at a time, Valet does something | a workflow schedule with any target |
+| **routine**: at a time, Valet does something; the group `On a schedule` | a workflow schedule with any target |
 | **Appears as**: the display name and avatar Valet uses when it replies | the `appearance` field (Part J) |
 | **Runs in**: the form label for where deliveries land | thread policy |
 | **active**: a thread currently waiting on this place | event waiter |
 | **following**: a Slack thread whose replies reach a Valet thread | followed thread |
 | **Activity**: what happened | events, deliveries, receipts |
+| **Needs attention**: the banner of things to fix | problems: an archived pin, a disabled routine, a dead delivery |
 | **workflow**, **run** | unchanged; their own top-nav entry |
 
 UI copy MUST NOT use "listener", "automation", "subscription", "trigger",
@@ -73,17 +92,17 @@ pin.
 | Step | Action | Expected observation |
 |---|---|---|
 | P1 | Open the app. | The nav shows **Presence** and **Workflows**, and no "Events" or "Automation" entry. |
-| P2 | Open `/presence`. | The pane shows Activity. The rail shows `Activity` with a problem count of 1, `Routines` with a count of 1, then the groups `Slack` and `GitHub`; `GitHub` lists `acme/api` with 2 lines and an active dot. No pull request appears in the rail. |
-| P3 | Select `acme/api`. | The pane header reads `acme/api` with `GitHub`. Under **Valet here**, R1 reads `When a pull request review or a check completes on acme/api, work in one thread per pull request.` and R4 reads `When a check completes on acme/api, work in the Platform CI thread.` with an inline problem line `Platform CI is archived. Pick another thread:` and a picker. **Threads** lists `One thread per pull request: acme/api#12, acme/api#13`. |
-| P4 | Switch to the `sre` workspace and select `#incidents`. | The pane lists M and P as sentences, **Appears as** `Ops Bot`, **Threads** with `Active now: t-inc` and `Following: 1 Slack thread`, and **Recent activity** with the C2 mention. |
-| P5 | Click **Listen for…** on `#incidents`. | The wizard opens fixed on `#incidents`. The When step offers only Slack choices. The preview line reads `When someone mentions Valet in #incidents, reply in a new thread.` Create stores a rule with policy `{ mode: "new" }`. |
-| P6 | Select `Routines`, click **New routine**, set weekdays at 9:00, a prompt, and a name. | The preview reads `Every weekday at 9:00, <name>: work in its own thread.` The row appears under Routines with `Next: <date and time>` and **Fire now**. |
-| P7 | Open R4 from its row. | The pane shows a breadcrumb `acme/api › CI failures`, the sentence as the title, a fact strip (When, Do, Runs in, Appears as) with **Edit**, the problem line with the picker, then deliveries as sentences. |
-| P8 | Pick a new thread in the picker. | The problem line disappears, the sentence ends with the new thread's title, and the rail's problem count on `Activity` drops to 0. |
-| P9 | Select `Activity`, choose the `Problems` chip. | The dead-lettered delivery appears as `Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver`. With the chip off, the C2 mention appears as `Mention in #incidents → replied in t-inc`. |
+| P2 | Open `/presence`. | The page shows **Add**, a **Needs attention** banner with one item (`Platform CI is archived. Pick another thread:` and a picker), then the group `GitHub` with the block `acme/api` (an active mark, R1 and R4 as sentences with switches, R4's problem line under its row) and the group `On a schedule` with S1 as a sentence, `Next: <date and time>`, and **Fire now**. No rail, no tabs, no pull request block. The footer reads `Activity`. |
+| P3 | Select `acme/api`. | The place page header reads `acme/api` with `GitHub`. Under **Valet here**, R1 reads `When a pull request review or a check completes on acme/api, work in one thread per pull request.` and R4 reads `When a check completes on acme/api, work in the Platform CI thread.` with its inline problem line. **Threads** lists `One thread per pull request: acme/api#12, acme/api#13`. |
+| P4 | Switch to the `sre` workspace and select `#incidents`. | The place page lists M and P as sentences, **Appears as** `Ops Bot`, **Threads** with `Active now: t-inc` and `Following: 1 Slack thread`, and **Recent activity** with the C2 mention. |
+| P5 | Click **Listen for…** on the `#incidents` block of the overview. | The wizard opens fixed on `#incidents`. The When step offers only Slack choices. The preview reads `When someone mentions Valet in #incidents, reply in a new thread.` Create stores a rule with policy `{ mode: "new" }`. |
+| P6 | Click **Add**, choose `On a schedule`, set weekdays at 9:00, a prompt, and a name. | The When step offers all four choices. The preview reads `Every weekday at 9:00, <name>: work in its own thread.` The row appears under `On a schedule` with `Next: <date and time>` and **Fire now**. |
+| P7 | Open R4 from its row. | The page shows a breadcrumb `acme/api › CI failures`, the sentence as the title, a fact strip (When, Do, Runs in, Appears as) with **Edit**, the problem line with the picker, then deliveries as sentences. |
+| P8 | Pick a new thread in the picker, then return to `/presence`. | The problem line is gone, the sentence ends with the new thread's title, and the **Needs attention** banner is gone. |
+| P9 | Follow `Activity`, choose the `Problems` chip. | `/presence/activity` lists the dead-lettered delivery as `Completed check in acme/api#14 → gave up after 3 attempts. To send it again, press Redeliver`. With the chip off, the C2 mention appears as `Mention in #incidents → replied in t-inc`. The breadcrumb reads `Presence › Activity`. |
 | P10 | Open `/workflows`. | The Workflows page shows the workflow list and a Runs view at its own URL. The editor's panel lists this workflow's presence lines and routines as sentences, and its **Add** opens the wizard fixed on the workflow. |
 | P11 | Open thread `t-inc`. | The thread context card shows `Fed by: Incident mentions, Channel watch` with links; `acme/api#12`'s header names its place, `acme/api#12`. |
-| P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, the last two to `/workflows`. No URL returns a 404. |
+| P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/routines`, `/presence/routines?routine=<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, `/presence/routines` to `/presence`, `/presence/routines?routine=<id>` to `/presence/routines/<id>`, the last two to `/workflows`. No URL returns a 404. |
 
 Pass criterion: all steps, in one run, from a clean start.
 
@@ -94,62 +113,95 @@ Pass criterion: all steps, in one run, from a clean start.
 1. Two nav entries replace "Automation" and "Events": **Presence** at
    `/presence` and **Workflows** at `/workflows`. The Presence subtitle is
    `Where Valet is, and what it does there.`
-2. Presence is a two-pane shell: a left **rail** (Part B) and a **pane**.
-   There are no tabs. The shell reuses the Settings rail primitives.
+2. Presence is one column. There is no rail and there are no tabs. The
+   landing page is the overview (Part B). Every other page of the section
+   is a drill-in with a breadcrumb whose first crumb is `Presence`.
 3. Routes:
 
-   | Path | Pane |
+   | Path | Page |
    |---|---|
-   | `/presence` | Activity (Part F) |
-   | `/presence/activity` | Activity |
-   | `/presence/routines` | Routines (Part E); `?routine=<id>` opens one |
+   | `/presence` | the overview (Part B) |
    | `/presence/places/$subject` | a place (Part C) |
    | `/presence/rules/$id` | one line of presence (Part D) |
+   | `/presence/routines/$id` | one routine (Part E) |
+   | `/presence/activity` | Activity (Part F) |
    | `/presence/events/$eventId` | one event |
    | `/workflows`, `/workflows/runs`, `/workflows/$workflowId`, `/workflows/runs/$runId` | the Workflows section (Part G) |
 
-4. Every URL from revision 1 and from before it MUST redirect: `/events*`
-   and `/channel` into Presence, `/presence/listeners/$id` to
-   `/presence/rules/$id`, `/presence/workflows*` to `/workflows*`,
-   `/presence/runs*` to `/workflows/runs*`. Redirects carry their search
-   params and live in one table.
-5. `/presence` MUST land on Activity. It never lands on a place.
-6. A detail page (a line of presence, a routine, an event) opens in the
-   pane with a breadcrumb; the rail stays visible.
-7. On a narrow viewport the rail MUST collapse into a dropdown, as the
-   Settings rail does.
-8. The workspace switcher scopes the whole section.
+4. Every URL from an earlier revision and from before the hub MUST
+   redirect: `/events*` and `/channel` into Presence,
+   `/presence/listeners/$id` to `/presence/rules/$id`, `/presence/routines`
+   to `/presence`, `/presence/routines?routine=<id>` to
+   `/presence/routines/<id>`, `/presence/workflows*` to `/workflows*`,
+   `/presence/runs*` to `/workflows/runs*`, and the old `/workflows?tab=`
+   values as the Deviations list them. Redirects carry their search params
+   and live in one table.
+5. `/presence` MUST land on the overview. It never lands on a place or on
+   Activity.
+6. The overview MUST read well at one column on a phone: blocks stack, the
+   switch and the overflow menu stay on the sentence row, and nothing
+   scrolls sideways.
+7. The workspace switcher scopes the whole section.
 
-## Part B: The rail
+## Part B: The overview
 
 *Depends on: delivery threads spec Part D. Conformance: api, web.*
 
-1. Rail order: **New routine** (a button), **Activity** with a problem
-   count (Part F step 4), **Routines** with a count, then one group per
-   service (Slack, GitHub, Linear) in that order.
-2. A group header is itself the service-wide place (`Everywhere in Slack`,
-   `Across GitHub`, `Across Linear`). Selecting it opens the service page,
-   which lists the lines whose filters name no single place.
-3. Group rows are places at the mid grain only: Slack channels, GitHub
-   repositories, Linear teams. A pull request or issue MUST NOT appear in
-   the rail; it appears inside its repository's or team's page as a thread.
-   `GET /api/presence/places` keeps returning every grain; the rail filters.
-4. A place row shows its label, the number of presence lines there, an
-   **active** dot when a thread waits there, and a problem dot when a line
-   there has a problem.
-5. A group with no places and no service-wide lines does not render.
-6. Past eight places, a filter box appears at the top of the rail and the
-   groups collapse by default, with the selected place's group open.
-7. The rail reads one `GET /api/presence/places` per workspace, refreshed
-   on every write the section makes and every 60 seconds.
+1. Header: the title, the workspace clause, the subtitle, and one **Add**
+   button at the right. **Add** opens the wizard (Part H) on the When step
+   with all four choices.
+2. **Needs attention** (Part F step 4): a banner under the header, shown
+   only when the workspace has at least one fault. Each item is one line:
+   the fault text and its fix inline (an archived pin shows the thread
+   picker; a disabled routine shows its reason and an `Edit` link; a dead
+   delivery links its event). The banner never shows a bare count.
+3. Groups, in order: `Slack`, `GitHub`, `Linear`, `On a schedule`. A group
+   renders only when it has at least one block.
+4. A **place block** has a header row and sentence rows. The header row:
+   the concrete name as a link to the place page, an active mark with the
+   count of threads waiting there, and `<time ago>` of the last activity. A
+   block appears for every place at the mid grain (a Slack channel, a
+   GitHub repository, a Linear team) that has at least one line of
+   presence. A pull request or issue MUST NOT get a block. Lines whose
+   filters name no single place form one block per service headed
+   `Everywhere in Slack`, `Across GitHub`, or `Across Linear`, which links
+   to the service page (Part C).
+5. A **sentence row** is the Part C step 2 sentence without its `<in|on>
+   <place>` clause (the block names the place), linked to the line's page,
+   with the on/off switch and the overflow menu (Edit, Appears as, Delete)
+   from Part C step 2. The problem line (Part C step 3) and the paused line
+   render under the row. A block ends with a quiet `+ Listen for…` that
+   opens the wizard fixed on that place.
+6. The `On a schedule` group has one block with the Part E step 1 routine
+   rows, each with `Next: <time>`, the switch, and **Fire now**, and ends
+   with `+ New routine`, which opens the wizard on the schedule step.
+7. Footer: a link `Activity` to `/presence/activity`. When the api already
+   returns a total, the link MAY read `Activity · <n> events in the last 30
+   days`.
+8. Scale: with more than ten blocks, each group collapses to its header
+   with a block count, a filter box appears above the groups and filters
+   blocks by name, and groups with a fault stay open. Blocks within a group
+   sort by last activity, newest first; blocks with no activity sort by
+   name.
+9. Empty state: a workspace with no block and no routine shows, in place
+   of the groups, `Valet is not present anywhere yet.` with three cards
+   (Connect Slack, Connect GitHub, Connect Linear, each to Integrations)
+   and a line `or Add to listen somewhere, or run on a schedule.` with
+   **Add**.
+10. Reads: `GET /api/presence/places` (every grain; the overview keeps the
+    mid grain and the service roots), `GET /api/event-subscriptions` (the
+    sentences), and the workspace's schedules, refreshed on every write the
+    section makes and every 60 seconds. Loading reads `Loading…` in place of
+    the groups; a failed read names its fix.
 
 ## Part C: The place page
 
 *Depends on: delivery threads spec Parts A and B. Conformance: web, api.*
 
-1. Header: the concrete name, the service, and an outbound link to the
-   place in its tool when the api knows it. The header never shows the
-   place key; loading reads `Loading…`; a failed read reads `Not available`.
+1. Header: a breadcrumb `Presence › <name>`, the concrete name, the
+   service, and an outbound link to the place in its tool when the api
+   knows it. The header never shows the place key; loading reads
+   `Loading…`; a failed read reads `Not available`.
 2. **Valet here**: one sentence per line of presence, with an on/off switch
    and an overflow menu (Edit, Appears as, Delete). The sentence grammar:
 
@@ -180,25 +232,22 @@ Pass criterion: all steps, in one run, from a clean start.
    threads bound here), and for a repository or team `One thread per pull
    request` or `One thread per issue` listing the subject threads; each a
    link.
-6. **Appears as**: shown when any line here sets one; inline change.
+6. **Appears as**: shown when any line here sets one.
 7. **Recent activity**: the last ten rows for this place (Part F grammar)
    and `View all` into Activity filtered to the place.
-8. Empty states: a place that exists only because events or threads
-   touched it reads `Nothing is set up here yet.` with **Listen for…**. A
-   workspace with no places shows, in the Activity pane, `Valet is not
-   present anywhere yet.` with three cards (Connect Slack, Connect GitHub,
-   Connect Linear, each to Integrations) and `or add a routine`.
+8. Empty state: a place that exists only because events or threads touched
+   it reads `Nothing is set up here yet.` with **Listen for…**.
 
 ## Part D: One line of presence
 
 *Conformance: web, api.*
 
-1. `/presence/rules/$id` shows a breadcrumb `<place> › <name>`, the
-   sentence as the title, a fact strip (When, Do, Runs in, Appears as)
-   with **Edit** (the existing dialog, Runs in editable), the problem line
-   when present, then **Deliveries** as sentences (`<event in words> →
-   <outcome>, <time ago>`) and, for admins, receipt stages under a
-   disclosure.
+1. `/presence/rules/$id` shows a breadcrumb `Presence › <place> › <name>`,
+   the sentence as the title, a fact strip (When, Do, Runs in, Appears as)
+   with **Edit** (the existing dialog, Runs in editable), the on/off
+   switch, the problem line when present, then **Deliveries** as sentences
+   (`<event in words> → <outcome>, <time ago>`) and, for admins, receipt
+   stages under a disclosure.
 2. `EventSubscriptionWire` carries `problem?: string` (the pin text when
    the latest settled delivery since the line's last edit dead-lettered on
    its pin). The api offers `GET /api/event-subscriptions/:id/deliveries`
@@ -210,13 +259,17 @@ Pass criterion: all steps, in one run, from a clean start.
 
 1. A routine row is one sentence: `<schedule in words>, <name>: <do>.` with
    `<do>` as `work in its own thread`, `work in a new thread each time`,
-   `work in the <title> thread`, or `run <workflow>`; plus `Next: <time>`,
-   an on/off switch, and **Fire now**. The timezone follows the schedule
-   words when it is not UTC.
-2. `/presence/routines?routine=<id>` opens one routine in the pane: the
-   sentence, the fact strip, Edit, Fire now, the problem line from
-   `disabledReason`, and its run or delivery history.
-3. **New routine** opens the wizard (Part H) on the schedule step.
+   `work in the <title> thread`, or `run <workflow>`; plus `Next: <time>`
+   or `Off`, an on/off switch, and **Fire now**. The timezone follows the
+   schedule words when it is not UTC. The rows live in the overview's `On
+   a schedule` group (Part B step 6).
+2. `/presence/routines/$id` shows a breadcrumb `Presence › On a schedule ›
+   <name>`, the sentence as the title, a fact strip (When, Do, Runs in),
+   Edit, Fire now, the switch, the problem line from `disabledReason`, and
+   its run or delivery history.
+3. A routine is created through **Add** → `On a schedule`, or `+ New
+   routine` on the group, both of which open the wizard (Part H) on the
+   schedule step.
 4. `workflow_schedules` carries `disabled_reason`, set when the scheduler
    disables a routine for an undeliverable pin and cleared on enable or a
    pin change; the wire exposes `disabledReason` and the routine's owner.
@@ -229,16 +282,17 @@ Pass criterion: all steps, in one run, from a clean start.
    with outcomes `replied in <thread>`, `delivered to <thread>`, `claimed
    by <thread>`, `started <workflow> run`, `skipped: <reason>`, `no one
    listening`, or the delivery's status line when pending, failed, or dead.
-2. Chips filter the list: `All`, `Problems`, one per service, and a place
-   search. Receipt stages sit under a disclosure for admins. The event
-   page keeps payload and redeliver.
+2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
+   filter the list: `All`, `Problems`, one per service, and a place search.
+   Receipt stages and diagnostics sit under disclosures for admins. The
+   event page keeps payload and redeliver.
 3. A claim by a thread the viewer cannot open reads `claimed by another
    thread`; an archived thread renders a disabled link.
-4. The rail's Activity count is the number of distinct faults: lines with
-   a problem, routines with a `disabledReason`, and lines with a dead
-   delivery in the last day. A dead delivery counts once per line, and
-   only when its line does not count for its own problem and was not
-   edited after the delivery.
+4. The **Needs attention** banner lists the workspace's distinct faults:
+   lines with a problem, routines with a `disabledReason`, and lines with
+   a dead delivery in the last day. A dead delivery counts once per line,
+   and only when its line does not already list for its own problem and
+   was not edited after the delivery.
 
 ## Part G: Workflows
 
@@ -259,10 +313,11 @@ Pass criterion: all steps, in one run, from a clean start.
 1. The wizard reads the configuration back as the sentence the lists use,
    in a preview line at its top that updates with every choice.
 2. Step **When**: `Someone mentions Valet in Slack`, `Something happens on
-   GitHub`, `Something happens in Linear`, `On a schedule`. Launched from a
-   place, the place is fixed and only its service's choices show. Launched
-   from Routines, the schedule step opens first. Launched from a workflow,
-   the Do step is fixed on that workflow.
+   GitHub`, `Something happens in Linear`, `On a schedule`. Launched from
+   **Add**, all four show. Launched from a place, the place is fixed and
+   only its service's choices show. Launched from `+ New routine`, the
+   schedule step opens first. Launched from a workflow, the Do step is
+   fixed on that workflow.
 3. Step **What**: the event picker for the chosen service, with filters.
 4. Step **Do**: `Reply`, `Work on it`, `Run a workflow`. A non-Slack place
    never offers `Reply` or a Slack channel picker.
@@ -273,6 +328,8 @@ Pass criterion: all steps, in one run, from a clean start.
 7. Titles: `New routine` or `Listen for…`; the create button reads `Create`.
 8. A preselected place filter stays through event changes; a filter the
    reader removed stays removed.
+9. After Create, the overview MUST show the new row, and SHOULD scroll to
+   and highlight its block.
 
 ## Part I: Threads
 
@@ -316,39 +373,47 @@ Pass criterion: all steps, in one run, from a clean start.
   lint over `components/presence/**`, the presence routes, and every dialog
   the section opens, for the banned words. Vector: a test that reads the
   source.
-- **INV-H3 The hub adds no feature beyond parity, the rail, the pages, the
-  wizard preview, and Runs in.** Mechanism: the Non-goals table. Review
+- **INV-H3 The hub adds no feature beyond parity, the overview, the pages,
+  the wizard preview, and Runs in.** Mechanism: the Non-goals table. Review
   enforces it.
 - **INV-H4 A thread picker lists only threads the viewer may deliver to.**
   Mechanism: the picker reads the workspace's open threads through the
   existing thread list API, scoped by the switcher.
-- **INV-H5 No level of navigation sits under the top nav except the rail.**
-  Mechanism: the shell has no `TabBar`; a test renders every Presence route
-  and asserts none.
+- **INV-H5 No level of navigation sits under the top nav.** Mechanism: the
+  section has no `TabBar` and no rail; a test renders every Presence route
+  and asserts no `tablist` and no `navigation` landmark other than the
+  breadcrumb.
+- **INV-H6 Every fault is fixable where it is shown.** Mechanism: the
+  banner item and the sentence row render the same inline fix component;
+  a test asserts a pick from the banner patches the line.
 
 ## Testing
 
 - Route tests for Part A step 4, one per row.
 - Component tests for the sentence renderers (Part C step 2, Part E step 1,
   Part F step 1), one per `<do>` row and outcome.
+- Overview tests: grouping and ordering (Part B steps 3, 4, 8), the
+  sentence row without its place clause, the banner (Part B step 2, Part F
+  step 4), the empty state, the scale rules at eleven blocks.
 - The acceptance scenario as a router-level web test plus api integration
   (see Deviations).
-- A copy lint for INV-H2 and a no-tabs test for INV-H5.
+- A copy lint for INV-H2 and a no-navigation test for INV-H5.
 
 ## Non-goals (normative boundary)
 
 | Excluded | Why | Re-entry seam |
 |---|---|---|
 | Bulk enable or disable, line history, versioning | Beyond parity | A later spec |
-| Pull requests or issues in the rail | Transient; they live inside their repository's page | Part B step 3 |
+| Pull requests or issues as blocks on the overview | Transient; they live inside their repository's page | Part B step 4 |
 | Routines that post to a place | A routine's prompt is free text; no structured destination | A `posts to` field on routines |
 | Place pages for direct messages | Channel bindings own DM routing | The channel bindings spec |
 | Renaming code identifiers beyond `presence` → `appearance` | Churn with no user-facing gain | None planned |
 | A per-event receipts endpoint | Receipts search by event id serves the disclosure | None planned |
+| A server-side service filter or event total for Activity | The client filters loaded rows; a total is optional copy | A `service` and `total` on the log route |
 
 ## Deviations
 
-Revision 1 deviations that still hold, with the revision 2 part numbers:
+Revision 1 deviations that still hold, with the revision 3 part numbers:
 
 - **Problem state source (Part D step 2, Part E step 4).** The list route
   reads a line's problem from its deliveries. `problem` is set when the
@@ -399,7 +464,7 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
 - **The places API accepts a channel-only Slack key (Part C step 1).**
   `GET /api/presence/places/:subject` resolves `slack:<channel>` with the
   org's Slack workspace; with none, it answers 404 `That Slack channel has
-  no workspace in its link. Pick the channel from the rail.`
+  no workspace in its link. Pick the channel from Presence.`
 - **Event names come from a short-name table (Part C step 2).** The catalog
   carries a description for each key and no short label. A `label` field on
   catalog entries would replace the table.
@@ -447,14 +512,12 @@ Revision 1 deviations that still hold, with the revision 2 part numbers:
   a `Receipts` disclosure beside the list. The old `status=receipts` value
   and the `/events?tab=receipts` redirect open the whole Log.
 
-Revision 2 deviations:
+Revision 2 deviations that still hold:
 
 - **The routine preview uses the Part E sentence (acceptance P6).** The
   wizard has one sentence renderer for every list. A routine's preview
-  reads `Every weekday at 9:00, <name>: work in its own thread.` The
-  earlier P6 text was `Weekdays at 9:00, <prompt>.` Before the reader
-  types a name, the preview reads `this routine`. The P6 row shows the
-  corrected text.
+  reads `Every weekday at 9:00, <name>: work in its own thread.` Before the
+  reader types a name, the preview reads `this routine`.
 - **Do offers `Follow a Slack thread` (Part H step 4).** For Slack, the Do
   step lists `Reply`, `Follow a Slack thread`, `Work on it`, and `Run a
   workflow`. The follow choice keeps the revision 1 outcome that listens
@@ -469,19 +532,15 @@ Revision 2 deviations:
   personal or org mention rule (`packages/api/src/events/mention-scope.ts`).
   That filter is the rule's scope, so the sentence shows no `from
   <sender>` for it. A labeled `user` filter still reads as a sender.
-- **The Routines pane switch is not gated (Part E step 1).** The pane does
+- **A routine row's switch is not gated (Part E step 1).** The row does
   not check `routineReadOnly` before it enables the switch. If the viewer
-  may not change the routine, the server refuses, and the pane shows the
+  may not change the routine, the server refuses, and the row shows the
   refusal, which names the fix. The routine page still reads its
   read-only state first.
-- **The Activity count follows the switcher (Part F step 4).** The rail
-  counts the problems of the active workspace only: its lines, its
-  routines, and its Activity rows. The count changes when the reader
-  switches workspace.
-- **A group with no service-wide row shows a plain header (Part B step
-  2).** The places list has a service-wide row only when a line there
-  names no single place. Without that row, the group header is plain
-  text, because no service page exists to open.
+- **Needs attention follows the switcher (Part F step 4).** The banner
+  lists the faults of the active workspace only: its lines, its routines,
+  and its Activity rows. The banner changes when the reader switches
+  workspace.
 - **The breadcrumb separator is decoration (Part D step 1).** The `›`
   between crumbs is a hidden list item with padding. The breadcrumb's text
   is `acme/api›CI failures`, and each crumb is its own link or the
@@ -489,17 +548,11 @@ Revision 2 deviations:
 - **A dead delivery reads its status line (acceptance P9).** Part F step 1
   reads a dead delivery as its status line, so the P9 row reads `gave up
   after 3 attempts. To send it again, press Redeliver`. The lead follows
-  the Part F grammar: `Completed check in acme/api#14`. The P9 row shows
-  the corrected text.
+  the Part F grammar: `Completed check in acme/api#14`.
 - **A pull request thread names its own place (acceptance P11).** The
   header names the server's place key, and that key keeps the pull
   request number (`github:acme/api#12`). The header of `acme/api#12` reads
-  `acme/api#12` and links to that page. The rail does not list it. The
-  P11 row shows the corrected text.
-- **The thread card keeps `Event waiter` (INV-H2).** The background
-  section of the thread context card names an event wakeup `Event waiter`.
-  The card is outside Presence, so the copy lint does not read it. A
-  later copy pass replaces the word with `active`.
+  `acme/api#12` and links to that page. The overview does not list it.
 - **A thread follow has its own sentence (Part C step 2).** The `Follow a
   Slack thread` outcome stores a `slack.message` line with `channel` and
   `thread_ts` filters. A line whose keys are all Slack messages and that
@@ -507,34 +560,39 @@ Revision 2 deviations:
   in <channel>, <do>.` The channel is its label, or its id when the line
   has no label. The wizard preview reads the draft through the same
   renderer, so the preview equals the stored sentence.
-
 - **Old Workflows tabs redirect from the live page (Part A step 4).**
   `/workflows` serves the Workflows list and is also a legacy route.
-  `/workflows?tab=scheduled` and `?tab=triggers` redirect to
-  `/presence/routines`. With `&review=<id>`, they redirect to
-  `/presence/routines?routine=<id>`. `/workflows?tab=runs` redirects to
-  `/workflows/runs`. Each `/workflows` row has a match condition, so a URL
-  that no row takes serves the list.
+  `/workflows?tab=scheduled` and `?tab=triggers` redirect to `/presence`.
+  With `&review=<id>`, they redirect to `/presence/routines/<id>`.
+  `/workflows?tab=runs` redirects to `/workflows/runs`. Each `/workflows`
+  row has a match condition, so a URL that no row takes serves the list.
 - **View all searches a Slack place by its channel id (Part C step 7).**
   The server matches `q` against an event's summary and key, and a Slack
   summary carries the channel id (`app mentioned in C900 by U1`). So `View
   all` on a Slack channel sends the channel id from its key
   (`slack:<team>/<channel>`). Every other place sends its label.
-- **The Activity count counts each fault once (Part F step 4).** A dead
-  delivery names its line by `subscriptionId`. The count adds that line
+- **Needs attention lists each fault once (Part F step 4).** A dead
+  delivery names its line by `subscriptionId`. The banner adds that line
   only when the line has no `problem` and its `updatedAt` is before the
-  delivery. So a line's problem and the dead delivery that caused it count
-  as 1, and a pick that fixes the line drops the count to 0 at once. The
-  revision 2 text added the two and kept the dead delivery in the count
-  for a day.
-- **Onboarding reads places and routines (Part C step 8).** The Activity
-  pane shows the onboarding cards only when the workspace has no places
-  and no routines. A workspace with a routine is not empty: Valet already
-  does something there on a schedule, and its Activity shows that work.
-  The pane shows the cards only after both reads load.
+  delivery. So a line's problem and the dead delivery that caused it are
+  one item, and a pick that fixes the line removes the item at once.
+- **The empty state reads places and routines (Part B step 9).** The
+  overview shows the onboarding cards only when the workspace has no
+  block and no routine. A workspace with a routine is not empty: Valet
+  already does something there on a schedule. The cards show only after
+  both reads load.
+- **The thread card says `wait` (INV-H2).** The background section of the
+  thread context card names an event wakeup a `wait`, because `active`
+  reads as a state and not a thing to count. The card is outside Presence,
+  so the copy lint does not read it.
 
-Revision 1 deviations that revision 2 retires: the All listeners view, the
+Revision 1 deviations that revision 2 retired: the All listeners view, the
 place header's reach label, the empty service-wide row rule, and the
-routine page as a tab child. The `/workflows?tab=runs` row now goes to
-`/workflows/runs`, because the Workflows section serves `/workflows`
-again.
+routine page as a tab child.
+
+Revision 2 deviations that revision 3 retires: the rail's filter box and
+collapse rules (replaced by Part B step 8), the plain group header for a
+service without a service-wide row (a service block exists only when lines
+name no place), the Activity landing, the `Activity` and `Routines` rail
+counts (replaced by the banner), and the `/presence/routines?routine=<id>`
+page (now `/presence/routines/<id>`).
