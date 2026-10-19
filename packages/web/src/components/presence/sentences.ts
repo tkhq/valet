@@ -163,6 +163,7 @@ const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; on
   "slack.channel_unarchive": { when: ["a channel", "is unarchived"], one: "Unarchived channel" },
   "slack.file_shared": { when: ["someone", "shares a file"], one: "Shared file" },
 
+  "github.ping": { when: ["GitHub", "pings"], one: "GitHub ping" },
   "github.push": { when: ["a push", "lands"], one: "Push" },
   "github.create": { when: ["a branch or tag", "is created"], one: "New branch or tag" },
   "github.delete": { when: ["a branch or tag", "is deleted"], one: "Deleted branch or tag" },
@@ -795,11 +796,12 @@ export function cronInWords(cron: string): string {
   const [min = "", hour = "", dom = "", month = "", dow = ""] = parts;
   const every = /^\*\/(\d+)$/.exec(min);
   if (every && hour === "*" && dom === "*" && month === "*" && dow === "*") {
-    return `Every ${every[1]} minutes`;
+    const n = Number(every[1]);
+    return n === 1 ? "Every minute" : `Every ${n} minutes`;
   }
   const m = intIn(min, 0, 59);
   if (m === null || month !== "*") return fallback;
-  if (hour === "*" && dom === "*" && dow === "*") return `Every hour at ${m} minutes past`;
+  if (hour === "*" && dom === "*" && dow === "*") return `Every hour at ${m} ${m === 1 ? "minute" : "minutes"} past`;
   const h = intIn(hour, 0, 23);
   if (h === null) return fallback;
   const at = clock(h, m);
@@ -1071,12 +1073,31 @@ const BRANCH_FIELDS: ReadonlySet<string> = new Set(["branch", "ref", "head_branc
 /** Filter fields that name a label. */
 const LABEL_FIELDS: ReadonlySet<string> = new Set(["label", "labels"]);
 
-/** What a line hears when no filter other than its place narrows it, per service. */
-const ANY_EVENT: Readonly<Record<SentenceService, string>> = {
-  slack: "Any message, in a thread or not.",
-  github: "Any branch, any author.",
-  linear: "Any issue, any author.",
-};
+const NO_CONDITIONS = "No other conditions.";
+
+/**
+ * What one key hears when no filter other than its place narrows it: a
+ * Slack message hears any message, a GitHub push, pull request, or check
+ * any branch, an issue any issue, a release any release. Other keys have
+ * no default words.
+ */
+function anyEventWords(key: string): string {
+  if (key === "slack.app_mention" || key === "slack.message" || key.startsWith("slack.message.")) return "Any message, in a thread or not.";
+  if (/^github\.(push|pull_request|pull_request_review|pull_request_review_comment|pull_request_review_thread|check_run|check_suite|workflow_run|status|create|delete)(\.|$)/.test(key)) {
+    return "Any branch, any author.";
+  }
+  if (/^github\.(issues|issue_comment)(\.|$)/.test(key)) return "Any issue.";
+  if (/^github\.release(\.|$)/.test(key)) return "Any release.";
+  if (/^linear\.(issue|comment)(\.|$)/.test(key)) return "Any issue, any author.";
+  return NO_CONDITIONS;
+}
+
+/** The default words every key shares, or `No other conditions.` when they differ. */
+function anyEvent(keys: readonly string[]): string {
+  const words = new Set(keys.map(anyEventWords));
+  const [only] = words;
+  return words.size === 1 && only !== undefined ? only : NO_CONDITIONS;
+}
 
 /** An op as a verb after its field: `starts with`, `contains`. */
 function opWords(op: EventSubscriptionFilterWire["op"]): string {
@@ -1107,10 +1128,7 @@ function conditionInWords(filter: EventSubscriptionFilterWire): string {
  */
 export function whenExplanation(filters: readonly EventSubscriptionFilterWire[], keys: readonly string[]): string {
   const conditions = filters.filter((f) => !isPlaceFilter(f) && !isCreatorScopeFilter(f) && f.field !== "thread_ts");
-  if (conditions.length === 0) {
-    const service = serviceOf(keys);
-    return service === null ? "No other conditions." : ANY_EVENT[service];
-  }
+  if (conditions.length === 0) return anyEvent(keys);
   return `Only ${joinAnd(conditions.map(conditionInWords))}.`;
 }
 

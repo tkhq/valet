@@ -496,6 +496,8 @@ describe("cronInWords", () => {
     expect(cronInWords("0 8 * * 1")).toBe("Every Monday at 8:00");
     expect(cronInWords("15 * * * *")).toBe("Every hour at 15 minutes past");
     expect(cronInWords("*/10 * * * *")).toBe("Every 10 minutes");
+    expect(cronInWords("*/1 * * * *")).toBe("Every minute");
+    expect(cronInWords("1 * * * *")).toBe("Every hour at 1 minute past");
     expect(cronInWords("0 6 1 * *")).toBe("On day 1 of every month at 6:00");
   });
 
@@ -798,6 +800,14 @@ function catalogKeys(): string[] {
   return keys;
 }
 
+describe("a GitHub ping reads as words (S15)", () => {
+  it("reads GitHub pings", () => {
+    expect(eventLabel("github.ping")).toBe("GitHub pings");
+    const ping = sub({ eventKeys: ["github.ping"], filters: [acmeApi], target: { kind: "assistant", thread: { mode: "own" } } });
+    expect(presenceSentence(ping, catalog, workflows, threads)).toBe("When GitHub pings on acme/api, work in its own thread.");
+  });
+});
+
 describe("wildcard keys read as words (S7)", () => {
   it("reads a service wildcard and an object wildcard with articles", () => {
     expect(eventLabel("slack.*")).toBe("Anything happens in Slack");
@@ -848,6 +858,15 @@ describe("every catalog key reads as words", () => {
 
 describe("How it works explanations (Part D step 1.6)", () => {
   const ACME = { field: "repo", op: "eq" as const, value: "acme/api" };
+
+  it("reads each key's default words only for the keys they fit (S15)", () => {
+    expect(whenExplanation([], ["slack.reaction_added"])).toBe("No other conditions.");
+    expect(whenExplanation([], ["slack.channel_created"])).toBe("No other conditions.");
+    expect(whenExplanation([ACME], ["github.issues.opened"])).toBe("Any issue.");
+    expect(whenExplanation([ACME], ["github.release.published"])).toBe("Any release.");
+    expect(whenExplanation([ACME], ["github.push", "github.pull_request.opened"])).toBe("Any branch, any author.");
+    expect(whenExplanation([ACME], ["github.push", "github.issues.opened"])).toBe("No other conditions.");
+  });
 
   it("reads a line that names only its place as what it hears there", () => {
     expect(whenExplanation([ACME], ["github.check_run.completed"])).toBe("Any branch, any author.");
