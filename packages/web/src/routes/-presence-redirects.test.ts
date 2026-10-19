@@ -45,11 +45,11 @@ describe("presence redirect table", () => {
     expect(target("/events", {}, { tab: "nonsense", q: "deploy" })).toEqual({ to: "/presence", params: {}, search: { q: "deploy" } });
   });
 
-  it("sends a Subscriptions review link to the rule page and keeps review", () => {
+  it("sends a Subscriptions review link to the rule page and drops review, as the Workflows rows do", () => {
     expect(target("/events", {}, { tab: "subscriptions", review: "sub-1", workspace: "t1" })).toEqual({
       to: "/presence/rules/$id",
       params: { id: "sub-1" },
-      search: { review: "sub-1", workspace: "t1" },
+      search: { workspace: "t1" },
     });
   });
 

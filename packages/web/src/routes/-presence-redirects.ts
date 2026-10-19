@@ -175,7 +175,8 @@ export const PRESENCE_REDIRECTS: readonly PresenceRedirectRow[] = [
     matches: (search) => tabIs("subscriptions")(search) && text(search, "review") !== undefined,
     to: "/presence/rules/$id",
     mapParams: (_params, search) => ({ id: text(search, "review") ?? "" }),
-    mapSearch: dropTab,
+    // The id moves into the path; the rule page reads no `review`.
+    mapSearch: (search) => without(search, "tab", "review"),
     example: { params: {}, search: { tab: "subscriptions", review: "sub-1" } },
   },
   {
