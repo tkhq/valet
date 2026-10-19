@@ -13,7 +13,7 @@
  * problem with the thread picker inline; a pick repins the routine and
  * turns it on again. Edit's **Where** lists the routine owner's threads.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import type { WorkflowRunSummary } from "@valet/api/wire";
@@ -108,6 +108,25 @@ function routineFault(reason: string | undefined, pinTitle: string | undefined):
   return { title: "Needs attention", detail };
 }
 
+/**
+ * True after the routine's pin problem clears while the routine stays off.
+ * A new pin from the editor answers the pin reason but leaves the routine
+ * off (api `patchAnswersReason`), so the page asks the reader to turn it
+ * on. It reads the transition of the props, so it starts false and turns
+ * false again once the routine is on.
+ */
+function useRepinnedWhileOff(reason: string | undefined, enabled: boolean): boolean {
+  const [repinned, setRepinned] = useState(false);
+  const previous = useRef(reason);
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = reason;
+    if (enabled) setRepinned(false);
+    else if (isPinProblem(before) && (reason === undefined || reason.length === 0)) setRepinned(true);
+  }, [reason, enabled]);
+  return repinned && !enabled;
+}
+
 function RoutineBody({ routine }: { routine: Routine }) {
   const workflows = useWorkflows();
   const pin = routine.detail.thread?.mode === "existing" ? routine.detail.thread : undefined;
@@ -146,6 +165,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const newestRun = runs.reduce<number | null>((max, run) => (max === null || run.createdAt > max ? run.createdAt : max), null);
   const lastAt = lastFired !== null && (newestRun === null || lastFired > newestRun) ? lastFired : newestRun;
   const fault = routineFault(routine.detail.disabledReason, pinThreadTitle);
+  const repinned = useRepinnedWhileOff(routine.detail.disabledReason, routine.enabled);
 
   function fireNow() {
     setMessage(null);
@@ -177,6 +197,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
             {routine.enabled ? "On" : "Off"}
           </label>
           {routine.enabled && <span>{routineWhen(routine, ": ")}</span>}
+          {repinned && <span role="status" className="text-ink">Pinned. Turn the routine on to resume.</span>}
           <span className="ml-auto flex items-center gap-2">
             <Button size="sm" variant="secondary" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
             <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing("form")}>Edit</Button>

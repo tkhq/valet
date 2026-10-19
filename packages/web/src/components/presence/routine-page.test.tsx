@@ -256,6 +256,34 @@ describe("RoutinePage", () => {
     }));
   });
 
+  it("asks to turn the routine on after a new pin leaves it off (A13)", async () => {
+    const pinned = { mode: "existing" as const, sessionId: "s-ws", threadId: "t-ci" };
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { enabled: false, detail: { disabledReason: PIN_TEXT, thread: pinned } })] });
+    wrap(<RoutinePage id="S1" />);
+    const problem = await screen.findByRole("region", { name: "Problem" });
+    expect(screen.queryByText("Pinned. Turn the routine on to resume.")).toBeNull();
+    // The editor's new pin answers the reason; the routine stays off.
+    listWorkflowTriggers.mockResolvedValue({
+      triggers: [routine("S1", { enabled: false, detail: { thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" } } })],
+    });
+    fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
+    const note = await screen.findByText("Pinned. Turn the routine on to resume.");
+    expect(screen.queryByRole("region", { name: "Problem" })).toBeNull();
+    const toggle = screen.getByRole("switch", { name: "Turn on Morning summary" });
+    expect(note.parentElement).toBe(toggle.closest("label")?.parentElement);
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" } } })] });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenLastCalledWith("S1", { enabled: true }));
+    await waitFor(() => expect(screen.queryByText("Pinned. Turn the routine on to resume.")).toBeNull());
+  });
+
+  it("does not ask to turn on a routine that is only off", async () => {
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { enabled: false })] });
+    wrap(<RoutinePage id="S1" />);
+    await screen.findByRole("switch", { name: "Turn on Morning summary" });
+    expect(screen.queryByText("Pinned. Turn the routine on to resume.")).toBeNull();
+  });
+
   it("lists the routine owner's threads in the picker, whatever the switcher shows", async () => {
     listWorkflowTriggers.mockResolvedValue({
       triggers: [routine("S1", { enabled: false, detail: { disabledReason: PIN_TEXT, ownerType: "team", ownerId: "team-sre" } })],
