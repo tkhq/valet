@@ -752,6 +752,26 @@ function catalogKeys(): string[] {
   return keys;
 }
 
+describe("wildcard keys read as words (S7)", () => {
+  it("reads a service wildcard and an object wildcard with articles", () => {
+    expect(eventLabel("slack.*")).toBe("Anything happens in Slack");
+    expect(eventLabel("github.*")).toBe("Anything happens on GitHub");
+    expect(eventLabel("linear.*")).toBe("Anything happens in Linear");
+    expect(eventLabel("github.pull_request.*")).toBe("A pull request changes");
+    expect(eventLabel("github.issues.*")).toBe("An issue changes");
+    expect(eventLabel("github.release.*")).toBe("A release changes");
+    expect(derivedClause("github.workflow_run.*")).toBe("a workflow run changes");
+    expect(derivedClause("jira.*")).toBe("anything happens in jira");
+  });
+
+  it("puts no raw key in a line's sentence", () => {
+    const team = sub({ eventKeys: ["slack.*"], filters: [incidents], target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "own" } } });
+    expect(presenceSentence(team, catalog, workflows, threads)).toBe("When anything happens in Slack in #incidents, work in its own thread.");
+    const pr = sub({ eventKeys: ["github.pull_request.*"], filters: [acmeApi], target: { kind: "assistant", thread: { mode: "own" } } });
+    expect(presenceSentence(pr, catalog, workflows, threads)).toBe("When a pull request changes on acme/api, work in its own thread.");
+  });
+});
+
 describe("every catalog key reads as words", () => {
   const keys = catalogKeys();
 

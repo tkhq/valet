@@ -142,6 +142,14 @@ function joinPartsOr(groups: readonly (readonly SentencePart[])[]): SentencePart
  * key (`derivedClause`).
  */
 const EVENT_WORDS: Readonly<Record<string, { when: readonly [string, string]; one: string }>> = {
+  "slack.*": { when: ["anything", "happens in Slack"], one: "Slack event" },
+  "github.*": { when: ["anything", "happens on GitHub"], one: "GitHub event" },
+  "linear.*": { when: ["anything", "happens in Linear"], one: "Linear event" },
+  "github.pull_request.*": { when: ["a pull request", "changes"], one: "Pull request change" },
+  "github.issues.*": { when: ["an issue", "changes"], one: "Issue change" },
+  "github.release.*": { when: ["a release", "changes"], one: "Release change" },
+  "linear.issue.*": { when: ["an issue", "changes"], one: "Issue change" },
+
   "slack.app_mention": { when: ["someone", "mentions Valet"], one: "Mention" },
   "slack.message": { when: ["someone", "posts a message"], one: "Message" },
   "slack.bot_message": { when: ["an app", "posts a message"], one: "App message" },
@@ -265,6 +273,9 @@ const OBJECT_WORDS: Readonly<Record<string, string>> = {
   issuelabel: "label",
 };
 
+/** Service names for a `<service>.*` key. */
+const SERVICE_NAMES: Readonly<Record<string, string>> = { slack: "Slack", github: "GitHub", linear: "Linear" };
+
 /** Two-part keys whose object has its own verb. */
 const BARE_KEY_WORDS: Readonly<Record<string, string>> = {
   push: "a push lands",
@@ -287,11 +298,15 @@ function participle(action: string): string {
  * (`github.pull_request.closed` → `a pull request is closed`). A comment
  * that is created is posted. A key with no action reads `<object> happens`,
  * except for the objects with their own verb (`github.push` → `a push lands`).
+ * A wildcard reads `anything happens in <service>` (`slack.*`) or `<object>
+ * changes` (`github.pull_request.*` → `a pull request changes`).
  */
 export function derivedClause(key: string): string {
   const segments = key.split(".");
-  const [, object = "", action] = segments;
-  if (segments.length < 3 || action === undefined || action.length === 0 || action === "*") {
+  const [service = "", object = "", action] = segments;
+  if (object === "*") return `anything happens in ${SERVICE_NAMES[service] ?? service}`;
+  if (action === "*") return `${article(OBJECT_WORDS[object] ?? object.replace(/_/g, " "))} changes`;
+  if (segments.length < 3 || action === undefined || action.length === 0) {
     const bare = BARE_KEY_WORDS[object];
     if (bare !== undefined) return bare;
     return `${lowerFirst(keyInWords(key))} happens`;
