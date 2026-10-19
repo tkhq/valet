@@ -66,7 +66,7 @@ import { loadLineActivity } from "../services/line-activity.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
-import { eventInPlace, eventPlace, eventPlaceName, isPlaceKey } from "../services/presence-places.js";
+import { eventInPlace, eventPlace, eventPlaceName, isPlaceKey, listenerRowPlace } from "../services/presence-places.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -150,6 +150,36 @@ export async function subscriptionProblems(db: AppDb, conditions: (SQL | undefin
     if (d.status === "dead" && d.lastError !== null && isPinUnavailableMessage(d.lastError)) problems.set(d.subscriptionId, d.lastError);
   }
   return problems;
+}
+
+/**
+ * A rule on the wire with its open problem and its `placeKey`: the overview
+ * row the places read lists it at (`listenerRowPlace`). A Slack line gets no
+ * `placeKey` while the org's Slack workspace is unknown, because its row key
+ * names that workspace.
+ */
+export function subscriptionToWire(
+  row: typeof eventSubscriptions.$inferSelect, problems: ReadonlyMap<string, string>, slackTeam: string | null,
+): EventSubscriptionWire {
+  const problem = problems.get(row.id);
+  const placeKey = listenerRowPlace(row, slackTeam ?? "?");
+  const known = placeKey !== null && !(slackTeam === null && placeKey.startsWith("slack:"));
+  return { ...rowToSubscription(row), ...(problem ? { problem } : {}), ...(known ? { placeKey } : {}) };
+}
+
+/**
+ * The org's Slack workspace id, from its bot credential, or null. A read
+ * that fails reads as none, so a transient credential fault degrades a
+ * Slack label or row key instead of failing the whole read.
+ */
+export async function orgSlackTeam(providers: Parameters<typeof orgSlackCredential>[0], orgId: string): Promise<string | null> {
+  try {
+    const teamId = (await orgSlackCredential(providers, orgId))?.metadata?.teamId;
+    return typeof teamId === "string" && teamId !== "" ? teamId : null;
+  } catch (err) {
+    console.error("[events] reading the org's Slack credential failed", err);
+    return null;
+  }
 }
 
 /** `refs`/`actor` jsonb shapes are owned by the ingest writer
@@ -1048,13 +1078,10 @@ eventsRouter.get("/event-subscriptions", async (c) => {
     .from(eventSubscriptions)
     .where(and(...conditions))
     .orderBy(desc(eventSubscriptions.createdAt));
-  const problems = await subscriptionProblems(db, conditions);
+  const [problems, slackTeam] = await Promise.all([subscriptionProblems(db, conditions), orgSlackTeam(c.var.providers, user.orgId)]);
 
   const resp: ListEventSubscriptionsResponse = {
-    subscriptions: rows.map((row) => {
-      const problem = problems.get(row.id);
-      return problem ? { ...rowToSubscription(row), problem } : rowToSubscription(row);
-    }),
+    subscriptions: rows.map((row) => subscriptionToWire(row, problems, slackTeam)),
   };
   return c.json(resp);
 });

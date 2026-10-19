@@ -155,6 +155,36 @@ export function listenerPlaces(rule: { eventKeys: unknown; filters: unknown }, s
   });
 }
 
+/** Whether a place is a service's top row: `github:*`, `linear:*`, or a Slack workspace. */
+export function isServiceRoot(place: string): boolean {
+  return place === GITHUB_ROOT || place === LINEAR_ROOT || /^slack:[^/]+$/.test(place);
+}
+
+/** Whether a place is a mid-grain row: a Slack channel, a repository, or a Linear team. */
+function isMidGrain(place: string): boolean {
+  if (SLACK_RE.exec(place)?.[2]) return true;
+  const github = GITHUB_RE.exec(place);
+  return (github !== null && !github[3]) || LINEAR_TEAM_RE.test(place);
+}
+
+/**
+ * The overview row a listener lists at (spec Part B steps 2 and 3): the
+ * place `listenerPlaces` gives for its first service, rolled up the parent
+ * chain to a mid-grain row or a service's top row. A pull request lists at
+ * its repository and a Linear issue at its team. Null for a listener whose
+ * event keys name no service with places.
+ */
+export function listenerRowPlace(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string | null {
+  let place = listenerPlaces(rule, slackTeam)[0];
+  if (place === undefined) return null;
+  while (!isServiceRoot(place) && !isMidGrain(place)) {
+    const parent = parentPlace(place);
+    if (parent === null) break;
+    place = parent;
+  }
+  return place;
+}
+
 /** The one name of each service-wide place: its label, its scope label,
  * and its page title (spec Part B step 3). */
 const SERVICE_WIDE_NAMES: Readonly<Record<PresencePlaceService, string>> = {
@@ -292,7 +322,13 @@ function isListener(row: SubscriptionRow): boolean {
   return isRecord(target) && (isAssistantKind(target.kind) || target.kind === "workflow");
 }
 
-async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<Map<string, PlaceState>> {
+/** The workspace's places, and the Slack workspace id that completed channel filters (`?` when none is known). */
+interface LoadedPlaces {
+  places: Map<string, PlaceState>;
+  slackTeam: string;
+}
+
+async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<LoadedPlaces> {
   const { db } = deps;
   const root = await runtimeSessionId(db, orgId, owner);
   const sessions = root ? await workspaceSessionIds(db, orgId, root) : [];
@@ -456,7 +492,7 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     state.wire.listenerCount = state.listeners.length;
     state.wire.activeThreadCount = state.active.size;
   }
-  return places;
+  return { places, slackTeam };
 }
 
 function compareConversations(a: ChannelConversation, b: ChannelConversation): number {
@@ -467,7 +503,7 @@ function compareConversations(a: ChannelConversation, b: ChannelConversation): n
 export async function listPresencePlaces(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now = Date.now(),
 ): Promise<ListPresencePlacesResponse> {
-  const rows = [...(await loadPlaces(deps, orgId, owner, access, now)).values()].map((state) => state.wire);
+  const rows = [...(await loadPlaces(deps, orgId, owner, access, now)).places.values()].map((state) => state.wire);
   rows.sort((a, b) => SERVICES.indexOf(a.service) - SERVICES.indexOf(b.service)
     || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.label.localeCompare(b.label));
   return { places: rows };
@@ -476,6 +512,8 @@ export async function listPresencePlaces(
 /** One place with the rows its page shows. The route maps the rows to their wire shapes. */
 export interface PresencePlaceDetail {
   place: PresencePlaceWire;
+  /** The Slack workspace id the place rows used for channel filters, `?` when none is known. */
+  slackTeam: string;
   listeners: SubscriptionRow[];
   threads: { subject: ChannelConversation[]; following: ChannelConversation[]; active: ChannelConversation[] };
   /** Newest first. */
@@ -490,7 +528,7 @@ export interface PresencePlaceDetail {
 export async function getPresencePlace(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, subject: string, now = Date.now(),
 ): Promise<PresencePlaceDetail | null> {
-  const places = await loadPlaces(deps, orgId, owner, access, now);
+  const { places, slackTeam } = await loadPlaces(deps, orgId, owner, access, now);
   const state = places.get(subject);
   if (!state) return null;
   const covered = [...places.values()].filter((candidate) => placeCovers(subject, candidate.wire.subject));
@@ -498,6 +536,7 @@ export async function getPresencePlace(
   for (const candidate of covered) for (const [id, row] of candidate.active) active.set(id, row);
   return {
     place: state.wire,
+    slackTeam,
     listeners: [...state.listeners].sort((a, b) => a.name.localeCompare(b.name)),
     threads: {
       subject: covered.flatMap((candidate) => candidate.subjectThreads).sort(compareConversations),

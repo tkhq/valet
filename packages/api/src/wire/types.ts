@@ -5080,6 +5080,13 @@ export interface EventSubscriptionWire {
    * edit dead-lettered because the pinned thread cannot receive deliveries
    * (spec 2026-10-16: presence hub, Part C step 5). Absent otherwise. */
   problem?: string;
+  /** The key of the Presence row the server lists the rule at, on the list
+   * route and on a place page's listeners: a Slack channel, a repository, a
+   * Linear team, or a service's top row (spec Part B steps 2 and 3). A rule
+   * that names a pull request or a Linear issue lists at its parent row.
+   * Absent for a rule with no place service, and for a Slack rule while the
+   * org has no Slack workspace connected. */
+  placeKey?: string;
 }
 
 // ─── Action policies (action-policies plan, Task 4) ─────────────────────────

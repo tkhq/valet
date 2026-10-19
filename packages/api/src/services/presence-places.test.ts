@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { listenerPlaces, parentPlace, placeCovers, placeLabel, placeOfSubject, placeScopeLabel } from "./presence-places.js";
+import { listenerPlaces, listenerRowPlace, parentPlace, placeCovers, placeLabel, placeOfSubject, placeScopeLabel } from "./presence-places.js";
 
 describe("placeOfSubject", () => {
   it("maps a subject to the place it belongs to", () => {
@@ -75,6 +75,30 @@ describe("listenerPlaces", () => {
   it("gives one place for each service a listener's keys name, and none for other services", () => {
     expect(listenerPlaces(rule(["slack.app_mention", "github.issue_comment.created"], []), "T1")).toEqual(["slack:T1", "github:*"]);
     expect(listenerPlaces(rule(["telegram.message"], []), "T1")).toEqual([]);
+  });
+});
+
+// Review W-B2: the overview groups a line by the row key the server lists it at.
+describe("listenerRowPlace", () => {
+  const rule = (eventKeys: string[], filters: unknown[]) => ({ eventKeys, filters });
+
+  it("rolls a pull request up to its repository and a Linear issue up to its team", () => {
+    expect(listenerRowPlace(rule(["github.pull_request.*"], [
+      { field: "repo", op: "eq", value: "acme/api" }, { field: "pr_number", op: "eq", value: "12" },
+    ]), "T1")).toBe("github:acme/api");
+    expect(listenerRowPlace(rule(["linear.Issue.update"], [{ field: "identifier", op: "eq", value: "ENG-4" }]), "T1")).toBe("linear:team/ENG");
+  });
+
+  it("keeps a one-value channel list at its channel and a team with an issue at the service row", () => {
+    expect(listenerRowPlace(rule(["slack.message"], [{ field: "channel", op: "in", value: ["C900"] }]), "T1")).toBe("slack:T1/C900");
+    expect(listenerRowPlace(rule(["linear.Issue.update"], [
+      { field: "team", op: "eq", value: "ENG" }, { field: "identifier", op: "eq", value: "ENG-4" },
+    ]), "T1")).toBe("linear:*");
+  });
+
+  it("takes the first service's row, and none for a service with no places", () => {
+    expect(listenerRowPlace(rule(["github.push", "slack.message"], [{ field: "repo", op: "eq", value: "acme/web" }]), "T1")).toBe("github:acme/web");
+    expect(listenerRowPlace(rule(["telegram.message"], []), "T1")).toBeNull();
   });
 });
 

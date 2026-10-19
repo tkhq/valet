@@ -187,6 +187,7 @@ describe("Presence hub data scenario", () => {
     // H3: acme/api lists R1 and R4 and the subject threads #12 and #13.
     const acme = await placeOf(a, "user", "github:acme/api");
     expect(acme.listeners.map((l) => l.id).sort()).toEqual([r1, r4].sort());
+    expect(acme.listeners.map((l) => l.placeKey)).toEqual(["github:acme/api", "github:acme/api"]);
     expect(acme.threads.subject.map((t) => t.threadId).sort()).toEqual([pr12.id, pr13.id].sort());
 
     // H4: #incidents in sre lists M (with its appearance) and P, the active
@@ -194,6 +195,21 @@ describe("Presence hub data scenario", () => {
     const incidents = await placeOf(a, team.id, "slack:T1/C900");
     expect(incidents.listeners.map((l) => l.id).sort()).toEqual([m, pRule].sort());
     expect(incidents.listeners.find((l) => l.id === m)?.target.appearance).toEqual({ displayName: "SRE Bot" });
+    expect(incidents.listeners.map((l) => l.placeKey)).toEqual(["slack:T1/C900", "slack:T1/C900"]);
+    // W-B2: the list route carries the same row key. A pull request line
+    // lists at its repository's row.
+    const pr = await createRule(a, {
+      name: "One PR",
+      eventKeys: ["github.pull_request_review.submitted"],
+      filters: [...repo, { field: "pr_number", op: "eq", value: "12" }],
+      target: { kind: "assistant", thread: { mode: "subject" } },
+    });
+    const keyed = await read<ListEventSubscriptionsResponse>(a, `/api/event-subscriptions?ownerType=team&ownerId=${team.id}`);
+    expect(keyed.subscriptions.find((s) => s.id === m)?.placeKey).toBe("slack:T1/C900");
+    const mine = await read<ListEventSubscriptionsResponse>(a, `/api/event-subscriptions?ownerType=user&ownerId=${USER}`);
+    expect(mine.subscriptions.find((s) => s.id === r1)?.placeKey).toBe("github:acme/api");
+    expect(mine.subscriptions.find((s) => s.id === pr)?.placeKey).toBe("github:acme/api");
+    expect((await call(a, "DELETE", `/api/event-subscriptions/${pr}`)).status).toBe(204);
     expect(incidents.threads.active.map((t) => t.threadId)).toEqual([tInc.id]);
     expect(incidents.threads.following.map((t) => t.threadId)).toEqual([tInc.id]);
     // The team's place is not the personal workspace's.

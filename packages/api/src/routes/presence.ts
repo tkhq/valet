@@ -18,7 +18,7 @@ import { getPresencePlace, listPresencePlaces, listThreadFeeders, type PresenceA
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 import { slackChannelNames, threadsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { rowToEventSummary, rowToSubscription, subscriptionProblems } from "./events.js";
+import { rowToEventSummary, subscriptionProblems, subscriptionToWire } from "./events.js";
 import type { PresencePlaceDetailResponse } from "../wire/types.js";
 
 export const presenceRouter = new Hono<AppEnv>();
@@ -85,10 +85,7 @@ presenceRouter.get("/places/:subject", async (c) => {
     : await subscriptionProblems(c.var.providers.db, [eq(eventSubscriptions.orgId, c.var.user.orgId), inArray(eventSubscriptions.id, ids)]);
   const body: PresencePlaceDetailResponse = {
     place: detail.place,
-    listeners: detail.listeners.map((row) => {
-      const problem = problems.get(row.id);
-      return problem ? { ...rowToSubscription(row), problem } : rowToSubscription(row);
-    }),
+    listeners: detail.listeners.map((row) => subscriptionToWire(row, problems, detail.slackTeam === "?" ? null : detail.slackTeam)),
     threads: detail.threads,
     activity: detail.activity.map(rowToEventSummary),
   };
