@@ -15,7 +15,7 @@
  * whole service. `mergeLineActivity` is the pure core; `loadLineActivity`
  * reads both sources for one line.
  */
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { claimedThreadId } from "../events/destination.js";
 import { sanitizeReceiptSubscriptions } from "../events/receipts.js";
@@ -178,8 +178,8 @@ export function mergeLineActivity(
 }
 
 /**
- * The health strip's counts from the times the line delivered: one count per
- * UTC day for the last 30 days (today last), and their sum.
+ * The health strip's counts from the times of the line's acted entries: one
+ * count per UTC day for the last 30 days (today last), and their sum.
  */
 export function lineActivityCounts(deliveredAts: readonly number[], now: number): { perDay: number[]; actedLast30Days: number } {
   const today = Math.floor(now / DAY_MS);
@@ -286,13 +286,15 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
   const take = limit + 1;
   const now = query.now ?? Date.now();
 
+  // A dead delivery that a later delivery settled is not a fault (Part F step 4).
+  const notSuperseded = sql`NOT (${eventDeliveries.status} = 'dead' AND EXISTS (SELECT 1 FROM event_deliveries later
+    WHERE later.event_id = ${eventDeliveries.eventId} AND later.subscription_id = ${eventDeliveries.subscriptionId}
+      AND later.status = 'delivered' AND later.created_at > ${eventDeliveries.createdAt}))`;
+
   const deliveryBatch = (before: { at: number; id: string } | undefined) => {
     const where: (SQL | undefined)[] = [
       eq(eventDeliveries.subscriptionId, line.id),
-      // A dead delivery that a later delivery settled is not a fault (Part F step 4).
-      sql`NOT (${eventDeliveries.status} = 'dead' AND EXISTS (SELECT 1 FROM event_deliveries later
-        WHERE later.event_id = ${eventDeliveries.eventId} AND later.subscription_id = ${eventDeliveries.subscriptionId}
-          AND later.status = 'delivered' AND later.created_at > ${eventDeliveries.createdAt}))`,
+      notSuperseded,
       before ? sql`(${eventDeliveries.createdAt}, ${eventDeliveries.id}) < (${before.at}, ${before.id})` : undefined,
     ];
     return db.select({
@@ -426,15 +428,16 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
     next = { at: last.at, id: last.id };
   }
 
+  // The strip counts what the timeline lists as acted (spec Part D step
+  // 1.4): every delivery that is not skipped and not superseded, whatever
+  // its status. Each counts on the day it landed, or was created if it has
+  // not landed.
   const windowStart = (Math.floor(now / DAY_MS) - (LINE_ACTIVITY_DAYS - 1)) * DAY_MS;
   const actedAt = sql<number>`COALESCE(${eventDeliveries.deliveredAt}, ${eventDeliveries.createdAt})`;
+  const acted = and(eq(eventDeliveries.subscriptionId, line.id), ne(eventDeliveries.status, "skipped"), notSuperseded);
   const [recent, latest] = await Promise.all([
-    db.select({ at: actedAt }).from(eventDeliveries).where(and(
-      eq(eventDeliveries.subscriptionId, line.id), eq(eventDeliveries.status, "delivered"), sql`${actedAt} >= ${windowStart}`,
-    )),
-    db.select({ at: sql<number | null>`MAX(${actedAt})` }).from(eventDeliveries).where(and(
-      eq(eventDeliveries.subscriptionId, line.id), eq(eventDeliveries.status, "delivered"),
-    )),
+    db.select({ at: actedAt }).from(eventDeliveries).where(and(acted, sql`${actedAt} >= ${windowStart}`)),
+    db.select({ at: sql<number | null>`MAX(${actedAt})` }).from(eventDeliveries).where(acted),
   ]);
   const counts = lineActivityCounts(recent.map((row) => Number(row.at)), now);
   const lastActedAt = latest[0]?.at;

@@ -777,7 +777,8 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
     ]);
   });
 
-  it("counts delivered entries per UTC day for 30 days", async () => {
+  // Review S9: the strip counts what the timeline lists as acted.
+  it("counts acted entries of any status per UTC day for 30 days", async () => {
     const a = await boot();
     const day = 24 * 60 * 60 * 1000;
     const now = Date.now();
@@ -788,6 +789,10 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
       { id: "d_31", at: now - 31 * day, status: "delivered" as const },
       { id: "d_now", at: now, status: "delivered" as const },
       { id: "d_dead", at: now, status: "dead" as const },
+      { id: "d_pending", at: now - 1, status: "pending" as const },
+      { id: "d_skip", at: now, status: "skipped" as const },
+      // A dead delivery that a later delivery settled is not listed.
+      { id: "d_settled", at: now - 29 * day - 1, status: "dead" as const },
     ];
     await a.providers.db.insert(eventDeliveries).values(rows.map((r) => ({
       id: r.id, eventId: "ev_a", subscriptionId: "sub_line", status: r.status, attempts: 1, nextAttemptAt: r.at,
@@ -796,8 +801,9 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
     const body = await activity(a);
     expect(body.perDay).toHaveLength(30);
     expect(body.perDay[0]).toBe(1);
-    expect(body.perDay[29]).toBe(1);
-    expect(body.actedLast30Days).toBe(2);
+    expect(body.perDay[29]).toBe(3);
+    expect(body.actedLast30Days).toBe(4);
+    expect(body.perDay.reduce((sum, n) => sum + n, 0)).toBe(body.entries.filter((e) => e.kind === "acted" && e.at >= now - 29 * day).length);
     expect(body.lastActedAt).toBe(now);
   });
 

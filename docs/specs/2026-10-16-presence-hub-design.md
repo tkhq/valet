@@ -403,7 +403,10 @@ Pass criterion: all steps, in one run, from a clean start.
    A skipped entry for an event whose place the line does not name is
    returned only to an organization admin. The response carries the
    counts the health strip shows (`actedLast30Days`, `lastActedAt`,
-   `perDay`). `GET /api/event-subscriptions/:id/deliveries` stays for
+   `perDay`). The counts read the same rows the timeline lists as acted:
+   every delivery that is not skipped and that no later delivery settled,
+   whatever its status. Each row counts on the day it landed, or on the
+   day it was created when it has not landed. `GET /api/event-subscriptions/:id/deliveries` stays for
    callers that want deliveries alone. `EventSubscriptionWire` carries
    `problem?: string` as before.
 
