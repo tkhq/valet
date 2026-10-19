@@ -293,11 +293,57 @@ describe("presenceSentence parts", () => {
 
   it("adds a single sender filter as from <value>", () => {
     const s = sub({
+      eventKeys: ["slack.message"],
       filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
       target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "own" } },
     });
     expect(presenceSentence(s, catalog, workflows, threads)).toBe(
-      "When someone mentions Valet from Alice in #incidents, work in its own thread.",
+      "When someone posts a message from Alice in #incidents, work in its own thread.",
+    );
+  });
+
+  it("names a mention line's labeled sender as the one who mentions Valet (S15)", () => {
+    const team = sub({
+      filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
+      target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "own" } },
+    });
+    expect(presenceSentence(team, catalog, workflows, threads)).toBe("When Alice mentions Valet in #incidents, work in its own thread.");
+    const personal = sub({
+      filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
+      target: { kind: "assistant", assistant: "user", thread: { mode: "own" } },
+    });
+    expect(presenceSentence(personal, catalog, workflows, threads)).toBe("When Alice mentions Valet in #incidents, work in its own thread.");
+    expect(presenceSentenceParts(personal, catalog, workflows, threads)).toContainEqual({ kind: "person", text: "Alice" });
+  });
+
+  it("applies the creator scope to every clause whose event carries user (S8)", () => {
+    const scope = { field: "user", op: "eq" as const, value: "U0ABC" };
+    const personal = sub({
+      eventKeys: ["slack.app_mention", "slack.message"],
+      filters: [incidents, scope],
+      target: { kind: "assistant", assistant: "user", thread: { mode: "own" } },
+    });
+    expect(presenceSentence(personal, catalog, workflows, threads)).toBe(
+      "When you mention Valet or you post a message in #incidents, work in its own thread.",
+    );
+    const org = sub({
+      createdBy: "u-002",
+      eventKeys: ["slack.app_mention", "slack.reaction_added"],
+      filters: [incidents, scope],
+      target: { kind: "assistant", assistant: "org", thread: { mode: "own" } },
+    });
+    // Without the catalog, a Slack event whose words name someone carries user.
+    expect(presenceSentence(org, undefined, workflows, threads, { members: { "u-002": "Jack" }, me: "u-001" })).toBe(
+      "When Jack mentions Valet or Jack adds a reaction in #incidents, work in its own thread.",
+    );
+    // With the catalog, its filters decide: this test catalog lists no user field on reactions.
+    expect(presenceSentence(org, catalog, workflows, threads, { members: { "u-002": "Jack" }, me: "u-001" })).toBe(
+      "When Jack mentions Valet or someone adds a reaction in #incidents, work in its own thread.",
+    );
+    // A team line hears its team: no actor applies.
+    const team = sub({ eventKeys: ["slack.app_mention", "slack.message"], filters: [incidents], target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "own" } } });
+    expect(presenceSentence(team, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet or someone posts a message in #incidents, work in its own thread.",
     );
   });
 
@@ -314,7 +360,7 @@ describe("presenceSentence parts", () => {
       target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "new" } },
     });
     expect(presenceSentence(labeled, catalog, workflows, threads)).toBe(
-      "When someone mentions Valet from Alice in #incidents, reply in a new thread.",
+      "When Alice mentions Valet in #incidents, reply in a new thread.",
     );
   });
 
@@ -338,7 +384,7 @@ describe("presenceSentence without the place clause (spec Part B step 5)", () =>
       target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
     });
     expect(presenceSentence(slack, catalog, workflows, threads, {}, noPlace)).toBe(
-      "When someone mentions Valet from Alice, reply in a new thread, as Ops Bot.",
+      "When Alice mentions Valet, reply in a new thread, as Ops Bot.",
     );
     const github = sub({
       eventKeys: ["github.check_run.completed"],

@@ -383,13 +383,36 @@ function clauseKey(clause: Clause): string {
   return `${partsText(clause.actor)}\u0000${clause.verb}`;
 }
 
+/**
+ * True when the key's events carry the `user` field the creator scope
+ * filters on. The catalog says so when it is loaded. Without it, a Slack
+ * event whose words name `someone` carries it.
+ */
+function carriesUser(key: string, catalog: Catalog | undefined): boolean {
+  for (const service of catalog ?? []) {
+    const entry = service.entries.find((e) => e.key === key);
+    if (entry !== undefined) return entry.filters.some((f) => f.field === "user");
+  }
+  return key.startsWith("slack.") && EVENT_WORDS[key]?.when[0] === "someone";
+}
+
+/** A third-person verb phrase in the second person: `posts a message` → `post a message`. */
+function secondPerson(verb: string): string {
+  const [first = "", ...rest] = verb.split(" ");
+  const base = /(sh|ch|x|ss)es$/.test(first) ? first.slice(0, -2) : first.endsWith("s") ? first.slice(0, -1) : first;
+  return [base, ...rest].join(" ");
+}
+
 /** One event as an actor and a verb. Derived words are one clause with no verb to share. */
 function eventClause(key: string, catalog: Catalog | undefined, actor: MentionActor): Clause {
   const known = EVENT_WORDS[key]?.when;
-  if (known && isMentionKey(key) && actor.kind !== "someone") {
-    if (actor.kind === "you") return { actor: [text("you")], verb: "mention Valet" };
-    if (actor.kind === "person") return { actor: [{ kind: "person", text: actor.name }], verb: "mentions Valet" };
-    return { actor: [text("the person who set this up")], verb: "mentions Valet" };
+  // The creator scope (or a named sender) covers every key that carries
+  // `user`, so each of those clauses names the same actor.
+  if (known && actor.kind !== "someone" && (isMentionKey(key) || carriesUser(key, catalog))) {
+    const verb = isMentionKey(key) ? "mentions Valet" : known[1];
+    if (actor.kind === "you") return { actor: [text("you")], verb: secondPerson(verb) };
+    if (actor.kind === "person") return { actor: [{ kind: "person", text: actor.name }], verb };
+    return { actor: [text("the person who set this up")], verb };
   }
   if (known) return { actor: [text(known[0])], verb: known[1] };
   return { actor: [text(catalogClause(key, catalog) ?? derivedClause(key))], verb: "" };
@@ -660,8 +683,13 @@ export function presenceWhenParts(
   const place = withPlace ? presencePlace(service, sub.filters) : null;
   const where = place === null ? [] : [text(` ${service === "github" ? "on" : "in"} `), ...place];
   const sender = senderFilter(sub.eventKeys, sub.filters);
-  const from: SentencePart[] = sender === null ? [] : [text(" from "), { kind: "person", text: sender }];
-  const actor = sub.eventKeys.some(isMentionKey) ? mentionActor(sub, names) : { kind: "someone" as const };
+  const mention = sub.eventKeys.some(isMentionKey);
+  // On a mention line a named sender is the one who mentions Valet:
+  // `When Alice mentions Valet`, not `When you mention Valet from Alice`.
+  const actor: MentionActor = mention && sender !== null
+    ? { kind: "person", name: sender }
+    : mention ? mentionActor(sub, names) : { kind: "someone" };
+  const from: SentencePart[] = sender === null || mention ? [] : [text(" from "), { kind: "person", text: sender }];
   return tidy([...eventsInParts(sub.eventKeys, catalog, actor), ...from, ...where]);
 }
 
