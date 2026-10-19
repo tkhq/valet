@@ -3,7 +3,8 @@
  * B steps 3, 4, and 8), as pure functions. A block is a mid-grain place (a
  * Slack channel, a GitHub repository, a Linear team) with at least one line
  * of presence, or the service block for the lines that name no single place.
- * A pull request or an issue never gets a block.
+ * A pull request or an issue never gets a block. A line's block is the row
+ * key the api sends as `placeKey`; the filters decide only for an older api.
  */
 import type { EventSubscriptionWire, PresencePlaceWire } from "@valet/api/wire";
 import { isMidGrain, isServiceRoot } from "./places";
@@ -103,16 +104,24 @@ export function namedPlaceLabel(line: Pick<EventSubscriptionWire, "filters">, pl
  * `In <place>,` for a line that names one place, else its service row's
  * name (`Everywhere in Slack,`). A line with no known service has none.
  */
-export function faultLead(line: Pick<EventSubscriptionWire, "eventKeys" | "filters">, places: readonly PresencePlaceWire[]): string | null {
+export function faultLead(line: LineRowFields, places: readonly PresencePlaceWire[]): string | null {
   const parts = faultLeadParts(line, places);
   return parts === null ? null : partsText(parts);
 }
 
 /** `faultLead` as parts: the named place is a token that links its page. */
 export function faultLeadParts(
-  line: Pick<EventSubscriptionWire, "eventKeys" | "filters">,
+  line: LineRowFields,
   places: readonly PresencePlaceWire[],
 ): SentencePart[] | null {
+  if (line.placeKey !== undefined) {
+    const service = keyService(line.placeKey);
+    if (service !== null) {
+      const row = places.find((place) => place.subject === line.placeKey);
+      if (isMidGrain({ subject: line.placeKey })) return placeLeadParts(row?.label ?? keyLabel(line.placeKey), row?.service ?? service, line.placeKey);
+      return [text(`${SERVICE_BLOCK_LABELS[service]},`)];
+    }
+  }
   const named = namedPlace(line, places);
   if (named !== null) return placeLeadParts(named.label, named.service, named.subject);
   const service = lineService(line);
@@ -129,14 +138,37 @@ function serviceRoot(service: OverviewService, places: readonly PresencePlaceWir
   return places.find((place) => place.service === service && isServiceRoot(place));
 }
 
+/** The line fields that place a line on a row: the server's row key, and the keys and filters an older api leaves to the web. */
+export type LineRowFields = Pick<EventSubscriptionWire, "eventKeys" | "filters" | "placeKey">;
+
+/** The service a row key names, from its prefix. */
+function keyService(key: string): OverviewService | null {
+  const prefix = key.split(":", 1)[0];
+  return prefix === "slack" || prefix === "github" || prefix === "linear" ? prefix : null;
+}
+
 /**
- * The key of the block a line belongs to: the one place it names, else its
+ * A mid-grain row's name from its key alone, for a row key the places list
+ * does not hold yet (the two reads refresh apart): the channel id, the
+ * repository, or the team key.
+ */
+function keyLabel(key: string): string {
+  const slack = SLACK_CHANNEL.exec(key);
+  if (slack !== null) return slack[1]!;
+  return key.slice(key.indexOf(":") + 1).replace(/^team\//, "");
+}
+
+/**
+ * The key of the block a line belongs to. The server's `placeKey` wins: it
+ * is the row the places read lists the line at. An older api sends no
+ * `placeKey`; then the block is the one place the line names, else its
  * service block. A line with no known service has no block.
  */
 export function blockSubjectFor(
-  line: Pick<EventSubscriptionWire, "eventKeys" | "filters">,
+  line: LineRowFields,
   places: readonly PresencePlaceWire[],
 ): string | null {
+  if (line.placeKey !== undefined && keyService(line.placeKey) !== null) return line.placeKey;
   const named = namedPlace(line, places);
   if (named !== null) return named.subject;
   const service = lineService(line);
@@ -168,17 +200,18 @@ export function overviewGroups(
   const blocks = new Map<string, PlaceBlockData>();
   for (const line of lines) {
     const subject = blockSubjectFor(line, places);
-    const keyService = lineService(line);
-    if (subject === null || keyService === null) continue;
+    const eventService = lineService(line);
+    if (subject === null || eventService === null) continue;
     let block = blocks.get(subject);
     if (block === undefined) {
       const row = places.find((place) => place.subject === subject);
-      const serviceWide = row === undefined || isServiceRoot(row);
-      // A named place sets the group, even when the line's keys name another service.
-      const service = row?.service ?? keyService;
+      // A row key the places list does not hold yet still names a mid-grain row.
+      const serviceWide = row === undefined ? !isMidGrain({ subject }) : isServiceRoot(row);
+      // The row sets the group, even when the line's keys name another service.
+      const service = row?.service ?? keyService(subject) ?? eventService;
       block = {
         subject,
-        label: serviceWide ? SERVICE_BLOCK_LABELS[service] : row.label,
+        label: serviceWide ? SERVICE_BLOCK_LABELS[service] : row?.label ?? keyLabel(subject),
         service,
         serviceWide,
         lines: [],

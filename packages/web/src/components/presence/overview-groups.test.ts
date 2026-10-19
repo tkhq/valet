@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { EventSubscriptionFilterWire, EventSubscriptionWire, PresencePlaceWire } from "@valet/api/wire";
-import { blockSubjectFor, countText, namedPlaceLabel, overviewGroups } from "./overview-groups";
+import { blockSubjectFor, countText, faultLead, namedPlaceLabel, overviewGroups } from "./overview-groups";
 import { place } from "./test-fixtures";
 
 
@@ -24,7 +24,7 @@ const DEPLOYS = place("slack:T1/C901", "#deploys", "slack", "slack:T1", { lastAc
 const ALERTS = place("slack:T1/C902", "#alerts", "slack", "slack:T1");
 const ACME_API = place("github:acme/api", "acme/api", "github", null, { lastActivityAt: 3_000, activeThreadCount: 1 });
 const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", { lastActivityAt: 9_000, activeThreadCount: 1 });
-const ENG = place("linear:team/ENG", "ENG", "linear", "linear:*");
+const ENG = place("linear:team/ENG", "ENG", "linear", null);
 const LINEAR_ROOT = place("linear:*", "Linear", "linear");
 
 const PLACES = [SLACK_ROOT, INCIDENTS, DEPLOYS, ALERTS, ACME_API, ACME_API_12, LINEAR_ROOT, ENG];
@@ -74,6 +74,60 @@ describe("overviewGroups", () => {
     const byLabel = line("N", ["slack.app_mention"], [{ field: "channel", op: "eq", value: "#deploys" }]);
     expect(blockSubjectFor(byLabel, PLACES)).toBe("slack:T1/C901");
     expect(blockSubjectFor(line("T", ["linear.issue.create"], [{ field: "team", op: "eq", value: "ENG" }]), PLACES)).toBe("linear:team/ENG");
+  });
+
+  // The server's row key (`placeKey`) for each shape the web's guess got
+  // wrong. The line lands on that row, so the row's place page lists it.
+  it.each([
+    {
+      shape: "a repository and a pull request number",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "repo", op: "eq", value: "acme/api" }, { field: "pr_number", op: "eq", value: "12" }],
+      placeKey: "github:acme/api",
+      label: "acme/api",
+    },
+    {
+      shape: "one channel in an `in` list",
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "in", value: ["C900"] }],
+      placeKey: "slack:T1/C900",
+      label: "#incidents",
+    },
+    {
+      shape: "a Linear issue identifier",
+      eventKeys: ["linear.issue.update"],
+      filters: [{ field: "identifier", op: "eq", value: "ENG-4" }],
+      placeKey: "linear:team/ENG",
+      label: "ENG",
+    },
+    {
+      shape: "a Linear team and an issue identifier",
+      eventKeys: ["linear.issue.update"],
+      filters: [{ field: "team", op: "eq", value: "ENG" }, { field: "identifier", op: "eq", value: "ENG-4" }],
+      placeKey: "linear:*",
+      label: "Across Linear",
+    },
+  ] satisfies { shape: string; eventKeys: string[]; filters: EventSubscriptionFilterWire[]; placeKey: string; label: string }[])(
+    "puts a line with $shape on the server's row",
+    ({ eventKeys, filters, placeKey, label }) => {
+      const sub = { ...line("K", eventKeys, filters), placeKey };
+      expect(blockSubjectFor(sub, PLACES)).toBe(placeKey);
+      const blocks = overviewGroups(PLACES, [sub], new Set()).flatMap((group) => group.blocks);
+      expect(blocks.map((block) => [block.subject, block.label])).toEqual([[placeKey, label]]);
+      expect(faultLead(sub, PLACES)).toBe(label.startsWith("Across") ? `${label},` : `In ${label},`);
+    },
+  );
+
+  it("names a row key the places list does not hold yet by its key", () => {
+    const sub = { ...line("R", ["github.push"], [{ field: "repo", op: "eq", value: "acme/web" }]), placeKey: "github:acme/web" };
+    const blocks = overviewGroups(PLACES, [sub], new Set()).flatMap((group) => group.blocks);
+    expect(blocks.map((block) => [block.subject, block.label, block.serviceWide])).toEqual([["github:acme/web", "acme/web", false]]);
+  });
+
+  it("marks the server's row as faulted", () => {
+    const sub = { ...line("F", ["slack.app_mention"], [{ field: "channel", op: "in", value: ["C900"] }]), placeKey: "slack:T1/C900" };
+    const groups = overviewGroups(PLACES, [sub], new Set(["slack:T1/C900"]));
+    expect(groups[0]!.blocks[0]).toMatchObject({ subject: "slack:T1/C900", hasFault: true });
   });
 
   it("sorts blocks by last activity, newest first, then by name", () => {
