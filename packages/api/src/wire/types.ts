@@ -2693,6 +2693,13 @@ export interface WorkflowWebhookResponse {
   updatedAt: number;
 }
 
+/** `GET /api/workflows/:id/webhook`. `null` when the workflow has no webhook
+ * yet: that is the normal starting state, not an error, so the read answers
+ * 200 and the editor logs nothing. */
+export interface GetWorkflowWebhookResponse {
+  webhook: WorkflowWebhookResponse | null;
+}
+
 export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }

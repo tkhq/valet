@@ -97,6 +97,7 @@ import type {
   CreateWorkflowScheduleResponse,
   DeleteWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   ListWorkflowSchedulesResponse,
   WorkflowScheduleWire,
   GetWorkflowResponse,
@@ -778,10 +779,10 @@ workflowsRouter.get("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
   if (!result.ok) return c.json({ error: "workflow not found" }, 404);
-  if (!result.webhook) return c.json({ error: "no webhook configured for this workflow" }, 404);
-  const resp: WorkflowWebhookResponse = {
-    ...result.webhook,
-    url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin),
+  const resp: GetWorkflowWebhookResponse = {
+    webhook: result.webhook
+      ? { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin) }
+      : null,
   };
   return c.json(resp);
 });

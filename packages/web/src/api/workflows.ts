@@ -41,7 +41,7 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter, type WorkflowRunPage } from "./client";
+import { api, type OwnerFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -469,19 +469,13 @@ export function useDismissRun() {
 
 // ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
-/** The webhook status read treats "no webhook configured" (404) as `null`
- * rather than an error — absence is the normal starting state. */
+/** The workflow's webhook, or `null` when it has none yet. The server answers
+ * a missing webhook with 200 `{ webhook: null }`, since absence is the normal
+ * starting state; a 404 means the workflow itself is gone. */
 export function useWorkflowWebhook(id: string) {
   return useQuery<WorkflowWebhookResponse | null>({
     queryKey: qkWorkflows.webhook(id),
-    queryFn: async () => {
-      try {
-        return await api.getWorkflowWebhook(id);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404) return null;
-        throw err;
-      }
-    },
+    queryFn: async () => (await api.getWorkflowWebhook(id)).webhook,
   });
 }
 

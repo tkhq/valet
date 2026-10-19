@@ -26,6 +26,7 @@ import type {
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
@@ -1170,7 +1171,7 @@ export const api = {
   // workflow webhook URL management. Schedules and event triggers are the
   // flat trigger surface below, not this per-workflow one.
   getWorkflowWebhook: (id: string) =>
-    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+    request<GetWorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
   mintWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
   deleteWorkflowWebhook: (id: string) =>

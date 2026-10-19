@@ -33,6 +33,7 @@ import type {
   CreateWorkflowResponse,
   CreateWorkflowScheduleResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   GetWorkflowRunResponse,
   ListWorkflowActionRequiredResponse,
   ListWorkflowRunsResponse,
@@ -2801,16 +2802,20 @@ describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
 
     const fetched = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
     expect(fetched.status).toBe(200);
-    const fetchedBody = (await fetched.json()) as WorkflowWebhookResponse;
-    expect(fetchedBody.hookId).toBe(mintedBody.hookId);
+    const fetchedBody = (await fetched.json()) as GetWorkflowWebhookResponse;
+    expect(fetchedBody.webhook?.hookId).toBe(mintedBody.hookId);
+    expect(fetchedBody.webhook?.url).toBe(mintedBody.url);
   });
 
-  it("GET 404s when the workflow has no webhook yet", async () => {
+  // No webhook is the normal starting state. A 404 here logged a console
+  // error on every workflow editor load.
+  it("GET answers webhook null when the workflow has no webhook yet", async () => {
     api = await bootTestApi();
     const created = await createWorkflow(api.baseUrl);
 
     const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ webhook: null } satisfies GetWorkflowWebhookResponse);
   });
 
   it("POST/GET/DELETE all 404 against another owner's workflow", async () => {
@@ -2850,7 +2855,8 @@ describe("POST/GET/DELETE /api/workflows/:id/webhook", () => {
     expect(body.deleted).toBe(true);
 
     const afterDelete = await fetch(`${api.baseUrl}/api/workflows/${created.id}/webhook`);
-    expect(afterDelete.status).toBe(404);
+    expect(afterDelete.status).toBe(200);
+    expect(((await afterDelete.json()) as GetWorkflowWebhookResponse).webhook).toBeNull();
   });
 
   it("DELETE on an owned workflow with no hook returns deleted:false (not a 404 — the workflow itself is fine)", async () => {
