@@ -29,6 +29,24 @@ describe("DeliveryList", () => {
     expect(screen.getByRole("link", { name: "Delivered to thread" }).getAttribute("href")).toBe("/threads/th_inc");
   });
 
+  it("disables the link to an archived thread, delivered to or claimed by", () => {
+    const delivered: EventDeliveryWire = {
+      ...base, id: "d1", status: "delivered", deliveredAt: 1_723_200_000_000,
+      thread: { sessionId: "sess_1", threadId: "th_old", title: "Old incident", archived: true },
+    };
+    const claimed: EventDeliveryWire = {
+      ...base, id: "d2", status: "skipped", lastError: "Skipped, claimed by thread th_old.",
+      claimedBy: { sessionId: "sess_1", threadId: "th_old", title: "Old incident", archived: true },
+    };
+    render(<DeliveryList deliveries={[delivered, claimed]} now={1_723_200_000_000} />);
+    for (const name of ["Delivered to Old incident", "Claimed by Old incident"]) {
+      const link = screen.getByRole("link", { name });
+      expect(link.getAttribute("aria-disabled")).toBe("true");
+      expect(link.getAttribute("href")).toBeNull();
+      expect(link.getAttribute("title")).toBe("This thread is archived.");
+    }
+  });
+
   it("links a claimed row to the thread that claimed it, in place of the raw skip text", () => {
     const claimed: EventDeliveryWire = {
       ...base, id: "d2", status: "skipped", lastError: "Skipped, claimed by thread th_inc.", claimedBy: { sessionId: "sess_1", threadId: "th_inc" },

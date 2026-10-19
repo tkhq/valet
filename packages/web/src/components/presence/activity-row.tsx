@@ -14,6 +14,7 @@ import { DeliveryList } from "~/components/events/delivery-list";
 import { EventReceiptStages } from "~/components/events/receipts-panel";
 import { Badge, WorkRow, textLinkClass } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
+import { ArchivedThreadLink } from "./archived-thread-link";
 import { Ref } from "./ref";
 import { Sentence } from "./sentence";
 import { activitySentenceParts, type ActivityOutcome, type ActivitySentenceParts, type SentencePart } from "./sentences";
@@ -61,9 +62,9 @@ function Outcome({ outcome, parts }: { outcome: ActivityOutcome; parts: readonly
     return (
       <>
         {outcome.words}{" "}
-        <span role="link" aria-disabled="true" title="This thread is archived." className="opacity-70">
+        <ArchivedThreadLink>
           <Ref kind="thread" text={thread.label} />
-        </span>
+        </ArchivedThreadLink>
       </>
     );
   }

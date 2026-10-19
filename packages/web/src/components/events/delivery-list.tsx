@@ -4,6 +4,7 @@ import type { EventDeliveryThreadRef, EventDeliveryWire, EventSummaryWire } from
 import { Badge, textLinkClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
+import { ArchivedThreadLink } from "~/components/presence/archived-thread-link";
 import { deliveryStatusLine } from "./delivery-copy";
 
 /** A delivery, with the event it carried when the list is one listener's. */
@@ -29,13 +30,24 @@ const DELIVERY_VARIANT: Record<EventDeliveryWire["status"], "neutral" | "success
 
 const destinationLinkClass = cn(textLinkClass, "min-h-11 text-xs sm:min-h-0");
 
+/** A link to the thread a delivery reached or that claimed it. An archived thread's link is disabled. */
+function ThreadLink({ thread, children }: { thread: EventDeliveryThreadRef; children: ReactNode }) {
+  if (thread.archived) return <ArchivedThreadLink className="text-xs text-muted">{children}</ArchivedThreadLink>;
+  return (
+    <Link to="/threads/$threadId" params={{ threadId: thread.threadId }} className={destinationLinkClass}>
+      {children}
+    </Link>
+  );
+}
+
 /**
  * The delivery attempts made for one event: what each one was trying to
  * reach, where it got to, and when it tries again. Shared by the feed row
  * and the event page so the two never drift. A delivery links to the thread
  * it reached, the thread whose waiter claimed it, or the workflow run it
  * started, when the API sends one (spec 2026-10-16: delivery threads and
- * claims, Part E step 2). A dead delivery shows its dead-letter text.
+ * claims, Part E step 2). An archived thread's link stays, disabled. A
+ * dead delivery shows its dead-letter text.
  *
  * A row names its thread by the title on its thread ref. A row that
  * carries its event (a line's list) leads with the event. Otherwise it leads
@@ -79,16 +91,8 @@ export function DeliveryList({
             {d.deliveredAt !== null && (
               <span className="text-xs text-muted">delivered {formatWhen(d.deliveredAt)}</span>
             )}
-            {d.thread && (
-              <Link to="/threads/$threadId" params={{ threadId: d.thread.threadId }} className={destinationLinkClass}>
-                Delivered to {titleOf(d.thread)}
-              </Link>
-            )}
-            {d.claimedBy && (
-              <Link to="/threads/$threadId" params={{ threadId: d.claimedBy.threadId }} className={destinationLinkClass}>
-                Claimed by {titleOf(d.claimedBy)}
-              </Link>
-            )}
+            {d.thread && <ThreadLink thread={d.thread}>Delivered to {titleOf(d.thread)}</ThreadLink>}
+            {d.claimedBy && <ThreadLink thread={d.claimedBy}>Claimed by {titleOf(d.claimedBy)}</ThreadLink>}
             {d.runId && (
               <Link to="/workflows/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
                 Open run
