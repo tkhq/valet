@@ -166,6 +166,23 @@ describe("EngineHost native credential policy (Part B)", () => {
       await expect(session.credentialProvider({ actorId: userId }).get("linear")).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
     });
 
+    // The app tier is for members only: a channel sender with no Valet
+    // account never acts as the Linear app.
+    it("an external sender never reaches the app token, and no fallback is counted", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      const session = await makeHost(appDb, credentials).sessionFor("sess-t8", teamMeta);
+      const provider = session.credentialProvider({ externalSender: true });
+
+      expect(await provider.get("linear")).toBeNull();
+      expect(await provider.get("linear:app")).toBeNull();
+      expect(record).not.toHaveBeenCalled();
+
+      // The team's own connection still answers, as before the policy.
+      await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "team-linear" });
+      expect((await partB(provider))?.accessToken).toBe("team-linear");
+    });
+
     it("P4: with no share, team row, or approved share, the read ends at the app token", async () => {
       const { appDb, credentials } = await harness();
       const session = await makeHost(appDb, credentials).sessionFor("sess-t4", teamMeta);

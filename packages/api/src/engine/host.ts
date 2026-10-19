@@ -1938,6 +1938,9 @@ export class EngineHost {
         // of the Part B order for every owner. The org owns it, so the
         // answer does not depend on who reads. `null` unless a native plugin
         // names the service (INV-P2); a bare token, never the row (INV-P1).
+        // The app tier is for members only: a channel sender with no Valet
+        // account never acts as the app (native credential policy, Part B).
+        if (use.externalSender) return null;
         return resolveAppCredentialRead({ credentials, onePassword }, { orgId }, service, this.opts.plugins);
       }
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
@@ -2039,7 +2042,9 @@ export class EngineHost {
       // is the identity link, which the private-channel check needs — and
       // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
-      const appService = rowBackedAppServiceFor(this.opts.plugins, service);
+      // An external sender never reaches the app tier, so its reads neither
+      // fall through to the app token nor count as a fallback.
+      const appService = use.externalSender ? undefined : rowBackedAppServiceFor(this.opts.plugins, service);
       // A read that ends at the app token is counted
       // (`valet_credentials_app_fallback_total`), so a broken delegated
       // credential stays visible while the app keeps the action working.
@@ -2079,7 +2084,7 @@ export class EngineHost {
         return fromTeam;
       }
       if (owner.type === "org") {
-        const app = await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins);
+        const app = use.externalSender ? null : await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins);
         if (app) return app;
         return resolveOrgCredentialRead(
           { credentials, onePassword },
