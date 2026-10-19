@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -16,7 +16,8 @@ beforeEach(async () => {
   const bin = join(root, 'bin');
   await mkdir(bin);
   await writeFile(join(root, 'containers'), '[]');
-  // A fake docker. `exec --user 0` writes as root, so it ignores the mode bits.
+  // A fake docker. `exec --user 0` runs the probe's real shell command against
+  // the host directory, as root, so it ignores the mode bits.
   await writeFile(join(bin, 'docker'), `#!${process.execPath}
 const fs=require('node:fs');const path=require('node:path');const a=process.argv.slice(2);const file=${JSON.stringify(join(root, 'containers'))};
 let owners=JSON.parse(fs.readFileSync(file,'utf8'));const save=()=>fs.writeFileSync(file,JSON.stringify(owners));
@@ -29,11 +30,11 @@ else if(a[0]==='inspect'){const o=owners.find(o=>o.Id===a.at(-1)||o.Name===a.at(
 else if(a[0]==='ps'){process.stdout.write(owners.map(o=>o.Id).join('\\n'));}
 else if(a[0]==='rm'){owners=owners.filter(o=>o.Id!==a.at(-1));save();}
 else if(a[0]==='exec'){const o=owners.find(o=>a.includes(o.Id));if(!o)fail('No such container');
- const dir=o.Mounts.find(m=>m.Destination==='/workspace').Source;const asRoot=a.includes('--user')&&a[a.indexOf('--user')+1]==='0';
- const probe=/^printf %s (\\S+) > \\/workspace\\/\\.valet-mount-probe$/.exec(a.at(-1));
- const write=fn=>{if(!asRoot)fail('Permission denied');const mode=fs.statSync(dir).mode;fs.chmodSync(dir,0o755);try{fn();}finally{fs.chmodSync(dir,mode);}};
- if(probe)write(()=>fs.writeFileSync(path.join(dir,'.valet-mount-probe'),probe[1]));
- else if(a.at(-1)==='/workspace/.valet-mount-probe'&&a.includes('rm'))write(()=>fs.rmSync(path.join(dir,'.valet-mount-probe'),{force:true}));}
+ const dir=o.Mounts.find(m=>m.Destination==='/workspace').Source;if(!/\\/workspace\\/\\.valet-mount-probe/.test(a.at(-1)))process.exit(0);
+ if(!(a.includes('--user')&&a[a.indexOf('--user')+1]==='0'))fail('Permission denied');
+ const cmd=a.slice(a.indexOf(o.Id)+1).map(s=>s.split('/workspace').join(dir));const mode=fs.statSync(dir).mode;fs.chmodSync(dir,0o755);
+ const r=require('node:child_process').spawnSync('/bin/'+cmd[0],cmd.slice(1),{encoding:'utf8'});fs.chmodSync(dir,mode);
+ process.stderr.write(r.stderr??'');process.exit(r.status??1);}
 else fail('unexpected fake Docker operation '+a.join(' '));
 `, { mode: 0o755 });
   vi.stubEnv('PATH', bin);
@@ -51,4 +52,22 @@ it('creates a sandbox when the host cannot create files in the working directory
   const sandbox = await provider.create(opts);
   expect(sandbox.id).toBeTruthy();
   expect(await readdir(workspace)).toEqual([]);
+});
+
+it('never writes through a link an earlier workload left in the working directory', async () => {
+  const victim = join(root, 'victim.txt');
+  await writeFile(victim, 'journal', { mode: 0o600 });
+  await symlink(victim, join(workspace, '.valet-mount-probe'));
+  const provider = new DockerSandboxProvider({ inventoryRoot: join(root, 'private') });
+  const opts: DockerSandboxCreateOpts = { sessionId: 'probe-session', workspace, image: 'repo:bake', pullIfMissing: false };
+  await provider.create(opts);
+  expect(await readFile(victim, 'utf8')).toBe('journal');
+  expect(await readdir(workspace)).toEqual(['.valet-mount-probe']);
+});
+
+it('reports a host read error as a permission problem, not as a missing bind mount', async () => {
+  await chmod(workspace, 0o000);
+  const provider = new DockerSandboxProvider({ inventoryRoot: join(root, 'private') });
+  const opts: DockerSandboxCreateOpts = { sessionId: 'probe-session', workspace, image: 'repo:bake', pullIfMissing: false };
+  await expect(provider.create(opts)).rejects.toThrow(/cannot read the workspace .*EACCES/);
 });
