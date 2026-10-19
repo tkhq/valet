@@ -135,4 +135,5 @@ export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interprete
 
 export { LocalRunHost } from './local-host.js';
 export { retryRerunSteps, retrySeedCheckpoints } from './retry-seed.js';
+export type { RetrySeedOptions } from './retry-seed.js';
 export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost, RunStartOptions } from './local-host.js';

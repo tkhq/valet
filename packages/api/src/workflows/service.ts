@@ -73,6 +73,7 @@ import type {
   ListWorkflowRunsResponse,
   WorkflowDefinitionSummary,
   WorkflowPendingGate,
+  WorkflowRerunStep,
   WorkflowRunCheckpoint,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -1929,7 +1930,7 @@ export async function cancelWorkflowRun(
 }
 
 export type RetryWorkflowRunResult =
-  | { runId: string; rerunSteps?: string[] }
+  | { runId: string; rerunSteps?: WorkflowRerunStep[] }
   | { invalidInput: TriggerInputError[] }
   | "not_found"
   | "not_retryable"
@@ -1957,6 +1958,15 @@ function dagDefinition(value: unknown): WorkflowDefinition | undefined {
 
 /** No step changed since the run, so a re-run of its changed steps would run nothing. */
 class NothingChangedError extends Error {}
+
+/** The steps a re-run runs, each tool step with the action it does in `current`. */
+function rerunStepViews(current: WorkflowDefinition, ids: readonly string[]): WorkflowRerunStep[] {
+  const nodes = new Map(current.nodes.map((node) => [node.id, node]));
+  return ids.map((nodeId) => {
+    const node = nodes.get(nodeId);
+    return node?.type === "tool" ? { nodeId, action: `${node.service}.${node.action}` } : { nodeId };
+  });
+}
 
 /**
  * Starts a fresh run of the same workflow, reusing the old run's trigger
@@ -1987,7 +1997,7 @@ export async function retryWorkflowRun(
   const original = triggerData(run.params.input);
 
   // Written by the seed callback, which TypeScript does not track.
-  const plan: { rerunSteps?: string[] } = {};
+  const plan: { rerunSteps?: WorkflowRerunStep[] } = {};
   let started: Awaited<ReturnType<typeof startWorkflowRun>>;
   try {
     started = await startWorkflowRun(
@@ -2008,12 +2018,16 @@ export async function retryWorkflowRun(
         const current = dagDefinition(next.definition);
         if (!previous || !current) return [];
         const checkpoints = await deps.workflowStore.getCheckpoints(runId);
+        // Every step a completed run finished is a result, a tolerated
+        // failure and a stop step included.
+        const seedOpts = { completed: from === "changed_steps" };
         if (from === "changed_steps") {
           // The same definition the new run snapshots, so the list matches what runs.
-          plan.rerunSteps = retryRerunSteps(previous, current, checkpoints);
-          if (plan.rerunSteps.length === 0) throw new NothingChangedError();
+          const ids = retryRerunSteps(previous, current, checkpoints, seedOpts);
+          if (ids.length === 0) throw new NothingChangedError();
+          plan.rerunSteps = rerunStepViews(current, ids);
         }
-        return retrySeedCheckpoints(previous, current, checkpoints);
+        return retrySeedCheckpoints(previous, current, checkpoints, seedOpts);
       },
       run.params.startedBy,
     );
@@ -2027,21 +2041,23 @@ export async function retryWorkflowRun(
 }
 
 /**
- * For a completed run: the steps that a re-run of its changed steps runs
- * again, from the current saved workflow. Empty when no step changed.
- * Undefined for any other run, and when the caller cannot start the workflow.
+ * For a completed run: the steps that a re-run of its changed steps runs,
+ * from the current saved workflow. Empty when no step changed. Undefined for
+ * any other run, and when the caller cannot start the workflow.
  */
 export async function changedStepsToRerun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   run: { runId: string; workflowId: string; status: string; outcome?: string | null; definition: unknown },
   checkpoints: readonly { nodeId: string; status: NodeCheckpoint["status"] }[],
-): Promise<string[] | undefined> {
+): Promise<WorkflowRerunStep[] | undefined> {
   if (run.status !== "settled" || run.outcome !== "completed") return undefined;
   const row = await ownedDefinitionRow(deps.db, owner, run.workflowId);
   const previous = dagDefinition(run.definition);
   const current = row ? dagDefinition(row.definition) : undefined;
-  return previous && current ? retryRerunSteps(previous, current, checkpoints) : undefined;
+  return previous && current
+    ? rerunStepViews(current, retryRerunSteps(previous, current, checkpoints, { completed: true }))
+    : undefined;
 }
 
 /**

@@ -112,12 +112,13 @@ describe("retryWorkflowRun from changed_steps", () => {
     const checkpoints = await settledRun("wfrun_done", "completed");
     await saveDefinition(report("Summarize v2, one line per PR"));
     const run = { runId: "wfrun_done", workflowId: WORKFLOW_ID, status: "settled", outcome: "completed", definition: report("Summarize v1") };
-    expect(await changedStepsToRerun(deps, OWNER, run, checkpoints)).toEqual(["summarize", "notify", "done"]);
+    const rerunSteps = [{ nodeId: "summarize" }, { nodeId: "notify", action: "slack.send_message" }, { nodeId: "done" }];
+    expect(await changedStepsToRerun(deps, OWNER, run, checkpoints)).toEqual(rerunSteps);
 
     const result = await retryWorkflowRun(deps, OWNER, "wfrun_done", { from: "changed_steps" });
 
     // The tool step after the edit sends its message again, and the result says so.
-    expect(result).toEqual({ runId: expect.any(String), rerunSteps: ["summarize", "notify", "done"] });
+    expect(result).toEqual({ runId: expect.any(String), rerunSteps });
     expect(started).toHaveLength(1);
     expect(started[0]?.seed?.map((cp) => [cp.nodeId, cp.result])).toEqual([
       ["trigger", { from: "trigger" }],

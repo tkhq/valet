@@ -1169,11 +1169,11 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     });
     expect(edited.status).toBe(200);
     const after = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
-    expect(after.rerunSteps).toEqual(["summary", "stop"]);
+    expect(after.rerunSteps).toEqual([{ nodeId: "summary" }, { nodeId: "stop" }]);
 
     const rerun = await retry({ from: "changed_steps" });
     expect(rerun.status).toBe(201);
-    expect(((await rerun.json()) as RetryWorkflowRunResponse).rerunSteps).toEqual(["summary", "stop"]);
+    expect(((await rerun.json()) as RetryWorkflowRunResponse).rerunSteps).toEqual([{ nodeId: "summary" }, { nodeId: "stop" }]);
     expect(stub.started.at(-1)?.opts?.seed?.map((cp) => cp.nodeId)).toEqual(["trigger", "fetch"]);
   });
 

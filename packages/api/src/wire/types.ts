@@ -2206,9 +2206,9 @@ export interface WorkflowRunDetail {
    * Empty for a first run and for a run after an edit. */
   modelChanges?: WorkflowModelChange[];
   /** For a completed run: the steps that a re-run of its changed steps
-   * (`from: "changed_steps"`) runs again, from the current saved workflow.
+   * (`from: "changed_steps"`) runs, from the current saved workflow.
    * Empty when no step changed since the run. Absent for other runs. */
-  rerunSteps?: string[];
+  rerunSteps?: WorkflowRerunStep[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2264,10 +2264,17 @@ export interface RetryWorkflowRunRequest {
 
 export interface RetryWorkflowRunResponse {
   runId: string;
-  /** With `changed_steps`: the steps that run again, in workflow order. A
-   * tool step in this list does its action again, for example it sends a
-   * message again. */
-  rerunSteps?: string[];
+  /** With `changed_steps`: the steps that run, in workflow order. */
+  rerunSteps?: WorkflowRerunStep[];
+}
+
+/** A step that a re-run of a completed run's changed steps runs. */
+export interface WorkflowRerunStep {
+  nodeId: string;
+  /** For a tool step, the action it does as `service.action`, read from the
+   * current workflow. The step does this action again, for example it
+   * sends a message again. */
+  action?: string;
 }
 
 // ── Workflow permissions preview ──────────────────────────────────────────

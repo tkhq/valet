@@ -254,7 +254,7 @@ describe("RunDetailBody", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
-  it("re-runs a completed run's changed steps after it names them and the actions that repeat", async () => {
+  it("re-runs a completed run's changed steps after it names them and the actions the server reports", async () => {
     const onRetry = vi.fn();
     const data: WorkflowRunDetail = {
       ...baseRun({
@@ -265,12 +265,12 @@ describe("RunDetailBody", () => {
           nodes: [
             { id: "trigger", type: "trigger" },
             { id: "summarize", type: "session", mode: "start", prompt: "Summarize" },
-            { id: "notify", type: "tool", service: "slack", action: "send_message", params: {} },
           ],
-          edges: [{ from: "trigger", to: "summarize" }, { from: "summarize", to: "notify" }],
+          edges: [{ from: "trigger", to: "summarize" }],
         },
       }),
-      rerunSteps: ["summarize", "notify"],
+      // `notify` is new since the run: the action comes from the server, not the old definition.
+      rerunSteps: [{ nodeId: "summarize" }, { nodeId: "notify", action: "slack.send_message" }],
     };
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={onRetry} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
@@ -279,7 +279,7 @@ describe("RunDetailBody", () => {
     expect(onRetry).not.toHaveBeenCalled();
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("These steps run again: summarize, notify. Every other step keeps this run's result.")).toBeTruthy();
-    expect(within(dialog).getByText("These tool steps do their action again: notify (slack.send_message).")).toBeTruthy();
+    expect(within(dialog).getByText("These tool steps do their action: notify (slack.send_message).")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Re-run changed steps" }));
     expect(onRetry.mock.calls).toEqual([["changed_steps"]]);
   });

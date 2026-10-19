@@ -89,15 +89,33 @@ describe('retrySeedCheckpoints', () => {
 
 describe('retryRerunSteps', () => {
   const completed = [cp('trigger', 'completed'), cp('list', 'completed'), cp('qualify', 'completed', 0), cp('loop', 'completed'), cp('report', 'completed'), cp('stop', 'completed')];
+  const done = { completed: true };
 
   it('names an edited step and every step after it for a completed run, and matches the seed', () => {
     const edited = chain('qualify {{item}} strictly');
-    expect(retryRerunSteps(chain(), edited, completed)).toEqual(['loop', 'report', 'stop']);
-    expect(ids(retrySeedCheckpoints(chain(), edited, completed))).toEqual(['trigger#0', 'list#0']);
+    expect(retryRerunSteps(chain(), edited, completed, done)).toEqual(['loop', 'report', 'stop']);
+    expect(ids(retrySeedCheckpoints(chain(), edited, completed, done))).toEqual(['trigger#0', 'list#0']);
   });
 
   it('is empty for a completed run when no step changed', () => {
-    expect(retryRerunSteps(chain(), chain(), completed)).toEqual([]);
+    expect(retryRerunSteps(chain(), chain(), completed, done)).toEqual([]);
+  });
+
+  it('keeps a failure the completed run tolerated, so an unchanged run has nothing to re-run', () => {
+    const tolerant = (text: string): WorkflowDefinition => ({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'optional', type: 'tool', service: 'github', action: 'get_pr', params: {}, onError: 'continue' },
+        { id: 'send', type: 'tool', service: 'slack', action: 'send_message', params: { text } },
+        { id: 'stop', type: 'stop' },
+      ],
+      edges: [{ from: 'trigger', to: 'optional' }, { from: 'optional', to: 'send' }, { from: 'send', to: 'stop' }],
+    });
+    const run = [cp('trigger', 'completed'), cp('optional', 'failed'), cp('send', 'completed'), cp('stop', 'completed')];
+    expect(retryRerunSteps(tolerant('hi'), tolerant('hi'), run, done)).toEqual([]);
+    expect(retryRerunSteps(tolerant('hi'), tolerant('hello'), run, done)).toEqual(['send', 'stop']);
+    expect(ids(retrySeedCheckpoints(tolerant('hi'), tolerant('hello'), run, done))).toEqual(['trigger#0', 'optional#0']);
   });
 
   it('names the failed step of a failed run', () => {
@@ -138,5 +156,44 @@ describe('LocalRunHost seeded start', () => {
     const byNode = new Map((await store.getCheckpoints('retry')).map((c) => [c.nodeId, c]));
     expect(byNode.get('first')).toMatchObject({ runId: 'retry', attempt: 0, result: { from: 'old run' } });
     expect(byNode.get('second')).toMatchObject({ status: 'completed', result: { saw: 'old run' } });
+  });
+
+  it('keeps an unchanged stop of a completed run, so it cannot end the re-run before the edited branch', async () => {
+    const store = new InMemoryWorkflowStore();
+    const host = new LocalRunHost({ store, engine: makeRunHostFixtureEngine(), pollMs: 5, sweepMs: 10 });
+    const branches = (label: string): WorkflowDefinition => ({
+      version: 'dag/v1',
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'short', type: 'set', values: { done: true } },
+        { id: 'stop_short', type: 'stop' },
+        { id: 'long', type: 'set', values: { label } },
+        { id: 'after', type: 'set', values: { saw: '{{nodes.long.output.label}}' } },
+        { id: 'stop_long', type: 'stop' },
+      ],
+      edges: [
+        { from: 'trigger', to: 'short' }, { from: 'short', to: 'stop_short' },
+        { from: 'trigger', to: 'long' }, { from: 'long', to: 'after' }, { from: 'after', to: 'stop_long' },
+      ],
+    });
+    const old = [
+      cp('trigger', 'completed', 0, { data: {} }), cp('short', 'completed', 0, { done: true }), cp('stop_short', 'completed', 0, {}),
+      cp('long', 'completed', 0, { label: 'v1' }), cp('after', 'completed', 0, { saw: 'v1' }),
+    ];
+    const seed = retrySeedCheckpoints(branches('v1'), branches('v2'), old, { completed: true });
+    expect(ids(seed)).toEqual(['trigger#0', 'short#0', 'stop_short#0']);
+    host.startHost();
+    try {
+      await host.start('rerun', { workflowId: 'wf', definitionVersionId: 'v' }, branches('v2'), undefined, { seed });
+      for (let i = 0; i < 300 && (await store.getRun('rerun'))?.status !== 'settled'; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } finally {
+      await host.stopHost();
+    }
+    expect((await store.getRun('rerun'))?.outcome).toBe('completed');
+    const byNode = new Map((await store.getCheckpoints('rerun')).map((c) => [c.nodeId, c]));
+    expect(byNode.get('after')).toMatchObject({ status: 'completed', result: { saw: 'v2' } });
+    expect(byNode.get('stop_long')).toMatchObject({ status: 'completed' });
   });
 });

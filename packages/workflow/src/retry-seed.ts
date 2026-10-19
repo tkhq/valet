@@ -11,8 +11,11 @@
  * its finished items, so only the failed and unstarted items run again,
  * unless the foreach itself changed.
  *
- * A re-run of a completed run's changed steps uses the same rules. No step
- * failed, so only the edited steps and the steps after them run again.
+ * A re-run of a completed run's changed steps (`completed: true`) reuses
+ * every step that did not change and is not after a changed step. That
+ * includes a failed step the run tolerated (`onError: "continue"`), which is
+ * part of the result, and a stop step that ran: a copied stop never
+ * executes, so it cannot end the re-run before the changed steps finish.
  */
 import type { WorkflowNode } from './dag/nodes.js';
 import type { WorkflowDefinition, WorkflowEdge } from './dag/shape.js';
@@ -61,22 +64,38 @@ function bodyOwners(definition: WorkflowDefinition): Map<string, string> {
   return owners;
 }
 
+/** How the old run ended. */
+export interface RetrySeedOptions {
+  /** The old run completed. Every checkpoint it finished is a result to keep,
+   * so only the changed steps and the steps after them run again. */
+  completed?: boolean;
+}
+
+function finished(status: NodeCheckpoint['status'], opts: RetrySeedOptions): boolean {
+  return status === 'completed' || status === 'skipped' || (opts.completed === true && status === 'failed');
+}
+
 /** Which steps a retry runs again, and why. */
 function retryScope(
   previous: WorkflowDefinition,
   current: WorkflowDefinition,
   checkpoints: readonly Pick<NodeCheckpoint, 'nodeId' | 'status'>[],
+  opts: RetrySeedOptions,
 ) {
   const before = signatures(previous);
   const after = signatures(current);
-  // A stop step ends the run when it executes. A copied one never executes,
-  // so it always runs again; it has no side effects.
-  const topLevel = new Set(current.nodes.filter((node: WorkflowNode) => node.type !== 'stop').map((node) => node.id));
+  // A stop step ends the run when it executes. After a failure, a copied
+  // stop never executes, so it always runs again; it has no side effects.
+  // A completed run keeps its stops, so an unchanged one cannot end the
+  // re-run early.
+  const reusable = new Set(current.nodes.filter((node: WorkflowNode) => opts.completed || node.type !== 'stop').map((node) => node.id));
 
   const changed = new Set([...after].filter(([id, sig]) => before.get(id) !== sig).map(([id]) => id));
   // Top-level steps only. A foreach that stops on a failed item fails its
   // own checkpoint too; one that skips or collects failed items completed.
-  const failed = new Set(checkpoints.filter((cp) => cp.status === 'failed' && topLevel.has(cp.nodeId)).map((cp) => cp.nodeId));
+  // A completed run only has failures it tolerated.
+  const failed = new Set(opts.completed ? [] : checkpoints
+    .filter((cp) => cp.status === 'failed' && reusable.has(cp.nodeId)).map((cp) => cp.nodeId));
   // An approval step answered for the old steps after it. When any of those
   // changed, a person approves again, so the approval runs again too.
   const reapprove = current.nodes.filter((node: WorkflowNode) => node.type === 'approval'
@@ -84,7 +103,7 @@ function retryScope(
   const roots = new Set([...changed, ...failed, ...reapprove]);
   const downstream = descendants(current, roots);
   const rerun = new Set([...roots, ...downstream]);
-  return { topLevel, changed, failed, downstream, rerun };
+  return { reusable, changed, failed, downstream, rerun };
 }
 
 /**
@@ -96,13 +115,14 @@ export function retrySeedCheckpoints(
   previous: WorkflowDefinition,
   current: WorkflowDefinition,
   checkpoints: readonly NodeCheckpoint[],
+  opts: RetrySeedOptions = {},
 ): NodeCheckpoint[] {
-  const { topLevel, changed, failed, downstream, rerun } = retryScope(previous, current, checkpoints);
+  const { reusable, changed, failed, downstream, rerun } = retryScope(previous, current, checkpoints, opts);
   const owners = bodyOwners(current);
   return checkpoints.filter((cp) => {
-    if (cp.status !== 'completed' && cp.status !== 'skipped') return false;
+    if (!finished(cp.status, opts)) return false;
     const owner = owners.get(cp.nodeId);
-    if (owner === undefined) return topLevel.has(cp.nodeId) && !rerun.has(cp.nodeId);
+    if (owner === undefined) return reusable.has(cp.nodeId) && !rerun.has(cp.nodeId);
     if (!rerun.has(owner)) return true;
     // The failed foreach itself, unchanged, and not downstream of another
     // step that runs again: its items are the same list, so a finished item
@@ -114,15 +134,23 @@ export function retrySeedCheckpoints(
 /**
  * The top-level steps a retry runs again, in definition order: each failed
  * step, each step edited or added since the old run, each approval asked
- * again, and every step after one of these. For a completed run, an empty
- * list means that no step changed. A step that the old run never reached
- * also runs, but this list does not name it.
+ * again, and every step after one of these. After a failure, a step that the
+ * old run never reached also runs, but this list does not name it.
+ *
+ * For a completed run, an empty list means that no step changed. Otherwise
+ * the list also names each step that the old run never reached, because a
+ * stop step ended it first: with the stop copied, that step runs now.
  */
 export function retryRerunSteps(
   previous: WorkflowDefinition,
   current: WorkflowDefinition,
   checkpoints: readonly Pick<NodeCheckpoint, 'nodeId' | 'status'>[],
+  opts: RetrySeedOptions = {},
 ): string[] {
-  const { rerun } = retryScope(previous, current, checkpoints);
-  return current.nodes.filter((node) => rerun.has(node.id)).map((node) => node.id);
+  const { rerun } = retryScope(previous, current, checkpoints, opts);
+  if (rerun.size === 0) return [];
+  const reached = new Set(checkpoints.filter((cp) => finished(cp.status, opts)).map((cp) => cp.nodeId));
+  return current.nodes
+    .filter((node) => rerun.has(node.id) || (opts.completed === true && !reached.has(node.id)))
+    .map((node) => node.id);
 }

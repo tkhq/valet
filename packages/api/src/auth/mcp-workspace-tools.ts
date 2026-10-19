@@ -430,7 +430,9 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
       const body: RetryWorkflowRunRequest = { ...(from ? { from } : {}), ...(input ? { input } : {}) };
       const retried = await call<RetryWorkflowRunResponse>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/retry`, "Workflow run", body);
       const view = await waitForRun(deps, retried.runId, wait_seconds ?? DEFAULT_RUN_WAIT_SECONDS);
-      return retried.rerunSteps ? { ...view, rerun_steps: retried.rerunSteps } : view;
+      return retried.rerunSteps
+        ? { ...view, rerun_steps: retried.rerunSteps.map((step) => ({ node_id: step.nodeId, ...(step.action ? { action: step.action } : {}) })) }
+        : view;
     }),
   );
 

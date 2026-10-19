@@ -173,12 +173,11 @@ export function RunDetailBody({
   // Only worth offering when a finished step can be reused.
   const stepRetryable = retryable && run.outcome === "failed" && checkpoints.some((cp) => cp.status === "completed");
   const definition = isWorkflowDefinitionShape(run.definition) ? run.definition : undefined;
-  // The server lists the steps that run again only for a completed run.
+  // The server lists the steps that run again only for a completed run,
+  // with each tool step's action from the workflow that will run.
   const rerunSteps = run.status === "settled" && run.outcome === "completed" ? data.rerunSteps ?? [] : [];
-  const repeatedActions = rerunSteps.flatMap((id) => {
-    const node = definition?.nodes.find((n) => n.id === id);
-    return node?.type === "tool" ? [`${id} (${node.service}.${node.action})`] : [];
-  });
+  const rerunNames = rerunSteps.map((step) => step.nodeId).join(", ");
+  const rerunActions = rerunSteps.flatMap((step) => step.action ? [`${step.nodeId} (${step.action})`] : []);
   const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
   const activeSteps = Object.entries(nodeStatuses.status)
@@ -239,7 +238,7 @@ export function RunDetailBody({
           )}
           {rerunSteps.length > 0 && (
             <Button size="sm" onClick={() => setRerunOpen(true)} disabled={retryPending}
-              title={`Runs again: ${rerunSteps.join(", ")}. Every other step keeps this run's result.`}>
+              title={`Runs again: ${rerunNames}. Every other step keeps this run's result.`}>
               {retryPending ? "Re-running…" : "Re-run changed steps"}
             </Button>
           )}
@@ -250,7 +249,7 @@ export function RunDetailBody({
         open={rerunOpen && rerunSteps.length > 0}
         onOpenChange={setRerunOpen}
         title="Re-run changed steps?"
-        description={`These steps run again: ${rerunSteps.join(", ")}. Every other step keeps this run's result.`}
+        description={`These steps run again: ${rerunNames}. Every other step keeps this run's result.`}
         confirmLabel="Re-run changed steps"
         confirmVariant="primary"
         onConfirm={() => {
@@ -258,9 +257,9 @@ export function RunDetailBody({
           onRetry("changed_steps");
         }}
       >
-        {repeatedActions.length > 0 && (
+        {rerunActions.length > 0 && (
           <p className="rounded border border-line bg-warning-wash px-3 py-2 text-sm text-ink">
-            These tool steps do their action again: {repeatedActions.join(", ")}.
+            These tool steps do their action: {rerunActions.join(", ")}.
           </p>
         )}
       </ConfirmDialog>
