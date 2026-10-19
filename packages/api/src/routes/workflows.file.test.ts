@@ -99,7 +99,7 @@ describe("GET /api/workflows/:id/file", () => {
       headers: { "x-valet-test-user-id": "test-member" },
     });
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "workflow not found" });
+    expect(await res.json()).toEqual({ error: "This workflow was not found. Refresh Workflows and try again." });
   });
 
   it("puts a mirrored workflow's upstream reference in description only", async () => {

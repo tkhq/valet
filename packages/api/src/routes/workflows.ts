@@ -121,6 +121,9 @@ import type {
 
 export const workflowsRouter = new Hono<AppEnv>();
 
+/** The 404 text for a workflow that is gone or that the caller may not open. */
+export const WORKFLOW_NOT_FOUND = "This workflow was not found. Refresh Workflows and try again.";
+
 /** The credential reads the team arm gate makes before a schedule arms
  * (`workflows/team-service-readiness.ts#teamArmBlock`). */
 function armDeps(c: Context<AppEnv>): TeamServiceReadinessDeps {
@@ -309,7 +312,7 @@ workflowsRouter.get("/runs", async (c) => {
   }
   // Same convention as every other handler here: a workflow the caller
   // cannot read is indistinguishable from one that does not exist.
-  if (!page) return c.json({ error: "workflow not found" }, 404);
+  if (!page) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   // Rows carry `workflowName`: this list mixes workflows, so the hub's Runs
   // tab has no heading to name them from.
@@ -452,7 +455,7 @@ workflowsRouter.get("/import/repo-file", async (c) => {
 workflowsRouter.get("/:id", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: GetWorkflowResponse = summary;
   return c.json(resp);
 });
@@ -465,7 +468,7 @@ workflowsRouter.get("/:id", async (c) => {
 workflowsRouter.get("/:id/file", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const formatRaw = blankToUndefined(c.req.query("format")) ?? "yaml";
   if (formatRaw !== "yaml" && formatRaw !== "json") {
@@ -521,7 +524,7 @@ workflowsRouter.put("/:id", async (c) => {
     name: body.name,
     definition: body.definition,
   });
-  if (!updated) return c.json({ error: "workflow not found" }, 404);
+  if (!updated) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const resp: UpdateWorkflowResponse = updated;
   return c.json(resp);
@@ -554,7 +557,7 @@ workflowsRouter.patch("/:id/model", async (c) => {
     return c.json({ error: `model ${body.model} is not approved. Choose an approved model or an org model tier.` }, 400);
   }
   const wf = await getWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!wf) return c.json({ error: "workflow not found" }, 404);
+  if (!wf) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const stored = validateDefinitionInput(wf.definition);
   if (!stored.ok) return c.json({ error: "invalid stored workflow definition", errors: stored.errors }, 409);
   const patched = applyWorkflowModelPatch(stored.definition, body.model, body.nodeIds);
@@ -562,7 +565,7 @@ workflowsRouter.patch("/:id/model", async (c) => {
   const validation = validateDefinitionInput(patched.definition, env);
   if (!validation.ok) return c.json({ error: "model update is invalid", errors: validation.errors }, 400);
   const updated = await updateWorkflowDefinition(deps, owner, c.req.param("id"), { definition: patched.definition });
-  if (!updated) return c.json({ error: "workflow not found" }, 404);
+  if (!updated) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: UpdateWorkflowModelResponse = {
     workflowId: updated.id,
     model: body.model,
@@ -592,14 +595,14 @@ workflowsRouter.post("/:id/copy-to-team", async (c) => {
   });
   if (!destination.ok) return c.json({ error: destination.error }, destination.status);
   const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"), { teamId: body.teamId, name: body.name });
-  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  if (!copy) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   return c.json(copy, 201);
 });
 
 workflowsRouter.post("/:id/copy", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  if (!copy) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: CreateWorkflowResponse = copy;
   return c.json(resp, 201);
 });
@@ -607,7 +610,7 @@ workflowsRouter.post("/:id/copy", async (c) => {
 workflowsRouter.delete("/:id", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await deleteWorkflowDefinition(deps, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  if (result === "not_found") return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   if (result === "has_active_runs") {
     return c.json(
       { error: "workflow has runs that are not settled. Cancel them first, then delete." },
@@ -636,7 +639,7 @@ workflowsRouter.post("/:id/runs", async (c) => {
   }
 
   const started = await startWorkflowRun(deps, owner, id, body.input);
-  if (!started) return c.json({ error: "workflow not found" }, 404);
+  if (!started) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   if ("invalidInput" in started) {
     return c.json(
       {
@@ -667,7 +670,7 @@ workflowsRouter.get("/:id/runs", async (c) => {
     if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);
     throw err;
   }
-  if (!page) return c.json({ error: "workflow not found" }, 404);
+  if (!page) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   const resp: ListWorkflowRunsResponse = page;
   return c.json(resp);
@@ -679,8 +682,9 @@ workflowsRouter.get("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/permissions", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const resp: GetWorkflowPermissionsResponse | null = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
-  if (resp === null) return c.json({ error: "workflow not found" }, 404);
+  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (nodes === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  const resp: GetWorkflowPermissionsResponse = { nodes };
   return c.json(resp);
 });
 
@@ -727,12 +731,9 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
     }
   }
 
-  if (typeof body.definitionToken !== "string" || !/^[a-f0-9]{64}$/.test(body.definitionToken)) {
-    return c.json({ error: "definitionToken must identify the reviewed workflow. Refresh the permissions review, then try again." }, 400);
-  }
-  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds, body.definitionToken);
-  if (outcome === null) return c.json({ error: "workflow not found" }, 404);
-  if (!outcome.ok) return c.json({ error: outcome.badRequest }, outcome.stale ? 409 : 400);
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
+  if (outcome === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
 
   const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);
@@ -741,7 +742,7 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
 workflowsRouter.get("/:id/versions", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const versions = await listWorkflowVersions(deps, owner, c.req.param("id"));
-  if (!versions) return c.json({ error: "workflow not found" }, 404);
+  if (!versions) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: ListWorkflowVersionsResponse = { versions };
   return c.json(resp);
 });
@@ -778,7 +779,7 @@ workflowsRouter.post("/:id/webhook", async (c) => {
 workflowsRouter.get("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await getWorkflowWebhook(deps.db, owner, c.req.param("id"));
-  if (!result.ok) return c.json({ error: "workflow not found" }, 404);
+  if (!result.ok) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: GetWorkflowWebhookResponse = {
     webhook: result.webhook
       ? { ...result.webhook, url: workflowWebhookUrl(result.webhook.workflowId, result.webhook.hookId, new URL(c.req.url).origin) }
@@ -790,7 +791,7 @@ workflowsRouter.get("/:id/webhook", async (c) => {
 workflowsRouter.delete("/:id/webhook", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const result = await deleteWorkflowWebhook(deps.db, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "workflow not found" }, 404);
+  if (result === "not_found") return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const resp: DeleteWorkflowWebhookResponse = { deleted: result === "deleted" };
   return c.json(resp);
 });
@@ -820,7 +821,7 @@ workflowsRouter.get("/:id/schedules", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const schedules = await listWorkflowSchedules(deps.db, owner, id);
   const resp: ListWorkflowSchedulesResponse = {
     schedules: schedules.map((s) => toScheduleWire(s, id)),
@@ -832,7 +833,7 @@ workflowsRouter.post("/:id/schedules", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const id = c.req.param("id");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
 
   let body: CreateScheduleOnWorkflowRequest;
   try {
@@ -874,7 +875,7 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
   const id = c.req.param("id");
   const scheduleId = c.req.param("scheduleId");
   const summary = await getWorkflowDefinition(deps, owner, id);
-  if (!summary) return c.json({ error: "workflow not found" }, 404);
+  if (!summary) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   const result = await deleteWorkflowSchedule(deps.db, owner, scheduleId, id);
   if (result === "not_found") return c.json({ error: "schedule not found" }, 404);
   const resp: DeleteWorkflowScheduleResponse = { deleted: true };
