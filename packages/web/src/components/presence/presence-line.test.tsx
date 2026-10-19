@@ -169,6 +169,18 @@ describe("PresenceLine", () => {
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R1", { pauseOnOverlap: false, enabled: true }));
   });
 
+  it("offers Turn on anyway when the server refuses Keep both over an overlap", async () => {
+    const text = 'This line covers everything "Old mentions" already handles on the same events, so both would fire together. Narrow its filters, or turn it on with "Turn on anyway".';
+    patchEventSubscription.mockRejectedValueOnce(new ApiError(409, text, { error: text, collisions: { blocking: [], overlapping: [] } }));
+    const paused = mention({ enabled: false, target: { kind: "assistant", overlapPausedAt: 5, pauseOnOverlap: true } });
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [paused] });
+    renderLine(paused);
+    await userEvent.click(screen.getByRole("button", { name: "Keep both" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(text);
+    await userEvent.click(screen.getByRole("button", { name: "Turn on anyway" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenLastCalledWith("R1", { pauseOnOverlap: false, enabled: true, allowCollision: true }));
+  });
+
   it("says the team when two teams could have paused the line", async () => {
     teams = [{ id: "sre", name: "SRE", callerRole: "member" }, { id: "ops", name: "Ops", callerRole: "member" }];
     const paused = mention({ enabled: false, target: { kind: "assistant", overlapPausedAt: 5 } });

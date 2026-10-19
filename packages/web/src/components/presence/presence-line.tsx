@@ -244,6 +244,8 @@ export function DeleteLineDialog({ sub, teams, open, onOpenChange, onDeleted }: 
 /**
  * A personal line that a team line paused: it names the team, and **Keep
  * both** turns the line on again and stops a team line from pausing it.
+ * When the server refuses that turn-on because the line overlaps another
+ * line, it shows the server's text and **Turn on anyway**, as the switch does.
  */
 export function PausedLine({ sub, teams, readOnly, className }: {
   sub: EventSubscriptionWire;
@@ -254,8 +256,14 @@ export function PausedLine({ sub, teams, readOnly, className }: {
   const subsQ = useEventSubscriptions();
   const patch = usePatchEventSubscription();
   const [error, setError] = useState<string | null>(null);
+  const [collision, setCollision] = useState<string | null>(null);
   const teamId = pausingTeamId(sub, subsQ.data?.subscriptions ?? [], teams);
   const team = teamId === undefined ? "the team" : teamName(teams, teamId);
+  function keepBoth(body: PatchEventSubscriptionRequest) {
+    setError(null);
+    setCollision(null);
+    patch.mutate({ id: sub.id, body }, { onError: switchFailure(body, setError, setCollision) });
+  }
   return (
     <div className={cn("space-y-1", className)}>
       <p className="flex flex-wrap items-baseline gap-x-2 text-xs text-muted">
@@ -267,19 +275,20 @@ export function PausedLine({ sub, teams, readOnly, className }: {
             variant="ghost"
             className="h-auto px-1.5 py-0.5 text-xs font-normal text-ink"
             disabled={patch.isPending}
-            onClick={() => {
-              setError(null);
-              patch.mutate(
-                { id: sub.id, body: { pauseOnOverlap: false, enabled: true } },
-                { onError: (err) => setError(errorText(err)) },
-              );
-            }}
+            onClick={() => keepBoth({ pauseOnOverlap: false, enabled: true })}
           >
             Keep both
           </Button>
         )}
       </p>
       {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
+      {collision !== null && !readOnly && (
+        <TurnOnAnyway
+          text={collision}
+          pending={patch.isPending}
+          onTurnOn={() => keepBoth({ pauseOnOverlap: false, enabled: true, allowCollision: true })}
+        />
+      )}
     </div>
   );
 }
