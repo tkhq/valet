@@ -47,12 +47,22 @@ function cards(routine: boolean): Card[] {
   ];
 }
 
-/** The details the instructions may name: the event's name, then each field the picked events carry. */
-function details(draft: Draft, services: readonly CatalogService[]): { label: string; template: string }[] {
+/**
+ * The names the event message (`userPromptTemplate`) accepts. It mirrors
+ * `VARIABLE_RE` in packages/api/src/events/prompt-template.ts. The
+ * instructions (`systemPrompt`) take `{{event.key}}` only, so text from the
+ * event never becomes an instruction; they get no insert menu.
+ */
+export const EVENT_MESSAGE_VARIABLE = /^(event\.(key|summary|body)|refs\.[A-Za-z0-9_-]+|payload\.[A-Za-z0-9_-]+)$/;
+
+/** The details the event message may name: the event's summary and body,
+ * then each payload field the picked events declare. */
+export function eventMessageDetails(draft: Draft, services: readonly CatalogService[]): { label: string; template: string }[] {
   const fields = unionFilterFields([...services], draft.events);
   return [
-    { label: "The event's name", template: "{{event.key}}" },
-    ...fields.map((f) => ({ label: fieldLabel(f.field), template: `{{refs.${f.field}}}` })),
+    { label: "The event's summary", template: "{{event.summary}}" },
+    { label: "The event's text", template: "{{event.body}}" },
+    ...fields.map((f) => ({ label: fieldLabel(f.field), template: `{{payload.${f.field}}}` })),
   ];
 }
 
@@ -96,11 +106,11 @@ export function DoSection({
 
   function insert(template: string) {
     const el = box.current;
-    const text = draft.instructions;
+    const text = draft.promptTemplates.userPromptTemplate;
     const start = el?.selectionStart ?? text.length;
     const end = el?.selectionEnd ?? text.length;
     const next = text.slice(0, start) + template + text.slice(end);
-    onChange({ ...draft, instructions: next });
+    onChange({ ...draft, promptTemplates: { userPromptTemplate: next } });
     requestAnimationFrame(() => {
       if (!el) return;
       el.focus();
@@ -119,7 +129,7 @@ export function DoSection({
             <label
               key={card.kind}
               className={cn(
-                "grid cursor-pointer gap-1 rounded-lg border border-line px-3.5 py-3",
+                "grid cursor-pointer gap-1 rounded-lg border border-line px-3.5 py-3 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent-500",
                 on && "border-ink ring-1 ring-ink",
                 off && !on && "cursor-not-allowed opacity-60",
               )}
@@ -169,7 +179,6 @@ export function DoSection({
         <div className="grid gap-1.5">
           <Label htmlFor={`${id}-instructions`}>{required ? "Instructions (required)" : "Instructions (optional)"}</Label>
           <Textarea
-            ref={box}
             id={`${id}-instructions`}
             rows={3}
             value={draft.instructions}
@@ -178,23 +187,7 @@ export function DoSection({
             placeholder={routine ? "Summarize what changed overnight." : "If the check failed, find the failing job and summarize the cause."}
             className="min-h-[84px] resize-y"
           />
-          <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
-            <span>Plain words.</span>
-            {!routine && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button type="button" variant="ghost" size="sm" className="h-auto px-1 py-0 text-xs font-normal text-accent-600 dark:text-accent-400">
-                    Insert a detail from the event
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  {details(draft, services).map((d) => (
-                    <DropdownMenuItem key={d.template} onSelect={() => insert(d.template)}>{d.label}</DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </div>
+          <p className="text-xs text-muted">{routine ? "Plain words." : "Plain words. Valet also receives the event itself."}</p>
           {routine && <p className="text-xs text-muted">Valet sends this to the assistant each time the routine runs.</p>}
         </div>
       )}
@@ -205,15 +198,28 @@ export function DoSection({
           <div className="mt-2 grid gap-1">
             <Label htmlFor={`${id}-message`}>Event message (optional)</Label>
             <Textarea
+              ref={box}
               id={`${id}-message`}
               rows={2}
               value={draft.promptTemplates.userPromptTemplate}
               onChange={(e) => onChange({ ...draft, promptTemplates: { userPromptTemplate: e.target.value } })}
               placeholder="{{event.key}}: {{event.summary}}"
             />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" className="h-auto justify-self-start px-1 py-0 text-xs font-normal text-accent-600 dark:text-accent-400">
+                  Insert a detail from the event
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {eventMessageDetails(draft, services).map((d) => (
+                  <DropdownMenuItem key={d.template} onSelect={() => insert(d.template)}>{d.label}</DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <p className="text-xs text-muted">
               Leave it empty to send the default message. It can use <code>{"{{event.key}}"}</code>, <code>{"{{event.summary}}"}</code>,{" "}
-              <code>{"{{event.body}}"}</code>, <code>{"{{refs.name}}"}</code>, and <code>{"{{payload.field}}"}</code>. A name that no event carries reads as nothing.
+              <code>{"{{event.body}}"}</code>, <code>{"{{refs.name}}"}</code>, and <code>{"{{payload.field}}"}</code> for a field the picked events carry.
             </p>
           </div>
         </details>

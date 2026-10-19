@@ -4,6 +4,7 @@ import type { CatalogService } from "~/components/events/subscription-match";
 import { line, routine } from "../test-fixtures";
 import { presenceSentence, routineSentence, text } from "../sentences";
 import {
+  addCondition,
   applyLinePatch,
   bodyFromDraft,
   draftFromLine,
@@ -155,8 +156,10 @@ describe("place condition (Part H step 11, Review Focus 4)", () => {
     expect(draft.conditions).toEqual([]);
   });
 
-  it("drops the place on a service change and adds nothing back", () => {
-    let draft = newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" });
+  it("drops an added condition on a service change and adds nothing back", () => {
+    let draft = newDraft({ timezone: "UTC" });
+    draft = toggleEvent(draft, "slack.app_mention", SERVICES);
+    draft = addCondition(draft, { id: "c1", field: "channel", op: "eq", value: "C1", label: "#incidents" });
     draft = setService(draft, "github");
     expect(draft.conditions).toEqual([]);
     draft = setService(draft, "slack");
@@ -173,6 +176,29 @@ describe("place condition (Part H step 11, Review Focus 4)", () => {
     const draft = draftFromLine(sub);
     expect(draft.creatorScopeId).not.toBeNull();
     expect(removeCondition(draft, draft.creatorScopeId ?? "")).toBe(draft);
+  });
+});
+
+describe("Any channel and follow", () => {
+  it("turns Any channel off when a channel condition is added", () => {
+    let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = { ...draft, anyChannel: true };
+    draft = addCondition(draft, { id: "c1", field: "channel", op: "eq", value: "C1" });
+    expect(draft.anyChannel).toBe(false);
+  });
+
+  it("blocks Save when Any channel and a channel condition are both set", () => {
+    let draft = toggleEvent(newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = { ...draft, anyChannel: true, name: "x" };
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe("Turn off Any channel or remove the channel condition.");
+  });
+
+  it("follows only a mention, never a channel message", () => {
+    const base = { ...newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), name: "x" };
+    const mention = created(toggleEvent(base, "slack.app_mention", SERVICES));
+    expect(mention.target.kind === "assistant" && mention.target.follow).toBe(true);
+    const message = created(toggleEvent(base, "slack.message", SERVICES));
+    expect(message.target.kind === "assistant" && message.target.follow).toBe(false);
   });
 });
 

@@ -102,9 +102,9 @@ export function PromptFields({
         <code>{"{{event.key}}"}</code>, <code>{"{{event.summary}}"}</code>,{" "}
         <code>{"{{event.body}}"}</code>, <code>{"{{refs.name}}"}</code>, and{" "}
         <code>{"{{payload.field}}"}</code> for a filter field your events declare. The
-        instructions take <code>{"{{event.key}}"}</code> and <code>{"{{refs.name}}"}</code>{" "}
-        only, because text from the event must not become an instruction. A ref name is
-        not checked when you save. A name that no event carries renders as nothing.
+        instructions take <code>{"{{event.key}}"}</code> only, because text from the event
+        must not become an instruction. A ref name is not checked when you save. A name
+        that no event carries renders as nothing.
       </p>
       {followsThread && (
         <p className="text-xs text-muted">

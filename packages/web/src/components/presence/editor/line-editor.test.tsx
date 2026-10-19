@@ -187,6 +187,9 @@ describe("LineEditor", () => {
     renderEditor({ kind: "create" });
     expect((screen.getByRole("button", { name: "Create" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("Pick at least one event.")).toBeTruthy();
+    const aside = screen.getByRole("complementary", { name: "Preview" });
+    expect(aside.textContent).toContain("No event is picked yet. Pick at least one in When.");
+    expect(aside.textContent).toContain("This line has no name yet. Give it one in Name.");
     fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
     expect(screen.getByText("Add a channel, or choose Any channel.")).toBeTruthy();
   });
@@ -222,11 +225,24 @@ describe("LineEditor", () => {
     expect(shown).toBe("When a check completes on acme/api, work in the Platform CI thread.");
   });
 
-  it("drops a place on a service change and the sentence names no place (Review Focus 4)", () => {
+  it("fixes the service when launched from a place", () => {
     renderEditor({ kind: "create", preselected: { place: INCIDENTS } });
     expect(sentence()).toContain("#incidents");
+    const services = screen.getByRole("group", { name: "Service" });
+    expect(within(services).getAllByRole("button").map((b) => b.textContent)).toEqual(["Slack"]);
+  });
+
+  it("drops an added condition on a service change and the sentence names no place (Review Focus 4)", () => {
+    renderEditor({ kind: "create" });
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "channel" } });
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "C1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')?.textContent).toBe("C1");
     fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
-    expect(sentence()).not.toContain("#incidents");
+    expect(screen.queryByText("channel is C1")).toBeNull();
+    expect(sentence()).not.toContain("C1");
     expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
     fireEvent.click(screen.getByLabelText("A check completes"));
     expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
@@ -245,6 +261,7 @@ describe("LineEditor", () => {
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getByText("Discard your changes?")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep editing" }));
     fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
     expect(screen.queryByText("Discard your changes?")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));

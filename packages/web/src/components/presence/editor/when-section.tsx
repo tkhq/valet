@@ -4,11 +4,12 @@
  * conditions as pills, and for `On a schedule` the day and time control.
  */
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ErrorRow, Button, Input, LoadingRow } from "~/components/primitives";
 import { FilterValuePicker, fieldLabel, toWireFilters, type FilterField, type FilterOp, type UiFilterRow } from "~/components/events/filter-editor";
 import { splitCommon } from "~/components/events/event-match-step";
 import { ScheduleMatchStep } from "~/components/events/schedule-step";
+import { EVENT_SERVICES } from "~/components/events/when-do-step";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
 import { selectsSlackMention, hasChannelScopeFilter } from "~/lib/slack-mention";
@@ -27,8 +28,10 @@ import {
   type EditorService,
 } from "./draft";
 
-const SERVICE_CHOICES: readonly EditorService[] = ["slack", "github", "linear", "schedule"];
+const SERVICE_CHOICES: readonly EditorService[] = [...EVENT_SERVICES, "schedule"];
 
+/** Mirrors the private `opWords` in sentences.ts, which this change may not
+ * touch; fold the two together when that file opens again. */
 const OP_WORDS: Readonly<Record<FilterOp, string>> = {
   eq: "is",
   in: "is",
@@ -85,23 +88,25 @@ export function WhenSection({
 }) {
   // A stored line keeps its service and a stored routine stays a routine:
   // the two live in different stores, and a line's Do depends on its service.
-  const choices = mode.kind === "create" ? SERVICE_CHOICES : SERVICE_CHOICES.filter((s) => s === draft.service);
+  // Launched from a place, the service is the place's (Part H step 3).
+  const placeService = mode.kind === "create" ? mode.preselected?.place?.service : undefined;
+  const fixed = mode.kind !== "create" || placeService !== undefined;
+  const choices = fixed ? SERVICE_CHOICES.filter((s) => s === draft.service) : SERVICE_CHOICES;
   return (
     <>
       <div role="group" aria-labelledby="editor-when-service" className="min-w-0">
         <p id="editor-when-service" className="mb-1.5 text-xs text-muted">Service</p>
         <div className="flex flex-wrap gap-2">
           {choices.map((service) => {
-            // A place's own service stays open: the place exists, so its events arrive.
-            const placeService = mode.kind === "create" ? mode.preselected?.place?.service : undefined;
-            const off = service !== "schedule" && service !== placeService && connected !== null && !connected.has(service) && mode.kind === "create";
+            // A fixed service stays open: the place or the line exists, so its events arrive.
+            const off = !fixed && service !== "schedule" && connected !== null && !connected.has(service);
             const on = draft.service === service;
             return (
               <button
                 key={service}
                 type="button"
                 aria-pressed={on}
-                disabled={off}
+                disabled={off || fixed}
                 onClick={() => {
                   onServicePicked?.();
                   onChange(setService(draft, service));
@@ -119,7 +124,7 @@ export function WhenSection({
             );
           })}
         </div>
-        {mode.kind === "create" && connected !== null && SERVICE_CHOICES.some((s) => s !== "schedule" && !connected.has(s)) && (
+        {!fixed && connected !== null && SERVICE_CHOICES.some((s) => s !== "schedule" && !connected.has(s)) && (
           <p className="mt-1.5 text-xs text-muted">
             To use another service, connect it in{" "}
             <Link to="/integrations" className="text-ink underline">Integrations</Link>.
@@ -313,6 +318,17 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
   const [op, setOp] = useState<FilterOp>("eq");
   const [value, setValue] = useState("");
   const [label, setLabel] = useState<string | undefined>(undefined);
+  // The offered fields follow the picked events; a field no longer offered
+  // falls back to the first one.
+  const firstField = fields[0]?.field ?? "";
+  const offered = fields.some((f) => f.field === field);
+  useEffect(() => {
+    if (!offered) {
+      setField(firstField);
+      setValue("");
+      setLabel(undefined);
+    }
+  }, [offered, firstField]);
   const selected = fields.find((f) => f.field === field);
   const source = op === "in" ? undefined : selected?.options;
   const deps: Record<string, string> = {};

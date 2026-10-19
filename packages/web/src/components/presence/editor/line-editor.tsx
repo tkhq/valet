@@ -331,6 +331,10 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
     steps: exampleSteps(ready, { when: partsText(whenParts), workflow: workflowName }),
     collisions,
     notConnected: mode.kind === "create" && !serviceConnected ? SERVICE_NAMES[draft.service] : undefined,
+    missing: [
+      ...(!routine && draft.events.size === 0 ? ["No event is picked yet. Pick at least one in When."] : []),
+      ...(nameValue.trim().length === 0 ? [`This ${routine ? "routine" : "line"} has no name yet. Give it one in Name.`] : []),
+    ],
     review: mode.kind === "review" ? { replaces: mode.replaces } : undefined,
     editedAt: mode.kind === "edit" || mode.kind === "review" ? mode.line.updatedAt : undefined,
     blocker,

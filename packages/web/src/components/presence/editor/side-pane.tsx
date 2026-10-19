@@ -5,13 +5,13 @@
  * or Save. On a phone the sentence card is a sticky header above the
  * form, and the rest sits under the form.
  */
-import { useId, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import type { EventSubscriptionCollisionsWire, EventSubscriptionWire } from "@valet/api/wire";
 import { Button } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { Ref } from "../ref";
 import { Sentence } from "../sentence";
-import { eventInWords, type SentencePart } from "../sentences";
+import { eventInWords, SENTENCE_PLACE_FIELD_SET, type SentencePart } from "../sentences";
 
 export interface SidePaneProps {
   title: string;
@@ -21,6 +21,8 @@ export interface SidePaneProps {
   collisions?: { report: EventSubscriptionCollisionsWire; committed: boolean } | null;
   /** The service the line listens to, when it is not connected. */
   notConnected?: string;
+  /** What the draft still lacks, as warnings: a missing event or name. */
+  missing?: readonly string[];
   review?: { replaces?: { id: string; name: string } };
   editedAt?: number;
   /** Why Create or Save is off, or null when the draft is ready. */
@@ -64,11 +66,9 @@ export function collisionWords(keys: readonly string[]): string {
   return words.length <= 2 ? words.join(" or ") : `${words.slice(0, -1).join(", ")}, or ${words[words.length - 1]}`;
 }
 
-const PLACE_FIELDS = ["channel", "repo", "identifier", "team"];
-
 /** The place a colliding line names, or null when it listens everywhere. */
 function collisionPlace(sub: EventSubscriptionWire): string | null {
-  for (const field of PLACE_FIELDS) {
+  for (const field of SENTENCE_PLACE_FIELD_SET) {
     const filter = sub.filters.find((f) => f.field === field && (f.op === "eq" || f.op === "in"));
     if (filter === undefined) continue;
     if (typeof filter.value === "string") return filter.label?.trim() || filter.value;
@@ -91,7 +91,16 @@ export function SentenceCard({ title, sentence, className }: { title: string; se
 /** Everything in the side pane under the sentence card. */
 export function SidePaneRest(props: SidePaneProps) {
   const reasonId = useId();
+  const keepEditing = useRef<HTMLButtonElement>(null);
   const { collisions, review } = props;
+  // The confirm can sit below the fold on a phone: bring it into view and
+  // put focus on the safe choice.
+  useEffect(() => {
+    if (!props.confirmingDiscard) return;
+    const button = keepEditing.current;
+    button?.scrollIntoView?.({ block: "nearest" });
+    button?.focus();
+  }, [props.confirmingDiscard]);
   const committed = collisions?.committed === true;
   const blocking = collisions !== null && collisions !== undefined && !collisions.committed && collisions.report.blocking.length > 0;
   const anyway = props.saveLabel === "Create" ? "Create anyway" : props.saveLabel === "Turn on" ? "Turn on anyway" : "Save anyway";
@@ -101,7 +110,7 @@ export function SidePaneRest(props: SidePaneProps) {
     footer = (
       <div role="group" aria-label="Discard your changes?" className="flex flex-wrap items-center justify-end gap-2">
         <span className="mr-auto text-sm font-medium text-ink">Discard your changes?</span>
-        <Button type="button" variant="secondary" onClick={props.onKeepEditing}>Keep editing</Button>
+        <Button ref={keepEditing} type="button" variant="secondary" onClick={props.onKeepEditing}>Keep editing</Button>
         <Button type="button" variant="danger" onClick={props.onDiscard}>Discard</Button>
       </div>
     );
@@ -143,8 +152,9 @@ export function SidePaneRest(props: SidePaneProps) {
       <div className="rounded-[10px] border border-line bg-paper px-5 py-[18px] text-sm leading-relaxed text-ink">
         <p className="mb-2 text-xs text-muted">For example</p>
         <ol className="grid gap-2">
+          {/* The list is always the same three steps in the same order, so the index is a stable key. */}
           {props.steps.map((step, i) => (
-            <li key={step} className="grid grid-cols-[20px_minmax(0,1fr)] items-baseline gap-2.5">
+            <li key={i} className="grid grid-cols-[20px_minmax(0,1fr)] items-baseline gap-2.5">
               <span aria-hidden="true" className="inline-grid h-5 w-5 place-items-center rounded-full bg-ink-wash text-[11px] text-muted">{i + 1}</span>
               <span>{step}</span>
             </li>
@@ -166,6 +176,10 @@ export function SidePaneRest(props: SidePaneProps) {
           {props.notConnected} is not connected. Connect it in Integrations first.
         </p>
       )}
+
+      {(props.missing ?? []).map((warning) => (
+        <p key={warning} className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">{warning}</p>
+      ))}
 
       {collisions !== null && collisions !== undefined && (
         <div className="grid gap-2">

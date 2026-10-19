@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { CatalogService } from "~/components/events/subscription-match";
 import { line } from "../test-fixtures";
 import { draftFromLine, newDraft, setService, toggleEvent, type Draft, type EditorMode } from "./draft";
-import { DoSection, type AssistantOption } from "./do-section";
+import { DoSection, EVENT_MESSAGE_VARIABLE, eventMessageDetails, type AssistantOption } from "./do-section";
 
 const SERVICES: CatalogService[] = [
   { service: "github", entries: [{ key: "github.check_run.completed", description: "Check", filters: [{ field: "repo" }, { field: "head_branch" }] }] },
@@ -51,14 +51,37 @@ describe("DoSection", () => {
     expect(screen.queryByLabelText(/Instructions/)).toBeNull();
   });
 
-  it("inserts a detail from the event at the cursor", async () => {
-    render(<Harness initial={{ ...github(), instructions: "Fix " }} />);
-    const box = screen.getByLabelText("Instructions (optional)") as HTMLTextAreaElement;
-    expect(screen.getByText("Plain words.")).toBeTruthy();
-    box.setSelectionRange(4, 4);
+  it("gives the instructions no insert menu, because they take no text from the event", () => {
+    render(<Harness initial={github()} />);
+    expect(screen.getByLabelText("Instructions (optional)")).toBeTruthy();
+    expect(screen.getByText("Plain words. Valet also receives the event itself.")).toBeTruthy();
+    // The only insert menu sits under the event message in Advanced.
+    const menu = screen.getByRole("button", { name: "Insert a detail from the event" });
+    expect(menu.closest("details")?.textContent).toContain("Event message (optional)");
+  });
+
+  it("inserts a detail the api accepts into the event message, at the cursor", async () => {
+    render(<Harness initial={{ ...github(), promptTemplates: { userPromptTemplate: "Branch: " } }} />);
+    const box = screen.getByLabelText("Event message (optional)") as HTMLTextAreaElement;
+    box.setSelectionRange(8, 8);
     await userEvent.click(screen.getByRole("button", { name: "Insert a detail from the event" }));
+    expect(screen.getAllByRole("menuitem").map((m) => m.textContent)).toEqual([
+      "The event's summary", "The event's text", "Repository", "Head branch",
+    ]);
     await userEvent.click(screen.getByRole("menuitem", { name: "Head branch" }));
-    expect(latest?.instructions).toBe("Fix {{refs.head_branch}}");
+    expect(latest?.promptTemplates.userPromptTemplate).toBe("Branch: {{payload.head_branch}}");
+    expect(latest?.instructions).toBe("");
+  });
+
+  it("offers only templates in the api's allow-list", () => {
+    const templates = eventMessageDetails(github(), SERVICES).map((d) => d.template);
+    expect(templates).toEqual(["{{event.summary}}", "{{event.body}}", "{{payload.repo}}", "{{payload.head_branch}}"]);
+    for (const t of templates) expect(EVENT_MESSAGE_VARIABLE.test(t.slice(2, -2))).toBe(true);
+  });
+
+  it("shows keyboard focus on a Do card", () => {
+    render(<Harness initial={github()} />);
+    expect(screen.getByRole("radio", { name: "Work on it" }).closest("label")?.className).toContain("has-[:focus-visible]:ring-2");
   });
 
   it("requires instructions for a routine on the assistant", () => {

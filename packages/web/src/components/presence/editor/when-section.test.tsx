@@ -119,12 +119,49 @@ describe("WhenSection", () => {
     expect(screen.getByText("author is jack")).toBeTruthy();
   });
 
-  it("switching the service drops the place condition (Review Focus 4)", () => {
-    render(<Harness initial={newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" })} />);
+  it("fixes the service to a preselected place's", () => {
+    const preselected = { place: INCIDENTS };
+    render(<Harness initial={newDraft({ preselected, timezone: "UTC" })} mode={{ kind: "create", preselected }} />);
+    const services = screen.getByRole("group", { name: "Service" });
+    const only = within(services).getAllByRole("button");
+    expect(only.map((b) => b.textContent)).toEqual(["Slack"]);
+    expect(only[0]?.getAttribute("aria-pressed")).toBe("true");
+    expect((only[0] as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("switching the service drops an added condition (Review Focus 4)", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} />);
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "channel" } });
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "C1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(screen.getByText("channel is C1")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
-    expect(latest?.service).toBe("github");
     expect(latest?.conditions).toEqual([]);
-    expect(screen.queryByText(/#incidents/)).toBeNull();
+    expect(screen.queryByText("channel is C1")).toBeNull();
+  });
+
+  it("turns Any channel off once a channel condition is added", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} />);
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    fireEvent.click(screen.getByLabelText(/^Any channel/));
+    expect(latest?.anyChannel).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "channel" } });
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "C1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(latest?.anyChannel).toBe(false);
+  });
+
+  it("moves the condition picker to an offered field when the events change", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} />);
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "user" } });
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    fireEvent.click(screen.getByLabelText("Someone posts a message"));
+    expect((screen.getByLabelText("Condition field") as HTMLSelectElement).value).toBe("channel");
   });
 
   it("holds the day and time control for a schedule, which makes the cron", () => {

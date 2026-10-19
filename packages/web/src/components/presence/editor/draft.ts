@@ -23,7 +23,7 @@ import { WEEKDAYS, cronFromDayAndTime } from "~/components/events/schedule-step"
 import { buildSubscriptionPatch } from "~/components/events/subscription-patch";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
-import { selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
+import { SLACK_APP_MENTION, selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
 import { placeFilter, type PreselectedPlace } from "../place-filter";
 import type { Routine } from "../routine-helpers";
 import {
@@ -282,8 +282,9 @@ export function draftForMode(mode: EditorMode, options: { teamId?: string; timez
 
 /**
  * A new When service. The events and the conditions belong to the old
- * service, so they go, and a preselected place does not come back (Review
- * Focus 4). Do keeps a choice the new service offers.
+ * service, so they go (Review Focus 4). A draft launched from a place
+ * keeps the place's service, so it never comes here. Do keeps a choice the
+ * new service offers.
  */
 export function setService(draft: Draft, next: EditorService): Draft {
   if (next === draft.service) return draft;
@@ -296,7 +297,6 @@ export function setService(draft: Draft, next: EditorService): Draft {
     events: new Set(),
     conditions: [],
     creatorScopeId: null,
-    placeRemoved: draft.placeRow !== null ? true : draft.placeRemoved,
     anyChannel: false,
     doKind,
     // A schedule has no organization assistant.
@@ -341,8 +341,11 @@ export function removeCondition(draft: Draft, id: string): Draft {
   };
 }
 
+/** Adds one condition. A channel condition turns Any channel off: the two say opposite things. */
 export function addCondition(draft: Draft, row: UiFilterRow): Draft {
-  return { ...draft, conditions: [...draft.conditions, row] };
+  const conditions = [...draft.conditions, row];
+  const scoped = hasChannelScopeFilter(toWireFilters(conditions));
+  return { ...draft, conditions, anyChannel: scoped ? false : draft.anyChannel };
 }
 
 // ── Derived facts ──────────────────────────────────────────────────────
@@ -423,7 +426,9 @@ function lineTarget(draft: Draft): EventSubscriptionTargetWire {
   const templates = promptFieldsToTarget({ systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate });
   const base = assistantFields(draft);
   const delivery = base.assistant === "user" ? { deliveryPolicy: draft.deliveryPolicy, pauseOnOverlap: draft.pauseOnOverlap } : {};
-  return { ...base, ...appearance, follow: draft.doKind === "reply", ...thread, ...templates, ...delivery };
+  // Only a mention starts a conversation to follow; a channel message never does.
+  const follow = draft.doKind === "reply" && draft.events.has(SLACK_APP_MENTION);
+  return { ...base, ...appearance, follow, ...thread, ...templates, ...delivery };
 }
 
 function createLineBody(draft: Draft): CreateEventSubscriptionRequest {
@@ -677,7 +682,9 @@ export function saveBlocker(draft: Draft, mode: EditorMode, context: { connected
   } else {
     if (draft.events.size === 0) return "Pick at least one event.";
     const filters = toWireFilters([...draft.conditions]);
-    if (selectsSlackMention([...draft.events]) && !draft.anyChannel && !hasChannelScopeFilter(filters)) {
+    const scoped = hasChannelScopeFilter(filters);
+    if (draft.anyChannel && scoped) return "Turn off Any channel or remove the channel condition.";
+    if (selectsSlackMention([...draft.events]) && !draft.anyChannel && !scoped) {
       return "Add a channel, or choose Any channel.";
     }
   }
