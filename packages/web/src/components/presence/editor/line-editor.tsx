@@ -7,7 +7,8 @@
  *
  * The sheet mounts when it opens, so the draft seeds from `mode` at open
  * time. A new mode needs a new open. Esc, Cancel, and a click outside close
- * it; a draft with changes asks `Discard your changes?` first.
+ * it; a draft with changes asks `Discard your changes?` first. On close,
+ * focus goes back to the element that had it at open.
  */
 import { useEffect, useRef, useState } from "react";
 import type { EventSubscriptionCollisionsWire, EventSubscriptionWire } from "@valet/api/wire";
@@ -196,6 +197,17 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     if (control === null) return;
     event.preventDefault();
     control.focus();
+  }
+  // The sheet has no Radix trigger, so Radix would send focus to the body
+  // when it closes. The element that had focus at open (the launcher's
+  // button) takes it back. Every close path (Esc, Cancel, Discard, Done, a
+  // save) unmounts the sheet, and the dialog runs this as it unmounts.
+  const [opener] = useState(() => (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+  function closeAutoFocus(event: Event) {
+    onCloseAutoFocus?.(event);
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    if (opener?.isConnected === true) opener.focus();
   }
   const [error, setError] = useState<string | null>(null);
   const [collisions, setCollisions] = useState<{ report: EventSubscriptionCollisionsWire; committed: boolean } | null>(null);
@@ -512,7 +524,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
       <DialogContent
         hideClose
         onOpenAutoFocus={openAutoFocus}
-        onCloseAutoFocus={onCloseAutoFocus}
+        onCloseAutoFocus={closeAutoFocus}
         data-layout={phone ? "phone" : "wide"}
         className={cn(
           "h-[100dvh] max-h-[100dvh] w-full max-w-[1180px] gap-0 overflow-hidden p-0",

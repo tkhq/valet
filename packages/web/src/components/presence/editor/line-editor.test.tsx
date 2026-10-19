@@ -4,7 +4,7 @@
  * `~/api/*` is mocked to record the bodies Create and Save send, so each
  * case can compare the side pane's sentence with the sentence of the body.
  */
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   CreateEventSubscriptionRequest,
   CreateWorkflowScheduleRequest,
@@ -13,7 +13,7 @@ import type {
   PluginSummary,
   UpdateWorkflowScheduleRequest,
 } from "@valet/api/wire";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "~/api/client";
 import { line, routine } from "../test-fixtures";
@@ -384,6 +384,51 @@ describe("LineEditor", () => {
     const { onOpenChange } = renderEditor({ kind: "edit", line: CHECK_LINE });
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  describe("returns focus to the button that opened it (L5)", () => {
+    function Launcher({ mode }: { mode: EditorMode }) {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>Open editor</button>
+          <LineEditor open={open} onOpenChange={setOpen} mode={mode} />
+        </>
+      );
+    }
+
+    function openFromButton(mode: EditorMode): HTMLElement {
+      render(<Launcher mode={mode} />);
+      const button = screen.getByRole("button", { name: "Open editor" });
+      button.focus();
+      fireEvent.click(button);
+      expect(screen.getByRole("dialog")).toBeTruthy();
+      return button;
+    }
+
+    it("after Esc on a clean draft", async () => {
+      const button = openFromButton({ kind: "edit", line: CHECK_LINE });
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(button));
+    });
+
+    it("after Discard", async () => {
+      const button = openFromButton({ kind: "edit", line: CHECK_LINE });
+      fireEvent.click(screen.getByRole("button", { name: "Change Name" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Renamed" } });
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(button));
+    });
+
+    it("after Cancel on a clean draft", async () => {
+      const button = openFromButton({ kind: "edit", line: CHECK_LINE });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(button));
+    });
   });
 
   it("ignores Esc while a request is pending (E8)", () => {
