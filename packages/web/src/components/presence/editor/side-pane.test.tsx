@@ -50,6 +50,14 @@ describe("SidePane", () => {
     expect(screen.getByRole("button", { name: "Turn on" })).toBeTruthy();
   });
 
+  it("offers no Turn on for a stale proposal", () => {
+    render(<SidePane {...props({ saveLabel: "Turn on", review: { stale: true } })} />);
+    expect(screen.getByRole("note").textContent).toBe(
+      "Proposed by the assistant. The line this proposal replaces is gone. Delete this proposal and make a new line.",
+    );
+    expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
+  });
+
   it("asks before it discards changes", () => {
     const onDiscard = vi.fn();
     render(<SidePane {...props({ confirmingDiscard: true, onDiscard })} />);

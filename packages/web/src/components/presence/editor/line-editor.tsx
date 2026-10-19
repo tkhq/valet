@@ -292,6 +292,13 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   const placeService = mode.kind === "create" ? mode.preselected?.place?.service : undefined;
   const serviceConnected = draft.service === "schedule" || draft.service === placeService || connected === null || connected.has(draft.service);
   const blocker = saveBlocker(ready, mode, { connected: serviceConnected, services });
+  // A proposal whose replaced line is gone or already off cannot turn on:
+  // the server refuses it (409). Unknown while the lines load.
+  const replacesId = mode.kind === "review"
+    ? (mode.line.target.kind === "assistant" ? mode.line.target.replaces : undefined) ?? mode.replaces?.id
+    : undefined;
+  const replacedRow = replacesId === undefined ? undefined : subsQ.data?.subscriptions.find((sub) => sub.id === replacesId);
+  const staleProposal = replacesId !== undefined && subsQ.data !== undefined && replacedRow?.enabled !== true;
   const pending = createLine.isPending || patchLine.isPending || createRoutine.isPending || updateRoutine.isPending;
 
   const assistants: AssistantOption[] = [
@@ -326,7 +333,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   }
 
   function save(allowCollision = false) {
-    if (blocker !== null || pending || frozen) return;
+    if (blocker !== null || pending || frozen || staleProposal) return;
     if (isEmptyBody(body)) {
       close();
       return;
@@ -397,7 +404,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
       ...(!routine && draft.events.size === 0 ? ["No event is picked yet. Pick at least one in When."] : []),
       ...(nameValue.trim().length === 0 ? [`This ${routine ? "routine" : "line"} has no name yet. Give it one in Name.`] : []),
     ],
-    review: mode.kind === "review" ? { replaces: mode.replaces } : undefined,
+    review: mode.kind === "review" ? { replaces: mode.replaces, stale: staleProposal } : undefined,
     editedAt: mode.kind === "edit" || mode.kind === "review" ? mode.line.updatedAt : undefined,
     blocker,
     saveLabel: mode.kind === "create" ? "Create" : mode.kind === "review" ? "Turn on" : "Save",

@@ -23,7 +23,9 @@ export interface SidePaneProps {
   notConnected?: string;
   /** What the draft still lacks, as warnings: a missing event or name. */
   missing?: readonly string[];
-  review?: { replaces?: { id: string; name: string } };
+  /** Review mode. `stale` is true when the line the proposal replaces is
+   * gone or already off: the server refuses Turn on (409), so none shows. */
+  review?: { replaces?: { id: string; name: string }; stale?: boolean };
   editedAt?: number;
   /** Why Create or Save is off, or null when the draft is ready. */
   blocker: string | null;
@@ -103,6 +105,7 @@ export function SidePaneRest(props: SidePaneProps) {
   }, [props.confirmingDiscard]);
   const committed = collisions?.committed === true;
   const blocking = collisions !== null && collisions !== undefined && !collisions.committed && collisions.report.blocking.length > 0;
+  const stale = review?.stale === true;
   const anyway = props.saveLabel === "Create" ? "Create anyway" : props.saveLabel === "Turn on" ? "Turn on anyway" : "Save anyway";
 
   let footer: ReactNode;
@@ -123,25 +126,27 @@ export function SidePaneRest(props: SidePaneProps) {
   } else {
     footer = (
       <div className="grid gap-1.5">
-        {props.blocker !== null && (
+        {!stale && props.blocker !== null && (
           <p id={reasonId} className="text-right text-[13px] text-muted">{props.blocker}</p>
         )}
         <div className="flex flex-wrap items-center justify-end gap-2">
           <span className="mr-auto text-[13px] text-muted">{props.editedAt !== undefined ? editedAgo(props.editedAt) : ""}</span>
           <Button type="button" variant="secondary" onClick={props.onCancel} disabled={props.pending}>Cancel</Button>
-          {blocking && props.onSaveAnyway !== undefined && (
+          {!stale && blocking && props.onSaveAnyway !== undefined && (
             <Button type="button" variant="secondary" onClick={props.onSaveAnyway} disabled={props.pending || props.blocker !== null}>
               {anyway}
             </Button>
           )}
-          <Button
-            type="button"
-            onClick={props.onSave}
-            disabled={props.pending || props.blocker !== null}
-            aria-describedby={props.blocker !== null ? reasonId : undefined}
-          >
-            {props.saveLabel}
-          </Button>
+          {!stale && (
+            <Button
+              type="button"
+              onClick={props.onSave}
+              disabled={props.pending || props.blocker !== null}
+              aria-describedby={props.blocker !== null ? reasonId : undefined}
+            >
+              {props.saveLabel}
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -165,9 +170,11 @@ export function SidePaneRest(props: SidePaneProps) {
       {review !== undefined && (
         <p role="note" className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">
           Proposed by the assistant.{" "}
-          {review.replaces !== undefined
-            ? <>Turning it on turns off <Ref kind="line" text={review.replaces.name} />.</>
-            : "It stays off until you turn it on."}
+          {stale
+            ? "The line this proposal replaces is gone. Delete this proposal and make a new line."
+            : review.replaces !== undefined
+              ? <>Turning it on turns off <Ref kind="line" text={review.replaces.name} />.</>
+              : "It stays off until you turn it on."}
         </p>
       )}
 

@@ -411,6 +411,7 @@ describe("LineEditor", () => {
 
   it("turns a proposal on in review mode and names the line it replaces", () => {
     const proposal = line("proposal-1", { name: "New CI", enabled: false, eventKeys: ["github.check_run.completed"], target: { kind: "assistant", assistant: "user", thread: { mode: "own" } } });
+    subscriptions = [line("l0", { name: "Old CI", enabled: true })];
     renderEditor({ kind: "review", line: proposal, replaces: { id: "l0", name: "Old CI" } });
     expect(screen.getByRole("note").textContent).toBe("Proposed by the assistant. Turning it on turns off Old CI.");
     const shown = sentence();
@@ -418,6 +419,23 @@ describe("LineEditor", () => {
     const { body } = patchSubscription.mock.calls[0]?.[0] as { body: PatchEventSubscriptionRequest };
     expect(body).toEqual({ enabled: true });
     expect(shown).toBe(presenceSentence(applyLinePatch(proposal, body), catalogData.services, [], {}));
+  });
+
+  it.each([
+    ["deleted", [] as EventSubscriptionWire[]],
+    ["already off", [line("l0", { name: "Old CI", enabled: false })]],
+  ])("offers no Turn on when the replaced line is %s", (_case, rows) => {
+    subscriptions = rows;
+    const proposal = line("proposal-2", {
+      name: "New CI", enabled: false, eventKeys: ["github.check_run.completed"],
+      target: { kind: "assistant", assistant: "user", thread: { mode: "own" }, replaces: "l0" },
+    });
+    renderEditor({ kind: "review", line: proposal, ...(rows.length > 0 ? { replaces: { id: "l0", name: "Old CI" } } : {}) });
+    expect(screen.getByRole("note").textContent).toBe(
+      "Proposed by the assistant. The line this proposal replaces is gone. Delete this proposal and make a new line.",
+    );
+    expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
   });
 
   it("edits a routine and reads the patched routine", () => {
