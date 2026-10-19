@@ -8,7 +8,8 @@
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
 import type { ReactNode } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { RouterContextProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { act, render as renderUnrouted, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
@@ -98,25 +99,12 @@ vi.mock("~/api/settings", () => ({
   useOrgReasoning: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
-vi.mock("@tanstack/react-router", () => ({
+// The real router module, so each Link builds its href as the app does
+// (params encoded). Only navigation is stubbed. Every render sits under a
+// memory router (`RouterWrapper` below).
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => vi.fn(),
-  Link: ({
-    children,
-    to,
-    params,
-    search,
-    ...rest
-  }: {
-    children: ReactNode;
-    to: string;
-    params?: Record<string, string>;
-    search?: Record<string, string>;
-    [key: string]: unknown;
-  }) => {
-    const path = params ? to.replace(/\$(\w+)/g, (_match, name: string) => params[name] ?? "") : to;
-    const query = search ? `?${new URLSearchParams(search).toString()}` : "";
-    return <a href={`${path}${query}`} {...rest}>{children}</a>;
-  },
 }));
 
 vi.mock("~/api/channels", () => ({
@@ -124,6 +112,22 @@ vi.mock("~/api/channels", () => ({
 }));
 
 import { SandboxChip, SessionHeader } from "./session-header";
+
+/** A memory router with the place page's route, for the header's links. */
+function testRouter() {
+  const root = createRootRoute();
+  const place = createRoute({ getParentRoute: () => root, path: "/presence/places/$subject" });
+  return createRouter({ routeTree: root.addChildren([place]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+}
+
+function RouterWrapper({ children }: { children: ReactNode }) {
+  return <RouterContextProvider router={testRouter()}>{children}</RouterContextProvider>;
+}
+
+/** Every render here sits under a real memory router; a rerender keeps it. */
+function render(ui: ReactNode) {
+  return renderUnrouted(<>{ui}</>, { wrapper: RouterWrapper });
+}
 
 function baseSession(): SessionDetail {
   return {
@@ -1053,13 +1057,15 @@ describe("SessionHeader — team assistant", () => {
  * A subject thread names its place (spec 2026-10-16-presence-hub-design.md
  * Part G): the header reads the engine thread key and, for a `subject:`
  * key, shows the place label under the title with a link to the place page.
+ * The hrefs are the router's own, so the key's `:`, `/`, and `#` arrive
+ * encoded, and a `#` never cuts the key into a fragment.
  */
 describe("SessionHeader: subject thread place", () => {
   it("names a GitHub pull request subject and links to its place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo#12" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "acme/repo#12" });
-    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/repo#12?workspace=user");
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Frepo%2312?workspace=user");
   });
 
   it("names a GitHub repository subject with no issue number", () => {
@@ -1086,7 +1092,7 @@ describe("SessionHeader: subject thread place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "#incidents" });
-    expect(link.getAttribute("href")).toBe("/presence/places/slack:T1/C123?workspace=user");
+    expect(link.getAttribute("href")).toBe("/presence/places/slack%3AT1%2FC123?workspace=user");
   });
 
   it("falls back to the raw channel id when the channel name is not resolved", () => {
@@ -1099,26 +1105,26 @@ describe("SessionHeader: subject thread place", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API#12" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "acme/api#12" });
-    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/api#12?workspace=user");
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi%2312?workspace=user");
   });
 
   it("links a commit subject to its repository", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API@0a1b2c3d" }];
     renderHeader(undefined, "th-1");
     const link = screen.getByRole("link", { name: "acme/api" });
-    expect(link.getAttribute("href")).toBe("/presence/places/github:acme/api?workspace=user");
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi?workspace=user");
   });
 
   it("links a Slack thread subject to its channel", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123/1790000000.000100" }];
     renderHeader(undefined, "th-1");
-    expect(screen.getByRole("link", { name: "#C123" }).getAttribute("href")).toBe("/presence/places/slack:T1/C123?workspace=user");
+    expect(screen.getByRole("link", { name: "#C123" }).getAttribute("href")).toBe("/presence/places/slack%3AT1%2FC123?workspace=user");
   });
 
   it("reads a team thread's place in the team's workspace, not the switcher's", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/api#12" }];
     renderHeader(undefined, "th-1", { ...baseSession(), owner: { type: "team", id: "team_1" } });
-    expect(screen.getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/presence/places/github:acme/api#12?workspace=team_1");
+    expect(screen.getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi%2312?workspace=team_1");
   });
 
   it("shows no place label for a non-subject thread", () => {
