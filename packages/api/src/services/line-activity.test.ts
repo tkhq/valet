@@ -106,6 +106,22 @@ describe("mergeLineActivity", () => {
     expect(entries[0]?.id).toBe("receipt:r_key");
   });
 
+  // Final review G9: the dispatcher's team skip text today and before the
+  // line wording reach the wire as one string, with no leading "Skipped".
+  it("sends one team skip text for today's rows and older rows", () => {
+    const entries = mergeLineActivity([
+      delivery({ id: "d_today", status: "skipped", createdAt: 1, lastError: "The team already listens for this." }),
+      delivery({ id: "d_old", status: "skipped", createdAt: 2, lastError: "Skipped — matching team subscription." }),
+      delivery({ id: "d_paused", status: "skipped", createdAt: 3, lastError: "The team already listens for this. This personal line is paused." }),
+    ], [], MEMBER);
+    const texts = Object.fromEntries(entries.map((e) => [e.id, e.kind === "skipped" ? e.reasonText : undefined]));
+    expect(texts.d_today).toBe("The team already listens for this.");
+    expect(texts.d_old).toBe(texts.d_today);
+    // The pause note is a second sentence after the same text.
+    expect(texts.d_paused).toBe("The team already listens for this. This personal line is paused.");
+    for (const text of Object.values(texts)) expect(text).not.toMatch(/^Skipped/);
+  });
+
   // Review Focus 1: a skipped event outside the line's places shows only to an admin.
   it("shows a member skipped entries only in the line's places, and an admin all of them", () => {
     const deliveries = [
