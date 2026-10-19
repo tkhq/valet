@@ -470,13 +470,9 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       status = await builder.status(buildId);
     }
 
-    // Shared CI runners exceed ECR Public's anonymous data limit on some
-    // days. That is an external outage, not a builder failure, so the test
-    // reports a skip with the reason instead of a red build.
-    if (status.state === "failed" && REGISTRY_RATE_LIMIT.test(status.logTail ?? "")) {
-      ctx.skip("the base image registry rate-limited this runner (429)");
-    }
-    expect(status.state, JSON.stringify(status)).toBe("pushed");
+    // Name the builder's own error on a red run: a bare state tells a CI
+    // reader nothing about a failed pull, clone, or push.
+    expect(status.state, `build ended ${status.state}: ${JSON.stringify(status)}`).toBe("pushed");
 
     const inspect = spawnSync("docker", ["image", "inspect", imageRef], { stdio: "pipe" });
     expect(inspect.status).toBe(0);
