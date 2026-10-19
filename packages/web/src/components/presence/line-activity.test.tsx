@@ -70,6 +70,13 @@ describe("ActivityTimeline", () => {
     expect(screen.queryByRole("button", { name: "Show earlier" })).toBeNull();
   });
 
+  it("points to Show earlier when the loaded pages are empty but older ones exist (S13)", () => {
+    render(<ActivityTimeline entries={[]} hasMore onShowEarlier={() => {}} />);
+    expect(screen.getByText("Nothing in the newest entries. To look further back, select Show earlier.")).toBeTruthy();
+    expect(screen.queryByText("Nothing yet. Activity appears here when an event reaches this line.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Show earlier" })).toBeTruthy();
+  });
+
   it("hides the chips for a timeline with no skipped entries", () => {
     render(<ActivityTimeline entries={[ENTRIES[0]!]} chips={false} />);
     expect(screen.queryByRole("group", { name: "Show" })).toBeNull();

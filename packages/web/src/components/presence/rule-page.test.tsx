@@ -401,6 +401,16 @@ describe("RulePage", () => {
     expect(getLineActivity).toHaveBeenCalledWith("R4", { limit: 50, before: "c-1" });
   });
 
+  it("fetches past empty pages by itself, three times, then offers Show earlier (S13)", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    getLineActivity.mockImplementation(async (_id, params) => activity([], { nextCursor: `c-${Number(params?.before?.slice(2) ?? "0") + 1}` }));
+    renderPage();
+    expect(await screen.findByText("Nothing in the newest entries. To look further back, select Show earlier.")).toBeTruthy();
+    await waitFor(() => expect(getLineActivity).toHaveBeenCalledTimes(4));
+    expect(screen.getByRole("button", { name: "Show earlier" })).toBeTruthy();
+    expect(getLineActivity).toHaveBeenCalledTimes(4);
+  });
+
   it("names the fix when the activity does not load", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     getLineActivity.mockRejectedValue("offline");

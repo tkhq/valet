@@ -34,6 +34,9 @@ const CHIPS: readonly { value: ActivityChip; label: string }[] = [
 
 const DAY_MS = 86_400_000;
 
+/** The empty text when the loaded pages hold no entry but older pages exist. */
+export const EMPTY_WITH_MORE = "Nothing in the newest entries. To look further back, select Show earlier.";
+
 function localDay(at: number): number {
   const date = new Date(at);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
@@ -100,7 +103,10 @@ export function ActivityTimeline({
       </div>
       {pending && <LoadingRow />}
       {error !== undefined && <ErrorRow>{error}</ErrorRow>}
-      {!pending && error === undefined && entries.length === 0 && <EmptyRow>{empty}</EmptyRow>}
+      {!pending && error === undefined && entries.length === 0 && !loadingMore && (
+        <EmptyRow>{hasMore ? EMPTY_WITH_MORE : empty}</EmptyRow>
+      )}
+      {!pending && error === undefined && entries.length === 0 && loadingMore && <LoadingRow />}
       {!pending && error === undefined && entries.length > 0 && shown.length === 0 && (
         <EmptyRow>{chip === "acted" ? "Nothing acted on here yet. Choose All to see every entry." : "Nothing skipped here yet. Choose All to see every entry."}</EmptyRow>
       )}
