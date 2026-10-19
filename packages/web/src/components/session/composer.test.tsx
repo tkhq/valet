@@ -19,7 +19,7 @@ import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
 const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
-const sendState = { pending: false };
+const sendState: { pending: boolean; sessionId?: string } = { pending: false };
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 const addUserMessage = vi.fn(() => "user-opt-1");
 const setMessageQueueItemId = vi.fn();
@@ -44,7 +44,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
-    useSendPrompt: () => ({ isPending: sendState.pending, mutateAsync: sendMutateAsync }),
+    useSendPrompt: (sessionId: string) => ({ isPending: sendState.pending && (sendState.sessionId ?? sessionId) === sessionId, mutateAsync: sendMutateAsync }),
     useAbortThread: () => ({
       isPending: false,
       mutateAsync: abortMutateAsync,
@@ -126,6 +126,7 @@ function renderComposer(
 beforeEach(() => {
   queueStateRef.current = undefined;
   sendState.pending = false;
+  sendState.sessionId = undefined;
   useComposerPrefillStore.setState({ text: null });
   // Drafts live in a module-global store keyed by (session, thread) — the
   // same key across tests would leak one test's draft into the next.
@@ -763,15 +764,17 @@ describe("composer focus request", () => {
 });
 
 describe("Composer beside the Ask Valet dock", () => {
-  function renderPageAndDock() {
+  function renderPageAndDock({ status = "streaming", dockSession = "orchestrator:user-1", pageThread = "page", dockThread = "dock", withPage = true }: {
+    status?: "idle" | "streaming"; dockSession?: string; pageThread?: string; dockThread?: string; withPage?: boolean;
+  } = {}) {
     const queryClient = new QueryClient();
-    const composer = (threadId: string) => <Composer sessionId="orchestrator:user-1" threadId={threadId} agentStatus="streaming" queuedMessages={[]} queuedItemCount={0} />;
-    render(<QueryClientProvider client={queryClient}>
-      <main>{composer("page")}</main>
-      <aside data-ask-valet-dock="">{composer("dock")}</aside>
-    </QueryClientProvider>);
-    const [page, dock] = screen.getAllByRole("textbox", { name: "Message" }) as HTMLTextAreaElement[];
-    return { page: page!, dock: dock! };
+    const tree = (page: boolean) => <QueryClientProvider client={queryClient}>
+      {page && <main><Composer sessionId="orchestrator:user-1" threadId={pageThread} agentStatus={status} queuedMessages={[]} queuedItemCount={0} /></main>}
+      <aside data-ask-valet-dock=""><Composer sessionId={dockSession} threadId={dockThread} agentStatus={status} queuedMessages={[]} queuedItemCount={0} /></aside>
+    </QueryClientProvider>;
+    const view = render(tree(withPage));
+    const inputs = () => screen.getAllByRole("textbox", { name: "Message" }) as HTMLTextAreaElement[];
+    return { page: inputs()[0]!, dock: inputs().at(-1)!, inputs, rerender: (page = withPage) => view.rerender(tree(page)) };
   }
 
   it("leaves a page focus request to the page's composer", async () => {
@@ -789,6 +792,38 @@ describe("Composer beside the Ask Valet dock", () => {
     abortMutate.mockClear();
     fireEvent.keyDown(page, { key: "Escape" });
     expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["page"]);
+  });
+
+  it("keeps newer text from the dock when a send of the same thread fails", async () => {
+    let fail: (error: Error) => void = () => undefined;
+    sendMutateAsync.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "first question" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+    fireEvent.change(dock, { target: { value: "new unsent text" } });
+    await act(async () => fail(new Error("connection lost")));
+    expect(dock.value).toBe("new unsent text");
+  });
+
+  it("leaves focus in the dock when a page send settles", () => {
+    const { page, dock, rerender } = renderPageAndDock({ status: "idle", dockSession: "orchestrator:dock" });
+    act(() => page.focus());
+    sendState.pending = true;
+    sendState.sessionId = "orchestrator:user-1";
+    rerender();
+    act(() => dock.focus());
+    sendState.pending = false;
+    rerender();
+    expect(document.activeElement).toBe(dock);
+  });
+
+  it("leaves a pending memory prefill to the page composer that mounts after the dock", () => {
+    act(() => useComposerPrefillStore.getState().set("Update memory file private.md: "));
+    const { rerender, inputs } = renderPageAndDock({ status: "idle", withPage: false });
+    expect(inputs()[0]!.value).toBe("");
+    rerender(true);
+    expect(inputs()[0]!.value).toBe("Update memory file private.md: ");
   });
 });
 

@@ -176,7 +176,7 @@ export function Composer({
   // draft out from under whatever the user is typing.
   const prefillSeeded = useRef(false);
   useEffect(() => {
-    if (prefillSeeded.current) return;
+    if (prefillSeeded.current || inAskValetDock(inputRef.current)) return;
     prefillSeeded.current = true;
     const pending = useComposerPrefillStore.getState().consume();
     if (pending !== null) useComposerDraftStore.getState().setText(key, pending);
@@ -295,8 +295,10 @@ export function Composer({
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
   const sendWasPending = useRef(false);
+  // Focus that moved to another composer, such as the Ask Valet dock, stays there.
   useEffect(() => {
-    if (sendWasPending.current && !send.isPending) inputRef.current?.focus();
+    const active = document.activeElement;
+    if (sendWasPending.current && !send.isPending && (!active || active === document.body || active === inputRef.current)) inputRef.current?.focus();
     sendWasPending.current = send.isPending;
   }, [send.isPending]);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
@@ -631,9 +633,14 @@ export function Composer({
       // it'll be reconciled against server truth. The server restores
       // consumed refs when a submit fails, so restored chips stay sendable
       // — EXCEPT when the failure is the refs themselves.
+      // A newer draft in the slot wins: another composer on this thread,
+      // such as the Ask Valet dock, wrote it while the POST was in flight.
       const drafts = useComposerDraftStore.getState();
-      drafts.setText(slot, t);
-      drafts.setImages(slot, pendingImages);
+      const untouched = drafts.byKey[slot] === undefined;
+      if (untouched) {
+        drafts.setText(slot, t);
+        drafts.setImages(slot, pendingImages);
+      }
       const payload =
         err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
           ? (err.payload as Record<string, unknown>)
@@ -647,7 +654,7 @@ export function Composer({
         err.status === 400 &&
         typeof payload?.error === "string" &&
         payload.error.startsWith("unknown attachment");
-      drafts.setFiles(
+      if (untouched) drafts.setFiles(
         slot,
         refsDead
           ? pendingFiles.map((f) =>
