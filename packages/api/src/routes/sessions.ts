@@ -1124,7 +1124,7 @@ sessionsRouter.patch("/:id", async (c) => {
         await engineSession.setReasoning(
           typeof body.reasoning === "string"
             ? body.reasoning.trim().toLowerCase()
-            : (await engineHost.resolveFreshThreadSettings(id, meta)).reasoning,
+            : await engineHost.resolveFreshThreadReasoning(id, meta),
         );
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400);

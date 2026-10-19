@@ -3655,6 +3655,39 @@ export class EngineHost {
     meta: SessionMeta,
     actorUserId = meta.userId,
   ): Promise<{ model: string; reasoning: ReasoningLevel }> {
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: legacy.model,
+    });
+    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: legacy.reasoning,
+    });
+    return { model: spec, reasoning };
+  }
+
+  /**
+   * The reasoning half of `resolveFreshThreadSettings`. It skips the model
+   * cascade, so an unavailable default model cannot block a reasoning reset.
+   */
+  async resolveFreshThreadReasoning(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+  ): Promise<ReasoningLevel> {
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    return this.resolveReasoningForBuild(null, meta.orgId, { userId, ownerTeamId, assistantDefault: legacy.reasoning });
+  }
+
+  /** Whose defaults a new thread uses: an assistant's owner, else the actor and the session's team. */
+  private async freshThreadPrefs(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId: string,
+  ): Promise<{ userId?: string; ownerTeamId?: string; legacy: { model?: string; reasoning?: string } }> {
     const assistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, sessionId)
       : undefined;
@@ -3664,18 +3697,8 @@ export class EngineHost {
     const ownerTeamId = assistant
       ? (isTeamAssistant ? assistant.ownerId : undefined)
       : meta.ownerTeamId;
-    const legacyModel = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
-    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
-      userId,
-      ownerTeamId,
-      assistantDefault: legacyModel.model,
-    });
-    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
-      userId,
-      ownerTeamId,
-      assistantDefault: legacyModel.reasoning,
-    });
-    return { model: spec, reasoning };
+    const legacy = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
+    return { userId, ownerTeamId, legacy };
   }
 
   /** Resolve an existing startup image before child creation mutates state. */

@@ -6,6 +6,7 @@ import type {
   CreateSessionResponse,
   CreateThreadResponse,
   ListThreadsResponse,
+  PatchSessionResponse,
   PatchThreadResponse,
 } from "../wire/types.js";
 
@@ -191,6 +192,30 @@ describe("POST /api/sessions/:id/threads settings", () => {
     expect(listed?.reasoning).toBe("medium");
     expect((await engineStore.getThread(sessionId, source.id))?.reasoning).toBe("medium");
     expect((await engineStore.getSession(sessionId))?.reasoning).toBe("max");
+  }, 30_000);
+
+  it("resets session reasoning when the default model is unavailable", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    await listThreads(api.baseUrl, sessionId); // Build the live session on a usable model.
+    // The session's own model still works; only the fresh default names a removed provider.
+    await api.providers.db
+      .update(users)
+      .set({ defaultModel: "prov_gone/m1", defaultReasoning: "low" })
+      .where(eq(users.id, "local-user"));
+    const patchSession = (body: object) => fetch(`${api!.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const reset = await patchSession({ reasoning: null });
+    expect(reset.status).toBe(200);
+    expect(((await reset.json()) as PatchSessionResponse).reasoning).toBe("low");
+
+    const combined = await patchSession({ model: "m", reasoning: null });
+    expect(combined.status).toBe(200);
+    expect((await combined.json()) as PatchSessionResponse).toMatchObject({ model: "m", reasoning: "low" });
   }, 30_000);
 
   it("rejects a missing or cross-session source without creating a thread", async () => {
