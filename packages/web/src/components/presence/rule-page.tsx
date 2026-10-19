@@ -50,6 +50,10 @@ import {
 import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
 import { useSentenceNames } from "./use-sentence-names";
 
+/** The review text for a proposal whose replaced line is gone or off. The
+ * editor's review mode says the same (editor/side-pane.tsx). */
+export const STALE_PROPOSAL_TEXT = "The line this proposal replaces is gone. Delete this proposal and make a new line.";
+
 /** The one place a line names in its filters, as a crumb label and a place
  * key. Null when no filter names exactly one place. A Slack channel filter
  * carries no Slack workspace id, so its key is `slack:<channel>`, and the
@@ -174,6 +178,9 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const proposal = isProposal(sub);
   const replacesId = sub.target.kind === "assistant" ? sub.target.replaces : undefined;
   const replaced = replacesId === undefined ? undefined : subs.find((other) => other.id === replacesId);
+  // The line a proposal replaces was deleted or turned off: Turn on would
+  // fail (the api refuses it), so the review offers Delete only.
+  const staleProposal = replacesId !== undefined && (replaced === undefined || !replaced.enabled);
   const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
   const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
   const pinTitle = pinnedTitle(sub, pinTitles);
@@ -263,7 +270,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
           {proposal && (
             <section aria-label="Proposal" className="space-y-2 rounded-md border border-line px-3 py-2.5">
               <p className="text-sm text-ink">Proposed by the assistant.</p>
-              {replaced !== undefined && (
+              {staleProposal && <p className="text-sm text-ink">{STALE_PROPOSAL_TEXT}</p>}
+              {!staleProposal && replaced !== undefined && (
                 <p className="text-sm text-ink">
                   Turning it on turns off{" "}
                   <Ref kind="line" text={replaced.name} to="/presence/rules/$id" params={{ id: replaced.id }} />.
@@ -273,8 +281,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
                 ? <p className="text-xs text-muted">{readOnlyText}</p>
                 : (
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" onClick={() => setEditing({ review: true })}>Turn on</Button>
-                    <Button size="sm" variant="secondary" onClick={() => setDeleting(true)}>Delete</Button>
+                    {!staleProposal && <Button size="sm" onClick={() => setEditing({ review: true })}>Turn on</Button>}
+                    <Button size="sm" variant={staleProposal ? "primary" : "secondary"} onClick={() => setDeleting(true)}>Delete</Button>
                   </div>
                 )}
             </section>

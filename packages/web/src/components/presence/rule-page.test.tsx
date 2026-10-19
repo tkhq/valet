@@ -607,6 +607,23 @@ describe("RulePage", () => {
     await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("proposal-abc"));
   });
 
+  it.each([
+    ["deleted", [] as EventSubscriptionWire[]],
+    ["off", [listener({ id: "R1", name: "Incident replies", enabled: false })]],
+  ])("offers Delete only for a proposal whose replaced line is %s (S6)", async (_state, others) => {
+    const proposal = listener({
+      id: "proposal-abc", name: "Incident replies v2", enabled: false,
+      target: { kind: "assistant", thread: { mode: "new" }, replaces: "R1" },
+    });
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [...others, proposal] });
+    renderPage("proposal-abc");
+    const section = await screen.findByRole("region", { name: "Proposal" });
+    expect(section.textContent).toContain("The line this proposal replaces is gone. Delete this proposal and make a new line.");
+    expect(section.textContent).not.toContain("Turning it on turns off");
+    expect(within(section).queryByRole("button", { name: "Turn on" })).toBeNull();
+    expect(within(section).getByRole("button", { name: "Delete" })).toBeTruthy();
+  });
+
   it("reads a line that is only off as off, not as a proposal", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ enabled: false, updatedAt: 9 })] });
     renderPage();
