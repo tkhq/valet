@@ -397,10 +397,12 @@ Recorded during implementation (2026-09-03):
   A restore that finds no stored session level stores the resolved one.
 - **Valet default reasoning (2026-10-19).** If no assistant, user, team, or
   org default is set, the cascade resolves `VALET_DEFAULT_REASONING`
-  (`medium`), clamped to the org max. Workflow steps do not use it: a step
-  may set `temperature`, which reasoning models reject. Before this change, an unset cascade sent no level, so the provider default
-  applied. OpenAI reasoning models then ran at minimal effort. The unset
-  Default option on the org Models page names this level.
+  (`medium`), clamped to the org max. LLM workflow steps do not use it: a
+  step may set `temperature`, which reasoning models reject. Agent workflow
+  steps run in an assistant session and get it. Before this change, an
+  unset cascade sent no level, so the provider default applied. OpenAI
+  reasoning models then ran at minimal effort. The unset Default option on
+  the org Models page names this level.
 - **The cap is not retroactive.** A persisted level is never re-clamped. If
   an admin lowers the max after a session pinned a higher level, that
   session keeps its level across rebuilds ("clamp the cascade result only").
