@@ -216,10 +216,13 @@ describe('tablesToTableBlocks', () => {
   });
 
   it.each([
-    ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo'],
-    ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n==='],
-  ])('keeps the Markdown block when GFM reads %s after the rows as a row', (_name, source) => {
-    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+    ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo', 'foo'],
+    ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n===', '==='],
+  ])('ends the table at %s after the rows and keeps that line as prose', (_name, source, prose) => {
+    // GFM would read the line as one more row; Slack's markdown block then
+    // showed the whole table as raw pipes.
+    expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['table', 'markdown']);
+    expect(tablesToTableBlocks(source, 50)?.[1]).toEqual({ type: 'markdown', text: prose });
   });
 
   it('keeps the Markdown block when the delimiter row is indented code', () => {

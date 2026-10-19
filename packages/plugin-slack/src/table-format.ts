@@ -119,7 +119,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     }
     // An indented delimiter row may be code, and the header may continue a
     // container. GFM also reads a following line without a pipe as a row.
-    let standalone = !inContainer && !/^\s/.test(delimiter);
+    const standalone = !inContainer && !/^\s/.test(delimiter);
     index += 1;
     const rows: string[][] = [];
     const tableLines = [line, delimiter];
@@ -127,10 +127,11 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       const next = lines[index + 1];
       if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
       const cells = tableCells(next);
-      if (!cells) {
-        standalone = false;
-        break;
-      }
+      // GFM reads a line without a pipe right after the rows as one more
+      // row. A model that ends a table with a sentence means prose, and
+      // Slack's markdown block showed such a table as raw pipes, so the line
+      // ends the table and stays prose.
+      if (!cells) break;
       rows.push(cells);
       tableLines.push(next);
       index += 1;

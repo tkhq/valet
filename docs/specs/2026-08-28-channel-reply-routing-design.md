@@ -613,9 +613,12 @@ with `only_one_table_allowed`, which the `invalid_blocks` retry does not catch.
 
 The message is split only where Markdown reads the table as a block of its
 own. The single Markdown block stays when a table continues a blockquote or
-list item, follows an indented line with no blank line between them, has an
-indented delimiter row, or is followed directly by a line without a pipe,
-which GFM reads as another row. It also stays when the message has a link
+list item, follows an indented line with no blank line between them, or has an
+indented delimiter row. A line without a pipe directly after the rows ends the
+table and stays prose (2026-10-19). GFM reads that line as another row, but a
+model that ends a table with a sentence means prose, and Slack's `markdown`
+block showed such a table as raw pipes: a 1-day release report short enough for
+one message lost its table this way. It also stays when the message has a link
 reference or footnote definition, because a definition applies to the whole
 document, when it has an HTML block, and when it has a fence inside a list
 item or blockquote, because the scanner tracks top-level fences only.
@@ -648,10 +651,9 @@ posted, so the caller can delete them before it sends the message again.
 
 The split keeps the single-message rendering when the message has Slack-native
 spans, more than one table, a table that a list item or indented delimiter
-keeps from standing alone, or more than 10 parts. One exception to the rule
-above: a line without a pipe directly after the rows becomes prose after the
-last part, because each part ends its table with a blank line. A model often
-ends a table this way, and does not mean the line as a row.
+keeps from standing alone, or more than 10 parts. A line without a pipe
+directly after the rows stays prose, as it does in a single message, so it
+closes the last part.
 
 ### Images in question answers
 

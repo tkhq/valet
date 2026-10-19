@@ -256,6 +256,27 @@ describe('native span boundaries', () => {
   });
 });
 
+describe("a release report short enough for one message", () => {
+  it("renders its table natively when a sentence follows the last row", () => {
+    // The 1-day release report: a label line right above the header, no
+    // outer pipes, and a closing sentence with no blank line before it.
+    const text = [
+      "**Release infrastructure review: 2026-10-18 to 2026-10-18**",
+      "- 3 qualifying merged PRs: 2 in tkhq/mono and 1 in tkhq/gitops.",
+      "",
+      "Release infrastructure changes",
+      "PR | Merged | Description",
+      "--- | --- | ---",
+      "[tkhq/gitops#5637](https://github.com/tkhq/gitops/pull/5637): apps: pin admin-dash | :murg'd: Oct 18 · @t-vila | Pins admin-dash.",
+      "[tkhq/mono#8749](https://github.com/tkhq/mono/pull/8749): tvc-507 | :murg'd: Oct 18 · @narimonf | Adds ENABLE_TVC_APPS.",
+      "Related and deployment PR details are in the thread.",
+    ].join("\n");
+    const blocks = buildContentBlocks(text, markdownToSlackMrkdwn(text), 49);
+    expect(blocks.map((block) => block.type)).toEqual(["markdown", "table", "markdown"]);
+    expect(blocks[2]).toEqual({ type: "markdown", text: "Related and deployment PR details are in the thread." });
+  });
+});
+
 describe("splitTableMessage", () => {
   const note = "_Continued in the thread._";
   /** A weekly release report: one row per PR with a linked title and a
