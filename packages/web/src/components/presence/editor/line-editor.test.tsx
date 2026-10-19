@@ -238,6 +238,47 @@ describe("LineEditor", () => {
     expect((screen.getByRole("radio", { name: "Platform's assistant" }) as HTMLInputElement).checked).toBe(true);
   });
 
+  it("follows one Slack thread from a pasted link, with the old wizard's body", () => {
+    renderEditor({ kind: "create" });
+    fireEvent.click(screen.getByRole("radio", { name: "A reply in one Slack thread" }));
+    expect(screen.getByText("Paste the thread's link.")).toBeTruthy();
+    const link = screen.getByLabelText("Paste the thread's link");
+    fireEvent.change(link, { target: { value: "https://acme.slack.com/archives/C123ABC" } });
+    expect(screen.getByRole("alert").textContent).toBe("That is not a Slack message link. Copy the link from the message's menu.");
+    fireEvent.change(link, { target: { value: "https://acme.slack.com/archives/C123ABC/p1750000000123456" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(summary("when")).toBe("a reply in one Slack thread in C123ABC");
+    fireEvent.click(screen.getByRole("button", { name: "Change Name" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Follow rollout thread" } });
+    expect(sentence()).toBe("When someone replies in the Slack thread in C123ABC, work in its own thread.");
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const body = createSubscription.mock.calls[0]?.[0] as CreateEventSubscriptionRequest;
+    expect(body.name).toBe("Follow rollout thread");
+    expect(body.eventKeys).toEqual(["slack.message"]);
+    expect(body.filters).toEqual([
+      { field: "channel", op: "eq", value: "C123ABC" },
+      { field: "thread_ts", op: "eq", value: "1750000000.123456" },
+    ]);
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "own" } });
+  });
+
+  it("opens a stored thread follow with its channel and thread under the link field", () => {
+    renderEditor({
+      kind: "edit",
+      line: line("t1", {
+        name: "Rollout thread",
+        eventKeys: ["slack.message"],
+        filters: [{ field: "channel", op: "eq", value: "C123ABC" }, { field: "thread_ts", op: "eq", value: "1750000000.123456" }],
+        target: { kind: "assistant", assistant: "user", follow: false, thread: { mode: "own" } },
+      }),
+      initialSection: "when",
+    });
+    expect(summary("when")).toBe("a reply in one Slack thread in C123ABC");
+    expect(screen.getByLabelText("Paste the thread's link")).toBeTruthy();
+    expect(screen.getByText("Follows the thread 1750000000.123456 in C123ABC. Paste another link to follow a different thread.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Remove channel is C123ABC/ })).toBeTruthy();
+  });
+
   it("fixes the service when launched from a place", () => {
     renderEditor({ kind: "create", preselected: { place: INCIDENTS } });
     expect(sentence()).toContain("#incidents");

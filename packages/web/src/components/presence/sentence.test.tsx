@@ -40,6 +40,21 @@ describe("Sentence", () => {
     expect(container.querySelectorAll("[data-ref-mark]")).toHaveLength(5);
   });
 
+  it("puts no whitespace between a token and the punctuation after it", () => {
+    const { container } = render(<Sentence parts={[
+      { kind: "text", text: "When a check completes on " },
+      { kind: "place", text: "acme/web", service: "github", subject: "github:acme/web" },
+      { kind: "text", text: ", work in the " },
+      { kind: "thread", text: "Platform CI" },
+      { kind: "text", text: "." },
+    ]} />);
+    expect(container.textContent).toBe("When a check completes on acme/web, work in the Platform CI.");
+    const glued = [...container.querySelectorAll("[data-glued]")];
+    expect(glued.map((span) => span.textContent)).toEqual(["acme/web,", "Platform CI."]);
+    // The token and its punctuation are adjacent nodes: no text node between them.
+    for (const span of glued) expect([...span.childNodes].some((n) => n.nodeType === Node.TEXT_NODE)).toBe(false);
+  });
+
   it("renders tokens without links when asked", () => {
     render(<p><Sentence parts={parts} links={false} /></p>);
     expect(screen.queryAllByRole("link")).toHaveLength(0);

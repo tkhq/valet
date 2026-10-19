@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * The pure conversion helpers behind the filter picker: form rows to the wire
- * shape and back — plus the provider-populated value picker's render behavior.
- * The picker's add/remove/edit interactions are covered end to end by
- * trigger-dialog.test.tsx.
+ * The pure conversion helpers behind the editor's conditions: form rows to
+ * the wire shape and back, plus the provider-populated value picker's render
+ * behavior. The editor's add and remove interactions are covered by
+ * presence/editor/when-section.test.tsx.
  */
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
@@ -16,13 +16,11 @@ vi.mock("~/api/events", () => ({
 }));
 
 import {
-  FilterEditor,
+  FilterValuePicker,
   fromWireFilters,
-  incompleteFilterRow,
   pruneFilterRows,
   sameWireFilters,
   toWireFilters,
-  type FilterField,
   type UiFilterRow,
 } from "./filter-editor";
 
@@ -92,30 +90,6 @@ describe("fromWireFilters", () => {
     expect(rows[0].id).toBeTruthy();
     expect(rows[1].id).toBeTruthy();
     expect(rows[0].id).not.toBe(rows[1].id);
-  });
-});
-
-describe("incompleteFilterRow", () => {
-  it("returns the field of the first row with a field but no value", () => {
-    expect(
-      incompleteFilterRow([
-        row({ field: "channel", op: "eq", value: "C1" }),
-        row({ field: "user", op: "eq", value: "  " }),
-      ]),
-    ).toBe("user");
-  });
-
-  it("treats an `in` row with only separators as incomplete", () => {
-    expect(incompleteFilterRow([row({ field: "reaction", op: "in", value: " , " })])).toBe("reaction");
-  });
-
-  it("ignores a blank-field row and returns null when every row is complete", () => {
-    expect(
-      incompleteFilterRow([
-        row({ field: "", op: "eq", value: "" }),
-        row({ field: "channel", op: "eq", value: "C1" }),
-      ]),
-    ).toBeNull();
   });
 });
 
@@ -226,38 +200,36 @@ function optionsResult(over: {
   return { data: over.data, isLoading: over.isLoading ?? false };
 }
 
-describe("FilterEditor value picker", () => {
-  it("queries the source and stores the picked id plus its label", () => {
+/** The picker for one field, as the editor's Add a condition renders it. */
+function renderPicker(over: Partial<Parameters<typeof FilterValuePicker>[0]> = {}) {
+  const onPick = vi.fn();
+  const onFreeText = vi.fn();
+  const utils = render(
+    <FilterValuePicker source="slack.users" deps={{}} value="" onPick={onPick} onFreeText={onFreeText} {...over} />,
+  );
+  return { onPick, onFreeText, ...utils };
+}
+
+describe("FilterValuePicker", () => {
+  it("queries the source and hands back the picked id plus its label", () => {
     useFilterOptions.mockReturnValue(
       optionsResult({ data: { options: [{ id: "U1", label: "Alice", hint: "@alice" }] } }),
     );
-    const fields: FilterField[] = [{ field: "user", options: { source: "slack.users" } }];
-    const rows: UiFilterRow[] = [row({ id: "r1", field: "user", op: "eq", value: "" })];
-    const onChange = vi.fn();
-    render(<FilterEditor fields={fields} rows={rows} onChange={onChange} />);
-
-    // The hook is queried for the field's source (enabled — no dependsOn gap).
+    const { onPick } = renderPicker();
     expect(useFilterOptions).toHaveBeenCalledWith(
       expect.objectContaining({ source: "slack.users" }),
       expect.objectContaining({ enabled: true }),
     );
-
     // The results are a focus-driven popover: focus opens it, then the option
-    // shows its label, not the raw id. An update preserves the row id.
+    // shows its label, not the raw id.
     fireEvent.focus(screen.getByLabelText("Filter value search"));
     fireEvent.click(screen.getByRole("option", { name: /Alice/ }));
-    expect(onChange).toHaveBeenCalledWith([
-      { id: "r1", field: "user", op: "eq", value: "U1", label: "Alice" },
-    ]);
+    expect(onPick).toHaveBeenCalledWith("U1", "Alice");
   });
 
   it("shows the stored label as the selection, not the raw id", () => {
-    // No `@testing-library/jest-dom` in this package, so assertions read raw
-    // DOM state (`textContent`, `disabled`, `getAttribute`).
     useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [{ field: "user", options: { source: "slack.users" } }];
-    const rows: UiFilterRow[] = [row({ field: "user", op: "eq", value: "U1", label: "Alice" })];
-    const { container } = render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    const { container } = renderPicker({ value: "U1", label: "Alice" });
     expect(screen.getByText("Alice")).toBeTruthy();
     expect(container.textContent).not.toContain("U1");
   });
@@ -267,35 +239,26 @@ describe("FilterEditor value picker", () => {
   // to one first, because Slack sends no events for a channel it is not in.
   it("tells a reader how to reach a private channel when the list is empty", async () => {
     useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [{ field: "channel", options: { source: "slack.channels" } }];
-    const rows: UiFilterRow[] = [row({ field: "channel", op: "eq", value: "" })];
-    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    renderPicker({ source: "slack.channels" });
     fireEvent.focus(screen.getByLabelText("Filter value search"));
     const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
     expect(listbox.textContent).toContain("invite the app to it in Slack");
   });
 
   // A rejected lookup settles with no data and an empty list, the same shape
-  // as a real empty answer. Inviting the app cannot fix an outage, so the
-  // advice must not go out for one.
+  // as a real empty answer. Inviting the app cannot fix an outage.
   it("does not blame a missing invite when the lookup failed", async () => {
     useFilterOptions.mockReturnValue(optionsResult({ data: undefined }));
-    const fields: FilterField[] = [{ field: "channel", options: { source: "slack.channels" } }];
-    const rows: UiFilterRow[] = [row({ field: "channel", op: "eq", value: "" })];
-    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    renderPicker({ source: "slack.channels" });
     fireEvent.focus(screen.getByLabelText("Filter value search"));
     const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
     expect(listbox.textContent).toContain("Could not load the options");
     expect(listbox.textContent).not.toContain("invite the app");
   });
 
-  // Only the channel source has one action that fixes an empty list, so every
-  // other source keeps the bare answer rather than borrowing advice.
   it("keeps the plain answer for a source with no single fix", async () => {
     useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [{ field: "user", options: { source: "slack.users" } }];
-    const rows: UiFilterRow[] = [row({ field: "user", op: "eq", value: "" })];
-    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    renderPicker();
     fireEvent.focus(screen.getByLabelText("Filter value search"));
     const listbox = await screen.findByRole("listbox", { name: "Filter value options" });
     expect(listbox.textContent).toContain("No matches");
@@ -304,21 +267,10 @@ describe("FilterEditor value picker", () => {
 
   it("disables the picker until every dependsOn value is present", () => {
     useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [
-      { field: "repo", description: "Repository" },
-      { field: "channel", options: { source: "slack.channels", dependsOn: ["repo"] } },
-    ];
-    const rows: UiFilterRow[] = [
-      row({ id: "r-repo", field: "repo", op: "eq", value: "" }),
-      row({ id: "r-chan", field: "channel", op: "eq", value: "" }),
-    ];
-    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
-
-    // The picker is disabled and names the field to fill first.
+    renderPicker({ source: "slack.channels", dependsOn: ["repo"], deps: {} });
     const search = screen.getByLabelText("Filter value search") as HTMLInputElement;
     expect(search.disabled).toBe(true);
     expect(search.getAttribute("placeholder")).toContain("repo");
-    // The disabled picker does not query the provider.
     expect(useFilterOptions).toHaveBeenCalledWith(
       expect.objectContaining({ source: "slack.channels" }),
       expect.objectContaining({ enabled: false }),
@@ -327,15 +279,7 @@ describe("FilterEditor value picker", () => {
 
   it("passes a present dependsOn value as a dep and enables the picker", () => {
     useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [
-      { field: "repo", description: "Repository" },
-      { field: "channel", options: { source: "slack.channels", dependsOn: ["repo"] } },
-    ];
-    const rows: UiFilterRow[] = [
-      row({ id: "r-repo", field: "repo", op: "eq", value: "acme/web" }),
-      row({ id: "r-chan", field: "channel", op: "eq", value: "" }),
-    ];
-    render(<FilterEditor fields={fields} rows={rows} onChange={vi.fn()} />);
+    renderPicker({ source: "slack.channels", dependsOn: ["repo"], deps: { repo: "acme/web" } });
     const search = screen.getByLabelText("Filter value search") as HTMLInputElement;
     expect(search.disabled).toBe(false);
     expect(useFilterOptions).toHaveBeenCalledWith(
@@ -348,30 +292,9 @@ describe("FilterEditor value picker", () => {
     useFilterOptions.mockReturnValue(
       optionsResult({ data: { options: [], reason: "Connect the Slack integration in Settings." } }),
     );
-    const fields: FilterField[] = [{ field: "user", options: { source: "slack.users" } }];
-    const rows: UiFilterRow[] = [row({ id: "r1", field: "user", op: "eq", value: "" })];
-    const onChange = vi.fn();
-    render(<FilterEditor fields={fields} rows={rows} onChange={onChange} />);
-
+    const { onFreeText } = renderPicker();
     expect(screen.getByText(/Connect the Slack integration/)).toBeTruthy();
-    // The fallback is a plain value input that writes straight to the row.
     fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "U9" } });
-    expect(onChange).toHaveBeenCalledWith([
-      { id: "r1", field: "user", op: "eq", value: "U9", label: undefined },
-    ]);
-  });
-
-  it("renders a plain text input for a field with no option source", () => {
-    useFilterOptions.mockReturnValue(optionsResult({ data: { options: [] } }));
-    const fields: FilterField[] = [{ field: "branch", description: "Base branch" }];
-    const rows: UiFilterRow[] = [row({ id: "r1", field: "branch", op: "eq", value: "" })];
-    const onChange = vi.fn();
-    render(<FilterEditor fields={fields} rows={rows} onChange={onChange} />);
-    // No search box; the plain value input is present.
-    expect(screen.queryByLabelText("Filter value search")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "main" } });
-    expect(onChange).toHaveBeenCalledWith([
-      { id: "r1", field: "branch", op: "eq", value: "main", label: undefined },
-    ]);
+    expect(onFreeText).toHaveBeenCalledWith("U9");
   });
 });

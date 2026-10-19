@@ -16,7 +16,6 @@ import { usePresencePlaces } from "~/api/presence";
 import { EventLog, type LogFilter, type LogService } from "~/components/events/event-log";
 import { Button } from "~/components/primitives";
 import { textParam } from "~/lib/search-params";
-import { announceCreated } from "./created-highlight";
 import { LineEditor } from "./editor/line-editor";
 import { useNotPresentAnywhere } from "./onboarding";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
@@ -118,7 +117,7 @@ export function ActivityPane({ search, onSearchChange }: {
           ? { place: search.place, placeName: placeName(search.place, places.data?.places ?? []) }
           : {})}
       />
-      <LineEditor open={adding} onOpenChange={setAdding} mode={{ kind: "create" }} onSaved={announceCreated} />
+      <LineEditor open={adding} onOpenChange={setAdding} mode={{ kind: "create" }} />
     </PresenceDetailPage>
   );
 }

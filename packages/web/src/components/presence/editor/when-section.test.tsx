@@ -15,7 +15,7 @@ vi.mock("~/api/events", () => ({
   useFilterOptions: () => ({ data: { options: [], reason: "Connect first." }, isLoading: false }),
 }));
 
-import { WhenSection, conditionWords } from "./when-section";
+import { WhenSection, conditionHint, conditionWords } from "./when-section";
 
 const SERVICES: CatalogService[] = [
   {
@@ -177,5 +177,13 @@ describe("WhenSection", () => {
     expect(conditionWords({ id: "2", field: "channel", op: "in", value: "C1, C2", inLabels: { field: "channel", values: ["C1", "C2"], labels: ["#a", "#b"] } })).toBe(
       "channel is #a or #b",
     );
+  });
+});
+
+describe("conditionHint", () => {
+  it("names fields the service's own events carry", () => {
+    expect(conditionHint("slack")).toBe("Any field these events carry, such as a channel or a sender.");
+    expect(conditionHint("github")).toBe("Any field these events carry, such as a branch or an author.");
+    expect(conditionHint("linear")).toBe("Any field these events carry, such as a team or a label.");
   });
 });

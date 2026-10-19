@@ -3,7 +3,6 @@ import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { useEventSubscriptions } from "~/api/events";
 import { useWorkflowTriggers } from "~/api/workflows";
-import { announceCreated } from "~/components/presence/created-highlight";
 import { LineEditor } from "~/components/presence/editor/line-editor";
 import { PresenceRow, usePresenceSentence } from "~/components/presence/presence-rows";
 import { ProblemBadge } from "~/components/presence/problem-badge";
@@ -85,7 +84,11 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
         open={adding !== null}
         onOpenChange={(open) => { if (!open) setAdding(null); }}
         mode={{ kind: "create", preselected: { workflowId, ...(adding === "routine" ? { schedule: true } : {}) } }}
-        onSaved={announceCreated}
+        // The panel lists this workflow's lines and routines; both refetch.
+        onSaved={() => {
+          void triggersQ.refetch();
+          void subscriptionsQ.refetch();
+        }}
       />
     </div>
   );

@@ -14,7 +14,6 @@ import {
   Avatar, AvatarFallback, AvatarImage, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection, textLinkClass,
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { announceCreated } from "./created-highlight";
 import { LineEditor } from "./editor/line-editor";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
@@ -57,6 +56,8 @@ const RECENT_ROWS = 10;
 
 export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
   const { place, listeners, threads, activity } = data;
+  // The same query the page reads; a refetch shows a line the editor adds.
+  const detail = usePresencePlace(place.subject);
   const [adding, setAdding] = useState(false);
   const sentence = usePresenceSentenceParts(listeners, knownThreadTitles(threads));
   const appearances = listeners.filter(hasAppearance);
@@ -83,7 +84,8 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
       <LineEditor
         open={adding}
         onOpenChange={setAdding}
-        onSaved={announceCreated}
+        // The page lists this place's lines; it refetches to show the new one.
+        onSaved={() => { void detail.refetch(); }}
         mode={{ kind: "create", preselected: { place: { subject: place.subject, service: place.service, label: place.label } } }}
       />
 

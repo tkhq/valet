@@ -47,6 +47,7 @@ import {
   bodyFromDraft,
   draftForMode,
   draftKey,
+  draftThread,
   draftWorkspace,
   exampleSteps,
   isEmptyBody,
@@ -240,7 +241,14 @@ function EditorSheet({ onOpenChange, mode, onSaved, onCloseAutoFocus }: {
 
   // The When in words, for the summary, the suggested name, and the example.
   const unnamed = bodyFromDraft(draft, mode);
-  const whenParts: SentencePart[] = routine
+  // A followed Slack thread reads as the reply it waits for (Part H step 3).
+  const followed = draft.threadFollow ? draftThread(draft) : null;
+  const threadWhen = followed !== null && followed.channelLabel.length > 0
+    ? `a reply in one Slack thread in ${followed.channelLabel}`
+    : "a reply in one Slack thread";
+  const whenParts: SentencePart[] = draft.threadFollow
+    ? [text(threadWhen)]
+    : routine
     ? [text(scheduleCron(draft.schedule).length > 0 ? scheduleInWords(scheduleCron(draft.schedule), draft.schedule.timezone) : "On a schedule")]
     : unnamed.kind === "create-line"
       ? lowerFirst(wizardWhenParts({ kind: "presence", sub: lineFromCreate(unnamed.body), service: draft.service === "schedule" ? "slack" : draft.service }, catalog))

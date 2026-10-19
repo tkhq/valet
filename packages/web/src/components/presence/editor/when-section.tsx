@@ -2,6 +2,8 @@
  * The editor's **When** section (docs/specs/2026-10-16-presence-hub-design.md
  * Part H steps 3 and 7): the service choices, the events in words, the
  * conditions as pills, and for `On a schedule` the day and time control.
+ * For Slack, `A reply in one Slack thread` takes a pasted message link in
+ * place of the events.
  */
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -16,12 +18,16 @@ import { selectsSlackMention, hasChannelScopeFilter } from "~/lib/slack-mention"
 import { cn } from "~/lib/cn";
 import { ServiceGlyph, ServiceMark, SERVICE_NAMES, glyphColor } from "../service-mark";
 import { eventLabel, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
+import { BAD_THREAD_LINK, parseSlackThreadLink } from "./slack-thread-link";
 import {
   addCondition,
+  draftThread,
   hasCreatorScope,
   removeCondition,
   scheduleCron,
   setService,
+  setThreadFollow,
+  setThreadLink,
   toggleEvent,
   type Draft,
   type EditorMode,
@@ -145,17 +151,72 @@ export function WhenSection({
         />
       ) : (
         <>
-          <Events
-            draft={draft}
-            onChange={onChange}
-            services={services}
-            loading={catalogLoading}
-            error={catalogError}
-          />
+          {draft.service === "slack" && (mode.kind === "create" || draft.threadFollow) && (
+            <SlackListenFor draft={draft} onChange={onChange} locked={mode.kind !== "create"} />
+          )}
+          {draft.threadFollow ? (
+            <ThreadLink draft={draft} onChange={onChange} />
+          ) : (
+            <Events
+              draft={draft}
+              onChange={onChange}
+              services={services}
+              loading={catalogLoading}
+              error={catalogError}
+            />
+          )}
           <Conditions draft={draft} mode={mode} onChange={onChange} services={services} names={names} />
         </>
       )}
     </>
+  );
+}
+
+/** Slack's two modes: events (a mention among them), or the replies in one thread. */
+function SlackListenFor({ draft, onChange, locked }: { draft: Draft; onChange: (next: Draft) => void; locked: boolean }) {
+  const options = [
+    { follow: false, title: "A mention or other events" },
+    { follow: true, title: "A reply in one Slack thread" },
+  ] as const;
+  return (
+    <div role="radiogroup" aria-label="Listen for" className="grid gap-1.5">
+      {options.map((option) => (
+        <label key={option.title} className="flex min-h-11 items-center gap-2.5 text-[15px] text-ink sm:min-h-0">
+          <input
+            type="radio"
+            name="editor-slack-listen-for"
+            checked={draft.threadFollow === option.follow}
+            disabled={locked}
+            onChange={() => onChange(setThreadFollow(draft, option.follow))}
+          />
+          {option.title}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** The thread's link. A link that parses sets the channel and thread conditions. */
+function ThreadLink({ draft, onChange }: { draft: Draft; onChange: (next: Draft) => void }) {
+  const bad = draft.threadLink.trim().length > 0 && parseSlackThreadLink(draft.threadLink) === null;
+  const thread = draftThread(draft);
+  return (
+    <div className="grid gap-1">
+      <label htmlFor="editor-thread-link" className="text-xs text-muted">Paste the thread's link</label>
+      <Input
+        id="editor-thread-link"
+        value={draft.threadLink}
+        onChange={(e) => onChange(setThreadLink(draft, e.target.value))}
+        placeholder="https://your-team.slack.com/archives/…"
+        aria-invalid={bad}
+        className="min-w-0"
+      />
+      {bad
+        ? <p role="alert" className="text-xs text-danger-500">{BAD_THREAD_LINK}</p>
+        : thread !== null && draft.threadLink.trim().length === 0
+          ? <p className="text-xs text-muted">Follows the thread {thread.threadTs} in {thread.channelLabel}. Paste another link to follow a different thread.</p>
+          : <p className="text-xs text-muted">In Slack, copy the link from a message's menu. Only later human replies in that thread match. Valet must have access to the channel.</p>}
+    </div>
   );
 }
 
@@ -208,6 +269,12 @@ function Events({ draft, onChange, services, loading, error }: {
       )}
     </div>
   );
+}
+
+/** What a condition can test, in the words of the service's own fields. */
+export function conditionHint(service: WhenService | undefined): string {
+  const examples = service === "github" ? "a branch or an author" : service === "linear" ? "a team or a label" : "a channel or a sender";
+  return `Any field these events carry, such as ${examples}.`;
 }
 
 function Conditions({ draft, mode, onChange, services, names }: {
@@ -269,7 +336,7 @@ function Conditions({ draft, mode, onChange, services, names }: {
         )}
       </div>
       <p className="mt-1.5 text-xs text-muted">
-        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : "Any field these events carry, such as a channel, a branch, or an author."}
+        {draft.events.size === 0 ? "Pick an event first. Its fields become the conditions you can add." : conditionHint(service)}
       </p>
       {adding && (
         <AddCondition

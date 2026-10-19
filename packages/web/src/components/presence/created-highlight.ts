@@ -1,6 +1,6 @@
 /**
  * The handoff from the editor's Create to the overview (spec Part H step 9).
- * The editor's launch points call `announceCreated` with the stored id. The
+ * Only the overview's launch points call `announceCreated` with the stored id. The
  * header's **Add** sits in the section layout, outside the overview, so the
  * handoff is a small module store, not a prop. The overview reads it with
  * `useCreatedTarget`, waits until its lists hold the id, then marks that

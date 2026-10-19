@@ -2,8 +2,9 @@
  * The editor's draft (docs/specs/2026-10-16-presence-hub-design.md Part H).
  * One state type holds a line or a routine while the reader edits it. Pure
  * functions fill it from a stored line or routine, change it, and turn it
- * into the create or patch body that Create or Save sends. The side pane reads its sentence from that body, so the sentence
- * equals the stored sentence (INV-H7).
+ * into the create or patch body that Create or Save sends. The side pane
+ * reads its sentence from that body, so the sentence equals the stored
+ * sentence (INV-H7).
  */
 import { type Appearance, type AssistantThreadPolicy, validateAppearance } from "@valet/shared";
 import type {
@@ -25,8 +26,10 @@ import type { WhenService } from "~/components/events/wizard-preview";
 import { SLACK_APP_MENTION, selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
 import { placeFilter, type PreselectedPlace } from "../place-filter";
 import type { SectionId } from "./section";
+import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-link";
 import type { Routine } from "../routine-helpers";
 import {
+  followsSlackThread,
   isCreatorScopeFilter,
   partsText,
   type RoutineLike,
@@ -86,6 +89,11 @@ export interface Draft {
   placeRemoved: boolean;
   /** The explicit opt-out of a mention line's channel requirement. */
   anyChannel: boolean;
+  /** True for `A reply in one Slack thread`: `slack.message` with the
+   * thread's `channel` and `thread_ts` conditions. */
+  threadFollow: boolean;
+  /** The pasted message link, as typed. Its parse sets the conditions. */
+  threadLink: string;
   doKind: DoKind;
   workflowId: string;
   assistant: AssistantKind;
@@ -187,6 +195,8 @@ export function newDraft(options: {
     placeRow,
     placeRemoved: false,
     anyChannel: false,
+    threadFollow: false,
+    threadLink: "",
     doKind: workflowId !== undefined ? "workflow" : service === "slack" ? "reply" : "work",
     workflowId: workflowId ?? "",
     assistant: teamId !== undefined ? "team" : "user",
@@ -226,6 +236,8 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     placeRow: null,
     placeRemoved: false,
     anyChannel: storedAnyChannel(sub.eventKeys, sub.filters),
+    threadFollow: followsSlackThread(sub),
+    threadLink: "",
     doKind: target.kind === "workflow" ? "workflow" : target.follow === true ? "reply" : "work",
     workflowId: target.kind === "workflow" ? target.workflowId : "",
     assistant: assistant ? target.assistant ?? "user" : sub.ownerType === "team" ? "team" : sub.ownerType === "org" ? "org" : "user",
@@ -258,6 +270,8 @@ export function draftFromRoutine(routine: Routine): Draft {
     placeRow: null,
     placeRemoved: false,
     anyChannel: false,
+    threadFollow: false,
+    threadLink: "",
     doKind: workflow ? "workflow" : "work",
     workflowId: routine.workflowId ?? "",
     assistant: detail.ownerType === "team" ? "team" : "user",
@@ -308,6 +322,8 @@ export function setService(draft: Draft, next: EditorService): Draft {
     conditions: [],
     creatorScopeId: null,
     anyChannel: false,
+    threadFollow: false,
+    threadLink: "",
     doKind,
     // A schedule has no organization assistant.
     assistant: next === "schedule" && draft.assistant === "org" ? "user" : draft.assistant,
@@ -341,6 +357,57 @@ export function toggleEvent(draft: Draft, key: string, services: readonly Catalo
   return { ...draft, events, conditions, creatorScopeId, anyChannel: selectsSlackMention([...events]) ? draft.anyChannel : false };
 }
 
+const SLACK_MESSAGE = "slack.message";
+
+/**
+ * Turns `A reply in one Slack thread` on or off. On, the line hears
+ * `slack.message` and waits for a link; the thread's conditions come from
+ * the link. Off, the draft goes back to picking events, with the place a
+ * launcher preselected.
+ */
+export function setThreadFollow(draft: Draft, on: boolean): Draft {
+  if (on === draft.threadFollow) return draft;
+  const placeRow = draft.placeRow !== null && !draft.placeRemoved ? [draft.placeRow] : [];
+  return {
+    ...draft,
+    threadFollow: on,
+    threadLink: "",
+    events: on ? new Set([SLACK_MESSAGE]) : new Set(),
+    conditions: placeRow,
+    creatorScopeId: null,
+    anyChannel: false,
+    // A thread follow works on each reply; it never starts a conversation to follow.
+    doKind: draft.doKind === "workflow" ? "workflow" : on ? "work" : draft.doKind,
+    where: null,
+    whereChosen: false,
+    whereTitle: undefined,
+  };
+}
+
+/**
+ * A pasted link. A link that parses replaces the thread's `channel` and
+ * `thread_ts` conditions; one that does not keeps the conditions, and the
+ * editor shows the error.
+ */
+export function setThreadLink(draft: Draft, link: string): Draft {
+  const thread = parseSlackThreadLink(link);
+  if (thread === null) return { ...draft, threadLink: link };
+  const rest = draft.conditions.filter((row) => row.field !== "channel" && row.field !== "thread_ts");
+  return { ...draft, threadLink: link, conditions: [...slackThreadFilterRows(thread), ...rest] };
+}
+
+/** The thread a thread-follow draft names, from its conditions. */
+export function draftThread(draft: Draft): { channel: string; channelLabel: string; threadTs: string } | null {
+  const ts = draft.conditions.find((row) => row.field === "thread_ts" && row.op === "eq" && row.value.trim().length > 0);
+  if (ts === undefined) return null;
+  const channel = draft.conditions.find((row) => row.field === "channel" && row.op === "eq");
+  return {
+    channel: channel?.value ?? "",
+    channelLabel: channel?.label?.trim() || channel?.value || "",
+    threadTs: ts.value.trim(),
+  };
+}
+
 /** Removes one condition. The creator scope cannot be removed. */
 export function removeCondition(draft: Draft, id: string): Draft {
   if (id === draft.creatorScopeId) return draft;
@@ -372,7 +439,8 @@ function outcomeOf(doKind: DoKind): "reply" | "notify" | "workflow" {
 
 /** The Where that holds until the reader picks one (thread policy spec defaults). */
 export function defaultWhere(draft: Draft): AssistantThreadPolicy {
-  if (draft.service === "schedule") return { mode: "own" };
+  // A routine and a followed Slack thread each keep one history.
+  if (draft.service === "schedule" || draft.threadFollow) return { mode: "own" };
   return defaultWizardThreadPolicy(outcomeOf(draft.doKind), draftSubjectKind(draft));
 }
 
@@ -690,6 +758,7 @@ export function saveBlocker(draft: Draft, mode: EditorMode, context: { connected
   if (routine) {
     if (scheduleCron(draft.schedule).length === 0) return "Pick at least one day.";
   } else {
+    if (draft.threadFollow && draftThread(draft) === null) return "Paste the thread's link.";
     if (draft.events.size === 0) return "Pick at least one event.";
     const filters = toWireFilters([...draft.conditions]);
     const scoped = hasChannelScopeFilter(filters);
