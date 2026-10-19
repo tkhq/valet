@@ -327,6 +327,17 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
     );
   });
 
+  it("refuses a name that is not a variable in either field, as the api does", () => {
+    const unknown = (name: string) =>
+      `{{${name}}} is not a variable. Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.`;
+    for (const name of ["foo", "event.title"]) {
+      const inInstructions = { ...mentionLine(), instructions: `Read {{${name}}}.` };
+      expect(saveBlocker(inInstructions, CREATE, { connected: true })).toBe(unknown(name));
+      const inMessage = { ...mentionLine(), promptTemplates: { userPromptTemplate: `Read {{${name}}}.` } };
+      expect(saveBlocker(inMessage, CREATE, { connected: true, services: SERVICES })).toBe(unknown(name));
+    }
+  });
+
   it("refuses an Event message payload variable that no picked event carries", () => {
     let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
     draft = { ...draft, name: "x", doKind: "work", anyChannel: true, promptTemplates: { userPromptTemplate: "From {{payload.user}}" } };

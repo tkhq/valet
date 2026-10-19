@@ -850,8 +850,15 @@ function placeholderNames(value: string): string[] | null {
   }
 }
 
+/** Every name a template may use: `VARIABLE_RE` in prompt-template.ts. */
+const VARIABLE_RE = /^(event\.(key|summary|body)|refs\.[A-Za-z0-9_-]+|payload\.[A-Za-z0-9_-]+)$/;
+
 /** The one name the instructions (`systemPrompt`) accept: `INSTRUCTION_VARIABLE_RE` in prompt-template.ts. */
 const INSTRUCTION_VARIABLE = "event.key";
+
+function unknownVariable(name: string): string {
+  return `{{${name}}} is not a variable. Use event.key, event.summary, event.body, refs.<name>, or payload.<field>.`;
+}
 
 /**
  * The refusal the server gives for the line's two templates, in the
@@ -863,6 +870,9 @@ function templateBlocker(draft: Draft, services: readonly CatalogService[]): str
   if (instructions.length > 0) {
     const names = placeholderNames(instructions);
     if (names === null) return "The instructions have an unclosed or nested {{. Close each {{ with }}.";
+    const unknown = names.find((name) => !VARIABLE_RE.test(name));
+    if (unknown !== undefined) return unknownVariable(unknown);
+    // The api accepts these names, but only in the Event message.
     const bad = names.find((name) => name !== INSTRUCTION_VARIABLE);
     if (bad !== undefined) return `Instructions cannot use event variables. Move {{${bad}}} to the Event message.`;
   }
@@ -870,6 +880,8 @@ function templateBlocker(draft: Draft, services: readonly CatalogService[]): str
   if (message.length > 0) {
     const names = placeholderNames(message);
     if (names === null) return "The Event message has an unclosed or nested {{. Close each {{ with }}.";
+    const unknown = names.find((name) => !VARIABLE_RE.test(name));
+    if (unknown !== undefined) return unknownVariable(unknown);
     if (services.length > 0) {
       const carried = new Set(unionFilterFields([...services], draft.events).map((f) => f.field));
       const missing = names.find((name) => name.startsWith("payload.") && !carried.has(name.slice("payload.".length)));
