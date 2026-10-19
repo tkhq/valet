@@ -10,6 +10,7 @@ import {
   draftFromLine,
   draftFromRoutine,
   exampleSteps,
+  hasCreatorScope,
   lineFromCreate,
   newDraft,
   removeCondition,
@@ -368,5 +369,19 @@ describe("Reply and Where follow the events (E7)", () => {
     // The same keys with the Where left on the new default send no thread.
     const asDefault = bodyFromDraft({ ...draft, where: { mode: "new" } }, { kind: "edit", line: sub });
     expect(asDefault.kind === "patch-line" ? asDefault.body.thread : "absent").toBeUndefined();
+  });
+});
+
+describe("small editor gaps (E10)", () => {
+  it("asks for a time when the time field is empty, and for a day when no day is picked", () => {
+    const base = { ...newDraft({ preselected: { schedule: true }, timezone: "UTC" }), name: "R", instructions: "x" };
+    expect(saveBlocker({ ...base, schedule: { ...base.schedule, time: "" } }, CREATE, { connected: true })).toBe("Enter a time, such as 09:00.");
+    expect(saveBlocker({ ...base, schedule: { ...base.schedule, days: new Set() } }, CREATE, { connected: true })).toBe("Pick at least one day.");
+  });
+
+  it("shows the creator scope on a team draft's workflow mention, which the server scopes to its creator", () => {
+    const team = toggleEvent(newDraft({ teamId: "t1", timezone: "UTC" }), "slack.app_mention", SERVICES);
+    expect(hasCreatorScope(team, CREATE)).toBe(false);
+    expect(hasCreatorScope({ ...team, doKind: "workflow" }, CREATE)).toBe(true);
   });
 });

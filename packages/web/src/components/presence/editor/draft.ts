@@ -473,7 +473,8 @@ export function isAssistantDraft(draft: Draft): boolean {
 /** True when a stored or created mention line hears only its creator. */
 export function hasCreatorScope(draft: Draft, mode: EditorMode): boolean {
   if (draft.service === "schedule" || !selectsSlackMention([...draft.events])) return false;
-  if (mode.kind === "create") return draft.assistant !== "team";
+  // A workflow line has no team assistant, so the server scopes it to its creator too.
+  if (mode.kind === "create") return !teamAssistantDraft(draft);
   return draft.creatorScopeId !== null;
 }
 
@@ -867,7 +868,9 @@ export function saveBlocker(
   const routine = draft.service === "schedule";
   if (mode.kind === "create" && !routine && !context.connected) return "Connect the service first.";
   if (routine) {
-    if (scheduleCron(draft.schedule).length === 0) return "Pick at least one day.";
+    if (scheduleCron(draft.schedule).length === 0) {
+      return draft.schedule.days.size === 0 ? "Pick at least one day." : "Enter a time, such as 09:00.";
+    }
   } else {
     if (draft.threadFollow && draftThread(draft) === null) return "Paste the thread's link.";
     if (draft.events.size === 0) return "Pick at least one event.";
