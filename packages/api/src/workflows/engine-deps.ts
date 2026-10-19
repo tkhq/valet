@@ -1,5 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
-import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
+import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over

@@ -1,4 +1,4 @@
-import { UNATTENDED_WORKFLOW_KEY, type Appearance } from "@valet/shared";
+import { UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type Appearance } from "@valet/shared";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
