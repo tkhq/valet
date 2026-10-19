@@ -49,6 +49,16 @@ describe("event receipts", () => {
     expect((await (await fetch(`${url}?q=secret`)).json() as ListEventReceiptsResponse).receipts).toEqual([]);
     expect((await (await fetch(`${url}?q=excluded`)).json() as ListEventReceiptsResponse).receipts).toHaveLength(3);
   });
+  // Review A12: the search reads the place key ingest records.
+  it("finds a receipt by its recorded place", async () => {
+    api = await bootTestApi(); const db = api.providers.db, now = Date.now();
+    await db.insert(eventReceipts).values([
+      { id: "r_api", orgId: "local-org", service: "github", metadata: { place: "github:acme/api" }, createdAt: now, updatedAt: now },
+      { id: "r_web", orgId: "local-org", service: "github", metadata: { place: "github:acme/web" }, createdAt: now, updatedAt: now },
+    ]);
+    const found = await (await fetch(`${api.baseUrl}/api/events/receipts?q=acme/api`)).json() as ListEventReceiptsResponse;
+    expect(found.receipts.map((r) => r.id)).toEqual(["r_api"]);
+  });
   it("narrows to one listener's receipts and fences the cursor to it", async () => {
     api = await bootTestApi(); const db = api.providers.db, now = Date.now();
     const decision = (id: string) => ({ id, ownerType: "user", ownerId: "local-user", target: "assistant", outcome: "matched" });

@@ -3,11 +3,13 @@ import { Hono } from "hono";
 import { and, desc, eq, gte, lt, or, sql, type SQL } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { eventReceipts } from "../schema/index.js";
-import { receiptWire } from "../events/receipts.js";
+import { RECEIPT_METADATA_KEYS, receiptWire } from "../events/receipts.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import type { ListEventReceiptsResponse } from "../wire/types.js";
 
 export const eventReceiptsRouter = new Hono<AppEnv>();
+/** The search reads every metadata key a receipt keeps, and no other. */
+const searchableKeys = sql.join([...RECEIPT_METADATA_KEYS].map((key) => sql`${key}`), sql`, `);
 eventReceiptsRouter.get("/events/receipts", async c => {
   if (!(await isOrgAdminUser(c))) return c.json({ error: "org admin required" }, 403);
   const orgId = c.var.user.orgId, db = c.var.providers.db;
@@ -22,7 +24,7 @@ eventReceiptsRouter.get("/events/receipts", async c => {
   if (q) {
     const pattern = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
     // Search only redacted identity fields and stage outcomes; never arbitrary raw payloads.
-    filters.push(sql`(${eventReceipts.id} ILIKE ${pattern} OR ${eventReceipts.externalId} ILIKE ${pattern} OR ${eventReceipts.service} ILIKE ${pattern} OR ${eventReceipts.eventKey} ILIKE ${pattern} OR ${eventReceipts.eventId} ILIKE ${pattern} OR EXISTS (SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(${eventReceipts.metadata}) = 'object' THEN ${eventReceipts.metadata} ELSE '{}'::jsonb END) m WHERE m.key = ANY(ARRAY['channelId','workspaceId','actorId','botId','appId','rawType','rawSubtype','messageTs','threadTs','retryNum','retryReason','botIdentityAvailable','botUserIdentityAvailable','payloadBytes','configuredTriggerCount']) AND m.value ILIKE ${pattern}) OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${eventReceipts.stages}) = 'array' THEN ${eventReceipts.stages} ELSE '[]'::jsonb END) s WHERE s->>'outcome' ILIKE ${pattern}))`);
+    filters.push(sql`(${eventReceipts.id} ILIKE ${pattern} OR ${eventReceipts.externalId} ILIKE ${pattern} OR ${eventReceipts.service} ILIKE ${pattern} OR ${eventReceipts.eventKey} ILIKE ${pattern} OR ${eventReceipts.eventId} ILIKE ${pattern} OR EXISTS (SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(${eventReceipts.metadata}) = 'object' THEN ${eventReceipts.metadata} ELSE '{}'::jsonb END) m WHERE m.key IN (${searchableKeys}) AND m.value ILIKE ${pattern}) OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${eventReceipts.stages}) = 'array' THEN ${eventReceipts.stages} ELSE '[]'::jsonb END) s WHERE s->>'outcome' ILIKE ${pattern}))`);
   }
   if (subscriptionId) {
     filters.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${eventReceipts.subscriptions}) = 'array' THEN ${eventReceipts.subscriptions} ELSE '[]'::jsonb END) d WHERE d->>'id' = ${subscriptionId})`);

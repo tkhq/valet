@@ -19,12 +19,12 @@ export function receiptCleanupDue(orgId: string, now: number): boolean {
  * natural subject (`github:acme/api`, `linear:team/ENG`), which ingest records
  * for every service but Slack; a Slack receipt keeps `channelId` and
  * `workspaceId`. Receipts written before ingest recorded `place` carry none. */
-const metadataKeys = new Set(["place", "channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
+export const RECEIPT_METADATA_KEYS: ReadonlySet<string> = new Set(["place", "channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
 const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch"]);
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const bounded = (value: unknown, max = 256): string => typeof value === "string" ? value.slice(0, max) : "";
 export function sanitizeReceiptMetadata(value: unknown): Record<string, string | number | boolean> {
-  return Object.fromEntries(Object.entries(record(value)).filter(([key, v]) => metadataKeys.has(key) && (typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v)))).map(([k, v]) => [k, typeof v === "string" ? v.slice(0, 256) : v])) as Record<string, string | number | boolean>;
+  return Object.fromEntries(Object.entries(record(value)).filter(([key, v]) => RECEIPT_METADATA_KEYS.has(key) && (typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v)))).map(([k, v]) => [k, typeof v === "string" ? v.slice(0, 256) : v])) as Record<string, string | number | boolean>;
 }
 export function sanitizeReceiptStages(value: unknown): ReceiptStage[] {
   return (Array.isArray(value) ? value : []).slice(-20).map(record).map(v => ({ stage: bounded(v.stage, 64), outcome: bounded(v.outcome, 64), detail: bounded(v.detail, 512), at: typeof v.at === "number" && Number.isFinite(v.at) ? v.at : 0 }));
