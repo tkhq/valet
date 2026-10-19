@@ -348,6 +348,31 @@ describe("Reply and Where follow the events (E7)", () => {
     expect(saveBlocker({ ...draft, doKind: "work" }, CREATE, { connected: true })).toBeNull();
   });
 
+  it("turns Reply into Work on it when a new line drops its last mention", () => {
+    let draft = toggleEvent(newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), "slack.app_mention", SERVICES, { create: true });
+    expect(draft.doKind).toBe("reply");
+    draft = toggleEvent(draft, "slack.message", SERVICES, { create: true });
+    expect(draft.doKind).toBe("reply");
+    draft = toggleEvent(draft, "slack.app_mention", SERVICES, { create: true });
+    expect(draft.doKind).toBe("work");
+    expect(saveBlocker({ ...draft, name: "x" }, CREATE, { connected: true })).toBeNull();
+  });
+
+  it("keeps Reply on a stored line and asks to keep the mention, since Do is locked", () => {
+    const sub = line("l1", {
+      name: "Mine",
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user", follow: true },
+    });
+    let draft = toggleEvent(draftFromLine(sub), "slack.message", SERVICES);
+    draft = toggleEvent(draft, "slack.app_mention", SERVICES);
+    expect(draft.doKind).toBe("reply");
+    expect(saveBlocker(draft, { kind: "edit", line: sub }, { connected: true })).toBe(
+      "Reply answers a mention. Keep the mention picked in When.",
+    );
+  });
+
   it("sends no thread when the Where default for the patched keys holds", () => {
     // No stored policy: a channel message line runs in a new thread by default.
     const sub = line("l1", { eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant", assistant: "user" } });

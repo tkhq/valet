@@ -160,6 +160,7 @@ export function WhenSection({
           ) : (
             <Events
               draft={draft}
+              create={mode.kind === "create"}
               onChange={onChange}
               services={services}
               loading={catalogLoading}
@@ -236,8 +237,10 @@ function ThreadLink({ draft, onChange }: { draft: Draft; onChange: (next: Draft)
   );
 }
 
-function Events({ draft, onChange, services, loading, error }: {
+function Events({ draft, create, onChange, services, loading, error }: {
   draft: Draft;
+  /** True on a new line: unchecking the last mention then turns Reply into Work on it. */
+  create: boolean;
   onChange: (next: Draft) => void;
   services: readonly CatalogService[];
   loading: boolean;
@@ -251,7 +254,7 @@ function Events({ draft, onChange, services, loading, error }: {
       <input
         type="checkbox"
         checked={draft.events.has(entry.key)}
-        onChange={() => onChange(toggleEvent(draft, entry.key, services))}
+        onChange={() => onChange(toggleEvent(draft, entry.key, services, { create }))}
       />
       {eventLabel(entry.key, [...services])}
     </label>

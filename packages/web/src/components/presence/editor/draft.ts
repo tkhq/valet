@@ -352,8 +352,17 @@ export function setService(draft: Draft, next: EditorService): Draft {
  * Picks or drops one event. A condition whose field no picked event
  * carries goes; the preselected place comes back once an event carries
  * its field again, unless the reader removed it.
+ *
+ * On a new line (`create`), unchecking the last mention turns Reply into
+ * Work on it: only a mention starts a conversation to reply in. A stored
+ * line locks Do, so its draft keeps Reply and Save says why.
  */
-export function toggleEvent(draft: Draft, key: string, services: readonly CatalogService[]): Draft {
+export function toggleEvent(
+  draft: Draft,
+  key: string,
+  services: readonly CatalogService[],
+  options: { create?: boolean } = {},
+): Draft {
   const events = new Set(draft.events);
   if (events.has(key)) events.delete(key);
   else events.add(key);
@@ -377,7 +386,9 @@ export function toggleEvent(draft: Draft, key: string, services: readonly Catalo
     conditions = [pin, ...conditions];
   }
   const creatorScopeId = conditions.some((row) => row.id === draft.creatorScopeId) ? draft.creatorScopeId : null;
-  return { ...draft, events, conditions, creatorScopeId, anyChannel: mention ? draft.anyChannel : false };
+  const lostMention = !mention && selectsSlackMention([...draft.events]);
+  const doKind = options.create === true && lostMention && draft.doKind === "reply" ? "work" : draft.doKind;
+  return { ...draft, events, conditions, creatorScopeId, doKind, anyChannel: mention ? draft.anyChannel : false };
 }
 
 const SLACK_MESSAGE = "slack.message";
@@ -898,9 +909,15 @@ export function saveBlocker(
     }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";
-    }    // Only a mention starts a conversation to reply in; a stored Reply on
-    // any other event would come back as Work on it.
-    if (draft.doKind === "reply" && !mention) return "Reply answers a mention. Pick the mention in When, or choose Work on it.";
+    }
+    // Only a mention starts a conversation to reply in; a stored Reply on
+    // any other event would come back as Work on it. A stored line locks Do,
+    // so its only way out is the mention.
+    if (draft.doKind === "reply" && !mention) {
+      return mode.kind === "create"
+        ? "Reply answers a mention. Pick the mention in When, or choose Work on it."
+        : "Reply answers a mention. Keep the mention picked in When.";
+    }
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
   if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";
