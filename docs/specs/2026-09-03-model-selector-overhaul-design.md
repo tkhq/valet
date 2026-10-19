@@ -287,7 +287,7 @@ already handles the token and persists it as the canonical id.
 Reasoning (new, parallel, resolved in `host.ts` at session build):
 
 `session/thread override → assistantDefault → userDefault → teamDefault →
-orgDefault → unset`.
+orgDefault → VALET_DEFAULT_REASONING (medium)`.
 
 The resolved level is clamped to `orgs.reasoning_settings.max` and then fed
 to `engine.createSession({ sampling: { reasoning } })`. The engine clamps to
@@ -392,8 +392,14 @@ Recorded during implementation (2026-09-03):
 - **No engine event on `setReasoning`.** The web UI reads the value back
   over REST. Add a `reasoning_switched` event if live sync is needed later.
 - **Clear vs unset.** `PATCH reasoning: null` clears the stored value. After
-  the next cache-eviction rebuild the cascade re-applies user/org defaults,
-  so a deliberate clear does not survive a rebuild when a default exists.
+  the next cache-eviction rebuild the cascade re-applies user/org defaults
+  or the Valet default, so a deliberate clear does not survive a rebuild.
+- **Valet default reasoning (2026-10-19).** If no assistant, user, team, or
+  org default is set, the cascade resolves `VALET_DEFAULT_REASONING`
+  (`medium`), clamped to the org max. Before this change, an unset cascade
+  sent no level, so the provider default applied. OpenAI reasoning models then
+  ran at minimal effort. The unset Default option on the org Models page
+  names this level.
 - **The cap is not retroactive.** A persisted level is never re-clamped. If
   an admin lowers the max after a session pinned a higher level, that
   session keeps its level across rebuilds ("clamp the cascade result only").

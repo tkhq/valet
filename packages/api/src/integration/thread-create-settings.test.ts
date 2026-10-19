@@ -130,7 +130,7 @@ describe("POST /api/sessions/:id/threads settings", () => {
     });
   }, 30_000);
 
-  it("does not inherit historical session reasoning when fresh defaults clear it", async () => {
+  it("uses the Valet default instead of historical session reasoning when no default is set", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
     const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
@@ -148,10 +148,28 @@ describe("POST /api/sessions/:id/threads settings", () => {
     const response = await createThread(api.baseUrl, sessionId, source.id);
     expect(response.status).toBe(201);
     const created = (await response.json()) as CreateThreadResponse;
-    expect(created.reasoning).toBeNull();
+    expect(created.reasoning).toBe("medium");
     expect((await api.providers.engineStore.getThread(sessionId, created.id))?.reasoning).toBe(
-      "off",
+      "medium",
     );
+  }, 30_000);
+
+  it("lists a legacy \"off\" thread with the session default", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
+    const sessionPatch = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: "high" }),
+    });
+    expect(sessionPatch.status).toBe(200);
+    // Older builds wrote "off" for a new thread with no resolved default.
+    const stored = (await api.providers.engineStore.getThread(sessionId, source.id))!;
+    await api.providers.engineStore.saveThread(sessionId, { ...stored, reasoning: "off" });
+
+    const listed = (await listThreads(api.baseUrl, sessionId)).threads.find((thread) => thread.id === source.id);
+    expect(listed?.reasoning).toBe("high");
   }, 30_000);
 
   it("rejects a missing or cross-session source without creating a thread", async () => {

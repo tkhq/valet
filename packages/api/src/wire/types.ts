@@ -3736,9 +3736,15 @@ export interface PutApprovedModelsRequest {
 /** `PUT /api/org/approved-models` — response. */
 export type PutApprovedModelsResponse = GetApprovedModelsResponse;
 
+/**
+ * Reasoning level a new thread gets when no assistant, user, team, or org
+ * default is set. The org max still clamps it.
+ */
+export const VALET_DEFAULT_REASONING = "medium";
+
 /** Org-level reasoning settings. */
 export interface OrgReasoningSettings {
-  /** Default reasoning/thinking level. */
+  /** Default reasoning/thinking level. Unset uses `VALET_DEFAULT_REASONING`. */
   default?: string;
   /** Maximum allowed reasoning level. */
   max?: string;

@@ -1054,6 +1054,41 @@ describe("EngineHost model resolution wiring", () => {
       expect(session.options.sampling?.reasoning).toBe("medium");
     });
 
+    it("falls back to the Valet default when no layer sets one", async () => {
+      api = await bootTestApi();
+      const { engineHost } = api.providers;
+
+      const session = await engineHost.sessionFor("reasoning-valet-default", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("medium");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      })).toMatchObject({ reasoning: "medium" });
+    });
+
+    it("clamps the Valet default to the org max", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgReasoningSettings(db, "local-org", { max: "low" });
+
+      const session = await engineHost.sessionFor("reasoning-valet-default-clamp", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("low");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      })).toMatchObject({ reasoning: "low" });
+    });
+
     it("a resolved level above the org max clamps down to the max", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;

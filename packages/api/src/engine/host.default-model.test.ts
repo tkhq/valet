@@ -168,7 +168,7 @@ describe("EngineHost default model", () => {
     expect(await session.threadByKey("slack:retry")).toBeNull();
     const thread = await engineHost.ensureFreshThread(session, "slack:retry", meta);
     expect(save).toHaveBeenCalledTimes(2);
-    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: "s", reasoning: "off" });
+    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: "s", reasoning: "medium" });
   });
 
   it("shares pending thread persistence across concurrent callers", async () => {
@@ -214,8 +214,7 @@ describe("EngineHost default model", () => {
     const restored = await wake();
     const existing = await engineHost.ensureFreshThread(restored, "slack:existing", meta);
     expect(existing.modelId()).toBe("claude-sonnet-4-5");
-    expect(existing.toThreadData().reasoning).toBe("off");
-    expect(existing.reasoning()).toBeUndefined();
+    expect(existing.reasoning()).toBe("medium");
     expect(resolver).not.toHaveBeenCalled();
   });
 

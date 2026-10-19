@@ -59,7 +59,7 @@ import {
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
-import type { RepoBinding } from "../wire/types.js";
+import { VALET_DEFAULT_REASONING, type RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
 import {
@@ -1235,7 +1235,7 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             resolveFallbackModel,
-            ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+            sampling: { reasoning },
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1267,7 +1267,7 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           resolveFallbackModel,
-          ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+          sampling: { reasoning },
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -2822,7 +2822,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
       ...(principal.type === "team" && !execution && !legacyRuntime ? {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
@@ -3573,10 +3573,11 @@ export class EngineHost {
    * on shutdown). So on restore (`existing` present), the *persisted* value
    * always wins outright over every cascade tier. Only on create does the
    * preference cascade apply:
-   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
-   * — most-specific wins — and the resolved level (if any) is clamped to the
-   * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
-   * level (a stale/invalid column) is treated as unset rather than thrown.
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ??
+   * VALET_DEFAULT_REASONING` — most-specific wins — and the resolved level is
+   * clamped to the org's cap (`clampToMax`). A value that isn't a known level
+   * (a stale/invalid column) is treated as unset rather than thrown, so every
+   * build and every new thread gets a concrete level.
    *
    * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
    * site already uses for `resolveModelForBuild` — see that method's doc
@@ -3586,18 +3587,15 @@ export class EngineHost {
     existing: SessionData | null,
     orgId: string,
     prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
-  ): Promise<ReasoningLevel | undefined> {
-    if (existing?.reasoning) {
-      return isReasoningLevel(existing.reasoning) ? existing.reasoning : undefined;
-    }
+  ): Promise<ReasoningLevel> {
+    if (isReasoningLevel(existing?.reasoning)) return existing.reasoning;
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
       prefs.assistantDefault ??
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
-    if (!isReasoningLevel(level)) return undefined;
-    return clampToMax(level, settings.max);
+    return clampToMax(isReasoningLevel(level) ? level : VALET_DEFAULT_REASONING, settings.max);
   }
 
   /**
@@ -3635,7 +3633,7 @@ export class EngineHost {
     sessionId: string,
     meta: SessionMeta,
     actorUserId = meta.userId,
-  ): Promise<{ model: string; reasoning: ReasoningLevel | null }> {
+  ): Promise<{ model: string; reasoning: ReasoningLevel }> {
     const assistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, sessionId)
       : undefined;
@@ -3656,10 +3654,7 @@ export class EngineHost {
       ownerTeamId,
       assistantDefault: legacyModel.reasoning,
     });
-    return {
-      model: spec,
-      reasoning: reasoning ?? null,
-    };
+    return { model: spec, reasoning };
   }
 
   /** Resolve an existing startup image before child creation mutates state. */
@@ -3951,7 +3946,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -4137,7 +4132,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,

@@ -254,18 +254,23 @@ describeE2E("api integration: phase 4 exit criteria — full orchestrator loop",
       expect(childText).toContain("p4-loop-ok");
 
       // ── 4. mem_patch appends a note to today's journal ─────────────────
-      const todayPath = `journal/${new Date().toISOString().slice(0, 10)}.md`;
+      const today = new Date().toISOString().slice(0, 10);
+      const todayPath = `journal/${today}.md`;
       const before = await readMemoryFile(db, { owner: { type: "user", id: "local-user" }, actorUserId: "local-user" }, todayPath);
       const beforeContent = before.kind === "file" ? before.file.content : "";
+      expect(beforeContent).toBe(`# ${today}\n`);
 
       await driveTurn({
         baseUrl: api.baseUrl,
         wsUrl: api.wsUrl,
         sessionId,
+        // Name the journal's current body: with no read allowed, the model
+        // otherwise guesses the trailing whitespace and the one patch misses.
         prompt:
           "Use mem_patch exactly once to append the exact line " +
-          '"p4-loop journal note" to the end of today\'s journal file, ' +
-          "then reply 'journaled' and stop. Do not use any other tools.",
+          `"p4-loop journal note" to the end of today's journal file, ${todayPath}. ` +
+          `Its whole current body is the heading line "# ${today}" and one newline. ` +
+          "Then reply 'journaled' and stop. Do not use any other tools.",
         timeoutMs: 60_000,
       });
 

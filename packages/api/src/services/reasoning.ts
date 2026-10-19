@@ -7,7 +7,8 @@
  * for new sessions and a maximum allowed level (cap) that no session can exceed.
  *
  * The org's reasoning settings live in `orgs.reasoning_settings` (jsonb, nullable).
- * A null column means no default and no cap.
+ * A null column means no org default and no cap. With no org, team, or user
+ * default, a new thread uses `VALET_DEFAULT_REASONING` (`wire/types.ts`).
  */
 import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";

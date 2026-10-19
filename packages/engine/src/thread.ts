@@ -62,7 +62,6 @@ import {
   parseReasoningLevel,
   REASONING_LEVELS,
   resolveReasoningLevel,
-  THREAD_REASONING_DISABLED,
   type ReasoningLevel,
 } from "./reasoning.js";
 import { extractStructuredOutput } from "./result-schema.js";
@@ -569,8 +568,6 @@ export class Thread {
    * here — see `resolveReasoningLevel`.
    */
   private reasoningOverride?: ReasoningLevel;
-  /** True when this thread explicitly bypasses the session reasoning default. */
-  private reasoningDisabled = false;
   /**
    * Agent-initiated escalation, scoped to the CURRENT turn (TKAI-338).
    *
@@ -631,7 +628,6 @@ export class Thread {
     // An unrecognized persisted token degrades to "no pin" instead of
     // killing the rehydrate (parseReasoningLevel).
     this.reasoningOverride = parseReasoningLevel(data.reasoning);
-    this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     const initialFocus = session.options.initialToolFocus?.({ key: data.key });
@@ -2217,7 +2213,7 @@ export class Thread {
       queueMode: this.mode,
       paused: this.paused,
       model: this.modelOverride,
-      reasoning: this.reasoningDisabled ? THREAD_REASONING_DISABLED : this.reasoningOverride,
+      reasoning: this.reasoningOverride,
       summary: undefined,
       metadata: this.threadMetadata,
       createdAt: this.threadCreatedAt,
@@ -2351,7 +2347,6 @@ export class Thread {
   async setReasoning(level: string | null): Promise<void> {
     if (level === null) {
       this.reasoningOverride = undefined;
-      this.reasoningDisabled = false;
     } else {
       // Validate before assigning so a bad token leaves the pin intact.
       if (!isReasoningLevel(level)) {
@@ -2360,7 +2355,6 @@ export class Thread {
         );
       }
       this.reasoningOverride = level;
-      this.reasoningDisabled = false;
     }
     await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
   }
@@ -5266,7 +5260,7 @@ export class Thread {
             model,
             options?.reasoning,
             this.reasoningOverride,
-            this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
+            this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
         }, this.session.sandbox, {

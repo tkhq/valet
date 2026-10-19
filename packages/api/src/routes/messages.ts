@@ -445,8 +445,10 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const wantArchived = c.req.query("archived") === "1";
   const selectedThreadId = c.req.query("threadId");
   const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
+  // Parse stored tokens: a legacy "off" row has no pin and shows the session default.
   const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key)).map(t => ({ ...t,
-    model: t.model ?? group.defaults?.model, reasoning: t.reasoning ?? group.defaults?.reasoning })));
+    model: t.model ?? group.defaults?.model,
+    reasoning: parseReasoningLevel(t.reasoning) ?? parseReasoningLevel(group.defaults?.reasoning) })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
   // (titles populated by auto-title). One lookup by id set — small, since a

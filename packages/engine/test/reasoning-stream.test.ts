@@ -92,6 +92,43 @@ describe("engine: reasoning reaches the stream call", () => {
     faux.unregister();
   });
 
+  it("sends the session default for a legacy \"off\" thread row", async () => {
+    const seen: Array<SimpleStreamOptions | undefined> = [];
+    const faux = registerFauxProvider({
+      provider: "reason4",
+      models: [{ id: "legacy-model", reasoning: true }],
+    });
+    faux.setResponses([
+      (_context, options) => {
+        seen.push(options);
+        return fauxAssistantMessage("ok");
+      },
+    ]);
+    const providers = {
+      store: new InMemorySessionStore(),
+      stream: new InMemoryEventStream(),
+      sandboxProvider: new VirtualSandboxProvider(),
+    };
+    const options = () => ({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      sampling: { reasoning: "medium" as const },
+    });
+    const session = await new Engine({ providers }).createSession(options());
+    const thread = await session.createThread("web:legacy");
+    await providers.store.saveThread(session.id, { ...thread.toThreadData(), reasoning: "off" });
+
+    const restored = await new Engine({ providers }).restoreSession({ sessionId: session.id, options: options() });
+    await restored.prompt("one", { threadId: thread.id });
+    await waitForCalls(seen, 1);
+    expect(seen[0]?.reasoning).toBe("medium");
+
+    faux.unregister();
+  });
+
   it("clamps the pin to the model instead of rewriting it", async () => {
     const seen: Array<SimpleStreamOptions | undefined> = [];
     const faux = registerFauxProvider({

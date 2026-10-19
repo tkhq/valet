@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * ReasoningSection (model-selector-overhaul, Task 13): two selects over
- * `REASONING_LEVELS` with an "Inherit"/"No cap" empty option; each change
+ * `REASONING_LEVELS` with a "Valet default"/"No cap" empty option; each change
  * issues its own `PatchOrgReasoningRequest` field, and default options
  * above the chosen max render disabled.
  */
@@ -31,11 +31,28 @@ beforeEach(() => {
 });
 
 describe("ReasoningSection", () => {
-  it("defaults both selects to the empty (Inherit / No cap) option", () => {
+  it("defaults both selects to the empty (Valet default / No cap) option", () => {
     render(<ReasoningSection />);
 
     expect(screen.getByLabelText("Default")).toHaveProperty("value", "");
     expect(screen.getByLabelText("Max")).toHaveProperty("value", "");
+  });
+
+  it("names the level new threads get when Default is unset", () => {
+    render(<ReasoningSection />);
+
+    const empty = Array.from((screen.getByLabelText("Default") as HTMLSelectElement).options)
+      .find((o) => o.value === "");
+    expect(empty?.textContent).toBe("Valet default (Medium)");
+  });
+
+  it("clamps the named Valet default to the chosen Max", () => {
+    reasoningData = { max: "low" };
+    render(<ReasoningSection />);
+
+    const empty = Array.from((screen.getByLabelText("Default") as HTMLSelectElement).options)
+      .find((o) => o.value === "");
+    expect(empty?.textContent).toBe("Valet default (Low)");
   });
 
   it("changing Default sends { default: value }", async () => {
