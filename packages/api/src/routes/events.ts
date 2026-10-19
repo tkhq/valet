@@ -465,16 +465,17 @@ eventsRouter.get("/events/log", async (c) => {
       return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, row, place)).map((row) => row.id));
     }
     : undefined;
-  const { items, hasMore } = await listEventLog(db, {
+  const { items, next } = await listEventLog(db, {
     // A problem names no place, so a place filter keeps events only.
     orgId: user.orgId, owner, admin, limit, problemsOnly, diagnostics: diagnostics && !place,
     ...(q ? { q } : {}), ...(before ? { before } : {}), ...(keepEvents ? { keepEvents } : {}),
     channelVisible: channelsVisibleTo(c),
   });
-  const last = items.at(-1);
   const resp: EventLogResponse = {
     items: await withPlacesAndDeliveries(c, items, owner),
-    nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
+    // A page that scanned only rows this viewer may not see is empty, and
+    // its cursor still reads on from where the scan stopped.
+    nextCursor: next ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: next.at, id: next.id }) : null,
     lastEventAt: await lastEventLogActivity(db, user.orgId, admin, diagnostics),
     windowDays: EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000),
   };

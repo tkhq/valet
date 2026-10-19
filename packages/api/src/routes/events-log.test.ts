@@ -246,6 +246,30 @@ it("keeps only the events in a place, or inside it, when the Log reads place= (p
   expect(bad.status).toBe(400);
 });
 
+// Review A2: a page whose bounded scan kept no row is empty, and its cursor
+// reads on from where the scan stopped, so the reader can reach older rows.
+it("returns a cursor at the scan frontier when a place page scanned past every row", async () => {
+  api = await bootTestApi({ plugins: [githubPlugin] });
+  await seed(api);
+  const now = Date.now();
+  const githubEvent = (id: string, subjects: string[], at: number) => ({
+    id, orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: id,
+    refs: {}, subjects, summary: id, payload: {}, occurredAt: at, receivedAt: at,
+  });
+  const others = Array.from({ length: 45 }, (_, i) => githubEvent(`ev_web_${i}`, ["github:acme/web"], now - 100 - i));
+  await api.providers.db.insert(events).values([...others, githubEvent("ev_api", ["github:acme/api"], now - 500)]);
+  await api.providers.db.insert(eventDeliveries).values([...others.map((e) => e.id), "ev_api"].map((eventId) => ({
+    id: `d_${eventId}`, eventId, subscriptionId: "sub_mine", status: "delivered" as const, attempts: 1, nextAttemptAt: 0, createdAt: now,
+  })));
+  const place = `&limit=1&place=${encodeURIComponent("github:acme/api")}`;
+  const first = await log(api, place);
+  expect(first.items).toEqual([]);
+  expect(first.nextCursor).toBeTruthy();
+  const second = await log(api, `${place}&cursor=${encodeURIComponent(first.nextCursor!)}`);
+  expect(second.items.map((item) => item.id)).toEqual(["ev_api"]);
+  expect(second.nextCursor).toBeNull();
+});
+
 it("lists each stored event's deliveries to this workspace's rules, newest first", async () => {
   api = await bootTestApi();
   await seed(api);

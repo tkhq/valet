@@ -71,13 +71,28 @@ function escapeLike(value: string): string {
 /** How many pages of events one Log read scans past hidden rows. */
 const MAX_SCAN_BATCHES = 20;
 
-export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ items: EventLogItem[]; hasMore: boolean }> {
+/** One Log page. `next` is the sort key the next page reads before, or null
+ * when nothing older remains. */
+export interface EventLogPage {
+  items: EventLogItem[];
+  hasMore: boolean;
+  next: { at: number; id: string } | null;
+}
+
+/** Whether `a` sorts at or before `b`, newest first by time, then by id. */
+function atOrNewer(a: { at: number; id: string }, b: { at: number; id: string }): boolean {
+  return a.at > b.at || (a.at === b.at && a.id >= b.id);
+}
+
+export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<EventLogPage> {
   const { orgId, owner, problemsOnly, limit } = query;
   const like = query.q ? `%${escapeLike(query.q)}%` : undefined;
   const take = limit + 1;
 
   const eventRows: EventLogItem[] = [];
   let moreEvents = false;
+  // The last event row the scan read when it stopped at its bound.
+  let frontier: { at: number; id: string } | undefined;
   {
     const where: SQL[] = [
       sql`e.org_id = ${orgId}`,
@@ -94,7 +109,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     // the events run out. The scan is bounded; past it the page says more.
     let before = query.before;
     for (let batch = 0; eventRows.length < take; batch++) {
-      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; break; }
+      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; frontier = before; break; }
       const scoped = before ? [...where, sql`(e.received_at, e.id) < (${before.at}, ${before.id})`] : where;
       const result = await db.execute(sql`
         SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
@@ -158,8 +173,19 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     }
   }
 
-  const merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-  return { items: merged.slice(0, limit), hasMore: merged.length > limit || moreEvents };
+  let merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  // A scan that stopped at its bound read no event older than its frontier,
+  // so the page ends there: an older problem waits for the next page, which
+  // reads on from the frontier. A page whose scan kept no row still carries
+  // the frontier, so the reader can continue past rows it may not see.
+  if (frontier !== undefined) {
+    const end = frontier;
+    merged = merged.filter((item) => atOrNewer(item, end));
+  }
+  const items = merged.slice(0, limit);
+  const last = items.at(-1);
+  const next = merged.length > limit && last ? { at: last.at, id: last.id } : frontier ?? null;
+  return { items, hasMore: next !== null, next };
 }
 
 /** One delivery row as `supersedingDeliveries` reads it. */
