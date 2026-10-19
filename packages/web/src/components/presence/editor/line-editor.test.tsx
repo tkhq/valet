@@ -225,6 +225,18 @@ describe("LineEditor", () => {
     expect(shown).toBe("When a check completes on acme/api, work in the Platform CI thread.");
   });
 
+  it("diffs the patch against the line as it was at open, not a refetched row (E3)", () => {
+    const onOpenChange = vi.fn();
+    const { rerender } = render(<LineEditor open onOpenChange={onOpenChange} mode={{ kind: "edit", line: CHECK_LINE }} />);
+    // Another tab renames the line; a refetch hands the launcher the new row.
+    rerender(<LineEditor open onOpenChange={onOpenChange} mode={{ kind: "edit", line: { ...CHECK_LINE, name: "Renamed elsewhere", updatedAt: Date.now() } }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Change Where" }));
+    fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const { body } = patchSubscription.mock.calls[0]?.[0] as { body: PatchEventSubscriptionRequest };
+    expect(body).toEqual({ thread: { mode: "new" } });
+  });
+
   it("opens the section a launcher names, and only that one", () => {
     renderEditor({ kind: "edit", line: CHECK_LINE, initialSection: "where" });
     expect(openSections()).toEqual(["where"]);

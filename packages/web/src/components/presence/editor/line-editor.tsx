@@ -133,12 +133,18 @@ function overlapTeamName(
   return other === undefined ? undefined : teamName(teams, other.ownerId);
 }
 
-function EditorSheet({ onOpenChange, mode, onSaved, onCloseAutoFocus }: {
+function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus }: {
   onOpenChange(open: boolean): void;
   mode: EditorMode;
   onSaved?(result: EditorSaved): void;
   onCloseAutoFocus?(event: Event): void;
 }) {
+  // The mode as it was at open. Launchers pass the live query row, which a
+  // refetch replaces while the sheet is open. The draft seeds from the open
+  // copy, so the patch diffs against that copy too; a diff against a newer
+  // row would send the old value of a field another tab changed. There is
+  // deliberately no sync: a new mode needs a new open (CLAUDE.md, mount-time state).
+  const [mode] = useState(openedMode);
   const phone = useIsPhone();
   const catalogQ = useEventCatalog();
   const services = catalogQ.data?.services ?? [];
