@@ -143,9 +143,34 @@ describe("place condition (Part H step 11, Review Focus 4)", () => {
     let draft = newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" });
     draft = toggleEvent(draft, "slack.app_mention", SERVICES);
     draft = toggleEvent(draft, "slack.app_mention", SERVICES);
-    expect(draft.conditions).toEqual([]);
+    // No event is picked, so no field set exists to prune against: the place stays.
+    expect(draft.conditions.map((r) => r.value)).toEqual(["C1"]);
     draft = toggleEvent(draft, "slack.message", SERVICES);
     expect(draft.conditions.map((r) => r.value)).toEqual(["C1"]);
+  });
+
+  it("keeps every condition when the only event is unchecked and another is checked (E9)", () => {
+    let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.message", SERVICES);
+    draft = addCondition(draft, { id: "c1", field: "channel", op: "eq", value: "C1" });
+    draft = toggleEvent(draft, "slack.message", SERVICES);
+    expect(draft.conditions.map((r) => r.id)).toEqual(["c1"]);
+    draft = toggleEvent(draft, "slack.app_mention", SERVICES);
+    expect(draft.conditions.map((r) => r.id)).toEqual(["c1"]);
+  });
+
+  it("drops the creator scope with the mention, so no hidden sender condition stays (E1)", () => {
+    const sub = line("l1", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user", follow: true },
+    });
+    let draft = draftFromLine(sub);
+    draft = toggleEvent(draft, "slack.message", SERVICES);
+    expect(draft.creatorScopeId).not.toBeNull();
+    draft = toggleEvent(draft, "slack.app_mention", SERVICES);
+    expect(draft.creatorScopeId).toBeNull();
+    const body = bodyFromDraft(draft, { kind: "edit", line: sub });
+    expect(body.kind === "patch-line" ? body.body.filters : undefined).toEqual([{ field: "channel", op: "eq", value: "C1" }]);
   });
 
   it("keeps a removed place removed", () => {

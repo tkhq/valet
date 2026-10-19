@@ -348,7 +348,15 @@ export function toggleEvent(draft: Draft, key: string, services: readonly Catalo
   if (events.has(key)) events.delete(key);
   else events.add(key);
   const fields = unionFilterFields([...services], events);
-  let conditions = pruneFilterRows([...draft.conditions], fields);
+  const mention = selectsSlackMention([...events]);
+  let conditions = [...draft.conditions];
+  // The creator scope belongs to a mention. With no mention picked, nothing
+  // shows the row and the server no longer adds it, so it goes with the
+  // mention instead of narrowing the other events unseen.
+  if (!mention && draft.creatorScopeId !== null) conditions = conditions.filter((row) => row.id !== draft.creatorScopeId);
+  // An empty event set carries no fields. Pruning against it would drop
+  // every condition on the way from one event to another.
+  if (events.size > 0) conditions = pruneFilterRows(conditions, fields);
   const pin = draft.placeRow;
   if (
     pin !== null &&
@@ -359,7 +367,7 @@ export function toggleEvent(draft: Draft, key: string, services: readonly Catalo
     conditions = [pin, ...conditions];
   }
   const creatorScopeId = conditions.some((row) => row.id === draft.creatorScopeId) ? draft.creatorScopeId : null;
-  return { ...draft, events, conditions, creatorScopeId, anyChannel: selectsSlackMention([...events]) ? draft.anyChannel : false };
+  return { ...draft, events, conditions, creatorScopeId, anyChannel: mention ? draft.anyChannel : false };
 }
 
 const SLACK_MESSAGE = "slack.message";
