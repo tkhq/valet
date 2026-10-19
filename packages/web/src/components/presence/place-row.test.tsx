@@ -86,7 +86,7 @@ const PAUSED = line("R5", {
   eventKeys: ["github.check_run.completed"],
   filters: ACME,
   enabled: false,
-  target: { kind: "assistant", thread: { mode: "own" }, overlapPausedAt: 1 },
+  target: { kind: "assistant", thread: { mode: "own" }, appearance: { displayName: "Ops Bot" }, overlapPausedAt: 1 },
 });
 const OFF = line("R6", {
   name: "Old checks",
@@ -214,12 +214,37 @@ describe("PlaceRow", () => {
     expect(within(rowOf(sentence)).queryByText("Off")).toBeNull();
   });
 
-  it("shows one Appears as line after the sentences when a line sets an appearance", () => {
+  it("shows one Appears as line after the sentences when every line shares one appearance", () => {
     renderRow(block({}));
     expect(screen.getAllByText("Appears as Ops Bot")).toHaveLength(1);
+    // The row line says it, so no sentence repeats it.
+    expect(screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request." })).toBeTruthy();
     cleanup();
     renderRow(block({ lines: [OFF] }));
     expect(screen.queryByText(/^Appears as/)).toBeNull();
+  });
+
+  it("keeps each line's own as clause and no row line when the lines differ in appearance", () => {
+    const valetLine = line("R7", {
+      name: "Plain checks",
+      eventKeys: ["github.check_run.completed"],
+      filters: ACME,
+      target: { kind: "assistant", thread: { mode: "own" } },
+    });
+    renderRow(block({ lines: [R1, valetLine] }));
+    expect(screen.queryByText(/^Appears as/)).toBeNull();
+    expect(screen.getByRole("link", { name: /^When a pull request review or a check completes, work in one thread per pull request, as Ops Bot/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "When a check completes, work in its own thread." })).toBeTruthy();
+    cleanup();
+    const otherBot = line("R8", {
+      name: "Other checks",
+      eventKeys: ["github.check_run.completed"],
+      filters: ACME,
+      target: { kind: "assistant", thread: { mode: "own" }, appearance: { displayName: "Night Bot" } },
+    });
+    renderRow(block({ lines: [R1, otherBot] }));
+    expect(screen.queryByText(/^Appears as/)).toBeNull();
+    expect(screen.getByRole("link", { name: /^When a check completes, work in its own thread, as Night Bot/ })).toBeTruthy();
   });
 
   it("opens the editor fixed on the place from a quiet + Listen for…", () => {

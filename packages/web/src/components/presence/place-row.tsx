@@ -6,7 +6,8 @@
  * wait) and the time of the last activity. In a team workspace, a Slack
  * row's overflow menu offers `Choose channels`, which opens the team's
  * channel dialog (`TeamSlackSetupModal`, the dialog `ListenButton` opens). The sentence column holds one sentence row per
- * line of presence, one `Appears as` line when a line sets an appearance,
+ * line of presence, one `Appears as` line when every line shares one
+ * appearance (else each sentence keeps its own `as …` clause),
  * and a quiet `+ Listen for…` that opens the editor fixed on the place. At
  * phone width the place column stacks above the sentence column. The row
  * names the place, so a sentence leaves out its `<in|on> <place>` clause.
@@ -81,7 +82,7 @@ export function PlaceRow({ block, highlighted = false }: {
   const sentence = usePresenceSentenceParts(block.lines);
   const active = activeThreadsText(block.activeThreadCount);
   const placeLabel = block.serviceWide ? SERVICE_NAMES[block.service] : block.label;
-  const appearing = block.lines.find(hasAppearance);
+  const appearing = sharedAppearance(block.lines);
   return (
     <section
       aria-label={block.label}
@@ -144,6 +145,18 @@ export function PlaceRow({ block, highlighted = false }: {
       />
     </section>
   );
+}
+
+/**
+ * The line whose appearance every line on the row shares, or undefined.
+ * The row shows one `Appears as` line only when no line differs; a line
+ * without an appearance appears as the default, so it differs from any set
+ * appearance. Otherwise each line keeps its own `, as <name>` clause.
+ */
+export function sharedAppearance(lines: readonly EventSubscriptionWire[]): EventSubscriptionWire | undefined {
+  const first = lines[0];
+  if (first === undefined || !hasAppearance(first)) return undefined;
+  return lines.every((line) => sameAppearance(line, first)) ? first : undefined;
 }
 
 /** True when a line appears as the place's `Appears as` line already says, so its sentence drops `, as <name>`. */
