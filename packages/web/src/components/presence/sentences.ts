@@ -1263,6 +1263,27 @@ const SKIP_WORDS: Readonly<Record<Exclude<NonNullable<LineActivityEntryWire["rea
   claimed: "another line claimed it",
 };
 
+/** `gave up after <n> tries` when the api sends the attempt count, else `gave up`. */
+function gaveUpWords(outcome: LineActivityEntryWire["outcome"]): string {
+  // `attempts` is not on the wire type yet; read it only when the api sends it.
+  const attempts = outcome !== undefined && "attempts" in outcome && typeof outcome.attempts === "number" ? outcome.attempts : undefined;
+  if (attempts === undefined || attempts < 1) return "gave up";
+  return `gave up after ${attempts} ${attempts === 1 ? "try" : "tries"}`;
+}
+
+/**
+ * A dead entry's error as one sentence for the Activity's right column:
+ * without an `error:` prefix, first letter upper case, with a final period.
+ * A fix sentence the api wrote stays as written. Null when there is no text.
+ */
+export function deadErrorSentence(deadText: string | undefined): string | null {
+  if (!hasText(deadText)) return null;
+  const bare = deadText.trim().replace(/^(error:\s*)+/i, "");
+  if (bare.length === 0) return null;
+  const sentence = upperFirst(bare);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
 /** What an acted entry reached, as parts after the arrow. */
 function actedOutcomeParts(entry: LineActivityEntryWire, names: LineEntryNames): SentencePart[] {
   const outcome = entry.outcome;
@@ -1280,7 +1301,7 @@ function actedOutcomeParts(entry: LineActivityEntryWire, names: LineEntryNames):
         const title = outcome.thread?.title ?? names.pinTitle;
         return [text("could not reach "), hasText(title) ? { kind: "thread", text: title } : text("the pinned thread"), text(", it is archived")];
       }
-      return [text(hasText(dead) ? `gave up: ${asTail(dead)}` : "gave up")];
+      return [text(gaveUpWords(outcome))];
     }
     case "pending":
       return [text("waiting for the first attempt")];

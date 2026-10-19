@@ -19,7 +19,7 @@ export interface TimelineEntry {
   kind: "acted" | "skipped";
   at: number;
   parts: readonly SentencePart[];
-  /** The right column: the time it took, or `gave up`. */
+  /** The right column: the time it took, or for a dead entry `gave up` or its error. */
   took?: string;
   tookDanger?: boolean;
 }
@@ -132,7 +132,9 @@ export function ActivityTimeline({
                   />
                   <Sentence parts={entry.parts} />
                 </span>
-                <span className={cn("text-[13px]", entry.tookDanger ? "text-danger-500" : "text-muted")}>{entry.took ?? ""}</span>
+                <span className={cn("max-w-[16rem] text-right text-[13px] [overflow-wrap:anywhere]", entry.tookDanger ? "text-danger-500" : "text-muted")}>
+                  {entry.took ?? ""}
+                </span>
               </li>
             ))}
           </ul>

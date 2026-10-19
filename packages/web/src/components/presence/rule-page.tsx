@@ -43,7 +43,7 @@ import { Ref } from "./ref";
 import { Sentence } from "./sentence";
 import { ServiceMark } from "./service-mark";
 import {
-  doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, tookInWords,
+  deadErrorSentence, doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, tookInWords,
   whenExplanation, whereExplanation, whereParts, type LineEntryNames, type SentencePart, type SentenceService, type ThreadTitles,
   type WorkflowNames,
 } from "./sentences";
@@ -121,10 +121,18 @@ export function lineColumns(
   ];
 }
 
+/** The right column of a dead entry: `gave up` for an archived pin, whose
+ * left text names the thread, else the error once, as a sentence. */
+function deadColumn(entry: LineActivityEntryWire, names: LineEntryNames): string | undefined {
+  const text = entry.outcome?.deadText;
+  if (text !== undefined && names.isPinText?.(text) === true) return "gave up";
+  return deadErrorSentence(text) ?? undefined;
+}
+
 /** One entry of the line's Activity, ready for the timeline. */
 export function lineTimelineEntry(entry: LineActivityEntryWire, names: LineEntryNames): TimelineEntry {
   const dead = entry.kind === "acted" && entry.outcome?.status === "dead";
-  const took = dead ? "gave up" : entry.kind === "acted" && entry.tookMs !== undefined ? tookInWords(entry.tookMs) : undefined;
+  const took = dead ? deadColumn(entry, names) : entry.kind === "acted" && entry.tookMs !== undefined ? tookInWords(entry.tookMs) : undefined;
   return {
     id: entry.id,
     kind: entry.kind,

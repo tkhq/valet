@@ -401,6 +401,15 @@ describe("RulePage", () => {
     expect(getLineActivity).toHaveBeenCalledWith("R4", { limit: 50, before: "c-1" });
   });
 
+  it("reads a dead entry's error once, in the right column, as a sentence (S14)", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    getLineActivity.mockResolvedValue(activity([acted("d-dead", { outcome: { status: "dead", deadText: "error: HTTP 500 from the assistant" } })]));
+    renderPage();
+    await waitFor(() => expect(activityRows()).toHaveLength(1));
+    expect(activityRows()[0]).toContain("Completed check on acme/api#14 → gave upHTTP 500 from the assistant.");
+    expect(activityRows()[0]).not.toMatch(/error:/i);
+  });
+
   it("fetches past empty pages by itself, three times, then offers Show earlier (S13)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     getLineActivity.mockImplementation(async (_id, params) => activity([], { nextCursor: `c-${Number(params?.before?.slice(2) ?? "0") + 1}` }));

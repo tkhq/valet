@@ -15,6 +15,7 @@ import {
   activityPartsText,
   activitySentenceParts,
   cronInWords,
+  deadErrorSentence,
   derivedClause,
   doExplanation,
   doParts,
@@ -979,10 +980,25 @@ describe("lineEntryParts (Part D step 1.7)", () => {
   it("reads a dead pin as could not reach the thread, and other dead text as gave up", () => {
     expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: PIN } }), { pinTitle: "Platform CI", isPinText })))
       .toBe("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
-    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: "The thread is gone." } }), { isPinText })))
-      .toBe("Completed check on acme/api#14 → gave up: the thread is gone");
+    // The error goes to the right column once (deadErrorSentence); the left text says gave up (S14).
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: "error: HTTP 500" } }), { isPinText })))
+      .toBe("Completed check on acme/api#14 → gave up");
+    // The api's attempt count, once it sends one.
+    const counted = { status: "dead" as const, deadText: "error: HTTP 500", attempts: 3 };
+    expect(partsText(lineEntryParts(entry({ outcome: counted }), { isPinText })))
+      .toBe("Completed check on acme/api#14 → gave up after 3 tries");
+    const once = { status: "dead" as const, attempts: 1 };
+    expect(partsText(lineEntryParts(entry({ outcome: once })))).toBe("Completed check on acme/api#14 → gave up after 1 try");
     expect(partsText(lineEntryParts(entry({ outcome: { status: "pending" } }))))
       .toBe("Completed check on acme/api#14 → waiting for the first attempt");
+  });
+
+  it("reads a dead entry's error as one sentence with no error prefix (S14)", () => {
+    expect(deadErrorSentence("error: HTTP 500 from the assistant")).toBe("HTTP 500 from the assistant.");
+    expect(deadErrorSentence("Error: error: timed out")).toBe("Timed out.");
+    expect(deadErrorSentence("The workflow is gone. Pick another workflow in Presence.")).toBe("The workflow is gone. Pick another workflow in Presence.");
+    expect(deadErrorSentence(undefined)).toBeNull();
+    expect(deadErrorSentence("error: ")).toBeNull();
   });
 
   it("reads each skipped reason in words", () => {
