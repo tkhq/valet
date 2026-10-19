@@ -7,7 +7,7 @@
  * mount/remount.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WireQueueState } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
@@ -483,7 +483,7 @@ describe("Composer — Escape interrupts the running turn", () => {
   it("aborts the active thread on Escape while the agent is busy", () => {
     queueStateRef.current = queueState("followup");
     renderComposer("streaming");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
     expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
   });
@@ -491,7 +491,7 @@ describe("Composer — Escape interrupts the running turn", () => {
   it("shows a failed Escape interrupt", () => {
     queueStateRef.current = queueState("followup");
     renderComposer("streaming");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     act(() => abortMutate.mock.calls[0][1].onError(new Error("connection lost")));
     expect(screen.getByRole("alert").textContent).toContain("connection lost");
   });
@@ -499,7 +499,7 @@ describe("Composer — Escape interrupts the running turn", () => {
   it("keeps a delayed interrupt failure with its original thread", () => {
     queueStateRef.current = queueState("followup");
     const view = renderComposer("streaming");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     const reject = abortMutate.mock.calls[0][1].onError;
     view.rerenderComposer("idle", "thread-2");
     act(() => reject(new Error("Thread one connection lost")));
@@ -510,7 +510,7 @@ describe("Composer — Escape interrupts the running turn", () => {
 
   it("does nothing on Escape while idle", () => {
     renderComposer("idle");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     expect(abortMutate).not.toHaveBeenCalled();
   });
 
@@ -520,7 +520,7 @@ describe("Composer — Escape interrupts the running turn", () => {
   it("aborts on Escape while the queue reports a running turn, even with agentStatus idle", () => {
     queueStateRef.current = queueState("followup");
     renderComposer("idle");
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     expect(abortMutate).toHaveBeenCalledTimes(1);
     expect(abortMutate.mock.calls[0][0]).toEqual({ threadId: "thread-1", targetItemId: "q-0" });
   });
@@ -532,7 +532,7 @@ describe("Composer — Escape interrupts the running turn", () => {
     // claims the event in the capture phase before the interrupt listener.
     const claim = (e: KeyboardEvent) => e.preventDefault();
     window.addEventListener("keydown", claim, { capture: true });
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(document.body, { key: "Escape" });
     window.removeEventListener("keydown", claim, { capture: true });
     expect(abortMutate).not.toHaveBeenCalled();
   });
@@ -768,13 +768,13 @@ describe("Composer beside the Ask Valet dock", () => {
     status?: "idle" | "streaming"; dockSession?: string; pageThread?: string; dockThread?: string; withPage?: boolean;
   } = {}) {
     const queryClient = new QueryClient();
-    const tree = (page: boolean) => <QueryClientProvider client={queryClient}>
-      {page && <main><Composer sessionId="orchestrator:user-1" threadId={pageThread} agentStatus={status} queuedMessages={[]} queuedItemCount={0} /></main>}
+    const tree = (page: boolean, thread = pageThread) => <QueryClientProvider client={queryClient}>
+      {page && <main><Composer sessionId="orchestrator:user-1" threadId={thread} agentStatus={status} queuedMessages={[]} queuedItemCount={0} /></main>}
       <aside data-ask-valet-dock=""><Composer sessionId={dockSession} threadId={dockThread} agentStatus={status} queuedMessages={[]} queuedItemCount={0} /></aside>
     </QueryClientProvider>;
     const view = render(tree(withPage));
     const inputs = () => screen.getAllByRole("textbox", { name: "Message" }) as HTMLTextAreaElement[];
-    return { page: inputs()[0]!, dock: inputs().at(-1)!, inputs, rerender: (page = withPage) => view.rerender(tree(page)) };
+    return { page: inputs()[0]!, dock: inputs().at(-1)!, inputs, rerender: (page = withPage, thread = pageThread) => view.rerender(tree(page, thread)) };
   }
 
   it("leaves a page focus request to the page's composer", async () => {
@@ -794,16 +794,43 @@ describe("Composer beside the Ask Valet dock", () => {
     expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["page"]);
   });
 
-  it("keeps newer text from the dock when a send of the same thread fails", async () => {
+  it("stops the page's turn first when focus is on the body", () => {
+    queueStateRef.current = queueState("followup");
+    const { rerender } = renderPageAndDock();
+    // Opening another thread registers the page's listener after the dock's.
+    rerender(true, "page-2");
+    abortMutate.mockClear();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["page-2"]);
+  });
+
+  it("returns focus after a send from a composer that was never focused", async () => {
+    const { page, dock, rerender } = renderPageAndDock({ status: "idle", dockSession: "orchestrator:dock" });
+    act(() => dock.focus());
+    act(() => useComposerDraftStore.getState().setText(draftKey("orchestrator:user-1", "page"), "Try this in chat"));
+    act(() => dock.blur());
+    await act(async () => fireEvent.click(within(page.closest("form")!).getByRole("button", { name: "Send" })));
+    sendState.pending = true;
+    sendState.sessions = ["orchestrator:user-1"];
+    rerender();
+    sendState.pending = false;
+    rerender();
+    expect(document.activeElement).toBe(page);
+  });
+
+  it("keeps the failed message and newer dock text when a send of the same thread fails", async () => {
     let fail: (error: Error) => void = () => undefined;
     sendMutateAsync.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const slot = draftKey("orchestrator:user-1", "shared");
     const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    act(() => useComposerDraftStore.getState().setFiles(slot, [{ id: "f1", name: "report.csv", bytes: 3, file: new File(["a,b"], "report.csv"), attachmentRef: "ref-1" }]));
     fireEvent.change(page, { target: { value: "first question" } });
     fireEvent.keyDown(page, { key: "Enter" });
     await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
     fireEvent.change(dock, { target: { value: "new unsent text" } });
     await act(async () => fail(new Error("connection lost")));
-    expect(dock.value).toBe("new unsent text");
+    expect(dock.value).toBe("first question\n\nnew unsent text");
+    expect(useComposerDraftStore.getState().byKey[slot]?.files.map(file => file.name)).toEqual(["report.csv"]);
   });
 
   it("leaves focus in the dock when a page send settles", () => {

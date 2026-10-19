@@ -558,6 +558,8 @@ export function Composer({
 
   async function submit() {
     if (submitting.current || send.isPending || !threadId || uploadsPending) return;
+    // A send uses this composer even when its text came from a prefill.
+    lastUsedComposer = identity.current;
 
     // Empty Enter after a self-queued followup promotes that item. Do not
     // POST the same text again — that would write a second user entry.
@@ -637,15 +639,13 @@ export function Composer({
       // it'll be reconciled against server truth. The server restores
       // consumed refs when a submit fails, so restored chips stay sendable
       // — EXCEPT when the failure is the refs themselves.
-      // A newer draft in the slot wins: another composer on this thread,
-      // such as the Ask Valet dock, wrote it while the POST was in flight.
+      // Another composer on this thread, such as the Ask Valet dock, can
+      // write newer content while the POST is in flight. Keep both: the
+      // failed message first, then the newer content.
       const drafts = useComposerDraftStore.getState();
-      const current = drafts.byKey[slot];
-      const untouched = !current || (!current.text.trim() && current.images.length === 0 && current.files.length === 0);
-      if (untouched) {
-        drafts.setText(slot, t);
-        drafts.setImages(slot, pendingImages);
-      }
+      const newer = drafts.byKey[slot]?.text ?? "";
+      drafts.setText(slot, newer.trim() ? `${t}\n\n${newer}` : t);
+      drafts.setImages(slot, (prev) => [...pendingImages, ...prev]);
       const payload =
         err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
           ? (err.payload as Record<string, unknown>)
@@ -659,16 +659,14 @@ export function Composer({
         err.status === 400 &&
         typeof payload?.error === "string" &&
         payload.error.startsWith("unknown attachment");
-      if (untouched) drafts.setFiles(
-        slot,
-        refsDead
-          ? pendingFiles.map((f) =>
-              f.attachmentRef !== undefined
-                ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
-                : f,
-            )
-          : pendingFiles,
-      );
+      const restored = refsDead
+        ? pendingFiles.map((f) =>
+            f.attachmentRef !== undefined
+              ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
+              : f,
+          )
+        : pendingFiles;
+      drafts.setFiles(slot, (prev) => [...restored, ...prev]);
       // The failure must be visible — a console-only error reads as a dead
       // send button.
       const detail =
@@ -730,8 +728,12 @@ export function Composer({
         { onError: (err) => setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again.")) },
       );
     }
-    window.addEventListener("keydown", onEscape);
-    return () => window.removeEventListener("keydown", onEscape);
+    // With focus on the body, the page's turn stops first: a page composer
+    // listens on document, which the event reaches before window, where the
+    // dock listens. The dock stops its turn only when the page claims nothing.
+    const target: Document | Window = inAskValetDock(inputRef.current) ? window : document;
+    target.addEventListener("keydown", onEscape as EventListener);
+    return () => target.removeEventListener("keydown", onEscape as EventListener);
   }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
 
   function insertSelection(id: string) {
@@ -1078,7 +1080,7 @@ export function Composer({
   );
 }
 
-/** The composer the person focused last. See the send-settle focus effect. */
+/** The composer the person focused or sent from last. See the send-settle focus effect. */
 let lastUsedComposer: object | undefined;
 
 function apiErrorDetail(err: unknown, fallback: string): string {
