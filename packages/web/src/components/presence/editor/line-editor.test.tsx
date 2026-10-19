@@ -25,6 +25,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
 }));
 
+let pendingRequest = false;
 const createSubscription = vi.fn();
 const patchSubscription = vi.fn();
 const createSchedule = vi.fn();
@@ -53,8 +54,8 @@ let subscriptions: EventSubscriptionWire[] = [];
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: { subscriptions } }),
-  useCreateEventSubscription: () => ({ mutate: createSubscription, isPending: false }),
-  usePatchEventSubscription: () => ({ mutate: patchSubscription, isPending: false }),
+  useCreateEventSubscription: () => ({ mutate: createSubscription, isPending: pendingRequest }),
+  usePatchEventSubscription: () => ({ mutate: patchSubscription, isPending: pendingRequest }),
   useFilterOptions: () => ({ data: { options: [], reason: "Connect first." }, isLoading: false }),
 }));
 
@@ -129,6 +130,7 @@ beforeEach(() => {
   createSchedule.mockReset();
   updateSchedule.mockReset();
   subscriptions = [];
+  pendingRequest = false;
 });
 
 afterEach(() => {
@@ -365,6 +367,14 @@ describe("LineEditor", () => {
     const { onOpenChange } = renderEditor({ kind: "edit", line: CHECK_LINE });
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("ignores Esc while a request is pending (E8)", () => {
+    pendingRequest = true;
+    const { onOpenChange } = renderEditor({ kind: "edit", line: CHECK_LINE });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("Discard your changes?")).toBeNull();
   });
 
   it("asks before Esc discards changes (Review Focus 5)", () => {

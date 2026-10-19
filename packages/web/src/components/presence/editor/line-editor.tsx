@@ -287,6 +287,9 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   }
 
   function requestClose() {
+    // A request in flight finishes first: closing would unmount the sheet
+    // and drop its success handler, so `onSaved` would never run.
+    if (pending) return;
     if (dirty && collisions?.committed !== true) setConfirming(true);
     else close();
   }
