@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildContentBlocks, needsContentBlocks, splitTableMessage, SLACK_TEXT_LIMIT, SLACK_MARKDOWN_LIMIT } from "./message-chunking.js";
+import { buildContentBlocks, needsContentBlocks, slackEscapedText, splitTableMessage, truncateSlackText, SLACK_TEXT_LIMIT, SLACK_MARKDOWN_LIMIT } from "./message-chunking.js";
 import { hasTableBlock } from "./table-blocks.js";
 import { markdownToSlackMrkdwn } from "./transport/format.js";
 
@@ -347,5 +347,19 @@ describe("splitTableMessage", () => {
     const big = report(78);
     expect(splitTableMessage(`${big}\n\n| A | B |\n|---|---|\n| 1 | 2 |`, 50, note)).toBeUndefined();
     expect(splitTableMessage(big.replace("Weekly release report", "Report for <@U123>"), 50, note)).toBeUndefined();
+  });
+});
+
+describe("Slack-escaped update text", () => {
+  it("escapes raw characters and keeps spans and entities", () => {
+    expect(slackEscapedText("x > y `a && <id>` <https://a.b|c> <@U1> <#C1> &amp; done")).toBe(
+      "x &gt; y `a &amp;&amp; &lt;id&gt;` <https://a.b|c> <@U1> <#C1> &amp; done",
+    );
+  });
+
+  it("never ends a cut inside a span or an entity", () => {
+    expect(truncateSlackText("ab <https://a.b|c>", 10)).toBe("ab ");
+    expect(truncateSlackText("ab &amp;&amp;", 10)).toBe("ab &amp;");
+    expect(truncateSlackText("short", 10)).toBe("short");
   });
 });
