@@ -895,7 +895,12 @@ describe("lineEntryParts (Part D step 1.7)", () => {
     expect(skipped({ reason: "sender" })).toBe("Completed check on acme/web#8 → skipped, the sender is not allowed");
     expect(skipped({ reason: "off" })).toBe("Completed check on acme/web#8 → skipped, the line was off");
     expect(skipped({ reason: "claimed" })).toBe("Completed check on acme/web#8 → skipped, another line claimed it");
-    expect(skipped({ reason: "other", reasonText: "Muted by the owner." })).toBe("Completed check on acme/web#8 → skipped, muted by the owner");
+    // The dispatcher's skip text leads with "Skipped, "; the entry says it once (S2).
+    expect(skipped({ reason: "other", reasonText: "Skipped, the mention delivers this post." }))
+      .toBe("Completed check on acme/web#8 → skipped, the mention delivers this post");
+    expect(skipped({ reason: "other", reasonText: "Skipped \u2014 subscription paused." }))
+      .toBe("Completed check on acme/web#8 → skipped, subscription paused");
+    expect(skipped({ reason: "other", reasonText: "Skipped." })).toBe("Completed check on acme/web#8 → skipped, for another reason");
   });
 
   it("reads an entry with no place by its event alone", () => {

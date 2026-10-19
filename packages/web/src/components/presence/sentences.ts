@@ -854,7 +854,7 @@ function asTail(line: string): string {
 function skipReason(delivery: EventDeliveryWire): string {
   // Reuse the delivery list's wording, without its leading "Skipped" and
   // the dash that older skip text carries after it.
-  const line = deliveryStatusLine(delivery, 0).replace(/^skipped(,| by)?\s*(\u2014\s*)?/i, "");
+  const line = withoutSkipped(deliveryStatusLine(delivery, 0));
   return asTail(line.length > 0 ? line : "a team line also matches");
 }
 
@@ -1205,17 +1205,25 @@ function actedOutcomeParts(entry: LineActivityEntryWire, names: LineEntryNames):
   }
 }
 
+/** A recorded skip text without its leading `Skipped`, which the entry
+ * already says: the dispatcher writes `Skipped, <reason>.`, and older rows
+ * `Skipped — <reason>.` (api events/dispatcher.ts). */
+function withoutSkipped(reason: string): string {
+  return reason.replace(/^skipped(\.|,| by)?\s*(\u2014\s*)?/i, "");
+}
+
 /** Why a skipped entry skipped, as words after `skipped, `. */
 function skipInWords(entry: LineActivityEntryWire): string {
+  const recorded = hasText(entry.reasonText) ? withoutSkipped(entry.reasonText) : "";
   switch (entry.reason) {
     case "filters":
-      return `not for this line: ${hasText(entry.reasonText) ? entry.reasonText : "its filters"}`;
+      return `not for this line: ${hasText(recorded) ? recorded : "its filters"}`;
     case "sender":
     case "off":
     case "claimed":
       return SKIP_WORDS[entry.reason];
     default:
-      return hasText(entry.reasonText) ? asTail(entry.reasonText) : "for another reason";
+      return hasText(recorded) ? asTail(recorded) : "for another reason";
   }
 }
 
