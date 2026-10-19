@@ -1,0 +1,313 @@
+// @vitest-environment jsdom
+/**
+ * The editor sheet (docs/specs/2026-10-16-presence-hub-design.md Part H).
+ * `~/api/*` is mocked to record the bodies Create and Save send, so each
+ * case can compare the side pane's sentence with the sentence of the body.
+ */
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import type {
+  CreateEventSubscriptionRequest,
+  CreateWorkflowScheduleRequest,
+  EventSubscriptionWire,
+  PatchEventSubscriptionRequest,
+  PluginSummary,
+  UpdateWorkflowScheduleRequest,
+} from "@valet/api/wire";
+import type { ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "~/api/client";
+import { line, routine } from "../test-fixtures";
+import { presenceSentence, routineSentence } from "../sentences";
+import { applyLinePatch, applyRoutinePatch, lineFromCreate, routineFromCreate } from "./draft";
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
+  Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
+}));
+
+const createSubscription = vi.fn();
+const patchSubscription = vi.fn();
+const createSchedule = vi.fn();
+const updateSchedule = vi.fn();
+
+const catalogData = {
+  services: [
+    {
+      service: "slack",
+      entries: [
+        { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel", description: "" }, { field: "user", description: "" }] },
+        { key: "slack.message", description: "Message", filters: [{ field: "channel", description: "" }] },
+      ],
+    },
+    {
+      service: "github",
+      entries: [
+        { key: "github.pull_request.opened", description: "PR", filters: [{ field: "repo", description: "" }] },
+        { key: "github.check_run.completed", description: "Check", filters: [{ field: "repo", description: "" }] },
+      ],
+    },
+  ],
+};
+let subscriptions: EventSubscriptionWire[] = [];
+
+vi.mock("~/api/events", () => ({
+  useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
+  useEventSubscriptions: () => ({ data: { subscriptions } }),
+  useCreateEventSubscription: () => ({ mutate: createSubscription, isPending: false }),
+  usePatchEventSubscription: () => ({ mutate: patchSubscription, isPending: false }),
+  useFilterOptions: () => ({ data: { options: [], reason: "Connect first." }, isLoading: false }),
+}));
+
+function plugin(name: string): PluginSummary {
+  return { name, version: "1", actionCount: 0, services: [{ service: name, type: "oauth2", configKeys: [], connected: true, connect: "oauth", actions: [] }] };
+}
+vi.mock("~/api/integrations", () => ({
+  usePlugins: () => ({ data: { plugins: ["slack", "github"].map(plugin) }, isError: false }),
+}));
+vi.mock("~/api/rule", () => ({ usePinnedThreadTitle: () => ({}) }));
+vi.mock("~/api/workflows", () => ({
+  useWorkflows: () => ({ data: { workflows: [{ id: "wf_1", name: "Triage" }] } }),
+  useCreateSchedule: () => ({ mutate: createSchedule, isPending: false }),
+  useUpdateSchedule: () => ({ mutate: updateSchedule, isPending: false }),
+}));
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
+  useTeams: () => ({ data: { teams: [] } }),
+  useOrg: () => ({ data: { features: { organizations: false } } }),
+}));
+vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/lib/workspace-scope")>(),
+  useWorkspaceScope: () => ({ key: "user", teamId: undefined, available: ["user"], setKey: () => {} }),
+}));
+vi.mock("../thread-picker", () => ({
+  ThreadPicker: ({ onPick }: { onPick: (p: { mode: "existing"; sessionId: string; threadId: string }, title: string) => void }) => (
+    <button type="button" onClick={() => onPick({ mode: "existing", sessionId: "s-u", threadId: "t-ci" }, "Platform CI")}>Pick Platform CI</button>
+  ),
+}));
+
+import { LineEditor, type EditorMode } from "./line-editor";
+
+const INCIDENTS = { subject: "slack:T1/C1", service: "slack" as const, label: "#incidents" };
+
+function sentence(): string {
+  const cards = screen.getAllByTestId("editor-sentence");
+  return cards[0]?.textContent ?? "";
+}
+
+function sectionNames(): string[] {
+  return [...document.querySelectorAll("[data-section]")].map((s) => s.getAttribute("data-section") ?? "");
+}
+
+function openSections(): string[] {
+  return [...document.querySelectorAll("[data-section]")]
+    .filter((s) => within(s as HTMLElement).queryByRole("button", { name: /^Close / }) !== null)
+    .map((s) => s.getAttribute("data-section") ?? "");
+}
+
+function summary(id: string): string {
+  const section = document.querySelector(`[data-section="${id}"]`);
+  return section?.querySelector("p")?.textContent ?? "";
+}
+
+function renderEditor(mode: EditorMode, onOpenChange = vi.fn(), onSaved = vi.fn()) {
+  render(<LineEditor open onOpenChange={onOpenChange} mode={mode} onSaved={onSaved} />);
+  return { onOpenChange, onSaved };
+}
+
+const CHECK_LINE = line("l1", {
+  name: "CI failures",
+  eventKeys: ["github.check_run.completed"],
+  filters: [{ field: "repo", op: "eq", value: "acme/api" }],
+  target: { kind: "assistant", assistant: "user", thread: { mode: "own" } },
+  updatedAt: Date.now() - 3 * 86_400_000,
+});
+
+beforeEach(() => {
+  createSubscription.mockReset();
+  patchSubscription.mockReset();
+  createSchedule.mockReset();
+  updateSchedule.mockReset();
+  subscriptions = [];
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("LineEditor", () => {
+  it("lists the sections in order; on create When opens and the rest read defaults", () => {
+    renderEditor({ kind: "create" });
+    expect(sectionNames()).toEqual(["when", "do", "where", "appears", "name"]);
+    expect(openSections()).toEqual(["when"]);
+    expect(screen.getByRole("heading", { name: "New" })).toBeTruthy();
+    expect(summary("do")).toBe("reply");
+    expect(summary("where")).toBe("in a new thread each time");
+    expect(summary("appears")).toBe("Valet, the workspace's name and avatar");
+    expect(summary("name")).toBe("No name yet");
+  });
+
+  it("keeps one section open at a time", () => {
+    renderEditor({ kind: "create" });
+    fireEvent.click(screen.getByRole("button", { name: "Change Do" }));
+    expect(openSections()).toEqual(["do"]);
+    fireEvent.click(screen.getByRole("button", { name: "Change Name" }));
+    expect(openSections()).toEqual(["name"]);
+    fireEvent.click(screen.getByRole("button", { name: "Close Name" }));
+    expect(openSections()).toEqual([]);
+  });
+
+  it("on edit shows every section summarized under the line's name", () => {
+    renderEditor({ kind: "edit", line: CHECK_LINE });
+    expect(openSections()).toEqual([]);
+    expect(screen.getByRole("heading", { name: "CI failures" })).toBeTruthy();
+    expect(summary("when")).toBe("a check completes on acme/api");
+    expect(summary("do")).toBe("work on it");
+    expect(summary("where")).toBe("in its own thread");
+    expect(summary("name")).toBe("CI failures");
+    expect(screen.getByText("Edited 3 days ago")).toBeTruthy();
+  });
+
+  it("creates a line whose stored sentence is the side pane's sentence, named by the suggestion", () => {
+    const { onSaved } = renderEditor({ kind: "create" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+    fireEvent.click(screen.getByLabelText("A check completes"));
+    expect(summary("name")).toBe("Check completes on any repository");
+    const shown = sentence();
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const body = createSubscription.mock.calls[0]?.[0] as CreateEventSubscriptionRequest;
+    expect(body.name).toBe("Check completes on any repository");
+    expect(body.target).toEqual({ kind: "assistant", assistant: "user", follow: false, deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "subject" } });
+    expect(shown).toBe(presenceSentence(lineFromCreate(body), catalogData.services, [], {}));
+    createSubscription.mock.calls[0]?.[1].onSuccess({ id: "sub_new" });
+    expect(onSaved).toHaveBeenCalledWith({ kind: "line", id: "sub_new" });
+  });
+
+  it("disables Create with its reason until the draft is ready", () => {
+    renderEditor({ kind: "create" });
+    expect((screen.getByRole("button", { name: "Create" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Pick at least one event.")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Someone mentions Valet"));
+    expect(screen.getByText("Add a channel, or choose Any channel.")).toBeTruthy();
+  });
+
+  it("creates a routine with the cron the day and time control makes", () => {
+    renderEditor({ kind: "create", preselected: { schedule: true } });
+    fireEvent.click(screen.getByLabelText("Sat"));
+    fireEvent.change(screen.getByLabelText("Time"), { target: { value: "07:30" } });
+    expect(screen.getByText("Give the routine instructions.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Change Do" }));
+    fireEvent.change(screen.getByLabelText("Instructions (required)"), { target: { value: "Summarize overnight changes" } });
+    const shown = sentence();
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const body = createSchedule.mock.calls[0]?.[0] as CreateWorkflowScheduleRequest;
+    expect(body.cron).toBe("30 7 * * 1,2,3,4,5,6");
+    expect(body.name).toBe("Summarize overnight changes");
+    expect(body.target).toEqual({ kind: "assistant", prompt: "Summarize overnight changes" });
+    expect(shown).toBe(routineSentence(routineFromCreate(body), [], {}));
+  });
+
+  it("saves only the thread when Where moves to a pinned thread (Review Focus 3)", () => {
+    renderEditor({ kind: "edit", line: CHECK_LINE });
+    fireEvent.click(screen.getByRole("button", { name: "Change Where" }));
+    fireEvent.click(screen.getByRole("radio", { name: "A thread you pick" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pick Platform CI" }));
+    expect(summary("where")).toBe("in the Platform CI thread");
+    const shown = sentence();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const { id, body } = patchSubscription.mock.calls[0]?.[0] as { id: string; body: PatchEventSubscriptionRequest };
+    expect(id).toBe("l1");
+    expect(body).toEqual({ thread: { mode: "existing", sessionId: "s-u", threadId: "t-ci" } });
+    expect(shown).toBe(presenceSentence(applyLinePatch(CHECK_LINE, body), catalogData.services, [], { "t-ci": { title: "Platform CI" } }));
+    expect(shown).toBe("When a check completes on acme/api, work in the Platform CI thread.");
+  });
+
+  it("drops a place on a service change and the sentence names no place (Review Focus 4)", () => {
+    renderEditor({ kind: "create", preselected: { place: INCIDENTS } });
+    expect(sentence()).toContain("#incidents");
+    fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+    expect(sentence()).not.toContain("#incidents");
+    expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
+    fireEvent.click(screen.getByLabelText("A check completes"));
+    expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
+  });
+
+  it("closes on Esc at once with no changes (Review Focus 5)", () => {
+    const { onOpenChange } = renderEditor({ kind: "edit", line: CHECK_LINE });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("asks before Esc discards changes (Review Focus 5)", () => {
+    const { onOpenChange } = renderEditor({ kind: "edit", line: CHECK_LINE });
+    fireEvent.click(screen.getByRole("button", { name: "Change Name" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "CI" } });
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByText("Discard your changes?")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.queryByText("Discard your changes?")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("turns a proposal on in review mode and names the line it replaces", () => {
+    const proposal = line("proposal-1", { name: "New CI", enabled: false, eventKeys: ["github.check_run.completed"], target: { kind: "assistant", assistant: "user", thread: { mode: "own" } } });
+    renderEditor({ kind: "review", line: proposal, replaces: { id: "l0", name: "Old CI" } });
+    expect(screen.getByRole("note").textContent).toBe("Proposed by the assistant. Turning it on turns off Old CI.");
+    const shown = sentence();
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    const { body } = patchSubscription.mock.calls[0]?.[0] as { body: PatchEventSubscriptionRequest };
+    expect(body).toEqual({ enabled: true });
+    expect(shown).toBe(presenceSentence(applyLinePatch(proposal, body), catalogData.services, [], {}));
+  });
+
+  it("edits a routine and reads the patched routine", () => {
+    const r = routine("r1", { name: "Morning summary", detail: { cron: "0 9 * * 1-5" } });
+    renderEditor({ kind: "edit-routine", routine: r });
+    expect(summary("when")).toBe("Every weekday at 9:00");
+    expect(sectionNames()).toEqual(["when", "do", "where", "name"]);
+    fireEvent.click(screen.getByRole("button", { name: "Change When" }));
+    fireEvent.click(screen.getByLabelText("Sun"));
+    const shown = sentence();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const { body } = updateSchedule.mock.calls[0]?.[0] as { body: UpdateWorkflowScheduleRequest };
+    expect(body).toEqual({ cron: "0 9 * * 0,1,2,3,4,5" });
+    expect(shown).toBe(routineSentence(applyRoutinePatch(r, body), [], {}));
+  });
+
+  it("shows a 409 collision in the side pane with Create anyway", () => {
+    renderEditor({ kind: "create" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+    fireEvent.click(screen.getByLabelText("A check completes"));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const other = line("l2", { name: "Review follow-up", eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/api" }] });
+    const collisions = { blocking: [{ subscription: other, relation: "equal" as const, sharedKeys: ["github.check_run.completed"] }], overlapping: [] };
+    act(() => createSubscription.mock.calls[0]?.[1].onError(new ApiError(409, "collision", { error: "collides", collisions })));
+    const aside = screen.getByRole("complementary", { name: "Preview" });
+    expect(aside.textContent).toContain("Review follow-up also acts on completed checks for acme/api. Both will run.");
+    fireEvent.click(screen.getByRole("button", { name: "Create anyway" }));
+    expect(createSubscription.mock.calls[1]?.[0]).toMatchObject({ allowCollision: true });
+  });
+
+  it("stacks the panes on a phone with the sentence as a sticky header", () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("max-width"),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    renderEditor({ kind: "edit", line: CHECK_LINE });
+    expect(screen.getByRole("dialog").getAttribute("data-layout")).toBe("phone");
+    const header = screen.getByTestId("editor-phone-header");
+    expect(header.className).toContain("sticky");
+    expect(within(header).getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");
+    expect(screen.getAllByTestId("editor-sentence")).toHaveLength(1);
+    expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
+    // The form comes before the rest of the side pane.
+    const name = document.querySelector('[data-section="name"]');
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(name !== null && (name.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+  });
+});

@@ -11,9 +11,9 @@ export interface CatalogService {
 /** Filter fields the selected events declare, unioned and deduped by field —
  * a filter is valid when any selected event declares it (the same rule the
  * server's validateSubscription applies). Shared with the edit dialog. */
-function unionFilterFields(
+export function unionFilterFields(
   services: CatalogService[],
-  selected: Set<string>,
+  selected: ReadonlySet<string>,
 ): FilterField[] {
   const out: FilterField[] = [];
   const seen = new Set<string>();

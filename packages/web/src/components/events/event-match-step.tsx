@@ -20,7 +20,7 @@ export function serviceName(service: string): string {
 type Entry = CatalogService["entries"][number];
 
 /** A service's events split into the common ones, in their set order, and the rest. */
-function splitCommon(service: CatalogService): { common: Entry[]; more: Entry[] } {
+export function splitCommon(service: CatalogService): { common: Entry[]; more: Entry[] } {
   const known = knownService(service.service);
   const order = known !== undefined ? COMMON_EVENTS[known] : [];
   const common = order.flatMap((key) => service.entries.filter((e) => e.key === key));

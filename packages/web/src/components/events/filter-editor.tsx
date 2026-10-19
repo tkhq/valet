@@ -360,7 +360,7 @@ export function FilterEditor({
  * `dependsOn` fields scope the list. Until every dependsOn value is present in
  * `deps`, the picker is disabled and names the field to fill first.
  */
-function FilterValuePicker({
+export function FilterValuePicker({
   source,
   dependsOn,
   deps,
