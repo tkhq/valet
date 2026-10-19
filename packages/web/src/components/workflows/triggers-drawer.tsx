@@ -19,7 +19,8 @@ export type TriggerKind = "schedule" | "event";
  * (docs/specs/2026-10-16-presence-hub-design.md Part F step 2): the webhook
  * URL, then each line and routine that runs it, as its Part C or Part D
  * sentence. A row opens the line's or the routine's page, where it is edited.
- * **Add** opens the editor with this workflow as the target.
+ * **Add** opens the editor fixed on this workflow as the target, so the
+ * new line or routine shows in this panel.
  *
  * `startNew` comes from the new-workflow dialog: the workflow was just
  * created to run on a schedule or on an event, so the editor opens at once.
@@ -83,7 +84,7 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
       <LineEditor
         open={adding !== null}
         onOpenChange={(open) => { if (!open) setAdding(null); }}
-        mode={{ kind: "create", preselected: { workflowId, ...(adding === "routine" ? { schedule: true } : {}) } }}
+        mode={{ kind: "create", preselected: { fixedWorkflowId: workflowId, ...(adding === "routine" ? { schedule: true } : {}) } }}
         // The panel lists this workflow's lines and routines; both refetch.
         onSaved={() => {
           void triggersQ.refetch();

@@ -121,6 +121,29 @@ describe("DoSection", () => {
     expect(latest?.teamId).toBe("t1");
   });
 
+  it("locks Do on the workflow a workflow's panel fixed (L4)", () => {
+    const mode: EditorMode = { kind: "create", preselected: { fixedWorkflowId: "wf_1" } };
+    const draft = toggleEvent(setService(newDraft({ timezone: "UTC", preselected: mode.preselected }), "github"), "github.check_run.completed", SERVICES);
+    render(<Harness initial={draft} mode={mode} />);
+    const run = screen.getByRole("radio", { name: "Run a workflow" }) as HTMLInputElement;
+    expect(run.checked).toBe(true);
+    expect((screen.getByRole("radio", { name: "Work on it" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("radio", { name: "Reply" }) as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: "Work on it" }));
+    expect(latest?.doKind).toBe("workflow");
+    const picker = screen.getByLabelText("Workflow") as HTMLSelectElement;
+    expect(picker.disabled).toBe(true);
+    expect(picker.selectedOptions[0]?.textContent).toBe("Triage");
+    expect(screen.getByText("This line starts Triage. To pick another workflow, add the line from Presence.")).toBeTruthy();
+  });
+
+  it("only preselects a workflow without the lock", () => {
+    const draft = setService(newDraft({ timezone: "UTC", preselected: { workflowId: "wf_1" } }), "github");
+    render(<Harness initial={draft} mode={{ kind: "create", preselected: { workflowId: "wf_1" } }} />);
+    expect((screen.getByRole("radio", { name: "Work on it" }) as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Workflow") as HTMLSelectElement).disabled).toBe(false);
+  });
+
   it("keeps what a stored line does fixed", () => {
     const sub = line("l1", { eventKeys: ["github.check_run.completed"], target: { kind: "assistant", assistant: "user" } });
     render(<Harness initial={draftFromLine(sub)} mode={{ kind: "edit", line: sub }} />);

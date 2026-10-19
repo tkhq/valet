@@ -169,20 +169,20 @@ describe("TriggersPanel: listeners and routines", () => {
     expect(container.textContent ?? "").not.toMatch(/trigger|subscription|automation/i);
   });
 
-  it("opens the editor with this workflow preselected on Add", () => {
+  it("opens the editor fixed on this workflow on Add", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
     expect(screen.queryByTestId("line-editor")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1");
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create fixed workflow wf_1");
   });
 
   it("opens the editor on a routine when the new-workflow dialog asked for a schedule", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" startNew="schedule" />);
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1 schedule");
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create fixed workflow wf_1 schedule");
   });
 
   it("opens the editor on a line when the new-workflow dialog asked for an event", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" startNew="event" />);
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1");
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create fixed workflow wf_1");
   });
 });

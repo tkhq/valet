@@ -93,6 +93,10 @@ export function DoSection({
   const stored = mode.kind !== "create";
   // The team Slack setup fixes the team's assistant.
   const fixedTeam = mode.kind === "create" && mode.preselected?.team !== undefined;
+  // A workflow's panel fixes the workflow, so the line shows in that panel.
+  const fixedWorkflowId = mode.kind === "create" ? mode.preselected?.fixedWorkflowId : undefined;
+  const fixedWorkflow = fixedWorkflowId !== undefined;
+  const fixedWorkflowName = workflows.find((w) => w.id === fixedWorkflowId)?.name ?? "this workflow";
   const runInputBad = parseRunInput(draft.runInput).kind === "bad";
   const assistant = draft.doKind !== "workflow";
   const required = routine && assistant;
@@ -102,7 +106,7 @@ export function DoSection({
   const replyNeedsMention = !stored && !routine && draft.service === "slack" && !mention;
 
   function pick(kind: DoKind) {
-    if (kind === draft.doKind) return;
+    if (kind === draft.doKind || fixedWorkflow) return;
     onChange({
       ...draft,
       doKind: kind,
@@ -133,7 +137,7 @@ export function DoSection({
         {cards(routine).map((card) => {
           const on = draft.doKind === card.kind;
           // A Reply already picked stays open, so the reader can see it and move off it.
-          const off = stored || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
+          const off = stored || (fixedWorkflow && card.kind !== "workflow") || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
           const lineId = `${id}-line-${card.kind}`;
           return (
             <label
@@ -160,7 +164,7 @@ export function DoSection({
           );
         })}
       </div>
-      {replyNeedsMention && (
+      {replyNeedsMention && !fixedWorkflow && (
         <p className="text-xs text-muted">Reply answers a mention. To reply, pick the mention in When.</p>
       )}
       {stored && (
@@ -175,14 +179,23 @@ export function DoSection({
           <select
             id={`${id}-workflow`}
             value={draft.workflowId}
-            disabled={stored}
+            disabled={stored || fixedWorkflow}
             onChange={(e) => onChange({ ...draft, workflowId: e.target.value })}
             className="min-h-11 w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
           >
             <option value="">Pick a workflow</option>
             {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            {/* The fixed workflow reads by name before the list loads. */}
+            {fixedWorkflowId !== undefined && !workflows.some((w) => w.id === fixedWorkflowId) && (
+              <option value={fixedWorkflowId}>{fixedWorkflowName}</option>
+            )}
           </select>
-          {workflows.length === 0 && (
+          {fixedWorkflow && (
+            <p className="text-xs text-muted">
+              This {routine ? "routine" : "line"} starts {fixedWorkflowName}. To pick another workflow, add the {routine ? "routine" : "line"} from Presence.
+            </p>
+          )}
+          {workflows.length === 0 && !fixedWorkflow && (
             <p className="text-xs text-muted">You have no workflows yet. Make one on the Workflows page, then come back.</p>
           )}
           {routine && (

@@ -60,7 +60,17 @@ export type EditorMode = (
   | {
     kind: "create";
     /** `team` starts a Slack mention line that the team's assistant answers (the team Slack setup). */
-    preselected?: { place?: PreselectedPlace; workflowId?: string; schedule?: boolean; team?: { id: string; name: string } };
+    /**
+     * `fixedWorkflowId` locks Do on that workflow (a workflow's panel adds
+     * a line that must show in that panel); `workflowId` only preselects it.
+     */
+    preselected?: {
+      place?: PreselectedPlace;
+      workflowId?: string;
+      fixedWorkflowId?: string;
+      schedule?: boolean;
+      team?: { id: string; name: string };
+    };
   }
   | { kind: "edit"; line: EventSubscriptionWire }
   | { kind: "edit-routine"; routine: Routine }
@@ -187,7 +197,7 @@ export function newDraft(options: {
   const place = preselected?.place;
   const placeRow = placeRowFor(place);
   const service: EditorService = preselected?.schedule ? "schedule" : place !== undefined && isWhen(place.service) ? place.service : "slack";
-  const workflowId = preselected?.workflowId;
+  const workflowId = preselected?.fixedWorkflowId ?? preselected?.workflowId;
   return {
     service,
     schedule: defaultSchedule(timezone),

@@ -17,6 +17,7 @@ export function editorModeText(mode: EditorMode): string {
       const parts = [
         ...(p?.place !== undefined ? [`place ${p.place.subject}`] : []),
         ...(p?.workflowId !== undefined ? [`workflow ${p.workflowId}`] : []),
+        ...(p?.fixedWorkflowId !== undefined ? [`fixed workflow ${p.fixedWorkflowId}`] : []),
         ...(p?.schedule === true ? ["schedule"] : []),
         ...(p?.team !== undefined ? [`team ${p.team.name} (${p.team.id})`] : []),
       ];
