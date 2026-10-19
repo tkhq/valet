@@ -66,6 +66,12 @@ describe("api client: colon-safe URL encoding", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/threads/thread%3A1/messages");
   });
 
+  it("reads a workflow step's logs through its session route", async () => {
+    const fetchMock = stubFetchOk();
+    await api.listMessages("wf:run_1:build", { threadId: "th-step", queueItemId: "q-step", limit: 200 });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/sessions/wf%3Arun_1%3Abuild/messages?limit=200&queueItemId=q-step&threadId=th-step");
+  });
+
   it("resolveDecision encodes session id and gate id", async () => {
     const fetchMock = stubFetchOk();
     await api.resolveDecision(COLON_ID, "gate:1", { actionId: "approve" });
