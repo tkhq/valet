@@ -762,6 +762,36 @@ describe("composer focus request", () => {
   });
 });
 
+describe("Composer beside the Ask Valet dock", () => {
+  function renderPageAndDock() {
+    const queryClient = new QueryClient();
+    const composer = (threadId: string) => <Composer sessionId="orchestrator:user-1" threadId={threadId} agentStatus="streaming" queuedMessages={[]} queuedItemCount={0} />;
+    render(<QueryClientProvider client={queryClient}>
+      <main>{composer("page")}</main>
+      <aside data-ask-valet-dock="">{composer("dock")}</aside>
+    </QueryClientProvider>);
+    const [page, dock] = screen.getAllByRole("textbox", { name: "Message" }) as HTMLTextAreaElement[];
+    return { page: page!, dock: dock! };
+  }
+
+  it("leaves a page focus request to the page's composer", async () => {
+    const { page } = renderPageAndDock();
+    act(() => useComposerPrefillStore.getState().requestFocus());
+    await waitFor(() => expect(document.activeElement).toBe(page));
+  });
+
+  it("stops the turn of the composer area that holds focus on Escape", () => {
+    queueStateRef.current = queueState("followup");
+    const { page, dock } = renderPageAndDock();
+    abortMutate.mockClear();
+    fireEvent.keyDown(dock, { key: "Escape" });
+    expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["dock"]);
+    abortMutate.mockClear();
+    fireEvent.keyDown(page, { key: "Escape" });
+    expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["page"]);
+  });
+});
+
 describe("Composer — slash-command keyboard handling", () => {
   it("pressing Enter while popup is open inserts the command and does not send", async () => {
     useComposerPrefillStore.setState({ text: null });

@@ -86,7 +86,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   }
   const conversation = loaded[workspace];
   const visible = opened === workspace && !/^\/workflows\/[^/]+$/.test(pathname);
-  const panel = visible ? <aside aria-label="Valet assistant" className="absolute inset-0 z-40 flex min-h-0 flex-col border-l border-line bg-paper lg:static lg:w-[440px] lg:shrink-0">
+  const panel = visible ? <aside aria-label="Valet assistant" data-ask-valet-dock="" className="absolute inset-0 z-40 flex min-h-0 flex-col border-l border-line bg-paper lg:static lg:w-[440px] lg:shrink-0">
       <AppPageHintContext.Provider value={readAppPageHint({ pathname, workspace })}><AssistantPanel title={`Valet · ${scope.teamId ? "Team workspace" : "Personal"}`} sessionId={conversation?.sessionId} threadId={conversation?.threadId} error={errors[workspace]} onRetry={() => void open()} onClose={close} onOpen={() => { if (conversation) { close(); void navigate({ to: "/chat", search: { workspace, thread: conversation.threadId } }); } }} scopeNotice={scope.teamId ? "Only you can see this conversation." : undefined} /></AppPageHintContext.Provider>
     </aside> : null;
   return <Context.Provider value={{ open: (prompt) => { void open(prompt); }, panel, close, isOpen: visible }}>{children}</Context.Provider>;

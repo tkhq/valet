@@ -1,4 +1,4 @@
-import { AppPageHintContext } from "~/lib/app-page-hint";
+import { AppPageHintContext, inAskValetDock } from "~/lib/app-page-hint";
 import {
   useCallback,
   useContext,
@@ -268,10 +268,11 @@ export function Composer({
   }, [popupItems.length, commandQuery, argPrefix]);
   // Focus-on-request (New thread button): reactive on purpose, unlike the
   // prefill text — the Composer is usually already mounted when the
-  // request fires, so a mount-time consume would miss it.
+  // request fires, so a mount-time consume would miss it. The request
+  // belongs to the page's composer, not the Ask Valet dock beside it.
   const focusNonce = useComposerPrefillStore((s) => s.focusNonce);
   useEffect(() => {
-    if (focusNonce > 0) inputRef.current?.focus();
+    if (focusNonce > 0 && !inAskValetDock(inputRef.current)) inputRef.current?.focus();
   }, [focusNonce]);
   // Prefill for a Composer that is ALREADY mounted (the workflow editor's
   // assistant panel sits open beside the canvas, so its suggestions never
@@ -280,7 +281,7 @@ export function Composer({
   // here to read, so this effect no-ops on mount instead of double-seeding.
   const prefillNonce = useComposerPrefillStore((s) => s.prefillNonce);
   useEffect(() => {
-    if (prefillNonce === 0) return;
+    if (prefillNonce === 0 || inAskValetDock(inputRef.current)) return;
     const pending = useComposerPrefillStore.getState().consume();
     if (pending === null) return;
     setText(pending);
@@ -706,6 +707,8 @@ export function Composer({
   useEffect(() => {
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
+      // Focus picks the area: the Ask Valet dock or the page beside it.
+      if (e.target instanceof Element && e.target !== document.body && inAskValetDock(e.target) !== inAskValetDock(inputRef.current)) return;
       const targetItemId = queueState?.activeItemId;
       if (!working || !threadId || !targetItemId || abortPending) return;
       e.preventDefault();
