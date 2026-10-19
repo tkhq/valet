@@ -5,7 +5,7 @@ import { Button, Spinner } from "~/components/primitives";
 import { SessionView } from "./session-view";
 
 /** Shared chrome; the host owns workspace or workflow conversation lifetime. */
-export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onClose, onOpen, scopeNotice, children }: {
+export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onClose, onOpen, scopeNotice, actions, children }: {
   title: string;
   sessionId?: string;
   threadId?: string;
@@ -14,12 +14,15 @@ export function AssistantPanel({ title, sessionId, threadId, error, onRetry, onC
   onClose?: () => void;
   onOpen?: () => void;
   scopeNotice?: string;
+  /** Header controls that belong to the host, such as New chat. */
+  actions?: ReactNode;
   children?: ReactNode;
 }) {
   const header = (summary?: ReactNode) => <>
     <header className="flex h-[60px] shrink-0 items-center gap-2 border-b border-line px-4">
       <Sparkles className="h-4 w-4 shrink-0 text-moss" aria-hidden />
       <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
+      {actions}
       {sessionId && threadId && (onOpen ?
         <button type="button" aria-label="Open assistant in Threads" className="rounded p-2 hover:bg-ink-wash" onClick={onOpen}><ExternalLink className="h-4 w-4" /></button> :
         <Link to="/threads/$threadId" params={{ threadId }} aria-label="Open assistant in Threads" className="rounded p-2 hover:bg-ink-wash"><ExternalLink className="h-4 w-4" /></Link>)}

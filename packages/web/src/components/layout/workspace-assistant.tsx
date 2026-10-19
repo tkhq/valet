@@ -1,15 +1,17 @@
 import { readAppPageHint } from "@valet/shared";
+import type { EnsureWorkspaceConversationRequest } from "@valet/api/wire";
 import { AppPageHintContext } from "~/lib/app-page-hint";
 import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Sparkles } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, History, SquarePen, Sparkles } from "lucide-react";
 import { qk } from "~/api/queries";
 import { api } from "~/api/client";
+import { relativeTime } from "~/lib/relative-time";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { AssistantPanel } from "~/components/session/assistant-panel";
 import { prefillComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
-import { Button } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
 
 type Conversation = { sessionId: string; threadId: string };
 type Assistant = { open: (prompt?: string) => void; panel: ReactNode; close: () => void; isOpen: boolean };
@@ -25,7 +27,9 @@ export function useWorkspaceAssistant() {
  * the request now fails at once and the panel offers Retry. */
 export const ENSURE_CONVERSATION_MUTATION = { networkMode: "always" } as const;
 
-/** One durable workspace Thread, reused across app pages. No helper sessions. */
+/** Ask Valet, reused across app pages. Opening the panel from closed starts a
+ * new conversation, unless the latest one runs a turn or waits for an approval.
+ * A contextual prompt starts a new conversation unless the panel is open. */
 export function WorkspaceAssistantProvider({ children }: { children: ReactNode }) {
   const scope = useWorkspaceScope();
   const navigate = useNavigate();
@@ -33,8 +37,10 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   const qc = useQueryClient();
   // A mutation, not a direct call: the UI stress gallery's frozen client
   // refuses every mutation, so the gallery never sends this request.
-  const ensureConversation = useMutation({ ...ENSURE_CONVERSATION_MUTATION, mutationFn: (key: string) => api.ensureWorkspaceConversation(key) });
-  const conversations = useRef(new Map<string, Promise<Conversation>>());
+  const ensureConversation = useMutation({ ...ENSURE_CONVERSATION_MUTATION,
+    mutationFn: ({ workspace, request }: { workspace: string; request: EnsureWorkspaceConversationRequest }) => api.ensureWorkspaceConversation(workspace, request) });
+  const starting = useRef(new Map<string, Promise<Conversation>>());
+  const lastRequest = useRef<EnsureWorkspaceConversationRequest>({ fresh: true, unlessBusy: true });
   const [opened, setOpened] = useState<string>();
   const [loaded, setLoaded] = useState<Record<string, Conversation>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -46,7 +52,6 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   activeWorkspace.current = workspace;
   function close() { requestGeneration.current += 1; setOpened(undefined); }
   async function open(prompt?: string) {
-    const draftOwner = useComposerDraftStore.getState().owner;
     const generation = ++requestGeneration.current;
     const mayNavigate = () => generation === requestGeneration.current && activeWorkspace.current === workspace && activePath.current === pathname;
     setOpened(workspace);
@@ -66,30 +71,79 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
       }
       return;
     }
-    let pending = conversations.current.get(workspace);
+    const shown = loaded[workspace];
+    if (visible && shown) {
+      if (prompt) prefillComposerDraft(shown.sessionId, shown.threadId, prompt);
+      return;
+    }
+    await start(prompt ? { fresh: true } : { fresh: true, unlessBusy: true }, prompt);
+  }
+  async function start(request: EnsureWorkspaceConversationRequest, prompt?: string) {
+    const draftOwner = useComposerDraftStore.getState().owner;
+    lastRequest.current = request;
+    setOpened(workspace);
+    setErrors((current) => ({ ...current, [workspace]: "" }));
+    setLoaded(({ [workspace]: _replaced, ...current }) => current);
+    let pending = starting.current.get(workspace);
     if (!pending) {
       pending = (async () => {
-        const conversation = await ensureConversation.mutateAsync(workspace);
-        await qc.invalidateQueries({ queryKey: qk.threads(conversation.sessionId) });
-        return conversation;
+        try {
+          const conversation = await ensureConversation.mutateAsync({ workspace, request });
+          await qc.invalidateQueries({ queryKey: qk.threads(conversation.sessionId) });
+          return conversation;
+        } finally {
+          starting.current.delete(workspace);
+        }
       })();
-      conversations.current.set(workspace, pending);
+      starting.current.set(workspace, pending);
     }
     try {
       const conversation = await pending;
       if (prompt && useComposerDraftStore.getState().owner === draftOwner) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
       setLoaded((current) => ({ ...current, [workspace]: conversation }));
     } catch (error) {
-      conversations.current.delete(workspace);
       setErrors((current) => ({ ...current, [workspace]: error instanceof Error ? error.message : "Could not open Valet." }));
     }
   }
   const conversation = loaded[workspace];
   const visible = opened === workspace && !/^\/workflows\/[^/]+$/.test(pathname);
+  const actions = conversation && <ConversationActions workspace={workspace} current={conversation.threadId} onNew={() => void start({ fresh: true })}
+    onSelect={(next) => setLoaded((current) => ({ ...current, [workspace]: next }))} />;
   const panel = visible ? <aside aria-label="Valet assistant" data-ask-valet-dock="" className="absolute inset-0 z-40 flex min-h-0 flex-col border-l border-line bg-paper lg:static lg:w-[440px] lg:shrink-0">
-      <AppPageHintContext.Provider value={readAppPageHint({ pathname, workspace })}><AssistantPanel title={`Valet · ${scope.teamId ? "Team workspace" : "Personal"}`} sessionId={conversation?.sessionId} threadId={conversation?.threadId} error={errors[workspace]} onRetry={() => void open()} onClose={close} onOpen={() => { if (conversation) { close(); void navigate({ to: "/chat", search: { workspace, thread: conversation.threadId } }); } }} scopeNotice={scope.teamId ? "Only you can see this conversation." : undefined} /></AppPageHintContext.Provider>
+      <AppPageHintContext.Provider value={readAppPageHint({ pathname, workspace })}><AssistantPanel title={`Valet · ${scope.teamId ? "Team workspace" : "Personal"}`} sessionId={conversation?.sessionId} threadId={conversation?.threadId} error={errors[workspace]} actions={actions} onRetry={() => void start(lastRequest.current)} onClose={close} onOpen={() => { if (conversation) { close(); void navigate({ to: "/chat", search: { workspace, thread: conversation.threadId } }); } }} scopeNotice={scope.teamId ? "Only you can see this conversation." : undefined} /></AppPageHintContext.Provider>
     </aside> : null;
   return <Context.Provider value={{ open: (prompt) => { void open(prompt); }, panel, close, isOpen: visible }}>{children}</Context.Provider>;
+}
+
+/** New chat, and a menu of the viewer's recent Ask Valet conversations. */
+function ConversationActions({ workspace, current, onNew, onSelect }: {
+  workspace: string;
+  current: string;
+  onNew: () => void;
+  onSelect: (conversation: Conversation) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const recent = useQuery({ queryKey: qk.workspaceConversations(workspace), queryFn: () => api.listWorkspaceConversations(workspace), enabled: menuOpen });
+  const items = recent.data?.conversations ?? [];
+  return <>
+    <button type="button" aria-label="New chat" title="New chat" className="rounded p-2 hover:bg-ink-wash" onClick={onNew}><SquarePen className="h-4 w-4" /></button>
+    <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+      <DropdownMenuTrigger asChild>
+        <button type="button" aria-label="Recent conversations" title="Recent conversations" className="rounded p-2 hover:bg-ink-wash"><History className="h-4 w-4" /></button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuLabel className="text-xs text-muted">Recent</DropdownMenuLabel>
+        {recent.error ? <p role="alert" className="px-2 py-1.5 text-muted">Could not load conversations. Close the menu and open it again.</p>
+          : !recent.data ? <p className="px-2 py-1.5 text-muted">Loading…</p>
+          : items.length === 0 ? <p className="px-2 py-1.5 text-muted">No conversations yet.</p>
+          : items.map(item => <DropdownMenuItem key={item.threadId} aria-current={item.threadId === current ? "true" : undefined}
+              onSelect={() => onSelect({ sessionId: recent.data.sessionId, threadId: item.threadId })}>
+              <span className="min-w-0 flex-1 truncate">{item.title || "New conversation"}</span>
+              {item.threadId === current ? <Check aria-hidden /> : <span className="shrink-0 text-xs text-muted">{relativeTime(item.lastUserActivityAt)}</span>}
+            </DropdownMenuItem>)}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  </>;
 }
 
 export function WorkspaceAssistantButton() {

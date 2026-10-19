@@ -58,6 +58,9 @@ import type {
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
   EnsureWorkspaceRuntimeResponse,
+  EnsureWorkspaceConversationRequest,
+  EnsureWorkspaceConversationResponse,
+  ListWorkspaceConversationsResponse,
   WorkspaceRuntimeInfoResponse,
   GetArtifactResponse,
   GetChangelogResponse,
@@ -718,8 +721,10 @@ export const api = {
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
   // workspace runtime: these entry points take a workspace key, never a raw
   // session id, and only ensure the runtime exists
-  ensureWorkspaceConversation: (workspace: string) =>
-    request<{ sessionId: string; threadId: string }>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`),
+  ensureWorkspaceConversation: (workspace: string, body?: EnsureWorkspaceConversationRequest) =>
+    request<EnsureWorkspaceConversationResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/conversation`, body),
+  listWorkspaceConversations: (workspace: string) =>
+    request<ListWorkspaceConversationsResponse>("GET", `/workspaces/${encodeURIComponent(workspace)}/conversations`),
   ensureWorkspaceRuntime: (workspace: string) =>
     request<EnsureWorkspaceRuntimeResponse>("POST", `/workspaces/${encodeURIComponent(workspace)}/runtime`),
   getWorkspaceRuntimeInfo: (workspace: string) =>

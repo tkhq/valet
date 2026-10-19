@@ -1,16 +1,17 @@
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
-import type { Principal } from "@valet/engine";
+import type { Principal, Session } from "@valet/engine";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant, workspaceSessionIds } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
-import { threadVisibility } from "../services/thread-access.js";
+import { assistantConversationKey, isAssistantConversationOf, threadVisibility } from "../services/thread-access.js";
 import { viewerOf } from "./_thread-access.js";
-import { agentSessions, assistantExecutions, assistants, childWatches } from "../schema/index.js";
+import { agentSessions, assistantExecutions, assistants, childWatches, sessionThreads } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
 import { clearIntegrationLimit, loadIntegrationLimit } from "../assistants/integration-limit.js";
-import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse, WorkspaceIntegrationLimitResponse } from "../wire/types.js";
+import type { WorkspaceRuntimeInfoResponse, EnsureWorkspaceRuntimeResponse, WorkspaceIntegrationLimitResponse, EnsureWorkspaceConversationRequest,
+  EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse, WorkspaceConversationSummary } from "../wire/types.js";
 
 export const workspaceRuntimeRouter = new Hono<AppEnv>();
 
@@ -66,18 +67,59 @@ workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
   return c.body(null, 204);
 });
 
-// A durable app-assistant Thread per viewer in this workspace. Opening it is
-// idempotent and never submits a model turn. Team threads retain team visibility.
+/** The session that holds the viewer's Ask Valet conversations. A team keys
+ * it per person, so every conversation of one person shares one sandbox. */
+function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
+  return ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
+}
+
+/** The viewer's Ask Valet conversations in one session, the most recently used first. */
+async function assistantConversations(c: Context<AppEnv>, session: Session): Promise<WorkspaceConversationSummary[]> {
+  const { db, engineStore } = c.var.providers;
+  const threads = (await engineStore.listThreads(session.id)).filter(thread => isAssistantConversationOf(thread.key, c.var.user.id));
+  if (!threads.length) return [];
+  const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt })
+    .from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
+  const waiting = new Set((await engineStore.listDecisionGates(session.id, undefined, "pending")).map(gate => gate.threadId));
+  return threads.map((thread): WorkspaceConversationSummary => {
+    const row = meta.get(thread.id);
+    return { threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
+      lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt,
+      busy: session.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
+  }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
+}
+
+// Opens one of the viewer's Ask Valet conversations in this workspace. It never
+// submits a model turn. Team threads retain team visibility.
 workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  const { sessionId, session } = await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
+  const body: unknown = await c.req.json().catch(() => undefined);
+  const request: EnsureWorkspaceConversationRequest = body && typeof body === "object" ? body : {};
+  const { sessionId, session } = await assistantConversationSession(c, owner);
+  const [latest] = await assistantConversations(c, session);
+  if (latest && (request.fresh !== true || (request.unlessBusy === true && latest.busy))) {
+    return c.json({ sessionId, threadId: latest.threadId } satisfies EnsureWorkspaceConversationResponse);
+  }
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
+  // Without `fresh`, the first conversation keeps the older per-person key, so
+  // concurrent opens agree on one thread.
   const data = await session.toData();
-  const thread = await c.var.providers.engineHost.ensureFreshThread(session, `app-assistant:${c.var.user.id}`,
+  const thread = await c.var.providers.engineHost.ensureFreshThread(session,
+    request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`,
     { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, c.var.user.id);
-  return c.json({ sessionId, threadId: thread.id });
+  return c.json({ sessionId, threadId: thread.id } satisfies EnsureWorkspaceConversationResponse);
+});
+
+// The Recent menu. The panel opens a conversation first, so this normally
+// finds the helper session that already exists.
+workspaceRuntimeRouter.get("/:workspace/conversations", async (c) => {
+  const owner = await authorizedWorkspaceOwner(c);
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const { sessionId, session } = await assistantConversationSession(c, owner);
+  const body: ListWorkspaceConversationsResponse = { sessionId, conversations: (await assistantConversations(c, session)).slice(0, 20) };
+  return c.json(body);
 });
 
 workspaceRuntimeRouter.get("/:workspace/runtime/info", async (c) => {

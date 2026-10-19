@@ -4,7 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, teams, teamMembers } from "../schema/index.js";
-import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse } from "../wire/types.js";
+import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse, EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; faux?.unregister(); faux = undefined; vi.unstubAllEnvs(); });
@@ -189,5 +189,83 @@ describe("workspace runtime authorization", () => {
     for (const [suffix, method] of [["", "POST"], ["/info", "GET"]]) {
       expect((await fetch(`${api.baseUrl}/api/workspaces/same/runtime${suffix}`, { method, headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
     }
+  });
+});
+
+describe("Ask Valet conversations", () => {
+  const conversations = (workspace: string, user = "local-user") => ({
+    open: async (body?: object) => await (await fetch(`${api!.baseUrl}/api/workspaces/${workspace}/conversation`, {
+      method: "POST", headers: { "x-valet-test-user-id": user, ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })).json() as EnsureWorkspaceConversationResponse,
+    list: async () => await (await fetch(`${api!.baseUrl}/api/workspaces/${workspace}/conversations`, {
+      headers: { "x-valet-test-user-id": user },
+    })).json() as ListWorkspaceConversationsResponse,
+  });
+  // Thread ids are random, so space out creations to order them by time.
+  const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+
+  it("starts a fresh conversation unless the latest one waits for an approval", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const first = await open();
+    expect(await open()).toEqual(first);
+    await tick();
+    const fresh = await open({ fresh: true });
+    expect(fresh.threadId).not.toBe(first.threadId);
+    expect(await open()).toEqual(fresh);
+    const keys = (await api.providers.engineStore.listThreads(first.sessionId)).map(thread => thread.key);
+    expect(keys).toContain("app-assistant:local-user");
+    expect(keys.filter(key => /^app-assistant:local-user:[0-9a-f-]{36}$/.test(key))).toHaveLength(1);
+
+    await tick();
+    const next = await open({ fresh: true, unlessBusy: true });
+    expect(next.threadId).not.toBe(fresh.threadId);
+    await api.providers.engineStore.saveDecisionGate(next.sessionId, next.threadId, {
+      id: "gate-settings", sessionId: next.sessionId, threadId: next.threadId, queueItemId: "q-settings", resumeKey: "rk-settings", ordinal: 0,
+      type: "approval", title: "Change your name?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+    });
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(next);
+    await tick();
+    const newChat = await open({ fresh: true });
+    expect(newChat.threadId).not.toBe(next.threadId);
+
+    const recent = await list();
+    expect(recent.sessionId).toBe(first.sessionId);
+    expect(recent.conversations.map(item => [item.threadId, item.busy])).toEqual([
+      [newChat.threadId, false], [next.threadId, true], [fresh.threadId, false], [first.threadId, false],
+    ]);
+    // Ask Valet conversations stay out of the Threads list.
+    const threads = await (await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=10`)).json() as ListThreadsResponse;
+    expect(threads.threads.some(thread => thread.key?.startsWith("app-assistant:"))).toBe(false);
+  });
+
+  it("keeps each team member's conversations to that member", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "ask-team", orgId: "local-org", name: "Ask", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values([
+      { teamId: "ask-team", userId: "local-user", role: "admin" },
+      { teamId: "ask-team", userId: "test-member", role: "member" },
+    ]);
+    const mine = conversations("ask-team");
+    const theirs = conversations("ask-team", "test-member");
+    await mine.open();
+    await tick();
+    const own = await mine.open({ fresh: true });
+    const other = await theirs.open({ fresh: true });
+    expect(own.sessionId).toMatch(/^execution:/);
+    expect(own.sessionId).not.toBe(other.sessionId);
+    const [execution] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, own.sessionId));
+    expect(execution?.conversationKey).toBe("app-assistant:local-user");
+    expect((await theirs.list()).conversations.map(item => item.threadId)).toEqual([other.threadId]);
+    expect((await mine.list()).conversations.map(item => item.threadId)).toContain(own.threadId);
+    const read = (threadId: string, user: string) => fetch(`${api!.baseUrl}/api/threads/${threadId}/messages`, { headers: { "x-valet-test-user-id": user } });
+    expect((await read(own.threadId, "local-user")).status).toBe(200);
+    expect((await read(own.threadId, "test-member")).status).toBe(404);
+    const { workspaceSessionId } = await (await fetch(`${api.baseUrl}/api/workspaces/ask-team/runtime`, {
+      method: "POST", headers: { "x-valet-test-user-id": "test-member" },
+    })).json() as EnsureWorkspaceRuntimeResponse;
+    const listed = await (await fetch(`${api.baseUrl}/api/sessions/${workspaceSessionId}/threads`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as ListThreadsResponse;
+    expect(listed.threads.some(thread => thread.id === own.threadId)).toBe(false);
   });
 });

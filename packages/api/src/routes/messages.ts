@@ -78,6 +78,7 @@ import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
+import { isAssistantConversationOf } from "../services/thread-access.js";
 import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
 import { threadChannel } from "../services/channels.js";
 import { threadChannelActivity } from "../services/channel-messages.js";
@@ -1141,7 +1142,7 @@ export async function submitSessionPrompt(
     outcome?.kind === "expand" && outcome.skill
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
-  const appPageHint = author && !author.externalSender && thread.key === `app-assistant:${author.id}`
+  const appPageHint = author && !author.externalSender && isAssistantConversationOf(thread.key, author.id)
     ? readAppPageHint(opts?.appPageHint) : undefined;
   const continuationMetadata = {
     ...(appPageHint ? { appPageHint } : {}),
