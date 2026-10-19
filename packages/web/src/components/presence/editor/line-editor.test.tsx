@@ -431,6 +431,44 @@ describe("LineEditor", () => {
     expect(createSubscription.mock.calls[1]?.[0]).toMatchObject({ allowCollision: true });
   });
 
+  describe("a save that stored the line with overlaps (E2)", () => {
+    function createWithOverlap() {
+      const handlers = renderEditor({ kind: "create" });
+      fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
+      fireEvent.click(screen.getByLabelText("A check completes"));
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      const other = line("l2", { name: "Review follow-up", eventKeys: ["github.check_run.completed"] });
+      const collisions = { blocking: [], overlapping: [{ subscription: other, relation: "partial" as const, sharedKeys: ["github.check_run.completed"] }] };
+      act(() => createSubscription.mock.calls[0]?.[1].onSuccess({ id: "sub_new", collisions }));
+      return handlers;
+    }
+
+    it("freezes the form and offers one Done that reports the line once", () => {
+      const { onSaved, onOpenChange } = createWithOverlap();
+      expect(screen.getByText("Saved.")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Create" })).toBeNull();
+      const check = screen.getByLabelText("A check completes") as HTMLInputElement;
+      expect(check.closest("fieldset")?.disabled).toBe(true);
+      // A change would clear the notice and bring Create back; the frozen form takes none.
+      fireEvent.click(check);
+      expect(screen.getByText("Saved.")).toBeTruthy();
+      expect(onSaved).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+      expect(onSaved).toHaveBeenCalledTimes(1);
+      expect(onSaved).toHaveBeenCalledWith({ kind: "line", id: "sub_new" });
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(createSubscription).toHaveBeenCalledTimes(1);
+    });
+
+    it("closes on Esc with no discard prompt, and reports the line", () => {
+      const { onSaved, onOpenChange } = createWithOverlap();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+      expect(screen.queryByText("Discard your changes?")).toBeNull();
+      expect(onSaved).toHaveBeenCalledTimes(1);
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+  });
+
   it("stacks the panes on a phone with the sentence as a sticky header", () => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query.includes("max-width"),

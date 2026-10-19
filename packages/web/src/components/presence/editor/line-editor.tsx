@@ -180,7 +180,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   // A section named at open time scrolls into view, so a `Change` link
   // under Where lands on Where and not on the top of the form.
   const initialSection = mode.initialSection;
-  const formRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFieldSetElement>(null);
   useEffect(() => {
     if (initialSection === undefined) return;
     const el = formRef.current?.querySelector(`[data-section="${initialSection}"]`);
@@ -188,6 +188,11 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   }, [initialSection]);
   const [error, setError] = useState<string | null>(null);
   const [collisions, setCollisions] = useState<{ report: EventSubscriptionCollisionsWire; committed: boolean } | null>(null);
+  // A create or save that stored the line but reported overlaps. The form
+  // freezes on the stored line, and Done (or Esc) reports it and closes.
+  const [stored, setStored] = useState<EditorSaved | null>(null);
+  const reported = useRef(false);
+  const frozen = stored !== null;
 
   // A change the editor makes for the reader (a default that loads late)
   // moves the baseline too, so it does not count as an edit.
@@ -232,6 +237,8 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   }, [pinTitle]);
 
   function change(next: Draft) {
+    // The line is stored; a change here would have no Save to send it.
+    if (frozen) return;
     if (next.assistant !== draft.assistant || next.teamId !== draft.teamId) assistantTouched.current = true;
     setDraft(next);
     setCollisions(null);
@@ -290,16 +297,25 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     // A request in flight finishes first: closing would unmount the sheet
     // and drop its success handler, so `onSaved` would never run.
     if (pending) return;
-    if (dirty && collisions?.committed !== true) setConfirming(true);
+    if (frozen) done();
+    else if (dirty) setConfirming(true);
     else close();
   }
 
   function saved(result: EditorSaved) {
+    if (reported.current) return;
+    reported.current = true;
     onSaved?.(result);
   }
 
+  /** Closes a frozen sheet and reports the stored line once. */
+  function done() {
+    if (stored !== null) saved(stored);
+    close();
+  }
+
   function save(allowCollision = false) {
-    if (blocker !== null || pending) return;
+    if (blocker !== null || pending || frozen) return;
     if (isEmptyBody(body)) {
       close();
       return;
@@ -307,11 +323,13 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     setError(null);
     const lineHandlers = {
       onSuccess: (resp: { id: string; collisions?: EventSubscriptionCollisionsWire }) => {
-        saved({ kind: "line", id: resp.id });
         if (resp.collisions !== undefined) {
           setCollisions({ report: resp.collisions, committed: true });
+          setStored({ kind: "line", id: resp.id });
+          setConfirming(false);
           return;
         }
+        saved({ kind: "line", id: resp.id });
         close();
       },
       onError: (err: Error) => {
@@ -377,7 +395,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     onCancel: requestClose,
     onSave: () => save(),
     onSaveAnyway: () => save(true),
-    onDone: close,
+    onDone: done,
     confirmingDiscard: confirming,
     onKeepEditing: () => setConfirming(false),
     onDiscard: close,
@@ -394,7 +412,8 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
       <DialogDescription className="sr-only">
         Choose when Valet acts, what it does, and where. The side pane reads the result.
       </DialogDescription>
-      <div ref={formRef}>
+      {/* After a save with overlaps the line is stored: the form reads it, and nothing in it changes. */}
+      <fieldset ref={formRef} disabled={frozen} className="m-0 min-w-0 border-0 p-0">
         <Section
           id="when"
           name="When"
@@ -466,7 +485,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
             onUseSuggestion={() => change({ ...draft, name: "", nameEdited: false })}
           />
         </Section>
-      </div>
+      </fieldset>
     </>
   );
 
