@@ -365,6 +365,22 @@ describe("RulePage", () => {
     expect(activityRows()).toHaveLength(2);
   });
 
+  it("reads the strip's acted count as the Acted chip's entries: a dead entry counts (S9)", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    // The api counts every acted delivery, dead ones too, as the timeline lists them.
+    getLineActivity.mockResolvedValue(activity([
+      acted("d-2", { outcome: { status: "delivered", thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } }, tookMs: 40_000 }),
+      acted("d-1", { at: NOW - 180_000, outcome: { status: "dead", deadText: "error: HTTP 500" } }),
+    ], { lastActedAt: NOW - 60_000, actedLast30Days: 2, perDay: [...Array.from({ length: 29 }, () => 0), 2] }));
+    renderPage();
+    await waitFor(() => expect(activityRows()).toHaveLength(2));
+    const strip = screen.getByRole("region", { name: "Health" });
+    expect(strip.querySelector('[data-fact="count"] [data-fact-value]')?.textContent).toBe("2");
+    expect(within(strip).getByText("last acted")).toBeTruthy();
+    await userEvent.click(within(screen.getByRole("region", { name: "Activity" })).getByRole("button", { name: "Acted" }));
+    expect(activityRows()).toHaveLength(2);
+  });
+
   it("shows a member only the skipped entries the api returns to a member, and no Diagnostics (Review Focus 1)", async () => {
     orgRole = "member";
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
@@ -443,6 +459,22 @@ describe("RulePage", () => {
     expect(crumbs.textContent).toBe("Presence›#incidents›Failed checks");
     // The title's place token links the same page as the crumb.
     expect(within(title).getByRole("link", { name: "#incidents" }).getAttribute("href")).toBe("/presence/places/slack:C900");
+  });
+
+  it("names an unlabeled channel by its id in both the crumb and the title (S16)", async () => {
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [listener({
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C123" }],
+        target: { kind: "assistant", thread: { mode: "new" } },
+      })],
+    });
+    renderPage();
+    const title = await screen.findByRole("heading", { level: 1, name: /C123/ });
+    const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(crumbs.textContent).toBe("Presence›C123›Failed checks");
+    expect(within(crumbs).getByRole("link", { name: "C123" })).toBeTruthy();
+    expect(within(title).getByRole("link", { name: "C123" })).toBeTruthy();
   });
 
   it("puts only Presence before the line for a line with no one place", async () => {

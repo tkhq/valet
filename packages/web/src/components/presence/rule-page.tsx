@@ -64,7 +64,8 @@ export function linePlace(sub: EventSubscriptionWire): { label: string; key: str
     if (filter === undefined || typeof filter.value !== "string" || filter.value.length === 0) continue;
     const value = filter.value;
     if (field === "channel") {
-      return { label: filter.label?.trim() || `#${value}`, key: `slack:${value}` };
+      // The label when known, else the raw id, as the title's place token reads.
+      return { label: filter.label?.trim() || value, key: `slack:${value}` };
     }
     const key = field === "repo" ? placeOfSubject(`github:${value}`) : placeOfSubject(`linear:team/${value}`);
     return key === null ? null : { label: value, key };
