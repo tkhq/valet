@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The Presence hub acceptance scenario, P1 to P17, revision 3 and the UX
- * fixes (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
+ * The Presence hub acceptance scenario, P1 to P20, revision 4
+ * (docs/specs/2026-10-16-presence-hub-design.md, "Acceptance scenario").
  *
  * The test renders the app's real route tree (`routeTree.gen.ts`, with the
  * root layout, the nav, and the workspace switcher) under a memory history.
@@ -20,10 +20,12 @@
  * router, because the thread page needs a live session socket. The thread
  * header's place label is a pure function, so P11 asserts it directly.
  *
- * P13 to P17 each start from their own mount, because each needs a
+ * P13 to P20 each start from their own mount, because each needs a
  * universe the walk does not hold: a proposal, a viewer outside `sre`, a
- * routine the scheduler turned off, or no connected service. P15 seeds the
- * routine's `disabledReason`; the api suite covers the scheduler that sets it.
+ * routine the scheduler turned off, no connected service, a member who is
+ * not an admin, or R4 with its archived pin after the walk fixed it. P15
+ * seeds the routine's `disabledReason`; the api suite covers the scheduler
+ * that sets it.
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -67,6 +69,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // ── Universe: org acme, user u-001, team sre ─────────────────────────────
 
 const ME = { id: "u-001", email: "u@acme.test", name: "U One", orgId: "acme", orgRole: "admin", role: "admin" };
+/** The viewer. P18 sets an organization member who is not an admin. */
+let meNow = ME;
 const SRE: TeamSummary = {
   id: "sre", orgId: "acme", name: "SRE", origin: "local", externalId: null, createdAt: 1,
   memberCount: 3, callerRole: "member", defaultModel: null,
@@ -78,7 +82,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
-    useMe: () => ({ data: ME, isLoading: false, isFetching: false, error: null, isError: false, isSuccess: true }),
+    useMe: () => ({ data: meNow, isLoading: false, isFetching: false, error: null, isError: false, isSuccess: true }),
     useOrg: () => ({ data: { callerRole: "admin", features: { organizations: true }, plugins: [] }, isLoading: false, error: null }),
     useTeams: () => ({ data: { teams: teamsNow }, isLoading: false, error: null }),
   };
@@ -277,11 +281,15 @@ const DEAD_ROW = logEvent("ev-14", "github", "github.check_run.completed", "acme
   delivery({ id: "d-14", subscriptionId: "R4", subscriptionName: "CI failures", status: "dead", attempts: 3, lastError: PIN_UNAVAILABLE, deliveredAt: null }),
 ], "failed");
 
-/** R4's Activity: the check that could not reach the archived Platform CI (P7). */
+/** R4's Activity: the check that could not reach the archived Platform CI
+ * (P7), and a check on acme/web that the repository filter skipped (P18). */
 const R4_ACTIVITY: LineActivityResponse = {
   entries: [{
     id: "d-14", kind: "acted", at: NOW - 60_000, eventId: "ev-14", eventKey: "github.check_run.completed",
     place: "github:acme/api#14", placeLabel: "acme/api#14", outcome: { status: "dead", deadText: PIN_UNAVAILABLE },
+  }, {
+    id: "rc-8", kind: "skipped", at: NOW - 120_000, eventId: null, eventKey: "github.check_run.completed",
+    place: "github:acme/web#8", placeLabel: "acme/web#8", reason: "filters", reasonText: "the repository filter",
   }],
   lastActedAt: null,
   actedLast30Days: 0,
@@ -510,6 +518,7 @@ beforeEach(() => {
   routines.user = [S1];
   routines.sre = [];
   teamsNow = [SRE];
+  meNow = ME;
   pluginsNow = plugins(true);
   created.length = 0;
   createdRoutines.length = 0;
@@ -562,6 +571,11 @@ function sentences(section: HTMLElement): string[] {
   return within(section).getAllByRole("link").map((link) => link.textContent ?? "").filter((text) => text.startsWith("When "));
 }
 
+/** The section toggles of an open editor, by accessible name: `Change When` while summarized, `Close When` while open. */
+function sectionToggles(editor: HTMLElement): string[] {
+  return [...editor.querySelectorAll<HTMLElement>("[data-section] button[aria-expanded]")].map((toggle) => toggle.getAttribute("aria-label") ?? "");
+}
+
 /** Back to the overview through the first crumb of a detail page. */
 async function crumbToOverview(router: ReturnType<typeof mountApp>) {
   await userEvent.click(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "Presence" }));
@@ -569,7 +583,7 @@ async function crumbToOverview(router: ReturnType<typeof mountApp>) {
   await screen.findByRole("heading", { level: 1, name: "Presence" });
 }
 
-describe("Presence hub acceptance (P1 to P17)", () => {
+describe("Presence hub acceptance (P1 to P20)", () => {
   it("walks the scenario in one run", { timeout: 90_000 }, async () => {
     const router = mountApp("/");
 
@@ -690,17 +704,30 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(within(screen.getByRole("region", { name: "Recent activity" })).getByRole("link", { name: "Mention in #incidents" })).toBeTruthy();
 
     // P5: + Listen for… on the overview's #incidents row opens the editor
-    // fixed on the place. When offers only Slack, and the side pane reads
-    // the line. Create stores the policy `{ mode: "new" }`, and the row
-    // shows the new line.
+    // full height with When open and fixed on the place: only Slack, and
+    // the place as a condition already set. After the mention is picked,
+    // the side pane reads the line and a three-step example. Create stores
+    // the policy `{ mode: "new" }`, and the row shows the new line.
     await crumbToOverview(router);
     const incidentsRow = await screen.findByRole("region", { name: "#incidents" });
     await userEvent.click(within(incidentsRow).getByRole("button", { name: "+ Listen for…" }));
-    const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    const editorSheet = await screen.findByRole("dialog", { name: "New" });
+    expect(editorSheet.className).toContain("h-[100dvh]");
+    const editor = within(editorSheet);
+    expect(editor.getByRole("button", { name: "Close When" }).getAttribute("aria-expanded")).toBe("true");
     expect(within(editor.getByRole("group", { name: "Service" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Slack"]);
-    await userEvent.click(editor.getByLabelText("Someone mentions Valet"));
     expect(editor.getByRole("button", { name: /^Remove .*#incidents/ })).toBeTruthy();
-    expect(editor.getAllByTestId("editor-sentence")[0]!.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+    await userEvent.click(editor.getByLabelText("Someone mentions Valet"));
+    const preview = within(editor.getByRole("complementary", { name: "Preview" }));
+    expect(preview.getByText("This line reads")).toBeTruthy();
+    expect(preview.getByTestId("editor-sentence").textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+    const example = preview.getByText("For example").nextElementSibling;
+    if (example === null) throw new Error("The side pane has no example.");
+    expect(within(example as HTMLElement).getAllByRole("listitem").map((step) => step.textContent)).toEqual([
+      "1Someone mentions Valet in #incidents.",
+      "2Valet reads the message.",
+      "3It replies in a new thread, as Valet.",
+    ]);
     await userEvent.click(editor.getByRole("button", { name: "Change Name" }));
     await userEvent.clear(editor.getByRole("textbox", { name: "Name" }));
     await userEvent.type(editor.getByRole("textbox", { name: "Name" }), "Incident replies");
@@ -719,20 +746,22 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     await switchWorkspace("SRE", "Personal");
     await screen.findByRole("region", { name: "acme/api" });
     await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
-    const routineWizard = within(await screen.findByRole("dialog", { name: "New" }));
-    expect(within(routineWizard.getByRole("group", { name: "Service" })).getAllByRole("button").map((b) => b.textContent)).toEqual([
+    const routineEditor = within(await screen.findByRole("dialog", { name: "New" }));
+    expect(routineEditor.getByRole("button", { name: "Close When" }).getAttribute("aria-expanded")).toBe("true");
+    expect(within(routineEditor.getByRole("group", { name: "Service" })).getAllByRole("button").map((b) => b.textContent)).toEqual([
       "Slack", "GitHub", "Linear", "On a schedule",
     ]);
-    await userEvent.click(routineWizard.getByRole("button", { name: "On a schedule" }));
+    await userEvent.click(routineEditor.getByRole("button", { name: "On a schedule" }));
+    expect(routineEditor.getByText("This routine reads")).toBeTruthy();
     // The day and time control opens on weekdays at 9:00.
-    await userEvent.selectOptions(routineWizard.getByLabelText("Timezone"), "UTC");
-    await userEvent.click(routineWizard.getByRole("button", { name: "Change Do" }));
-    await userEvent.type(routineWizard.getByLabelText("Instructions (required)"), "Summarize open incidents.");
-    await userEvent.click(routineWizard.getByRole("button", { name: "Change Name" }));
-    await userEvent.clear(routineWizard.getByRole("textbox", { name: "Name" }));
-    await userEvent.type(routineWizard.getByRole("textbox", { name: "Name" }), "Incident digest");
-    expect(routineWizard.getAllByTestId("editor-sentence")[0]!.textContent).toBe("Every weekday at 9:00, Incident digest: work in its own thread.");
-    await userEvent.click(routineWizard.getByRole("button", { name: "Create" }));
+    await userEvent.selectOptions(routineEditor.getByLabelText("Timezone"), "UTC");
+    await userEvent.click(routineEditor.getByRole("button", { name: "Change Do" }));
+    await userEvent.type(routineEditor.getByLabelText("Instructions (required)"), "Summarize open incidents.");
+    await userEvent.click(routineEditor.getByRole("button", { name: "Change Name" }));
+    await userEvent.clear(routineEditor.getByRole("textbox", { name: "Name" }));
+    await userEvent.type(routineEditor.getByRole("textbox", { name: "Name" }), "Incident digest");
+    expect(routineEditor.getAllByTestId("editor-sentence")[0]!.textContent).toBe("Every weekday at 9:00, Incident digest: work in its own thread.");
+    await userEvent.click(routineEditor.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(createdRoutines).toHaveLength(1));
     expect(createdRoutines[0]).toMatchObject({ name: "Incident digest", cron: "0 9 * * 1-5", timezone: "UTC" });
     const digest = within(await within(screen.getByRole("region", { name: "On a schedule" })).findByRole("region", { name: "Incident digest" }));
@@ -741,31 +770,49 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(digest.getByText(/^Next /)).toBeTruthy();
     expect(digest.getByRole("button", { name: "Fire Incident digest now" })).toBeTruthy();
 
-    // P7: R4's page shows the breadcrumb, the sentence as the title, the
-    // status line with Edit, the health strip, the problem line with the
-    // picker, How it works, and Activity with the dead check and its chips.
+    // P7: R4's page shows the breadcrumb, the sentence as the title led by
+    // the GitHub mark, the status line (name, set up by, the switch, Edit),
+    // the health strip, the problem line with the picker, How it works as
+    // When, Do, and Where with an explanation and a Change each, and
+    // Activity with the dead check and its chips.
     await userEvent.click(within(screen.getByRole("region", { name: "acme/api" })).getByRole("link", { name: "When a check completes, work in the Platform CI thread." }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/R4"));
     const crumbs = await screen.findByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›acme/api›CI failures");
     expect(within(crumbs).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
     expect(within(crumbs).getByText("CI failures").getAttribute("aria-current")).toBe("page");
-    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
-    expect((await screen.findByText("set up by", { exact: false })).textContent).toMatch(/^set up by U One /);
-    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    const r4Title = await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." });
+    expect(r4Title.parentElement?.querySelector('[data-service="github"][data-size="lg"]')).not.toBeNull();
+    const status = within(screen.getByRole("region", { name: "CI failures" }));
+    expect(status.getAllByText("CI failures")[0]).toBeTruthy();
+    expect((await status.findByText("set up by", { exact: false })).textContent).toMatch(/^set up by U One /);
+    expect(status.getByRole("switch", { name: "Turn off CI failures" }).parentElement?.textContent).toBe("On");
+    expect(status.getByRole("button", { name: "Edit" })).toBeTruthy();
     const health = within(await screen.findByRole("region", { name: "Health" }));
-    expect(health.getByText("last acted")).toBeTruthy();
-    expect(health.getByText("times in 30 days")).toBeTruthy();
-    expect(health.getByText("Needs attention")).toBeTruthy();
-    expect(health.getByRole("img", { name: "Activity over the last 30 days" })).toBeTruthy();
+    // R4 never delivered: its only acted entry dead-lettered.
+    expect(health.getByText("last acted").previousElementSibling?.textContent).toBe("never");
+    expect(health.getByText("times in 30 days").previousElementSibling?.textContent).toBe("0");
+    expect(health.getByText("Needs attention").nextElementSibling?.textContent).toBe("Platform CI is archived");
+    const pulse = health.getByRole("img", { name: "Activity over the last 30 days" });
+    expect(pulse.children).toHaveLength(30);
+    expect(pulse.lastElementChild?.className).toContain("bg-moss");
     const problem = within(screen.getByRole("region", { name: "Problem" }));
     expect(problem.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
     const how = screen.getByRole("region", { name: "How it works" });
-    expect([...how.querySelectorAll<HTMLElement>("[data-section]")].map((column) => column.dataset.section)).toEqual(["when", "do", "where"]);
-    expect(within(how).getAllByRole("button", { name: /^Change / })).toHaveLength(3);
+    const columns = [...how.querySelectorAll<HTMLElement>("[data-section]")];
+    expect(columns.map((column) => column.dataset.section)).toEqual(["when", "do", "where"]);
+    expect(columns.map((column) => [...column.querySelectorAll("p")].map((line) => line.textContent))).toEqual([
+      ["When", "a check completes on acme/api", "Any branch, any author."],
+      ["Do", "work on it as Valet", "Valet reads the event and acts in the thread. It appears as Valet."],
+      ["Where", "in the Platform CI thread", "Every event lands in this one thread, so the history stays in one place."],
+    ]);
+    expect(within(how).getAllByRole("button", { name: /^Change / }).map((link) => [link.getAttribute("aria-label"), link.textContent])).toEqual([
+      ["Change When", "Change"], ["Change Do", "Change"], ["Change Where", "Change"],
+    ]);
     const timeline = within(screen.getByRole("region", { name: "Activity" }));
-    expect((await timeline.findByText(/could not reach/)).closest("li")?.textContent)
-      .toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+    const deadEntry = (await timeline.findByText(/could not reach/)).closest("li");
+    expect(deadEntry?.textContent).toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+    expect(deadEntry?.querySelector('[data-mark="acted"]')).not.toBeNull();
     expect(within(timeline.getByRole("group", { name: "Show" })).getAllByRole("button").map((chip) => chip.textContent)).toEqual(["All", "Acted", "Skipped"]);
 
     // P8: a pick patches the pin; the problem line goes and the title names
@@ -884,9 +931,15 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     // A proposal shows Turn on and Delete in place of the switch.
     expect(screen.queryByRole("switch", { name: "Turn on Checks only" })).toBeNull();
 
+    // Turn on opens the editor in review mode: every section summarized, the
+    // notice in the side pane, and Turn on in place of Save (Part H step 10).
     await userEvent.click(proposal.getByRole("button", { name: "Turn on" }));
-    const review = within(await screen.findByRole("dialog", { name: "Checks only" }));
-    expect(review.getByText(/Proposed by the assistant/)).toBeTruthy();
+    const reviewSheet = await screen.findByRole("dialog", { name: "Checks only" });
+    const review = within(reviewSheet);
+    expect(sectionToggles(reviewSheet)).toEqual(["Change When", "Change Do", "Change Where", "Change Appears as", "Change Name"]);
+    const preview = within(review.getByRole("complementary", { name: "Preview" }));
+    expect(preview.getByRole("note").textContent).toBe("Proposed by the assistant. Turning it on turns off Reviews and checks.");
+    expect(review.queryByRole("button", { name: "Save" })).toBeNull();
     await userEvent.click(review.getByRole("button", { name: "Turn on" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toMatchObject({ id: "proposal-1", body: { enabled: true } });
@@ -954,6 +1007,7 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     await screen.findByRole("region", { name: "acme/api" });
     await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
     const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    expect(editor.getByRole("button", { name: "Close When" }).getAttribute("aria-expanded")).toBe("true");
     const service = within(editor.getByRole("group", { name: "Service" }));
     await waitFor(() => expect(service.getByRole("button", { name: "On a schedule" }).getAttribute("aria-pressed")).toBe("true"));
     for (const name of ["Slack", "GitHub", "Linear"]) {
@@ -961,7 +1015,109 @@ describe("Presence hub acceptance (P1 to P17)", () => {
       expect(button).toHaveProperty("disabled", true);
       expect(button.textContent).toContain("Connect first");
     }
+    expect(service.getByText(/^To use another service, connect it in/).textContent).toBe("To use another service, connect it in Integrations.");
     expect(service.getByRole("link", { name: "Integrations" }).getAttribute("href")).toBe("/integrations");
+  });
+
+  it("P18: on R4's page the chips keep skipped or acted entries, and only an admin sees Diagnostics", { timeout: 30_000 }, async () => {
+    mountApp("/presence/rules/R4");
+    const activity = await screen.findByRole("region", { name: "Activity" });
+    const timeline = within(activity);
+    await timeline.findByText(/could not reach/);
+    /** The entries the timeline shows, as their text and their mark. */
+    const shown = () => timeline.getAllByRole("listitem").map((entry) => ({
+      text: entry.textContent ?? "",
+      mark: entry.querySelector("[data-mark]")?.getAttribute("data-mark"),
+    }));
+    expect(shown().map((entry) => entry.mark)).toEqual(["acted", "skipped"]);
+
+    const chips = within(timeline.getByRole("group", { name: "Show" }));
+    await userEvent.click(chips.getByRole("button", { name: "Skipped" }));
+    const skipped = shown();
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.mark).toBe("skipped");
+    expect(skipped[0]!.text).toContain("Completed check on acme/web#8 → skipped, not for this line: the repository filter");
+    // A skipped entry carries a hollow mark: a ring, no fill.
+    expect(activity.querySelector('[data-mark="skipped"]')?.className).toContain("border-[1.5px]");
+    expect(activity.querySelector('[data-mark="skipped"]')?.className).not.toContain("bg-moss");
+
+    await userEvent.click(chips.getByRole("button", { name: "Acted" }));
+    const acted = shown();
+    expect(acted).toHaveLength(1);
+    expect(acted[0]!.mark).toBe("acted");
+    expect(acted[0]!.text).toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+
+    // ME is an organization admin.
+    expect(screen.getByText("Diagnostics")).toBeTruthy();
+  });
+
+  it("P18: an organization member who is not an admin sees no Diagnostics", async () => {
+    meNow = { ...ME, orgRole: "member", role: "member" };
+    mountApp("/presence/rules/R4");
+    const timeline = within(await screen.findByRole("region", { name: "Activity" }));
+    await timeline.findByText(/could not reach/);
+    expect(screen.queryByText("Diagnostics")).toBeNull();
+  });
+
+  it("P19: Edit, then Where, then Its own thread, then Save, retitles R4 and clears its fault", { timeout: 30_000 }, async () => {
+    mountApp("/presence/rules/R4");
+    const status = within(await screen.findByRole("region", { name: "CI failures" }));
+    const health = await screen.findByRole("region", { name: "Health" });
+    expect(within(health).getByText("Needs attention")).toBeTruthy();
+
+    // The editor opens full height with every section summarized and the
+    // side pane reading the current sentence.
+    await userEvent.click(status.getByRole("button", { name: "Edit" }));
+    const sheet = await screen.findByRole("dialog", { name: "CI failures" });
+    expect(sheet.className).toContain("h-[100dvh]");
+    const editor = within(sheet);
+    expect(sectionToggles(sheet)).toEqual(["Change When", "Change Do", "Change Where", "Change Appears as", "Change Name"]);
+    const preview = within(editor.getByRole("complementary", { name: "Preview" }));
+    await waitFor(() => expect(preview.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in the Platform CI thread."));
+
+    // Where reads its thread policies as cards with one explanation line each.
+    await userEvent.click(editor.getByRole("button", { name: "Change Where" }));
+    const where = within(editor.getByRole("radiogroup", { name: "Where" }));
+    const cards = where.getAllByRole("radio").map((radio) => {
+      const line = document.getElementById(radio.getAttribute("aria-describedby") ?? "");
+      return [radio.getAttribute("aria-label"), line?.textContent];
+    });
+    expect(cards).toEqual([
+      ["One thread per pull request", "Each pull request gets its own thread; every event for it lands there."],
+      ["A new thread each time", "Every event starts fresh."],
+      ["Its own thread", "One running thread for this line."],
+      ["The Platform CI thread", "An existing thread you pick. If it is archived, this line stops until you pick another."],
+    ]);
+    await userEvent.click(where.getByRole("radio", { name: "Its own thread" }));
+    expect(preview.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");
+    await userEvent.click(editor.getByRole("button", { name: "Save" }));
+
+    // The patch carries only the thread (Review Focus 3).
+    await waitFor(() => expect(patches).toEqual([{ id: "R4", body: { thread: { mode: "own" } } }]));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "CI failures" })).toBeNull());
+    expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in its own thread." })).toBeTruthy();
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Health" })).queryByText("Needs attention")).toBeNull());
+  });
+
+  it("P20: Add, then A reply in one Slack thread and a pasted link, reads the thread follow", { timeout: 30_000 }, async () => {
+    mountApp("/presence");
+    await screen.findByRole("region", { name: "acme/api" });
+    await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
+    const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    await waitFor(() => expect(within(editor.getByRole("group", { name: "Service" })).getByRole("button", { name: "Slack" }).getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(within(editor.getByRole("radiogroup", { name: "Listen for" })).getByRole("radio", { name: "A reply in one Slack thread" }));
+    await userEvent.type(editor.getByLabelText("Paste the thread's link"), "https://acme.slack.com/archives/C900/p1750000000123456");
+    const preview = within(editor.getByRole("complementary", { name: "Preview" }));
+    // The link names the channel by its id only, so the sentence does too.
+    expect(preview.getByTestId("editor-sentence").textContent).toBe("When someone replies in the Slack thread in C900, work in its own thread.");
+    await userEvent.click(editor.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(created).toHaveLength(1));
+    expect(created[0]!.eventKeys).toEqual(["slack.message"]);
+    expect(created[0]!.filters).toEqual([
+      { field: "channel", op: "eq", value: "C900" },
+      { field: "thread_ts", op: "eq", value: "1750000000.123456" },
+    ]);
+    expect(created[0]!.target).toMatchObject({ kind: "assistant", thread: { mode: "own" } });
   });
 
   it("INV-H8: Add, a place row, a line's Edit, a proposal's Turn on, and a workflow open one editor", { timeout: 60_000 }, async () => {
