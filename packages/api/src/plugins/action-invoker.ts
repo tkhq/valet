@@ -69,6 +69,7 @@ import {
   resolveOrgNativeAppRead,
   resolveOrgCredentialRead,
   readTeamCredential,
+  teamFallbackReason,
   readUserCredential,
   onePasswordScopesFor,
 } from "../services/credential-resolution.js";
@@ -439,10 +440,18 @@ async function computeResult(
   // User→org owner precedence + 1Password reference resolution, matching
   // `engine/host.ts`. A user-owned run reads the user row first and falls
   // back to the org row; an org-owned run reads the org row only.
-  const baseProvider =
+  // Two providers over the same reads: discovery and the team refusal
+  // probe use the first, and the action itself the second. Only the
+  // action's own read counts an app-token fallback, so one action counts
+  // once (`valet_credentials_app_fallback_total`).
+  const providerFor = (countsFallback: boolean) =>
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts, ctx, owner, credentialService, { selection, appService });
+      : buildCredentialProvider(opts, ctx, owner, credentialService, { selection, appService, countsFallback });
+  const withIdentity = (provider: CredentialProvider) =>
+    credentialService === "slack" && ctx.owner.type === "user"
+      ? withOwnerSlackIdentity(provider, opts.db, ctx.owner.id)
+      : provider;
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-
@@ -452,10 +461,7 @@ async function computeResult(
   // runs only: a team/org-owned run has no single person whose channel
   // membership could authorize the read, so its credential stays bare and
   // those actions keep failing closed.
-  const credentials =
-    credentialService === "slack" && ctx.owner.type === "user"
-      ? withOwnerSlackIdentity(baseProvider, opts.db, ctx.owner.id)
-      : baseProvider;
+  const credentials = withIdentity(providerFor(false));
 
   // Dynamic `resolveActions` discovery runs BEFORE policy enforcement because
   // resolution needs the action's `riskLevel` (rung 5 fallback) — which only
@@ -571,7 +577,7 @@ async function computeResult(
     return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Change the params to match the tool's parameter schema.` };
   }
 
-  const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
+  const actionCtx = buildActionContext(req, ctx, withIdentity(providerFor(true)), action.id, opts.db);
 
   const startedAt = (opts.clock ?? Date.now)();
   let result: PluginActionResult;
@@ -965,8 +971,11 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  *
  *   - `"auto"` keeps the order above and adds the app step: a read of the
  *     row-backed app credential service (`linear:app`) returns the bare app
- *     token. An org-owned run reads the app token first. A read that ends
- *     at the app token is counted (`valet_credentials_app_fallback_total`).
+ *     token. An org-owned run reads the app token first. An action whose
+ *     read ends at the app token is counted
+ *     (`valet_credentials_app_fallback_total`) when `pick.countsFallback`
+ *     is set: the provider the action executes with, not the discovery
+ *     and refusal reads.
  *   - `"app"` returns the app identity for the service and for its app step.
  *   - `"user"` reads a person's credential only. It never reaches the app
  *     step, and an org-provided org row does not count as a person's.
@@ -976,7 +985,7 @@ function buildCredentialProvider(
   ctx: ActionInvocationContext,
   owner: CredentialOwner,
   defaultService: string,
-  pick: { selection: "auto" | "app" | "user"; appService?: string } = {
+  pick: { selection: "auto" | "app" | "user"; appService?: string; countsFallback?: boolean } = {
     selection: "auto",
     appService: nativeAppCredentialServiceFor(registryOf(opts), defaultService),
   },
@@ -1042,9 +1051,10 @@ function buildCredentialProvider(
     // service, an org-provided org row is the app identity, so it is not one.
     const fallback = selection === "user" && appService && policy === "org-provided" ? "reference-only" : policy;
     // An `auto` read of the provider's own service ends at the app token
-    // when nothing else answers. That fallback is counted
-    // (`valet_credentials_app_fallback_total`).
-    const countsFallback = selection === "auto" && appTier !== undefined && svc === defaultService;
+    // when nothing else answers. The action's own read counts that
+    // fallback (`valet_credentials_app_fallback_total`).
+    const reachesApp = selection === "auto" && appTier !== undefined && svc === defaultService;
+    const countsFallback = reachesApp && pick.countsFallback === true;
     if (owner.type === "user") {
       const { credential: stored, source } = await readUserCredential(
         deps,
@@ -1057,7 +1067,7 @@ function buildCredentialProvider(
     }
     if (owner.type === "team") {
       let deadDelegated = false;
-      const { credential: stored, source } = await readTeamCredential(
+      const { credential: stored, source, approvalFrom } = await readTeamCredential(
         deps,
         {
           orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
@@ -1065,7 +1075,7 @@ function buildCredentialProvider(
           mayBorrow: mayBorrow(svc),
           // A dead team connection or a broken share gives way to the app
           // token, the same as in a session (`engine/host.ts`).
-          ...(countsFallback && appTier
+          ...(reachesApp && appTier
             ? {
                 laterTier: async () => {
                   deadDelegated = (await resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry)) !== null;
@@ -1078,12 +1088,12 @@ function buildCredentialProvider(
         fallback,
       );
       if (!stored && countsFallback) {
-        await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, deadDelegated ? "dead_delegated" : "no_delegated", registry);
+        await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, teamFallbackReason(approvalFrom, deadDelegated), registry);
       }
       return from(stored, await withSharerName(opts.db, source));
     }
-    if (countsFallback) {
-      const app = await resolveOrgNativeAppRead(readDeps, { orgId: ctx.orgId }, svc, registry);
+    if (reachesApp) {
+      const app = await resolveOrgNativeAppRead(readDeps, { orgId: ctx.orgId }, svc, registry, countsFallback);
       if (app) return from(app, { kind: "app" });
     }
     return from(await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc), { kind: "org" });

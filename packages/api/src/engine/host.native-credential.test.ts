@@ -80,6 +80,11 @@ describe("EngineHost native credential policy (Part B)", () => {
   async function partB(provider: Provider) {
     return (await provider.get("linear")) ?? (await provider.get("linear:app"));
   }
+  /** The reads an action makes as it executes: its own service, then the
+   * app step. Only these count a fallback. */
+  async function actionRead(provider: Provider) {
+    return (await provider.get("linear", { forAction: true })) ?? (await provider.get("linear:app", { forAction: true }));
+  }
   function expectAppToken(cred: Awaited<ReturnType<Provider["get"]>>) {
     expect(cred?.accessToken).toBe("lin-app-token");
     expect(cred?.metadata).toBeUndefined();
@@ -268,7 +273,7 @@ describe("EngineHost native credential policy (Part B)", () => {
       const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
       const { appDb, credentials } = await harness();
       const session = await makeHost(appDb, credentials).sessionFor("sess-m1", userMeta);
-      expectAppToken(await partB(session.credentialProvider()));
+      expectAppToken(await actionRead(session.credentialProvider()));
       expect(record.mock.calls).toEqual([["linear", "no_personal"]]);
     });
 
@@ -276,7 +281,7 @@ describe("EngineHost native credential policy (Part B)", () => {
       const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
       const { appDb, credentials } = await harness();
       const session = await makeHost(appDb, credentials).sessionFor("sess-m2", teamMeta);
-      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expectAppToken(await actionRead(session.credentialProvider({ actorId: userId })));
       expect(record.mock.calls).toEqual([["linear", "no_delegated"]]);
     });
 
@@ -286,7 +291,7 @@ describe("EngineHost native credential policy (Part B)", () => {
       await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
       await shareCredential(appDb, { teamId, service: "linear", userId, createdAt: 1 });
       const session = await makeHost(appDb, credentials).sessionFor("sess-m3", teamMeta);
-      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expectAppToken(await actionRead(session.credentialProvider({ actorId: userId })));
       expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
     });
 
@@ -295,7 +300,7 @@ describe("EngineHost native credential policy (Part B)", () => {
       const { appDb, credentials } = await harness();
       await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "dead", expiresAt: 1, metadata: { refreshRefused: true } });
       const session = await makeHost(appDb, credentials).sessionFor("sess-m4", teamMeta);
-      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expectAppToken(await actionRead(session.credentialProvider({ actorId: userId })));
       expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
     });
 
@@ -303,8 +308,35 @@ describe("EngineHost native credential policy (Part B)", () => {
       const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
       const { appDb, credentials } = await harness();
       const session = await makeHost(appDb, credentials).sessionFor("sess-m5", orgMeta);
-      expectAppToken(await session.credentialProvider().get("linear"));
+      expectAppToken(await session.credentialProvider().get("linear", { forAction: true }));
       expect(record.mock.calls).toEqual([["linear", "org_owner"]]);
+    });
+
+    it("counts a team read whose share waits for its member's approval as approval_pending", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "user", id: sharer }, "linear", { type: "oauth2", accessToken: "u-002-linear" });
+      await shareCredential(appDb, { teamId, service: "linear", userId: sharer, createdAt: 1 });
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m8", teamMeta);
+      expectAppToken(await actionRead(session.credentialProvider({ actorId: userId })));
+      expect(record.mock.calls).toEqual([["linear", "approval_pending"]]);
+    });
+
+    it("counts once per action: discovery and the list_tools probe read without counting", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      const h = makeHost(appDb, credentials);
+      const team = (await h.sessionFor("sess-m9", teamMeta)).credentialProvider({ actorId: userId });
+      const org = (await h.sessionFor("sess-m10", orgMeta)).credentialProvider();
+      // The probe and discovery.
+      expectAppToken(await partB(team));
+      expectAppToken(await partB(team));
+      expectAppToken(await org.get("linear"));
+      expect(record).not.toHaveBeenCalled();
+      // The action.
+      expectAppToken(await actionRead(team));
+      expectAppToken(await org.get("linear", { forAction: true }));
+      expect(record.mock.calls).toEqual([["linear", "no_delegated"], ["linear", "org_owner"]]);
     });
 
     it("counts nothing when a person's credential answers or no app is connected", async () => {
@@ -312,9 +344,9 @@ describe("EngineHost native credential policy (Part B)", () => {
       const { appDb, credentials } = await harness();
       await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "personal-linear" });
       const h = makeHost(appDb, credentials);
-      expect((await partB((await h.sessionFor("sess-m6", userMeta)).credentialProvider()))?.accessToken).toBe("personal-linear");
+      expect((await actionRead((await h.sessionFor("sess-m6", userMeta)).credentialProvider()))?.accessToken).toBe("personal-linear");
       await credentials.delete({ type: "org", id: orgId }, "linear");
-      expect(await partB((await h.sessionFor("sess-m7", teamMeta)).credentialProvider({ actorId: userId }))).toBeNull();
+      expect(await actionRead((await h.sessionFor("sess-m7", teamMeta)).credentialProvider({ actorId: userId }))).toBeNull();
       expect(record).not.toHaveBeenCalled();
     });
   });

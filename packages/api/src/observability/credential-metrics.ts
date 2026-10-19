@@ -22,6 +22,8 @@ export type AppFallbackReason =
   | "no_delegated"
   /** A team share or team connection existed but could not answer. */
   | "dead_delegated"
+  /** A member's share would answer, and that member has not approved yet. */
+  | "approval_pending"
   /** An org-owned read, which has no person to act as. */
   | "org_owner";
 
@@ -30,7 +32,7 @@ let fallbackCounter: Counter | undefined;
 
 export function recordAppCredentialFallback(service: string, reason: AppFallbackReason): void {
   fallbackCounter ??= metrics.getMeter("@valet/api").createCounter("valet.credentials.app_fallback", {
-    description: "Credential reads of a native integration that ended at the app token",
+    description: "Native integration actions whose credential read ended at the app token",
   });
   fallbackCounter.add(1, { service, reason });
 }

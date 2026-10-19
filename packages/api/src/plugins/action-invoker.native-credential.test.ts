@@ -167,11 +167,9 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     expect(await invoke(node("linear"), userCtx)).toEqual(bareApp);
     expect(await invoke(node("linear", "auto"), teamCtx)).toEqual(bareApp);
     expect(await invoke(node("linear"), orgCtx)).toEqual(bareApp);
-    // A team run reads once to decide its refusal and once in the action,
-    // and each read that ends at the app token counts.
-    expect(new Set(record.mock.calls.map(([service, reason]) => `${service}:${reason}`))).toEqual(
-      new Set(["linear:no_personal", "linear:no_delegated", "linear:org_owner"]),
-    );
+    // A team run reads once to decide its refusal and once in the action.
+    // Only the action's read counts, so each action counts once.
+    expect(record.mock.calls).toEqual([["linear", "no_personal"], ["linear", "no_delegated"], ["linear", "org_owner"]]);
 
     await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "personal-linear" });
     expect(await invoke(node("linear"), userCtx)).toEqual({ ok: true, result: { token: "personal-linear", metadata: null } });
@@ -187,6 +185,22 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     expect(await invoke(node("linear"), teamCtx)).toEqual(bareApp);
     expect(record.mock.calls.length).toBeGreaterThan(0);
     expect(record.mock.calls.every(([service, reason]) => service === "linear" && reason === "dead_delegated")).toBe(true);
+  });
+
+  it("a team run counts one fallback per action, and none while it parks for a share's approval", async () => {
+    const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+    const { appDb, credentials } = await harness();
+    const invoke = invokerFor(appDb, credentials);
+
+    expect(await invoke(node("linear"), teamCtx)).toEqual(bareApp);
+    expect(record.mock.calls).toEqual([["linear", "no_delegated"]]);
+
+    record.mockClear();
+    await credentials.save({ type: "user", id: sharer }, "linear", { type: "oauth2", accessToken: "u-002-linear" });
+    await shareCredential(appDb, { teamId, service: "linear", userId: sharer, createdAt: 1 });
+    // The run parks for the sharer's approval before any action reads.
+    expect(await invoke(node("linear"), teamCtx)).toMatchObject({ ok: false, requiresApproval: true, approver: { userId: sharer } });
+    expect(record).not.toHaveBeenCalled();
   });
 
   it("a Slack node pinned to app reads the org bot row", async () => {

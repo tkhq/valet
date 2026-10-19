@@ -471,22 +471,31 @@ export async function noteAppCredentialFallback(
 
 /**
  * An org-owned read of a native `service` whose app credential is
- * row-backed: the app token, counted as `org_owner`. `undefined` when the
- * service has no such app step or the app token does not answer, so the
- * caller goes on to its plain org read.
+ * row-backed: the app token, counted as `org_owner` when `count` is set.
+ * `undefined` when the service has no such app step or the app token does
+ * not answer, so the caller goes on to its plain org read.
  */
 export async function resolveOrgNativeAppRead(
   deps: CredentialReadDeps,
   ctx: { orgId: string },
   service: string,
   plugins: readonly ValetPlugin[] | undefined,
+  count: boolean,
 ): Promise<StoredCredential | undefined> {
   const appService = rowBackedAppServiceFor(plugins, service);
   if (!appService) return undefined;
   const app = await resolveAppCredentialRead(deps, ctx, appService, plugins);
   if (!app) return undefined;
-  recordAppCredentialFallback(service, "org_owner");
+  if (count) recordAppCredentialFallback(service, "org_owner");
   return app;
+}
+
+/** Why a team read that found no credential goes on to the app token: a
+ * share waits for its member's approval, a delegated credential is dead, or
+ * the team has none. */
+export function teamFallbackReason(approvalFrom: string | undefined, deadDelegated: boolean): AppFallbackReason {
+  if (approvalFrom) return "approval_pending";
+  return deadDelegated ? "dead_delegated" : "no_delegated";
 }
 
 /**

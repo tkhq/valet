@@ -900,13 +900,21 @@ export interface CredentialProvider {
    * the plugin catalog when it builds PluginActionContext); first-class
    * tools should always pass it explicitly.
    */
-  get(service?: string): Promise<Credential | null>;
+  get(service?: string, read?: CredentialRead): Promise<Credential | null>;
   request(service: string, reason: string): Promise<Credential>;
 }
 
 export interface CredentialOwner {
   type: "user" | "team" | "org" | "session";
   id: string;
+}
+
+/** What one credential read is for. */
+export interface CredentialRead {
+  /** The read is an action's own, made while it executes. Tool discovery
+   * and the `list_tools` probe leave it unset. A host counts per-action
+   * outcomes (such as a fallback to the app token) on these reads only. */
+  forAction?: boolean;
 }
 
 /** Who a credential read acts for: the turn's author and thread. A team host
@@ -920,6 +928,8 @@ export interface CredentialUse {
   externalSender?: boolean;
   /** The running submission. The host reads its metadata. */
   queueItemId?: string;
+  /** Set for one read: the read is an action's own (`CredentialRead`). */
+  forAction?: boolean;
 }
 
 export interface StoredCredential {

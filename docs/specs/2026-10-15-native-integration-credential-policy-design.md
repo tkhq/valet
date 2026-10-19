@@ -227,7 +227,13 @@ deployment after merge.
    workflow tool-node reads (`plugins/action-invoker.ts`). Reasons:
    `no_personal` (a user owner had no row), `no_delegated` (a team had no
    share and no team row), `dead_delegated` (a team share or team row
-   existed but could not answer), and `org_owner` (an org-owned read).
+   existed but could not answer), `approval_pending` (a member's share
+   would answer, and that member has not approved yet), and `org_owner`
+   (an org-owned read). The counter counts actions, not reads: only the
+   reads an action makes as it executes count (`CredentialRead.forAction`
+   in a session; the action's own provider in a workflow run). The
+   `list_tools` probe, tool discovery, and the team refusal check read the
+   same credential and count nothing.
    A broken delegated credential keeps working through the app, so alert
    on `dead_delegated` instead of letting the app token hide it. GitHub
    installation fallbacks and the Slack bot row are not counted: the

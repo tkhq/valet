@@ -102,6 +102,7 @@ import {
   readTeamCredential,
   readUserCredential,
   onePasswordScopesFor,
+  teamFallbackReason,
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
@@ -2046,9 +2047,12 @@ export class EngineHost {
       // An external sender never reaches the app tier, so its reads neither
       // fall through to the app token nor count as a fallback.
       const appService = use.externalSender ? undefined : rowBackedAppServiceFor(this.opts.plugins, service);
-      // A read that ends at the app token is counted
+      // An action whose read ends at the app token is counted
       // (`valet_credentials_app_fallback_total`), so a broken delegated
       // credential stays visible while the app keeps the action working.
+      // Only the action's own read counts: discovery and the `list_tools`
+      // probe read the same credential, and would count one action thrice.
+      const countsFallback = appService !== undefined && use.forAction === true;
       const readDeps = { credentials, onePassword };
       if (owner.type === "team") {
         let deadDelegated = false;
@@ -2056,7 +2060,7 @@ export class EngineHost {
         // used once that member approved, including authenticated tool discovery
         // (`services/credential-borrow.ts`).
         const actor = use.externalSender ? undefined : use.actorId ?? runActor;
-        const { credential: fromTeam, source } = await readTeamCredential(
+        const { credential: fromTeam, source, approvalFrom } = await readTeamCredential(
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
@@ -2079,15 +2083,15 @@ export class EngineHost {
           // refusing the org credential row (decision 5).
           fallback,
         );
-        if (fromTeam === null && appService) {
-          await noteAppCredentialFallback(readDeps, { orgId }, service, deadDelegated ? "dead_delegated" : "no_delegated", this.opts.plugins);
+        if (fromTeam === null && countsFallback) {
+          await noteAppCredentialFallback(readDeps, { orgId }, service, teamFallbackReason(approvalFrom, deadDelegated), this.opts.plugins);
         }
         // The source names who must repair a rejected token: the team, or
         // the member whose shared account it is.
         return fromTeam ? { ...fromTeam, source: db ? await withSharerName(db, source) : source } : null;
       }
       if (owner.type === "org") {
-        const app = use.externalSender ? null : await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins);
+        const app = use.externalSender ? null : await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins, use.forAction === true);
         if (app) return { ...app, source: { kind: "app" } };
         const fromOrg = await resolveOrgCredentialRead(
           { credentials, onePassword },
@@ -2102,7 +2106,7 @@ export class EngineHost {
         service,
         fallback,
       );
-      if (stored === null && appService) await noteAppCredentialFallback(readDeps, { orgId }, service, "no_personal", this.opts.plugins);
+      if (stored === null && countsFallback) await noteAppCredentialFallback(readDeps, { orgId }, service, "no_personal", this.opts.plugins);
       if (!stored) return null;
       const resolved: ResolvedCredential = { ...stored, ...(source ? { source } : {}) };
       if (service === "slack" && db) return withSlackOwnerMetadata(db, owner.id, resolved);

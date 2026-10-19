@@ -1800,7 +1800,7 @@ async function executeAction(
     actionId: entry.action.id,
     service: entry.service,
     summary,
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials: scopedCredentialProvider(ctx, credentialService, true),
     ...(pluginStore ? { pluginStore } : {}),
   };
 
@@ -1908,12 +1908,18 @@ function qualifiedId(entry: CatalogEntry): string {
  * plugin's `credentialService` setting rather than the bare
  * action.service.
  */
+/** `ctx.credentials` with the plugin's own service as the default. Set
+ * `forAction` for the provider an action executes with, so the host can
+ * tell its reads from discovery and probes (`CredentialRead`). */
 function scopedCredentialProvider(
   ctx: ToolContext,
   defaultService: string,
+  forAction = false,
 ): ToolContext["credentials"] {
   return {
-    get: (service?: string) => ctx.credentials.get(service ?? defaultService),
+    get: (service?: string) => forAction
+      ? ctx.credentials.get(service ?? defaultService, { forAction: true })
+      : ctx.credentials.get(service ?? defaultService),
     request: (service: string, reason: string) => ctx.credentials.request(service, reason),
   };
 }

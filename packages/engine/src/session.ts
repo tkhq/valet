@@ -62,6 +62,7 @@ import type {
   SessionStartRef,
   SkillSource,
   ResolvedCredential,
+  CredentialRead,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -1800,13 +1801,13 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string): Promise<ResolvedCredential | null> =>
+    const read = (service: string, readUse: CredentialUse = use): Promise<ResolvedCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service, use)
+            ? await resolver(owner, service, readUse)
             : credStore
               ? await credStore.get(owner, service)
               : null;
@@ -1816,10 +1817,10 @@ export class Session {
         },
       );
     return {
-      async get(service?: string) {
+      async get(service?: string, purpose?: CredentialRead) {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service);
+        const stored = await read(service, purpose?.forAction ? { ...use, forAction: true } : use);
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",
