@@ -60,6 +60,14 @@ describe("Sentence", () => {
     expect(GLUE_PULL).toBe("-ml-[0.2em]");
   });
 
+  it("reads a period after a token with no space in the accessible name", () => {
+    render(<h1><Sentence parts={[{ kind: "text", text: "When x, reply, as " }, { kind: "person", text: "Ops Bot" }, { kind: "text", text: "." }]} /></h1>);
+    expect(screen.getByRole("heading", { name: "When x, reply, as Ops Bot." })).toBeTruthy();
+    // The token keeps its own name and link.
+    render(<p><Sentence parts={[{ kind: "text", text: "in " }, { kind: "place", text: "#incidents", service: "slack", subject: "slack:C900" }, { kind: "text", text: ", work" }]} /></p>);
+    expect(screen.getByRole("link", { name: "#incidents" })).toBeTruthy();
+  });
+
   it("renders tokens without links when asked", () => {
     render(<p><Sentence parts={parts} links={false} /></p>);
     expect(screen.queryAllByRole("link")).toHaveLength(0);

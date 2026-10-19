@@ -10,12 +10,12 @@
  */
 import { Fragment } from "react";
 import { Ref } from "./ref";
+import type { SentencePart } from "./sentences";
 
 /** The pull on glued punctuation: half the token's padding (`TOKEN_PAD_X`), in
  * em, so at every size the mark sits at the pill's edge, not inside its tint
  * and not a full padding away from it. */
 export const GLUE_PULL = "-ml-[0.2em]";
-import type { SentencePart } from "./sentences";
 
 /**
  * Stable keys for parts, which have no ids: a part's kind and text, and a
@@ -59,7 +59,8 @@ const CLOSING = /^[,.:;!?)]+/;
  * A sentence of parts. A text part that starts with punctuation after a
  * token has its punctuation glued to the token: no whitespace between the
  * two, one unbreakable span, and the punctuation pulled back by the token's
- * right padding, so a line never starts with a comma.
+ * right padding, so a line never starts with a comma. The sentence's
+ * accessible name reads the punctuation with no space before it.
  */
 export function Sentence({ parts, links = true }: { parts: readonly SentencePart[]; links?: boolean }) {
   const keys = partKeys(parts);
@@ -81,7 +82,12 @@ export function Sentence({ parts, links = true }: { parts: readonly SentencePart
           <Fragment key={keys[i]}>
             {glued !== undefined
               ? (
-                <span data-glued="" className="whitespace-nowrap">
+                // The accessible name reads every element apart from its
+                // neighbors, so the punctuation would read after a space
+                // ("as Ops Bot ."). The label joins the token's text and its
+                // punctuation as `partsText` does; the token inside keeps its
+                // own name and link.
+                <span data-glued="" aria-label={`${part.text}${glued}`} className="whitespace-nowrap">
                   <SentencePartView part={part} links={links} />
                   <span data-glue="" className={GLUE_PULL}>{glued}</span>
                 </span>

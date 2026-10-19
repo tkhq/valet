@@ -233,7 +233,7 @@ describe("PlaceRow", () => {
     });
     renderRow(block({ lines: [R1, valetLine] }));
     expect(screen.queryByText(/^Appears as/)).toBeNull();
-    expect(screen.getByRole("link", { name: /^When a pull request review or a check completes, work in one thread per pull request, as Ops Bot/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "When a pull request review or a check completes, work in one thread per pull request, as Ops Bot." })).toBeTruthy();
     expect(screen.getByRole("link", { name: "When a check completes, work in its own thread." })).toBeTruthy();
     cleanup();
     const otherBot = line("R8", {
@@ -244,7 +244,7 @@ describe("PlaceRow", () => {
     });
     renderRow(block({ lines: [R1, otherBot] }));
     expect(screen.queryByText(/^Appears as/)).toBeNull();
-    expect(screen.getByRole("link", { name: /^When a check completes, work in its own thread, as Night Bot/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "When a check completes, work in its own thread, as Night Bot." })).toBeTruthy();
   });
 
   it("opens the editor fixed on the place from a quiet + Listen for…", () => {
