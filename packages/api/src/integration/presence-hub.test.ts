@@ -209,6 +209,13 @@ describe("Presence hub data scenario", () => {
     const mine = await read<ListEventSubscriptionsResponse>(a, `/api/event-subscriptions?ownerType=user&ownerId=${USER}`);
     expect(mine.subscriptions.find((s) => s.id === r1)?.placeKey).toBe("github:acme/api");
     expect(mine.subscriptions.find((s) => s.id === pr)?.placeKey).toBe("github:acme/api");
+    // P1: the repository's place page lists the pull request line too, so the
+    // row and its page agree. The line keeps its own place page.
+    const withPr = await placeOf(a, "user", "github:acme/api");
+    expect(withPr.listeners.map((l) => l.id).sort()).toEqual([r1, r4, pr].sort());
+    expect(withPr.listeners.find((l) => l.id === pr)?.placeKey).toBe("github:acme/api");
+    expect(withPr.place.listenerCount).toBe(3);
+    expect((await placeOf(a, "user", "github:acme/api#12")).listeners.map((l) => l.id)).toEqual([pr]);
     expect((await call(a, "DELETE", `/api/event-subscriptions/${pr}`)).status).toBe(204);
     expect(incidents.threads.active.map((t) => t.threadId)).toEqual([tInc.id]);
     expect(incidents.threads.following.map((t) => t.threadId)).toEqual([tInc.id]);

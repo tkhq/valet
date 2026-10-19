@@ -312,7 +312,10 @@ export type PresenceDeps = Pick<Providers, "db" | "engineStore" | "plugins">;
 
 interface PlaceState {
   wire: PresencePlaceWire;
+  /** Lines whose filters list them here (`listenerPlaces`). */
   listeners: SubscriptionRow[];
+  /** Lines that list at a child place and roll up to this row (`listenerRowPlace`), such as a pull request line on its repository. */
+  rolledUp: SubscriptionRow[];
   subjectThreads: ChannelConversation[];
   following: ChannelConversation[];
   /** By `<session>:<thread>`. */
@@ -409,7 +412,7 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (!service) return null;
     const created: PlaceState = {
       wire: { subject, label: subject, service, parent: parentPlace(subject), listenerCount: 0, activeThreadCount: 0, lastActivityAt: null },
-      listeners: [], subjectThreads: [], following: [], active: new Map(), events: [],
+      listeners: [], rolledUp: [], subjectThreads: [], following: [], active: new Map(), events: [],
     };
     places.set(subject, created);
     return created;
@@ -423,7 +426,12 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     .filter(isListener);
   for (const rule of rules) {
     for (const [id, label] of channelFilterIds(rule.filters).labels) channelNames.set(id, label);
-    for (const place of listenerPlaces(rule, slackTeam)) placeFor(place)?.listeners.push(rule);
+    const own = listenerPlaces(rule, slackTeam);
+    for (const place of own) placeFor(place)?.listeners.push(rule);
+    // A pull request or issue line also lists at its overview row
+    // (`placeKey`), so the row's place page lists the lines the row shows.
+    const row = listenerRowPlace(rule, slackTeam);
+    if (row !== null && !own.includes(row)) placeFor(row)?.rolledUp.push(rule);
   }
 
   for (const [sessionId, rows] of threads) {
@@ -507,7 +515,7 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     // as a parent only its children name) carries no reach.
     const scopeLabel = state.listeners.length > 0 ? placeScopeLabel(state.wire.subject) : undefined;
     if (scopeLabel !== undefined) state.wire.scopeLabel = scopeLabel;
-    state.wire.listenerCount = state.listeners.length;
+    state.wire.listenerCount = state.listeners.length + state.rolledUp.length;
     state.wire.activeThreadCount = state.active.size;
   }
   return { places, slackTeam };
@@ -555,7 +563,7 @@ export async function getPresencePlace(
   return {
     place: state.wire,
     slackTeam,
-    listeners: [...state.listeners].sort((a, b) => a.name.localeCompare(b.name)),
+    listeners: [...state.listeners, ...state.rolledUp].sort((a, b) => a.name.localeCompare(b.name)),
     threads: {
       subject: covered.flatMap((candidate) => candidate.subjectThreads).sort(compareConversations),
       following: covered.flatMap((candidate) => candidate.following).sort(compareConversations),

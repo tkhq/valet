@@ -230,8 +230,11 @@ it("shows one place with its listeners, threads of its child places, and recent 
   const res = await fetch(`${api.baseUrl}/api/presence/places/${subject}?scope=user`);
   expect(res.status).toBe(200);
   const detail = await res.json() as PresencePlaceDetailResponse;
-  expect(detail.place).toMatchObject({ subject: "github:acme/api", label: "acme/api", scopeLabel: "Across acme/api", listenerCount: 1 });
-  expect(detail.listeners.map((l) => l.id)).toEqual(["r1"]);
+  // The pull request line rolls up to this row (its `placeKey`), so the
+  // repository's page lists it beside the repository's own line.
+  expect(detail.place).toMatchObject({ subject: "github:acme/api", label: "acme/api", scopeLabel: "Across acme/api", listenerCount: 2 });
+  expect(detail.listeners.map((l) => l.id).sort()).toEqual(["r-pr", "r1"]);
+  expect(detail.listeners.map((l) => l.placeKey)).toEqual(["github:acme/api", "github:acme/api"]);
   expect(detail.threads.subject.map((t) => t.threadId).sort()).toEqual([pr12.id, pr13.id].sort());
   expect(detail.threads.subject.map((t) => t.threadId)).not.toContain(other.id);
   expect(detail.threads.active.map((t) => t.threadId)).toEqual([waiting.id]);
