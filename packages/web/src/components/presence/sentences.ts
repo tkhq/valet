@@ -1236,6 +1236,9 @@ export interface LineEntryNames {
   pinTitle?: string;
   /** True for the dead-letter text the api stores for an archived pin. */
   isPinText?: (text: string) => boolean;
+  /** True when the line's stored action is Reply (see `replies`): a
+   * delivered entry reads `replied in`, else `worked in`. */
+  replies?: boolean;
 }
 
 /** An entry's place as a token, or as words when its key names no service. */
@@ -1295,7 +1298,7 @@ function actedOutcomeParts(entry: LineActivityEntryWire, names: LineEntryNames):
   switch (outcome.status) {
     case "delivered":
       if (outcome.thread !== undefined) {
-        return [text(isConversational([entry.eventKey]) ? "replied in " : "worked in "), entryThread(outcome.thread)];
+        return [text(names.replies === true ? "replied in " : "worked in "), entryThread(outcome.thread)];
       }
       return names.workflow !== undefined ? startedRun(names) : [text("worked on it")];
     case "dead": {

@@ -979,12 +979,14 @@ describe("lineEntryParts (Part D step 1.7)", () => {
     expect(parts).toContainEqual({ kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" });
   });
 
-  it("reads a mention as replied in, in its channel", () => {
-    const parts = lineEntryParts(entry({
+  it("reads replied in only for a Reply line, and worked in for a mention line that works on it", () => {
+    const mention = entry({
       eventKey: "slack.app_mention", place: "slack:T1/C900", placeLabel: "#incidents",
       outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s", threadId: "t-inc", title: "t-inc" } },
-    }));
-    expect(partsText(parts)).toBe("Mention in #incidents → replied in t-inc");
+    });
+    expect(partsText(lineEntryParts(mention, { replies: true }))).toBe("Mention in #incidents → replied in t-inc");
+    expect(partsText(lineEntryParts(mention))).toBe("Mention in #incidents → worked in t-inc");
+    expect(partsText(lineEntryParts(mention, { replies: false }))).toBe("Mention in #incidents → worked in t-inc");
   });
 
   it("reads a run as started <workflow> run", () => {

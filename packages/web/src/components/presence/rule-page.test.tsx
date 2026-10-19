@@ -417,6 +417,26 @@ describe("RulePage", () => {
     expect(getLineActivity).toHaveBeenCalledWith("R4", { limit: 50, before: "c-1" });
   });
 
+  it.each([
+    ["a Reply line reads replied in", true, "replied in t-inc"],
+    ["a mention line that works on it reads worked in", false, "worked in t-inc"],
+  ])("follows the stored action in Activity: %s", async (_name, follow, words) => {
+    listEventSubscriptions.mockResolvedValue({
+      subscriptions: [listener({
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
+        target: { kind: "assistant", ...(follow ? { follow: true } : {}), thread: { mode: "new" } },
+      })],
+    });
+    getLineActivity.mockResolvedValue(activity([acted("d-m", {
+      eventKey: "slack.app_mention", place: "slack:T1/C900", placeLabel: "#incidents",
+      outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s", threadId: "t-inc", title: "t-inc" } },
+    })]));
+    renderPage();
+    await waitFor(() => expect(activityRows()).toHaveLength(1));
+    expect(activityRows()[0]).toContain(`Mention in #incidents → ${words}`);
+  });
+
   it("reads a dead entry's error once, in the right column, as a sentence (S14)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     getLineActivity.mockResolvedValue(activity([acted("d-dead", { outcome: { status: "dead", attempts: 3, deadText: "error: HTTP 500 from the assistant" } })]));

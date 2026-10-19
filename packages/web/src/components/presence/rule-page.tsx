@@ -43,7 +43,7 @@ import { Ref } from "./ref";
 import { Sentence } from "./sentence";
 import { ServiceMark } from "./service-mark";
 import {
-  deadErrorSentence, doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, tookInWords,
+  deadErrorSentence, doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, replies, tookInWords,
   whenExplanation, whereExplanation, whereParts, type LineEntryNames, type SentencePart, type SentenceService, type ThreadTitles,
   type WorkflowNames,
 } from "./sentences";
@@ -199,6 +199,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
     ...(workflowId !== undefined && workflowName !== undefined ? { workflow: { id: workflowId, name: workflowName } } : {}),
     ...(pinTitle !== undefined ? { pinTitle } : {}),
     isPinText: isPinProblem,
+    replies: replies(sub),
   };
   const entries = pages.flatMap((page) => page.entries).map((entry) => lineTimelineEntry(entry, entryNames));
   const columns = lineColumns(
