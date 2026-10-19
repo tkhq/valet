@@ -15,7 +15,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 const renderMermaidMock = vi.hoisted(() => vi.fn());
 vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
 
-import { Markdown } from "./markdown";
+import { Markdown, localDownloadHref } from "./markdown";
 
 describe("Markdown", () => {
   function pointer(type: string, pointerId: number, clientX: number, clientY: number): Event {
@@ -196,6 +196,20 @@ describe("Markdown", () => {
       expect(anchor("docs").rel).toBe("noopener noreferrer");
       // No memory context here, so a relative path stays an ordinary link.
       expect(anchor("sibling").target).toBe("_blank");
+    });
+
+    it("opens a generated download on this page's hostname, and leaves other links alone", () => {
+      const file = "/api/sessions/assistant%3Aasst_1/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
+      const here = "https://valet.example.dev";
+      expect(localDownloadHref(`https://valet.example.com${file}`, here)).toBe(file);
+      expect(localDownloadHref(`${here}${file}`, here)).toBe(`${here}${file}`);
+      expect(localDownloadHref(file, here)).toBe(file);
+      expect(localDownloadHref(`https://valet.example.com${file}?x=1`, here)).toBe(`https://valet.example.com${file}?x=1`);
+      expect(localDownloadHref("https://valet.example.com/api/sessions/s/messages", here)).toBe("https://valet.example.com/api/sessions/s/messages");
+      expect(localDownloadHref("https://example.com/x", here)).toBe("https://example.com/x");
+
+      render(<Markdown>{`[Form.docx](https://valet.example.com${file})`}</Markdown>);
+      expect(anchor("Form.docx").getAttribute("href")).toBe(file);
     });
 
     it("routes a memory cross-reference in place instead of opening a tab", () => {

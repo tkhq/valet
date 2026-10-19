@@ -56,6 +56,26 @@ export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/** A download that `file_attach` created (`services/generated-files.ts`). */
+const GENERATED_FILE_PATH = /^\/api\/sessions\/[^/]+\/threads\/[^/]+\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A generated download, moved to the hostname of this page. A deployment
+ * can serve the app on more than one hostname, and the tool links its
+ * configured public one. A sign-in belongs to one hostname, so a person
+ * signed in on another one got a 401 from the link. Other links keep their
+ * href. Exported for tests. */
+export function localDownloadHref(href: string | undefined, origin = window.location.origin): string | undefined {
+  if (!href) return href;
+  let url: URL;
+  try {
+    url = new URL(href, origin);
+  } catch {
+    return href;
+  }
+  if (url.origin === origin || !["https:", "http:"].includes(url.protocol) || url.search || url.hash) return href;
+  return GENERATED_FILE_PATH.test(url.pathname) ? url.pathname : href;
+}
+
 /** True for a click the browser would handle as a plain same-tab
  * navigation. A modified click (new tab, new window, download) keeps the
  * browser's own behavior, which the real `href` on the anchor supports. */
@@ -164,7 +184,7 @@ export function Markdown({
               );
             }
             return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+              <a href={localDownloadHref(href)} target="_blank" rel="noopener noreferrer" {...rest}>
                 {children}
               </a>
             );
