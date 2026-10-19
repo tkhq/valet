@@ -21,8 +21,9 @@ const SIZE: Record<Size, string> = {
   sm: `${CONTROL_SIZE.sm} px-2.5 gap-1.5`,
   md: `${CONTROL_SIZE.md} px-3.5 gap-2`,
   lg: "h-10 px-4 text-sm gap-2",
-  // A square button that holds only an icon. Give it an aria-label.
-  icon: "h-6 w-6 p-0 text-muted",
+  // A square button that holds only an icon. Give it an aria-label. A text
+  // button keeps at least its label's width, so only this size sets a width.
+  icon: "h-6 w-6 p-0 text-muted max-sm:min-w-11",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -47,7 +48,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         "inline-flex items-center justify-center whitespace-nowrap rounded font-medium transition-colors touch-manipulation",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[--bg]",
         "disabled:pointer-events-none disabled:opacity-50",
-        "max-sm:min-h-11 max-sm:min-w-11",
+        "max-sm:min-h-11",
         VARIANT[variant],
         SIZE[size],
         className,

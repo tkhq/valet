@@ -257,7 +257,7 @@ export function TopNav() {
       <div className="ml-auto shrink-0 md:hidden">
         <DropdownMenu open={mobileNav.open} onOpenChange={mobileNav.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label="Open navigation" className="w-8 px-0">
+            <Button variant="ghost" size="sm" aria-label="Open navigation" className="w-8 px-0 max-sm:w-11">
               <Menu className="h-5 w-5" aria-hidden />
             </Button>
           </DropdownMenuTrigger>

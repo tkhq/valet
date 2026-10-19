@@ -481,7 +481,7 @@ export function UsagePage() {
             />
           )}
           {scopeKnown && (
-            <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
               <label>
                 <span className="sr-only">CSV granularity</span>
                 <Select
