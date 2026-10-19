@@ -307,7 +307,7 @@ function Conditions({ draft, mode, onChange, services, names }: {
   const fields = unionFilterFields([...services], draft.events);
   const mention = selectsSlackMention([...draft.events]);
   const scoped = hasChannelScopeFilter(toWireFilters([...draft.conditions]));
-  const creator = hasCreatorScope(draft, mode);
+  const creator = hasCreatorScope(draft);
   const service = draft.service === "schedule" ? undefined : draft.service;
   const rows = draft.conditions.filter((row) => row.id !== draft.creatorScopeId);
   return (

@@ -491,12 +491,14 @@ export function isAssistantDraft(draft: Draft): boolean {
   return draft.doKind !== "workflow";
 }
 
-/** True when a stored or created mention line hears only its creator. */
-export function hasCreatorScope(draft: Draft, mode: EditorMode): boolean {
+/** True when a stored or created mention line hears only its creator.
+ * The server adds the creator scope on every write of a mention line that
+ * is not a team assistant's (`enforceMentionScope`), so a stored line whose
+ * mention was unchecked and checked again still gets it. A workflow line has
+ * no team assistant, so the server scopes it to its creator too. */
+export function hasCreatorScope(draft: Draft): boolean {
   if (draft.service === "schedule" || !selectsSlackMention([...draft.events])) return false;
-  // A workflow line has no team assistant, so the server scopes it to its creator too.
-  if (mode.kind === "create") return !teamAssistantDraft(draft);
-  return draft.creatorScopeId !== null;
+  return !teamAssistantDraft(draft);
 }
 
 /** The workspace key whose threads the picker lists. The organization's

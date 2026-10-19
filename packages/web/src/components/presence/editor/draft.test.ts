@@ -406,7 +406,20 @@ describe("small editor gaps (E10)", () => {
 
   it("shows the creator scope on a team draft's workflow mention, which the server scopes to its creator", () => {
     const team = toggleEvent(newDraft({ teamId: "t1", timezone: "UTC" }), "slack.app_mention", SERVICES);
-    expect(hasCreatorScope(team, CREATE)).toBe(false);
-    expect(hasCreatorScope({ ...team, doKind: "workflow" }, CREATE)).toBe(true);
+    expect(hasCreatorScope(team)).toBe(false);
+    expect(hasCreatorScope({ ...team, doKind: "workflow" })).toBe(true);
+  });
+
+  it("keeps the creator scope on a stored line whose mention is unchecked and checked again", () => {
+    const sub = line("l1", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user", follow: true },
+    });
+    let draft = draftFromLine(sub);
+    expect(hasCreatorScope(draft)).toBe(true);
+    draft = toggleEvent(toggleEvent(draft, "slack.app_mention", SERVICES), "slack.app_mention", SERVICES);
+    expect(draft.creatorScopeId).toBeNull();
+    expect(hasCreatorScope(draft)).toBe(true);
   });
 });
