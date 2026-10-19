@@ -258,8 +258,11 @@ Pass criterion: all steps, in one run, from a clean start.
     `GET /api/event-subscriptions` and on a place page's listeners carries
     `placeKey`: the row the places read lists it at, rolled up from a pull
     request or a Linear issue to its parent row. The overview groups a line
-    by `placeKey`, so a line and its row's place page agree. A Slack line
-    has no `placeKey` while the org has no Slack workspace connected; the
+    by `placeKey`, so a line and its row's place page agree. Both reads
+    pick the Slack workspace in one way: the org's bot credential, else the
+    team of the org's newest Slack subject thread, else the team of its
+    newest Slack event in the last 30 days. A Slack line
+    has no `placeKey` while none of these names a Slack workspace; the
     overview then groups it by its filters.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls

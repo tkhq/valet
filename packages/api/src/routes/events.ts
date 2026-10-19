@@ -67,7 +67,7 @@ import { slackChannelNames } from "./workspace-channels.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
-import { eventInPlace, eventPlace, eventPlaceName, isPlaceKey, listenerRowPlace } from "../services/presence-places.js";
+import { eventInPlace, eventPlace, eventPlaceName, isPlaceKey, listenerRowPlace, resolveSlackTeam } from "../services/presence-places.js";
 
 export const eventsRouter = new Hono<AppEnv>();
 
@@ -1098,7 +1098,11 @@ eventsRouter.get("/event-subscriptions", async (c) => {
     .from(eventSubscriptions)
     .where(and(...conditions))
     .orderBy(desc(eventSubscriptions.createdAt));
-  const [problems, slackTeam] = await Promise.all([subscriptionProblems(db, conditions), orgSlackTeam(c.var.providers, user.orgId)]);
+  // The places read picks the Slack workspace the same way, so a line's
+  // `placeKey` here matches the row its place page lists it at.
+  const [problems, slackTeam] = await Promise.all([
+    subscriptionProblems(db, conditions), resolveSlackTeam(db, user.orgId, () => orgSlackTeam(c.var.providers, user.orgId)),
+  ]);
 
   const resp: ListEventSubscriptionsResponse = {
     subscriptions: rows.map((row) => subscriptionToWire(row, problems, slackTeam)),
@@ -1196,7 +1200,7 @@ eventsRouter.get("/event-subscriptions/:id/activity", async (c) => {
   // A credential fault degrades Slack places to their ids, as the places read does.
   const page = await loadLineActivity({ db, plugins }, {
     orgId: user.orgId, line, admin: await isOrgAdminUser(c),
-    slackTeam: await orgSlackTeam(c.var.providers, user.orgId),
+    slackTeam: await resolveSlackTeam(db, user.orgId, () => orgSlackTeam(c.var.providers, user.orgId)),
     ...(before ? { before } : {}), limit,
     channelVisible: channelsVisibleTo(c),
     deliveryLinks: (rows) => deliveriesToWire(c, rows),

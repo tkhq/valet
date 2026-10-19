@@ -366,6 +366,35 @@ export interface PresenceAccess {
 
 export type PresenceDeps = Pick<Providers, "db" | "engineStore" | "plugins">;
 
+/**
+ * The org's Slack workspace id, as every Presence read picks it (spec Part B
+ * step 10): the bot credential's team, else the team of the org's newest
+ * Slack subject thread, else the team of its newest Slack event in the
+ * Activity window. The org connects one Slack workspace, so any of them
+ * names the same one. Null when none is known. A failed credential read
+ * reads as none.
+ */
+export async function resolveSlackTeam(
+  db: Providers["db"], orgId: string, credentialTeam: () => Promise<string | null>, now = Date.now(),
+): Promise<string | null> {
+  const credential = await credentialTeam().catch((err: unknown) => {
+    console.error("[presence] reading the org's Slack credential failed", err);
+    return null;
+  });
+  if (credential) return credential;
+  const thread = await db.execute(sql`
+    SELECT et.key FROM engine_threads et JOIN engine_sessions es ON es.id = et.session_id
+    WHERE es.org_id = ${orgId} AND et.key LIKE 'subject:slack:%' AND et.key NOT LIKE 'subject:slack:?%'
+    ORDER BY et.updated_at DESC LIMIT 1`) as { rows: Array<{ key: string }> };
+  const fromThread = thread.rows[0] ? slackTeamOf(thread.rows[0].key.slice("subject:".length)) : null;
+  if (fromThread) return fromThread;
+  const event = await db.execute(sql`
+    SELECT s.subject FROM events e CROSS JOIN LATERAL unnest(e.subjects) AS s(subject)
+    WHERE e.org_id = ${orgId} AND e.received_at >= ${now - EVENT_LOG_WINDOW_MS} AND s.subject LIKE 'slack:%' AND s.subject NOT LIKE 'slack:?%'
+    ORDER BY e.received_at DESC LIMIT 1`) as { rows: Array<{ subject: string }> };
+  return event.rows[0] ? slackTeamOf(event.rows[0].subject) : null;
+}
+
 interface PlaceState {
   wire: PresencePlaceWire;
   /** Lines whose filters list them here (`listenerPlaces`). */
@@ -409,7 +438,6 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   const { db } = deps;
   const root = await runtimeSessionId(db, orgId, owner);
   const sessions = root ? await workspaceSessionIds(db, orgId, root) : [];
-  const seenSubjects: string[] = [];
 
   // The threads of each session that this request may see.
   const threads = new Map<string, Map<string, ThreadRow>>();
@@ -426,7 +454,6 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     for (const row of result.rows) {
       if (!shown.has(row.id)) continue;
       visible.set(row.id, { id: row.id, key: row.key, updatedAt: Number(row.updated_at), title: row.title, archived: row.archived === true });
-      if (row.key?.startsWith("subject:")) seenSubjects.push(row.key.slice("subject:".length));
     }
     threads.set(sessionId, visible);
   }
@@ -441,7 +468,6 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
       if (wakeup.kind !== "event" || !thread) continue;
       // A waiter that also holds a wider subject for a derived key waits on its primary one.
       const subjects = wakeup.eventMatch?.primarySubject ? [wakeup.eventMatch.primarySubject] : wakeup.subjects ?? [];
-      seenSubjects.push(...subjects);
       waiters.push({ sessionId, thread, subjects });
     }
   }
@@ -454,11 +480,9 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
       WHERE d.event_id = ${events.id} AND s.org_id = ${orgId}
         AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org'))`,
   )).orderBy(desc(events.receivedAt)).limit(EVENT_SCAN_LIMIT);
-  for (const row of recentEvents) seenSubjects.push(...(row.subjects ?? []));
 
   // Filters and follow bindings name a channel without its Slack workspace.
-  const slackTeam = await access.slackTeamId().catch(() => null)
-    ?? seenSubjects.map(slackTeamOf).find((team): team is string => team !== null) ?? "?";
+  const slackTeam = await resolveSlackTeam(db, orgId, access.slackTeamId, now) ?? "?";
 
   const places = new Map<string, PlaceState>();
   const placeFor = (subject: string): PlaceState | null => {

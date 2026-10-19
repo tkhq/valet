@@ -14,7 +14,7 @@ import type { AppEnv } from "../env.js";
 import { agentSessions, eventSubscriptions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { orgSlackCredential, storedThreadRef } from "../services/thread-access.js";
-import { getPresencePlace, listPresencePlaces, listThreadFeeders, type PresenceAccess } from "../services/presence-places.js";
+import { getPresencePlace, listPresencePlaces, listThreadFeeders, resolveSlackTeam, type PresenceAccess } from "../services/presence-places.js";
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 import { slackChannelNames, threadsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
@@ -74,7 +74,7 @@ presenceRouter.get("/places/:subject", async (c) => {
   const owner = await scopeOwner(c);
   if (owner instanceof Response) return owner;
   const access = presenceAccess(c, owner);
-  const subject = await resolvePlaceKey(c.req.param("subject"), access.slackTeamId);
+  const subject = await resolvePlaceKey(c.req.param("subject"), () => resolveSlackTeam(c.var.providers.db, c.var.user.orgId, access.slackTeamId));
   if (!subject) return c.json({ error: CHANNEL_KEY_REFUSAL }, 404);
   const detail = await getPresencePlace(c.var.providers, c.var.user.orgId, owner, access, subject);
   if (!detail) return c.json({ error: "Valet is not present in that place in this workspace. Open Places to see where it is." }, 404);

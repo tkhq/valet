@@ -11,7 +11,7 @@ import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowS
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import type {
-  ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceDetailResponse, PresencePlaceWire,
+  ListEventSubscriptionsResponse, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceDetailResponse, PresencePlaceWire,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -158,6 +158,23 @@ it("lists the parent of a lone child place, with no counts and the child's activ
   // The synthesized parent opens as a place page with its child's thread.
   const detail = await (await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("github:acme/api")}?scope=user`)).json() as PresencePlaceDetailResponse;
   expect(detail.threads.subject.map((t) => t.threadId)).toEqual([lone.id]);
+});
+
+// Final review G3: the list route and the place page pick the Slack
+// workspace the same way, so a line's `placeKey` agrees on both.
+it("gives a Slack line the same placeKey on the list and the place page with no credential", async () => {
+  api = await boot();
+  const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await session.createThread("subject:slack:T7/C5/1700.1");
+  await rule(api, { id: "r-slack", eventKeys: ["slack.message"] });
+  const list = await fetch(`${api.baseUrl}/api/event-subscriptions?ownerType=user&ownerId=${USER}`);
+  expect(list.status).toBe(200);
+  const listed = (await list.json() as ListEventSubscriptionsResponse).subscriptions.find((row) => row.id === "r-slack");
+  expect(listed?.placeKey).toBe("slack:T7");
+  const page = await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("slack:T7")}?scope=user`);
+  expect(page.status).toBe(200);
+  const detail = await page.json() as PresencePlaceDetailResponse;
+  expect(detail.listeners.map((row) => row.placeKey)).toEqual([listed?.placeKey]);
 });
 
 it("scopes a team workspace to the team's rules and sessions", async () => {
