@@ -27,6 +27,7 @@ import { conversationBinding, isConversationalEvent } from "./conversation-bindi
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { isAssistantKind } from "./target-names.js";
+import { placeOfSubject } from "../services/presence-places.js";
 
 /** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
 function receiptTargetKind(target: unknown): string {
@@ -269,6 +270,19 @@ function failedFilterFields(filters: unknown, key: string, payload: unknown, cat
     !filtersMatch(payload, key, [f], catalog, subjects)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
 }
 
+/**
+ * The place key a receipt records for an event: its natural subject's place
+ * (`services/presence-places.ts`), so a line's Activity can place a skip
+ * whose event was not stored. A Slack receipt keeps its channel metadata
+ * instead. Null when the plugin names no place.
+ */
+function receiptPlace(plugins: readonly ValetPlugin[], service: string, event: NormalizedEvent): string | null {
+  if (service === "slack") return null;
+  const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === service));
+  const natural = plugin?.naturalSubject?.(event) ?? null;
+  return natural ? placeOfSubject(natural.subject) : null;
+}
+
 export async function ingestEvent(
   deps: IngestDeps,
   args: { orgId: string; service: string; event: NormalizedEvent; receiptId?: string },
@@ -276,7 +290,9 @@ export async function ingestEvent(
   const { orgId, service, event } = args;
   const receiptId = args.receiptId ?? await createEventReceipt(deps.db, { orgId, service, externalId: event.dedupeKey });
   if (!args.receiptId) await appendReceiptStage(deps.db, receiptId, { stage: "receipt", outcome: "received", detail: "An event reached normalized ingestion. Verification is handled by the source adapter." });
-  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` }, { eventKey: event.key });
+  const place = receiptPlace(deps.plugins, service, event);
+  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` },
+    { eventKey: event.key, ...(place !== null ? { metadata: { place } } : {}) });
   let phase = "subscription lookup";
   try {
     const now = Date.now();

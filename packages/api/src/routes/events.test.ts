@@ -14,6 +14,7 @@ import type { RunHost } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
+import { ingestEvent } from "../events/ingest.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
@@ -838,6 +839,42 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
     const body = await activity(a, "?limit=3", MEMBER);
     expect(body.entries.map((e) => e.id)).toEqual(["d_2", "d_1"]);
     expect(body.nextCursor).toBeUndefined();
+  });
+
+  // A GitHub event that no line matched is not stored, so its skip reads
+  // its place from the receipt, which ingest records.
+  it("places an unstored GitHub skip by the place its receipt records", async () => {
+    const a = await boot();
+    // check_run declares no branch filter, so the miss here is on the sender.
+    await seedSubscriptionRow(a, "sub_api", "local-org", {
+      eventKeys: ["github.check_run.completed"],
+      filters: [{ field: "repo", op: "eq", value: "acme/api" }, { field: "sender", op: "eq", value: "someone-else" }],
+    });
+    await seedSubscriptionRow(a, "sub_web", "local-org", {
+      eventKeys: ["github.check_run.completed"], filters: [{ field: "repo", op: "eq", value: "acme/web" }],
+    });
+    const result = await ingestEvent({ db: a.providers.db, plugins: [githubPlugin] }, {
+      orgId: "local-org", service: "github",
+      event: {
+        key: "github.check_run.completed", dedupeKey: "check-run-1", occurredAt: new Date().toISOString(),
+        refs: { repo: "acme/api" }, summary: "Check finished",
+        payload: { action: "completed", repository: { full_name: "acme/api" }, sender: { login: "octocat" }, check_run: { head_sha: "abc123", conclusion: "failure" } },
+        subjects: ["github:acme", "github:acme/api", "github:acme/api@abc123"],
+      },
+    });
+    expect(result.deliveries).toBe(0);
+    const read = async (id: string, headers: Record<string, string>) =>
+      (await (await fetch(`${a.baseUrl}/api/event-subscriptions/${id}/activity`, { headers })).json()) as LineActivityResponse;
+
+    const api = await read("sub_api", MEMBER);
+    expect(api.entries).toHaveLength(1);
+    expect(api.entries[0]).toMatchObject({
+      kind: "skipped", eventId: null, eventKey: "github.check_run.completed", place: "github:acme/api", placeLabel: "acme/api",
+      reason: "filters", reasonText: "the sender filter",
+    });
+    expect((await read("sub_web", MEMBER)).entries).toEqual([]);
+    // An admin sees the skip outside the line's places.
+    expect((await read("sub_web", {})).entries.map((e) => [e.place, e.reasonText])).toEqual([["github:acme/api", "the repository filter"]]);
   });
 
   it("404s a missing line with text that names the fix", async () => {

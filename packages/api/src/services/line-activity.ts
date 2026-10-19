@@ -235,9 +235,16 @@ export interface LineActivityPage {
   perDay: number[];
 }
 
-/** A Slack event's place from a receipt's metadata, for an event that was not stored. */
+/** An event's place from a receipt's metadata, for an event that was not
+ * stored: the recorded `place` key, or a Slack receipt's channel. A receipt
+ * written before ingest recorded `place` has no place for other services. */
 function receiptPlace(service: string, metadata: unknown, slackTeam: string | null): ActivityPlace | null {
-  if (service !== "slack" || typeof metadata !== "object" || metadata === null) return null;
+  if (typeof metadata !== "object" || metadata === null) return null;
+  if ("place" in metadata && typeof metadata.place === "string") {
+    const key = placeOfSubject(metadata.place);
+    if (key) return { key, label: placeLabel(key, new Map()) };
+  }
+  if (service !== "slack") return null;
   const channel = "channelId" in metadata && typeof metadata.channelId === "string" ? metadata.channelId : "";
   const workspace = "workspaceId" in metadata && typeof metadata.workspaceId === "string" ? metadata.workspaceId : slackTeam;
   if (!channel || !workspace) return null;

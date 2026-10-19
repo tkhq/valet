@@ -15,7 +15,11 @@ export function receiptCleanupDue(orgId: string, now: number): boolean {
   lastCleanup.set(orgId, now);
   return true;
 }
-const metadataKeys = new Set(["channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
+/** Metadata keys a receipt keeps. `place` is the event's place key from its
+ * natural subject (`github:acme/api`, `linear:team/ENG`), which ingest records
+ * for every service but Slack; a Slack receipt keeps `channelId` and
+ * `workspaceId`. Receipts written before ingest recorded `place` carry none. */
+const metadataKeys = new Set(["place", "channelId", "workspaceId", "actorId", "botId", "appId", "rawType", "rawSubtype", "messageTs", "threadTs", "retryNum", "retryReason", "botIdentityAvailable", "botUserIdentityAvailable", "payloadBytes", "configuredTriggerCount"]);
 const outcomes = new Set(["matched", "filter_excluded", "authorization_denied", "disabled", "key_mismatch"]);
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const bounded = (value: unknown, max = 256): string => typeof value === "string" ? value.slice(0, max) : "";
@@ -49,7 +53,7 @@ export async function createEventReceipt(db: AppDb, input: { orgId: string; serv
     return id;
   } catch { console.warn("[event-receipts] write unavailable"); return undefined; }
 }
-export async function appendReceiptStage(db: AppDb, receiptId: string | undefined, stage: { stage: string; outcome: string; detail: string }, patch?: { eventKey?: string; eventId?: string; subscriptions?: ReceiptSubscriptionDecision[] }): Promise<void> {
+export async function appendReceiptStage(db: AppDb, receiptId: string | undefined, stage: { stage: string; outcome: string; detail: string }, patch?: { eventKey?: string; eventId?: string; subscriptions?: ReceiptSubscriptionDecision[]; metadata?: Record<string, string> }): Promise<void> {
   if (!receiptId) return;
   try {
     const now = Date.now(), stages = JSON.stringify(sanitizeReceiptStages([{ ...stage, at: now }]));
@@ -60,6 +64,8 @@ export async function appendReceiptStage(db: AppDb, receiptId: string | undefine
       ...(patch?.eventKey !== undefined ? { eventKey: bounded(patch.eventKey) } : {}),
       ...(patch?.eventId !== undefined ? { eventId: bounded(patch.eventId) } : {}),
       ...(patch?.subscriptions !== undefined ? { subscriptions: sanitizeReceiptSubscriptions(patch.subscriptions) } : {}),
+      // Merged into the stored metadata, through the same allow-list as a new receipt.
+      ...(patch?.metadata !== undefined ? { metadata: sql`(CASE WHEN jsonb_typeof(${eventReceipts.metadata}) = 'object' THEN ${eventReceipts.metadata} ELSE '{}'::jsonb END) || ${JSON.stringify(sanitizeReceiptMetadata(patch.metadata))}::jsonb` } : {}),
     }).where(eq(eventReceipts.id, receiptId));
   } catch { console.warn("[event-receipts] write unavailable"); }
 }
