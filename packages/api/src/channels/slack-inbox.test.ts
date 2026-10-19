@@ -358,7 +358,7 @@ describe("POST /api/channels/slack/webhook", () => {
     // but there is no subscription event. Record that classification outcome.
     await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("slack_classifier_rejected");
     const rows = await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "slack_classifier_rejected"));
-    expect(rows[0]?.detail).toContain("No enabled Slack trigger classifier");
+    expect(rows[0]?.detail).toContain("No Slack event Valet reads matches this event type");
     expect(rows[0]?.eventMetadata).toBeNull();
     expect(JSON.stringify(rows)).not.toContain("private classifier payload");
     expect(JSON.stringify(rows)).not.toContain("classifier-secret");

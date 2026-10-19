@@ -1,7 +1,8 @@
 // INV-H2 (docs/specs/2026-10-16-presence-hub-design.md) for the api side:
 // the sentences the api sends to Presence use only the Terminology table's
-// words. This lint parses the event and workflow services and the events,
-// presence, and workflow-triggers routes. It reads each string literal,
+// words. This lint parses the event and workflow services, the events,
+// presence, and workflow-triggers routes, and the Slack inbox, whose stage
+// texts admins read in Diagnostics. It reads each string literal,
 // template, or `+` chain of them that holds a space, whatever its first
 // letter: text a reader may see, such as an error, a reason, or a stage
 // detail. It fails on a banned word. The banned words match the web lint
@@ -18,7 +19,7 @@ import { describe, expect, it } from "vitest";
 
 const SRC = resolve(__dirname);
 const DIRS = ["events", "workflows"] as const;
-const FILES = ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts"] as const;
+const FILES = ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "channels/slack-inbox.ts"] as const;
 /** Files whose sentences only the model reads: tool descriptions, tool
  * results, and thread prompts. They name tool ids such as
  * `events.list_subscriptions`, so the system words stay. */
