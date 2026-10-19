@@ -159,6 +159,23 @@ describe("TopNav", () => {
     expect(await screen.findByRole("button", {name:"Workspace: Platform. Change workspace"})).toBeTruthy();
   });
 
+  it.each([
+    "/presence?workspace=t1",
+    "/presence/activity?workspace=t1&status=problems",
+    "/workflows/runs?workspace=t1",
+  ])("renames the workspace in place on a list page reached as %s", async (path) => {
+    navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
+    const { router } = renderNav({ path });
+    const pathname = path.split("?")[0];
+    await userEvent.click(await screen.findByRole("button", { name: "Workspace: Platform. Change workspace" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Personal" }));
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ workspace: "user" }));
+    expect(router.state.location.pathname).toBe(pathname);
+    if (path.includes("status=")) expect(router.state.location.search).toEqual({ workspace: "user", status: "problems" });
+    expect(await screen.findByRole("button", { name: "Workspace: Personal. Change workspace" })).toBeTruthy();
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
+  });
+
   it("keeps a Presence tab in place when the workspace changes", async () => {
     navTeams = [{ id: "t1", name: "Platform", orgId: "org", createdAt: 1, memberCount: 1, callerRole: "member", origin: "local", externalId: null, defaultModel: null }];
     window.sessionStorage.setItem("valet:workspace", "t1");
