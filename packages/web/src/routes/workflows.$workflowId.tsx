@@ -34,6 +34,7 @@ import {
   DropdownMenuTrigger,
   Spinner,
 } from "~/components/primitives";
+import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
 import { Editor, type EditorHandle } from "~/components/workflows/editor/editor";
@@ -207,6 +208,7 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
   const [reviewedActions, setReviewedActions] = useState<WorkflowNodePermissionWire[]>([]);
   // The last pre-approval's leftovers: gating actions an org policy keeps
@@ -400,8 +402,21 @@ function WorkflowEditorPane({
               >
                 Download
               </DropdownMenuItem>
+              {/* A mirrored workflow lives in a repository, so the list offers no Delete for it either. */}
+              {!mirrored && (
+                <DropdownMenuItem className="text-danger-500" onSelect={() => setDeleteOpen(true)}>
+                  Delete
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
+          <DeleteWorkflowDialog
+            workflow={{ id: workflowId, name: committedName }}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+            // The workflow is gone, so an unsaved draft has nothing to save into.
+            onDeleted={() => void navigate({ to: "/workflows", ignoreBlocker: true })}
+          />
         </div>
       </div>
 

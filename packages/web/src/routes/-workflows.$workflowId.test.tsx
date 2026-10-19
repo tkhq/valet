@@ -60,6 +60,7 @@ let permissionsData: {
   }>;
 } = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
+const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
@@ -102,6 +103,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/workflows", () => ({
   downloadWorkflowFile: (...args: unknown[]) => downloadWorkflowFile(...args),
+  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
   useCopyWorkflow: () => ({ mutateAsync: vi.fn().mockResolvedValue({ id: "wf_copy" }), isPending: false }),
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
@@ -208,6 +210,7 @@ describe("WorkflowEditorPage", () => {
   beforeEach(() => {
     navigate.mockClear();
     downloadWorkflowFile.mockClear();
+    deleteMutateAsync.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
     blockerProceed.mockClear();
@@ -371,6 +374,36 @@ describe("WorkflowEditorPage", () => {
     expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
   });
 
+  it("deletes from the overflow menu with the list's confirm, then goes to the list (L8)", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Settled run history is kept/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete workflow" }));
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/workflows", ignoreBlocker: true }));
+  });
+
+  it("keeps a refused delete open with the server's reason", async () => {
+    deleteMutateAsync.mockRejectedValueOnce(new Error("The workflow has active runs. Cancel them, then delete it."));
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete workflow" }));
+    expect(await screen.findByText("The workflow has active runs. Cancel them, then delete it.")).toBeTruthy();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("offers no Delete for a mirrored workflow", async () => {
+    Object.assign(workflowData, { origin: "repo", upstream: { repoFullName: "tkhq/automation", ref: "main", path: "w.yaml" } });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    await screen.findByText("Download");
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
+  });
+
   it("renders the listeners and routines panel for this workflow", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" />);
@@ -385,7 +418,7 @@ describe("WorkflowEditorPage", () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
-    expect((await screen.findByTestId("line-editor")).textContent).toBe("Editor: create workflow wf_1");
+    expect((await screen.findByTestId("line-editor")).textContent).toBe("Editor: create fixed workflow wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

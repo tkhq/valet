@@ -7,7 +7,6 @@ import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
 import { AlertCircle, Clock, MoreHorizontal, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 import {
-  useDeleteWorkflow,
   useSetWorkflowEnabled,
   useStartRun,
   useWorkflows,
@@ -16,7 +15,6 @@ import {
 import { OwnerBadge } from "~/components/owner-badge";
 import {
   Button,
-  ConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -24,6 +22,7 @@ import {
   Spinner,
   Switch,
 } from "~/components/primitives";
+import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
 import { ImportV1Dialog } from "~/components/workflows/import-v1-dialog";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
@@ -134,9 +133,7 @@ function DefinitionRow({
   // all, and its label reads the saved state the server returns.
   const setEnabled = useSetWorkflowEnabled();
   const on = triggers.some((trigger) => trigger.enabled);
-  const del = useDeleteWorkflow();
   const navigate = useNavigate();
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
 
@@ -172,19 +169,6 @@ function DefinitionRow({
     }
     const result = await startRun.mutateAsync();
     goToRun(result.runId);
-  }
-
-  async function handleDelete() {
-    setDeleteError(null);
-    try {
-      await del.mutateAsync(workflow.id);
-      setDeleteOpen(false);
-    } catch (err) {
-      // 409 = active runs; surface the server's actionable message. The
-      // dialog stays open so the message sits beside the button that
-      // caused it, and a retry needs no second trip through the row.
-      setDeleteError(err instanceof Error ? err.message : "Delete failed.");
-    }
   }
 
   return (
@@ -277,26 +261,12 @@ function DefinitionRow({
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => {
-                setDeleteError(null);
-                setDeleteOpen(true);
-              }}
-              disabled={del.isPending}
+              onClick={() => setDeleteOpen(true)}
               aria-label={`Delete ${workflow.name}`}
             >
               <Trash2 className="h-4 w-4" />
             </Button>
-            <ConfirmDialog
-              open={deleteOpen}
-              onOpenChange={setDeleteOpen}
-              title={`Delete "${workflow.name}"?`}
-              description="The workflow, its saved versions, and what starts it are deleted. Settled run history is kept."
-              confirmLabel="Delete workflow"
-              pendingLabel="Deleting…"
-              pending={del.isPending}
-              error={deleteError}
-              onConfirm={() => void handleDelete()}
-            />
+            <DeleteWorkflowDialog workflow={workflow} open={deleteOpen} onOpenChange={setDeleteOpen} />
           </>
         )}
       </div>
