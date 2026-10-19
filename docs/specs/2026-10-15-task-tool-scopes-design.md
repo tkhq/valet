@@ -6,7 +6,7 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 
 - A scope lists native tool names and integration action IDs. `service.*` selects one service's actions.
 - An omitted list adds no restriction. An empty list permits no entries in that list.
-- Session ceilings, submission ceilings, and thread focus intersect. A child inherits the effective parent scope.
+- Session ceilings, submission ceilings, and thread focus intersect. A child inherits the parent's ceilings, not its thread focus. Focus is the parent's own reversible choice, so a child that inherited it lost tools that neither the parent nor a policy had refused. The parent narrows a child with the task's own scope.
 - Persist scopes in existing session, thread, submission, and run metadata. Restore them before execution.
 - An invalid stored scope permits no tools. A missing scope keeps existing behavior.
 - Filter discovery and visible tools. Check execution again, including pinned actions and sandbox calls.

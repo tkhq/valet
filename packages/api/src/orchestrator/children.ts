@@ -440,8 +440,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       throw new Error(`buildChildSpawner: parent session not found: ${ctx.parentSessionId}`);
     }
     const orgId = parentData.orgId;
-    const parentThread = await deps.engineStore.getThread(ctx.parentSessionId, ctx.parentThreadId);
-    const toolScope = intersectToolScopes(readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(parentThread?.metadata?.[TOOL_SCOPE_KEY]), req.toolScope);
+    // The parent's thread focus stays with the parent; `req.toolScope` already carries its ceiling.
+    const toolScope = intersectToolScopes(readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), req.toolScope);
 
     // Host policy for `req.repo` (`task` tool): normalize before anything is
     // created so a bad value costs nothing. The message is what the tool
@@ -1587,8 +1587,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
     if (!parentData || parentData.orgId !== watchRow.orgId) return null;
-    const parentThread = await deps.engineStore.getThread(ctx.parentSessionId, ctx.parentThreadId);
-    const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(parentThread?.metadata?.[TOOL_SCOPE_KEY]));
+    const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]));
     const promptOptions = childSendPromptOptions({ ...ctx, toolScope,
       ...(ctx.unattendedWorkflow ? { workflowStep: await submissionWorkflowStep(deps.engineStore, ctx.parentSessionId, ctx.parentQueueItemId) } : {}) }, req.queue === true);
     const receipt = await childSession.prompt(req.message, promptOptions);
