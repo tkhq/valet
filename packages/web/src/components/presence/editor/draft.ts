@@ -784,8 +784,70 @@ export function exampleSteps(draft: Draft, words: { when: string; workflow?: str
   return [first, second, `It ${verb} in ${where}${as}.`];
 }
 
-/** The reason Create or Save stays off, or null when the draft is ready. */
-export function saveBlocker(draft: Draft, mode: EditorMode, context: { connected: boolean }): string | null {
+/** True when the line answers through a team's assistant: the server then
+ * adds no creator scope (`enforceMentionScope`'s `teamAssistant`). */
+function teamAssistantDraft(draft: Draft): boolean {
+  return draft.doKind !== "workflow" && draft.assistant === "team" && draft.teamId !== null;
+}
+
+/**
+ * The placeholder names in a template, or null for one the server cannot
+ * read (an unclosed or nested `{{`). It mirrors `scanPlaceholders` in
+ * packages/api/src/events/prompt-template.ts.
+ */
+function placeholderNames(value: string): string[] | null {
+  const names: string[] = [];
+  let from = 0;
+  for (;;) {
+    const open = value.indexOf("{{", from);
+    if (open === -1) return names;
+    const close = value.indexOf("}}", open + 2);
+    if (close === -1) return null;
+    const nextOpen = value.indexOf("{{", open + 2);
+    if (nextOpen !== -1 && nextOpen < close) return null;
+    names.push(value.slice(open + 2, close).trim());
+    from = close + 2;
+  }
+}
+
+/** The one name the instructions (`systemPrompt`) accept: `INSTRUCTION_VARIABLE_RE` in prompt-template.ts. */
+const INSTRUCTION_VARIABLE = "event.key";
+
+/**
+ * The refusal the server gives for the line's two templates, in the
+ * editor's words (`validatePromptTemplate` in prompt-template.ts).
+ * `services` is the event catalog; while it is empty, the payload check waits.
+ */
+function templateBlocker(draft: Draft, services: readonly CatalogService[]): string | null {
+  const instructions = draft.instructions.trim();
+  if (instructions.length > 0) {
+    const names = placeholderNames(instructions);
+    if (names === null) return "The instructions have an unclosed or nested {{. Close each {{ with }}.";
+    const bad = names.find((name) => name !== INSTRUCTION_VARIABLE);
+    if (bad !== undefined) return `Instructions cannot use event variables. Move {{${bad}}} to the Event message.`;
+  }
+  const message = draft.promptTemplates.userPromptTemplate.trim();
+  if (message.length > 0) {
+    const names = placeholderNames(message);
+    if (names === null) return "The Event message has an unclosed or nested {{. Close each {{ with }}.";
+    if (services.length > 0) {
+      const carried = new Set(unionFilterFields([...services], draft.events).map((f) => f.field));
+      const missing = names.find((name) => name.startsWith("payload.") && !carried.has(name.slice("payload.".length)));
+      if (missing !== undefined) {
+        return `No picked event carries {{${missing}}}. Remove it from the Event message, or pick an event that carries it.`;
+      }
+    }
+  }
+  return null;
+}
+
+/** The reason Create or Save stays off, or null when the draft is ready.
+ * `services` is the event catalog, for the Event message's payload check. */
+export function saveBlocker(
+  draft: Draft,
+  mode: EditorMode,
+  context: { connected: boolean; services?: readonly CatalogService[] },
+): string | null {
   const routine = draft.service === "schedule";
   if (mode.kind === "create" && !routine && !context.connected) return "Connect the service first.";
   if (routine) {
@@ -796,14 +858,27 @@ export function saveBlocker(draft: Draft, mode: EditorMode, context: { connected
     const filters = toWireFilters([...draft.conditions]);
     const scoped = hasChannelScopeFilter(filters);
     if (draft.anyChannel && scoped) return "Turn off Any channel or remove the channel condition.";
-    if (selectsSlackMention([...draft.events]) && !draft.anyChannel && !scoped) {
+    const mention = selectsSlackMention([...draft.events]);
+    // The server adds the creator as a user condition, and it applies to
+    // every event of the line (`enforceMentionScope` in mention-scope.ts).
+    if (mention && [...draft.events].some((key) => key !== SLACK_APP_MENTION)) {
+      return "A mention line can only listen for mentions. Uncheck the other events or the mention.";
+    }
+    if (mention && !draft.anyChannel && !scoped) {
       return "Add a channel, or choose Any channel.";
+    }
+    if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
+      return "A personal mention line already listens for your own mentions. Remove the user condition.";
     }
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
   if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";
   if (draft.doKind !== "workflow" && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
   if (routine && draft.doKind !== "workflow" && draft.instructions.trim().length === 0) return "Give the routine instructions.";
+  if (!routine && draft.doKind !== "workflow") {
+    const template = templateBlocker(draft, context.services ?? []);
+    if (template !== null) return template;
+  }
   if (!routine) {
     const appearanceError = validateAppearance(draft.appearance);
     if (appearanceError) return appearanceError;

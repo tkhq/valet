@@ -267,7 +267,7 @@ function EditorSheet({ onOpenChange, mode, onSaved, onCloseAutoFocus }: {
   // A place's own service counts as connected: the place exists, so its events arrive.
   const placeService = mode.kind === "create" ? mode.preselected?.place?.service : undefined;
   const serviceConnected = draft.service === "schedule" || draft.service === placeService || connected === null || connected.has(draft.service);
-  const blocker = saveBlocker(ready, mode, { connected: serviceConnected });
+  const blocker = saveBlocker(ready, mode, { connected: serviceConnected, services });
   const pending = createLine.isPending || patchLine.isPending || createRoutine.isPending || updateRoutine.isPending;
 
   const assistants: AssistantOption[] = [

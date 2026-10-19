@@ -282,3 +282,59 @@ describe("saveBlocker", () => {
     expect(saveBlocker(routineDraft, CREATE, { connected: true })).toBe("Give the routine instructions.");
   });
 });
+
+describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)", () => {
+  const mentionLine = () => {
+    let draft = toggleEvent(newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = { ...draft, name: "x" };
+    return draft;
+  };
+
+  it("refuses a mention mixed with another Slack event", () => {
+    const draft = toggleEvent(mentionLine(), "slack.message", SERVICES);
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe(
+      "A mention line can only listen for mentions. Uncheck the other events or the mention.",
+    );
+  });
+
+  it("refuses a user condition on a personal mention line, not on a team one", () => {
+    const draft = addCondition(mentionLine(), { id: "u", field: "user", op: "eq", value: "U9" });
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe(
+      "A personal mention line already listens for your own mentions. Remove the user condition.",
+    );
+    expect(saveBlocker({ ...draft, assistant: "team", teamId: "t1" }, CREATE, { connected: true })).toBeNull();
+  });
+
+  it("lets a stored creator scope stay", () => {
+    const sub = line("l1", {
+      name: "Mine",
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user", follow: true },
+    });
+    expect(saveBlocker(draftFromLine(sub), { kind: "edit", line: sub }, { connected: true })).toBeNull();
+  });
+
+  it("refuses an event variable in the instructions, and allows {{event.key}}", () => {
+    const draft = { ...mentionLine(), instructions: "Summarize {{event.summary}}." };
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe(
+      "Instructions cannot use event variables. Move {{event.summary}} to the Event message.",
+    );
+    expect(saveBlocker({ ...draft, instructions: "Handle {{event.key}}." }, CREATE, { connected: true })).toBeNull();
+    expect(saveBlocker({ ...draft, instructions: "Open {{ event.key" }, CREATE, { connected: true })).toBe(
+      "The instructions have an unclosed or nested {{. Close each {{ with }}.",
+    );
+  });
+
+  it("refuses an Event message payload variable that no picked event carries", () => {
+    let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = { ...draft, name: "x", anyChannel: true, promptTemplates: { userPromptTemplate: "From {{payload.user}}" } };
+    expect(saveBlocker(draft, CREATE, { connected: true, services: SERVICES })).toBeNull();
+    draft = toggleEvent(toggleEvent(draft, "slack.app_mention", SERVICES), "slack.message", SERVICES);
+    expect(saveBlocker(draft, CREATE, { connected: true, services: SERVICES })).toBe(
+      "No picked event carries {{payload.user}}. Remove it from the Event message, or pick an event that carries it.",
+    );
+    // Before the catalog loads, the check waits.
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBeNull();
+  });
+});
