@@ -34,7 +34,9 @@ else if(a[0]==='stop'){const owner=owners.find(o=>o.Id===a.at(-1));if(!owner)fai
 else if(a[0]==='rm'){owners=owners.filter(o=>o.Id!==a.at(-1));save();}
 else if(a[0]==='exec'){
  const owner=owners.find(o=>a.includes(o.Id));if(!owner)fail('No such container');
- if(a.at(-1).startsWith('cat /workspace/.valet-mount-probe')){const mount=owner.Mounts.find(m=>m.Destination==='/workspace');process.stdout.write(fs.readFileSync(path.join(mount.Source,'.valet-mount-probe'),'utf8'));}
+ const mount=owner.Mounts.find(m=>m.Destination==='/workspace');const probe=/^printf %s (\\S+) > \\/workspace\\/\\.valet-mount-probe$/.exec(a.at(-1));
+ if(probe)fs.writeFileSync(path.join(mount.Source,'.valet-mount-probe'),probe[1]);
+ else if(a.at(-1)==='/workspace/.valet-mount-probe'&&a.includes('rm'))fs.rmSync(path.join(mount.Source,'.valet-mount-probe'),{force:true});
 }
 else fail('unexpected fake Docker operation '+a.join(' '));
 `, { mode: 0o755 });

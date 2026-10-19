@@ -162,13 +162,13 @@ const CONTAINER_WORKSPACE = "/workspace";
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
 
-/** Sentinel file the mount probe writes on the host and reads inside the
- * container. Removed again as soon as the probe ends. */
+/** Sentinel file the mount probe writes inside the container and reads on the
+ * host. Removed again as soon as the probe ends. */
 const MOUNT_PROBE_FILE = ".valet-mount-probe";
 
 /** Bounds the mount probe. macOS file sharing (VirtioFS, gRPC-FUSE) caches
- * directory entries, so a host write can need a moment to appear inside the
- * container — the same delay `awaitCredsPropagation` waits out. */
+ * directory entries, so a write can need a moment to appear on the other side
+ * of the mount — the same delay `awaitCredsPropagation` waits out. */
 const MOUNT_PROBE_TIMEOUT_MS = 5000;
 const MOUNT_PROBE_POLL_MS = 100;
 
@@ -199,19 +199,19 @@ export async function createSandboxWorkspace(prefix: string): Promise<string> {
 }
 
 /**
- * Confirms the container reads the same directory the host writes to.
+ * Confirms the container and the host see the same working directory.
  *
  * A docker daemon inside a virtual machine shares only a subset of the host
  * filesystem. `docker run -v` with a host path outside that subset does not
  * fail: the daemon creates an empty directory inside the VM and mounts that
- * instead. The container then reads a different directory than `readFile` and
- * `writeFile` write to (both run on the host — see the `DockerSandbox`
- * docblock), so every file staged from the host disappears.
+ * instead. The host and the container then read different directories, and
+ * every file staged from the host disappears.
  *
- * The probe exists because the mismatch is otherwise silent, and surfaces far
- * from its cause. Workspace prep, for example, stages the git credential
- * helper with `writeFile` and then installs it with `exec`; all the operator
- * sees is `cp: can't stat '.valet-prep/git-credential-valet'`.
+ * The container writes the sentinel as root and the host reads it. The image
+ * entrypoint can give the working directory to the `dockerd` workload user
+ * (`browser-preflight.sh`, `start-docker.sh`). After that, the API's own user
+ * can still read the directory but can no longer create files in it, so a
+ * host-side write failed with EACCES on every create for that workspace.
  */
 async function verifyWorkspaceMount(
   containerId: string,
@@ -221,18 +221,23 @@ async function verifyWorkspaceMount(
   const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const probeHostPath = join(hostWorkspace, MOUNT_PROBE_FILE);
   const probeContainerPath = posix.join(CONTAINER_WORKSPACE, MOUNT_PROBE_FILE);
+  let writeError = "";
+  let written = false;
   try {
-    await fs.writeFile(probeHostPath, token, "utf8");
     const deadline = Date.now() + MOUNT_PROBE_TIMEOUT_MS;
     for (;;) {
-      const read = await execProcess(
-        "docker",
-        ["exec", containerId, "sh", "-c", `cat ${probeContainerPath} 2>/dev/null`],
-        {},
-      );
-      if (read.stdout.trim() === token) return;
+      if (!written) {
+        const write = await execProcess(
+          "docker",
+          ["exec", "--user", "0", containerId, "sh", "-c", `printf %s ${token} > ${probeContainerPath}`],
+          {},
+        );
+        written = write.exitCode === 0;
+        writeError = (write.stderr.trim() || write.stdout.trim()).slice(0, 2000);
+      }
+      if (written && (await fs.readFile(probeHostPath, "utf8").catch(() => "")).trim() === token) return;
       if (Date.now() >= deadline) {
-        // A container whose PID 1 already exited cannot read anything. Say
+        // A container whose PID 1 already exited cannot write anything. Say
         // so, rather than blame a bind mount that may be correct.
         if (!(await isContainerAlive(containerId))) {
           // The container is removed right after this throw, so quote its
@@ -245,8 +250,15 @@ async function verifyWorkspaceMount(
               (tail ? ` Last container output: ${tail}` : ""),
           );
         }
+        if (!written) {
+          throw new Error(
+            `DockerSandboxProvider.create: the container from image "${image}" cannot write to ${CONTAINER_WORKSPACE}. ` +
+              `Make the image run "sh" as root through docker exec, then create the session again.` +
+              (writeError ? ` Last error: ${writeError}` : ""),
+          );
+        }
         throw new Error(
-          `DockerSandboxProvider.create: the container cannot read the workspace bind mount at ${hostWorkspace}. ` +
+          `DockerSandboxProvider.create: the host does not see the workspace bind mount at ${hostWorkspace}. ` +
             `This docker daemon runs in a virtual machine that does not share the path. ` +
             `The host and the container therefore read different directories, and staged files never arrive. ` +
             `Put the workspace under ${homedir()}, which every docker distribution shares by default. ` +
@@ -258,7 +270,9 @@ async function verifyWorkspaceMount(
       await new Promise((r) => setTimeout(r, MOUNT_PROBE_POLL_MS));
     }
   } finally {
-    // Never leave the sentinel in a workspace the agent will see.
+    // Never leave the sentinel in a workspace the agent will see. The container
+    // removes it, because the host may not have write access to the directory.
+    if (written) await execProcess("docker", ["exec", "--user", "0", containerId, "rm", "-f", probeContainerPath], {}).catch(() => undefined);
     await fs.rm(probeHostPath, { force: true }).catch(() => undefined);
   }
 }
