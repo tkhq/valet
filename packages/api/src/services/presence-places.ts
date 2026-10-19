@@ -137,6 +137,26 @@ function namedPlaces(service: PresencePlaceService, filters: unknown, slackTeam:
   return [...new Set(named)];
 }
 
+/** The services with places that a listener's event keys name, in key order. */
+function listenerServices(rule: { eventKeys: unknown }): PresencePlaceService[] {
+  const keys = Array.isArray(rule.eventKeys) ? rule.eventKeys.filter((key): key is string => typeof key === "string") : [];
+  return [...new Set(keys.map(serviceOf).filter((service): service is PresencePlaceService => service !== null))];
+}
+
+/**
+ * The exact places a listener's filters name, for each service its event
+ * keys name. A service whose filters name no place gives its top row.
+ * Unlike `listenerPlaces`, several places never collapse to their parent,
+ * so a gate on these places admits no place the line does not name
+ * (spec Part D step 4).
+ */
+export function lineNamedPlaces(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string[] {
+  return listenerServices(rule).flatMap((service) => {
+    const named = namedPlaces(service, rule.filters, slackTeam);
+    return named.length > 0 ? named : [rootOf(service, slackTeam)];
+  });
+}
+
 /**
  * Where a listener lists, one place for each service its event keys name
  * (spec Part B step 2). A listener whose filters name one place lists there.
@@ -144,9 +164,7 @@ function namedPlaces(service: PresencePlaceService, filters: unknown, slackTeam:
  * other listener lists at its service's top row.
  */
 export function listenerPlaces(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string[] {
-  const keys = Array.isArray(rule.eventKeys) ? rule.eventKeys.filter((key): key is string => typeof key === "string") : [];
-  const services = [...new Set(keys.map(serviceOf).filter((service): service is PresencePlaceService => service !== null))];
-  return services.map((service) => {
+  return listenerServices(rule).map((service) => {
     const named = namedPlaces(service, rule.filters, slackTeam);
     if (named.length === 1) return named[0]!;
     const parents = new Set(named.map(parentPlace));

@@ -2,6 +2,7 @@
 // of a line's Activity.
 import { describe, expect, it } from "vitest";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
+import { lineNamedPlaces } from "./presence-places.js";
 import {
   inLinePlaces, lineActivityCounts, mergeLineActivity, type LineDecisionInput, type LineDeliveryInput,
 } from "./line-activity.js";
@@ -108,6 +109,30 @@ describe("mergeLineActivity", () => {
     expect(member).toEqual(["receipt:r_in", "d_out_acted", "d_in"]);
     const admin = mergeLineActivity(deliveries, decisions, { ...MEMBER, admin: true }).map((e) => e.id);
     expect(admin).toEqual(["receipt:r_unknown", "receipt:r_out", "receipt:r_in", "d_out_skip", "d_out_acted", "d_in"]);
+  });
+
+  // Review A5: two named repositories list at `github:*`, but the gate reads
+  // only the two repositories, so a member sees no skip from a third one.
+  it("gates a member on each named place, not the parent that several share", () => {
+    const line = { eventKeys: ["github.push"], filters: [{ field: "repo", op: "in", value: ["acme/api", "acme/web"] }] };
+    const linePlaces = lineNamedPlaces(line, "T1");
+    expect(linePlaces).toEqual(["github:acme/api", "github:acme/web"]);
+    const decisions = [
+      decision("r_api", "filter_excluded", { at: 10, eventKey: "github.push" }),
+      decision("r_web", "filter_excluded", { at: 11, eventKey: "github.push", place: OTHER_REPO }),
+      decision("r_third", "filter_excluded", { at: 12, eventKey: "github.push", place: { key: "github:acme/billing", label: "acme/billing" } }),
+      decision("r_unknown", "filter_excluded", { at: 13, eventKey: "github.push", place: null }),
+    ];
+    const member = mergeLineActivity([], decisions, { linePlaces, admin: false }).map((e) => e.id);
+    expect(member).toEqual(["receipt:r_web", "receipt:r_api"]);
+    const admin = mergeLineActivity([], decisions, { linePlaces, admin: true }).map((e) => e.id);
+    expect(admin).toEqual(["receipt:r_unknown", "receipt:r_third", "receipt:r_web", "receipt:r_api"]);
+    // Two channels and two Linear teams stay exact as well.
+    expect(lineNamedPlaces({ eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C1", "C2"] }] }, "T1"))
+      .toEqual(["slack:T1/C1", "slack:T1/C2"]);
+    expect(lineNamedPlaces({ eventKeys: ["linear.Issue.update"], filters: [{ field: "team", op: "in", value: ["ENG", "OPS"] }] }, "T1"))
+      .toEqual(["linear:team/ENG", "linear:team/OPS"]);
+    expect(lineNamedPlaces({ eventKeys: ["github.push"], filters: [] }, "T1")).toEqual(["github:*"]);
   });
 
   it("treats a line with no place filter as naming its whole service", () => {

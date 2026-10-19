@@ -22,7 +22,9 @@ import { sanitizeReceiptSubscriptions } from "../events/receipts.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { slackEventChannel } from "./thread-access.js";
 import { supersedingDeliveries } from "./event-log.js";
-import { eventPlace, listenerPlaces, placeCovers, placeLabel, placeOfSubject, serviceOf, type PresenceDeps } from "./presence-places.js";
+import {
+  eventPlace, isServiceRoot, lineNamedPlaces, placeCovers, placeLabel, placeOfSubject, serviceOf, type PresenceDeps,
+} from "./presence-places.js";
 import type {
   EventDeliveryThreadRef, EventDeliveryWire, LineActivityEntryWire, LineActivitySkipReason, ReceiptSubscriptionDecision,
 } from "../wire/types.js";
@@ -63,15 +65,11 @@ export interface LineDecisionInput {
 }
 
 export interface MergeLineActivityOptions {
-  /** The places the line names (`listenerPlaces`). */
+  /** The exact places the line names (`lineNamedPlaces`), never a parent
+   * that several of them share. */
   linePlaces: readonly string[];
   /** An organization admin sees skipped entries outside the line's places. */
   admin: boolean;
-}
-
-/** Whether a place is a service's top row: `github:*`, `linear:*`, or a Slack workspace. */
-function isServiceRoot(place: string): boolean {
-  return place === "github:*" || place === "linear:*" || /^slack:[^/]+$/.test(place);
 }
 
 /**
@@ -318,10 +316,12 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
   type DeliveryBatch = Awaited<ReturnType<typeof deliveryBatch>>;
   type ReceiptBatch = Awaited<ReturnType<typeof receiptBatch>>;
 
-  // The places the line names. A Slack channel filter names a channel
-  // without its workspace, so the org's workspace completes it.
+  // The exact places the line names. A Slack channel filter names a channel
+  // without its workspace, so the org's workspace completes it. The gate
+  // reads the named places, not the row the line lists at: two repositories
+  // list at `github:*`, which would admit every repository's skips.
   let slackTeam = query.slackTeam;
-  const placesFor = () => listenerPlaces(line, slackTeam ?? "?");
+  const placesFor = () => lineNamedPlaces(line, slackTeam ?? "?");
 
   const entries: LineActivityEntryWire[] = [];
   let frontier = query.before;
