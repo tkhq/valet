@@ -461,8 +461,16 @@ eventsRouter.get("/events/log", async (c) => {
   const keepEvents = place
     ? async (ids: readonly string[]): Promise<ReadonlySet<string>> => {
       if (ids.length === 0) return new Set();
-      const rows = await db.select().from(events).where(and(eq(events.orgId, user.orgId), inArray(events.id, [...ids])));
-      return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, row, place)).map((row) => row.id));
+      // A scan reads up to 20 batches, so it leaves the payload column
+      // behind. The place plugins' `naturalSubject` (GitHub, Linear, Slack)
+      // reads only `subjects` and `refs`. A plugin that reads its payload
+      // to name a place needs that column added here.
+      const rows = await db.select({
+        id: events.id, orgId: events.orgId, service: events.service, eventKey: events.eventKey, dedupeKey: events.dedupeKey,
+        actor: events.actor, refs: events.refs, summary: events.summary, occurredAt: events.occurredAt,
+        receivedAt: events.receivedAt, subjects: events.subjects,
+      }).from(events).where(and(eq(events.orgId, user.orgId), inArray(events.id, [...ids])));
+      return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, { ...row, payload: null }, place)).map((row) => row.id));
     }
     : undefined;
   const { items, next } = await listEventLog(db, {
