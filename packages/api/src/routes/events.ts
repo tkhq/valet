@@ -453,9 +453,9 @@ eventsRouter.get("/events/log", async (c) => {
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
-    typeof decoded.at === "number" && Number.isFinite(decoded.at) && typeof decoded.id === "string"
+    typeof decoded.at === "number" && Number.isSafeInteger(decoded.at) && typeof decoded.id === "string"
     ? { at: decoded.at, id: decoded.id } : undefined;
-  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor no longer matches these filters. Load the Log again from the top." }, 400);
+  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor is not valid for these filters. Reload Activity and try again." }, 400);
 
   const admin = await isOrgAdminUser(c);
   const keepEvents = place
@@ -1170,9 +1170,9 @@ eventsRouter.get("/event-subscriptions/:id/activity", async (c) => {
   const rawCursor = c.req.query("before");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const before = decoded && decoded.orgId === user.orgId && decoded.scope === scope &&
-    typeof decoded.at === "number" && Number.isFinite(decoded.at) && typeof decoded.id === "string"
+    typeof decoded.at === "number" && Number.isSafeInteger(decoded.at) && typeof decoded.id === "string"
     ? { at: decoded.at, id: decoded.id } : undefined;
-  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor does not match this line. Load its activity again from the top." }, 400);
+  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor is not valid for this line. Reload Activity and try again." }, 400);
 
   // A credential fault degrades Slack places to their ids, as the places read does.
   const page = await loadLineActivity({ db, plugins }, {

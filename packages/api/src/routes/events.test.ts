@@ -830,6 +830,16 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
       "receipt:r_4", "d_4", "receipt:r_3", "d_3", "receipt:r_2", "d_2", "receipt:r_1", "d_1", "receipt:r_0", "d_0",
     ]);
     expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity?before=bad`)).status).toBe(400);
+    // Review A3: a forged cursor time is a 400 that names the fix, not a 500 that echoes SQL.
+    const real = (await activity(a, "?limit=3")).nextCursor!;
+    const fields: unknown = JSON.parse(Buffer.from(real, "base64url").toString("utf8"));
+    if (typeof fields !== "object" || fields === null) throw new Error("the cursor is not an object");
+    for (const at of [1.5, 1e300]) {
+      const forged = Buffer.from(JSON.stringify({ ...fields, at }), "utf8").toString("base64url");
+      const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity?limit=3&before=${forged}`);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "The page cursor is not valid for this line. Reload Activity and try again." });
+    }
   });
 
   it("keeps a short source's older rows when the other source fills a batch", async () => {

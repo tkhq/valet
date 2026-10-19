@@ -67,6 +67,25 @@ it("pages the merged list with one cursor, and refuses it under other filters", 
   expect((await fetch(`${api.baseUrl}/api/events/log?${MINE}&problems=1&cursor=${encodeURIComponent(first.nextCursor!)}`)).status).toBe(400);
 });
 
+/** A real cursor with its `at` replaced, as a forged request would send it. */
+function forged(cursor: string, at: number): string {
+  const fields: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  if (typeof fields !== "object" || fields === null) throw new Error("the cursor is not an object");
+  return Buffer.from(JSON.stringify({ ...fields, at }), "utf8").toString("base64url");
+}
+
+// Review A3: a forged cursor time is a 400 that names the fix, not a 500 that echoes SQL.
+it("refuses a cursor whose time is not a safe whole number", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const first = await log(api, "&limit=2");
+  for (const at of [1.5, 1e300]) {
+    const res = await fetch(`${api.baseUrl}/api/events/log?${MINE}&diagnostics=1&limit=2&cursor=${forged(first.nextCursor!, at)}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "The page cursor is not valid for these filters. Reload Activity and try again." });
+  }
+});
+
 it("counts only this workspace's deliveries, and shows why a skipped event was skipped", async () => {
   api = await bootTestApi();
   await seed(api);
