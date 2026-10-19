@@ -560,6 +560,14 @@ export function useDeleteSchedule() {
   });
 }
 
+/** True for a `qkWorkflows.runs(id)` key of any workflow. */
+export function isWorkflowRunsKey(key: readonly unknown[]): boolean {
+  return key[0] === "workflows" && key[2] === "runs";
+}
+
+/** Fires a schedule now. The mutation knows only the schedule id, so it
+ * refreshes every workflow's runs: a workflow routine's page reads its
+ * Activity, count, and pulse from its workflow's runs. */
 export function useRunScheduleNow() {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, string>({
@@ -567,6 +575,7 @@ export function useRunScheduleNow() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
       void qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+      void qc.invalidateQueries({ predicate: (query) => isWorkflowRunsKey(query.queryKey) });
     },
   });
 }
