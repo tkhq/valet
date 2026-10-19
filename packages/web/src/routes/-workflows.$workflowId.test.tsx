@@ -55,6 +55,7 @@ let permissionsData: {
     mode: "allow" | "require_approval" | "deny" | "unknown";
     provenance?: string;
     sharedAccount?: true;
+    agentStep?: true;
   }>;
 } = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
@@ -643,6 +644,19 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
       expect(revokeAccountsMutate).toHaveBeenCalledTimes(1);
       expect(allowMutateAsync).not.toHaveBeenCalled();
     } finally { workflowData.ownerType = "user"; workflowData.ownerId = "u1"; }
+  });
+
+  it("pre-approves an agent step's exact dynamic action and says the agent picks values", async () => {
+    permissionsData = { definitionToken: "review-a", nodes: [
+      { nodeId: "writer", service: "granola", action: "list_meetings", actionId: "granola.list_meetings", mode: "unknown", agentStep: true },
+    ] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.click(screen.getByText(/^Permissions ·/));
+    expect(screen.getByText("Risk unknown before a run")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("workflow-gate-badge"));
+    expect(await screen.findByText(/the agent chooses when to use an action/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("preapprove-confirm"));
+    await waitFor(() => expect(allowMutateAsync).toHaveBeenCalledWith({ actionIds: ["granola.list_meetings"], definitionToken: "review-a" }));
   });
 
   it("pre-approves through the dialog: lists the actions, confirms, closes", async () => {

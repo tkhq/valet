@@ -547,6 +547,7 @@ export async function resolveUngatedAction(
       orgId: ctx.orgId,
       sessionId: ctx.sessionId,
       threadId: ctx.threadId,
+      ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
       appliesIn: "session",
       partialParams: true,
     });
@@ -722,6 +723,7 @@ export async function invokeAction(
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
+    ...(ctx.queueItemId ? { queueItemId: ctx.queueItemId } : {}),
     appliesIn: "session",
     ...(ctx.externalSender ? { externalSender: true } : {}),
   };

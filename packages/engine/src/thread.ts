@@ -5455,6 +5455,7 @@ export class Thread {
         ...(!this.runningItem?.author?.externalSender ? { actorId } : {}),
         ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
         threadId: this.id,
+        ...(this.runningItem ? { queueItemId: this.runningItem.id } : {}),
       }),
       sandbox: session.sandbox,
       recordSkillInvocation: (skill, path, injectedText) =>

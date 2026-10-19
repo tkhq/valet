@@ -896,6 +896,8 @@ export interface CredentialUse {
   /** The turn came from a channel sender with no Valet account: no
    * teammate's approval to lend an account covers it. */
   externalSender?: boolean;
+  /** The running submission. The host reads its metadata. */
+  queueItemId?: string;
 }
 
 export interface StoredCredential {
@@ -1081,6 +1083,8 @@ export interface PolicyResolveInput {
   orgId?: string;
   sessionId: string;
   threadId: string;
+  /** The running submission. The host reads its metadata. */
+  queueItemId?: string;
   appliesIn: "session" | "workflow";
   /**
    * `params` lists only the values known before the request, as for a hosted
@@ -2845,6 +2849,8 @@ export type ChildSpawner = (
     owner: Principal;
     /** The spawning task is an unattended workflow task, so the child refuses decisions too. */
     unattendedWorkflow?: boolean;
+    /** The spawning submission. The host reads its metadata. */
+    parentQueueItemId?: string;
     /** The spawning submission's channel origin, so the child.settled
      * signal can inherit it and the settlement turn can reach the channel
      * that asked. */
@@ -2910,7 +2916,7 @@ export type ChildStatusReader = (
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean; parentQueueItemId?: string },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

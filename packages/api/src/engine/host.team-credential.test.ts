@@ -19,7 +19,9 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost, sessionPrincipal } from "./host.js";
 import { githubTokenArgsForOwner, isUsableGithubRow } from "../services/session-github-token.js";
-import { agentSessions, orgs, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, orgs, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
+import { saveWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
@@ -340,6 +342,31 @@ describe("EngineHost team-owned session credentials", () => {
     const cred = await session.credentialProvider().get("openai");
 
     expect(cred?.accessToken).not.toBe("sk-member-must-not-win");
+  });
+
+  it("team OpenAI in a workflow agent step borrows the lender's account the lender allowed for that workflow", async () => {
+    const { appDb, credentials } = await harness();
+    const lender = "team-cred-lender";
+    const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" },
+      { id: "agent", type: "session", mode: "start", prompt: "Draw.", toolScope: { actions: ["openai.generate_image"] } }], edges: [] };
+    await appDb.insert(teamMembers).values({ teamId, userId: lender, role: "member" });
+    await credentials.save({ type: "user", id: lender }, "openai", { type: "api_key", apiKey: "sk-lender" });
+    await shareCredential(appDb, { teamId, service: "openai", userId: lender, createdAt: NOW });
+    await appDb.insert(workflowDefinitions).values({ id: "wf-openai", orgId, ownerType: "team", ownerId: teamId, name: "Draw", definition, createdAt: NOW, updatedAt: NOW });
+    await appDb.insert(workflowRuns).values({ id: "run-openai", workflowId: "wf-openai", definitionVersionId: "v1", definition, params: {},
+      status: "running", ownerType: "team", ownerId: teamId, actorUserId: userId, orgId, createdAt: NOW, updatedAt: NOW });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+    const envKey = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const session = await h.sessionFor("wf:run-openai:agent", teamMeta);
+      expect((await session.credentialProvider({ actorId: userId }).get("openai"))?.accessToken).not.toBe("sk-lender");
+      await saveWorkflowAccountConsent(appDb, { orgId, workflowId: "wf-openai", teamId, userId: lender, services: ["openai"] });
+      expect((await session.credentialProvider({ actorId: userId }).get("openai"))?.accessToken).toBe("sk-lender");
+    } finally {
+      if (envKey !== undefined) process.env.OPENAI_API_KEY = envKey;
+    }
   });
 
   describe("credential_owner_mode", () => {

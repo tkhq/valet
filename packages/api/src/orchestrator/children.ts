@@ -1,4 +1,5 @@
-import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
+import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type ToolScope } from "@valet/shared";
+import { submissionWorkflowStep, type WorkflowStepRef } from "../workflows/step-grants.js";
 /**
  * Child spawning + durable settlement watching (Phase 4 decisions 10/11/21).
  *
@@ -389,7 +390,7 @@ export function nextReplyRoute(
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope; unattendedWorkflow?: boolean; workflowStep?: WorkflowStepRef },
   queue: boolean,
 ): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
   return {
@@ -399,8 +400,19 @@ export function childSendPromptOptions(
     author: { id: ctx.actorUserId, name: "Valet" },
     queueMode: queue ? "followup" : "steer",
     metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin), ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}),
-      ...(ctx.unattendedWorkflow ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}) },
+      ...(ctx.unattendedWorkflow ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}),
+      ...(ctx.unattendedWorkflow && ctx.workflowStep ? { [WORKFLOW_STEP_KEY]: ctx.workflowStep } : {}) },
   };
+}
+
+/** A spawned child of an unattended workflow task: it refuses decisions, and
+ * it works in the parent submission's workflow step. */
+async function unattendedChildMetadata(
+  engineStore: ChildrenDeps["engineStore"],
+  ctx: { parentSessionId: string; parentQueueItemId?: string },
+): Promise<Record<string, unknown>> {
+  const step = await submissionWorkflowStep(engineStore, ctx.parentSessionId, ctx.parentQueueItemId);
+  return { [UNATTENDED_WORKFLOW_KEY]: true, ...(step ? { [WORKFLOW_STEP_KEY]: step } : {}) };
 }
 
 /**
@@ -420,6 +432,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       owner: Principal;
       origin?: ChannelOrigin;
       unattendedWorkflow?: boolean;
+      parentQueueItemId?: string;
     },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
@@ -540,6 +553,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       });
     }
 
+    // Read before the child exists, so a failed read leaves nothing to clean up.
+    const unattendedMetadata = ctx.unattendedWorkflow ? await unattendedChildMetadata(deps.engineStore, ctx) : {};
     const childSession = await deps.engineHost.childSessionFor(childSessionId, {
       credentialOwnerMode,
       parentSessionId: ctx.parentSessionId,
@@ -566,9 +581,10 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
-      // A child of an unattended workflow task refuses decisions too.
+      // A child of an unattended workflow task refuses decisions too, and
+      // works in the parent's workflow step.
       metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
-        ...(ctx.unattendedWorkflow ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}) },
+        ...unattendedMetadata },
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
@@ -1506,7 +1522,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
   const send = async (
     req: { childSessionId: string; message: string; queue?: boolean },
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; toolScope?: ToolScope; unattendedWorkflow?: boolean },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; toolScope?: ToolScope; unattendedWorkflow?: boolean; parentQueueItemId?: string },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()
@@ -1573,7 +1589,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     if (!parentData || parentData.orgId !== watchRow.orgId) return null;
     const parentThread = await deps.engineStore.getThread(ctx.parentSessionId, ctx.parentThreadId);
     const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(parentThread?.metadata?.[TOOL_SCOPE_KEY]));
-    const promptOptions = childSendPromptOptions({ ...ctx, toolScope }, req.queue === true);
+    const promptOptions = childSendPromptOptions({ ...ctx, toolScope,
+      ...(ctx.unattendedWorkflow ? { workflowStep: await submissionWorkflowStep(deps.engineStore, ctx.parentSessionId, ctx.parentQueueItemId) } : {}) }, req.queue === true);
     const receipt = await childSession.prompt(req.message, promptOptions);
 
     // Re-point BEFORE arming: the fresh watcher must find the row already

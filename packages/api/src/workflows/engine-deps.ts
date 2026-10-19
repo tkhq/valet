@@ -1,5 +1,5 @@
 import { workflowStepToolScope } from "./tool-scope.js";
-import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
+import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -443,8 +443,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         outcome: "failed" as const,
         error:
           `This step needed approval nobody can give during a run: ${refused.map((gate) => `"${gate.title}"`).join(", ")}. ` +
-          "Before the next run, move the action to a tool step, which saving the workflow approves, " +
-          "ask a team admin to allow it by policy, or connect a team account for a teammate's shared account.",
+          "Before the next run, list the exact action in this step's actions and review the workflow's permissions, " +
+          "or move the action to a tool step. A team admin can also allow it by policy, and a team account replaces a teammate's shared account.",
       };
     },
 
@@ -655,7 +655,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
-        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+        // The step lets the run's agent use the workflow's saved grants (`step-grants.ts`).
+        metadata: { preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, [WORKFLOW_STEP_KEY]: { runId, nodeId },
+          ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
           ...(promptOpts.modelCallLimit ? { [MODEL_CALL_LIMIT_KEY]: promptOpts.modelCallLimit } : {}),
           ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,

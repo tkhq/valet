@@ -80,6 +80,9 @@ export interface RunParams {
   parentIteration?: number;
   /** The server build that started this run. A reader can check whether a fix was live for it. */
   build?: string;
+  /** An agent started this run on its own and chose its input, so its agent
+   * steps use no saved workflow grants. A nested run keeps the parent's value. */
+  startedBy?: 'agent';
 }
 
 /**

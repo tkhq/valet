@@ -151,9 +151,9 @@ Both paths call `allowWorkflowPermissions` with the review token of the definiti
 
 A grant covers the steps that were reviewed. Any step change revokes action grants and account consent, whoever makes it. A layout-only change keeps them. The policy lookup (`loadPolicyRows`) also refuses a workflow grant to a run whose steps differ from the saved steps, so a run that started before an edit does not use a grant made after it.
 
-For team workflows, an approval also allows the approving person's accounts already shared with that team for the declared direct tool services, excluding GitHub. This includes services with dynamic tools and foreach tool bodies. `workflow_account_grants` binds consent to the organization, workflow, team, member, service and share generation. It does not grant team-wide account consent. Another member approves their own account. Human review nodes remain explicit decisions. The review's `accountConsent.pending` lists the viewer's own shared services that still need consent.
+For team workflows, an approval also allows the approving person's accounts already shared with that team for the declared tool and agent-step services, excluding GitHub. This includes services with dynamic tools and foreach tool bodies. `workflow_account_grants` binds consent to the organization, workflow, team, member, service and share generation. It does not grant team-wide account consent. Another member approves their own account. Human review nodes remain explicit decisions. The review's `accountConsent.pending` lists the viewer's own shared services that still need consent.
 
-Saved workflow consent applies only to direct tool invocation contexts. Workflow agents and sandbox scripts keep their existing separate account approval paths.
+Saved workflow consent applies to direct tool invocation contexts and to agent steps for the services they list (`2026-10-17-agent-step-workflow-grants-design.md`). Sandbox scripts keep their existing separate account approval paths.
 
 A run's account gate also offers the lender "Always allow for this workflow".
 It needs the lender's signed-in browser answer. It saves the same

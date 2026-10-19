@@ -1,4 +1,4 @@
-import { UNATTENDED_WORKFLOW_KEY, type Presence } from "@valet/shared";
+import { UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY, type Presence } from "@valet/shared";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
@@ -1018,6 +1018,8 @@ it("retains task references and marks both workflow dispatch paths and their rep
   const reportRepair = await deps.promptOrchestrator("Correct the JSON", { dispatchId: "workflow:task-contract-run:report:repair", ownerHint, queueMode: "followup", taskSourceQueueItemId: report.queueItemId });
   expect(reportRepair.sessionId).toBe(report.sessionId);
   expect(reportRepair.threadId).toBe(report.threadId);
-  expect((await engineStore.getQueueItem(report.sessionId, report.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true });
-  expect((await engineStore.getQueueItem(reportRepair.sessionId, reportRepair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, taskSourceQueueItemId: report.queueItemId });
+  // A Thread step and its repair name the step, so its agent can use the workflow's saved grants.
+  const step = { [WORKFLOW_STEP_KEY]: { runId: "task-contract-run", nodeId: "report" } };
+  expect((await engineStore.getQueueItem(report.sessionId, report.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, ...step });
+  expect((await engineStore.getQueueItem(reportRepair.sessionId, reportRepair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, [UNATTENDED_WORKFLOW_KEY]: true, taskSourceQueueItemId: report.queueItemId, ...step });
 });

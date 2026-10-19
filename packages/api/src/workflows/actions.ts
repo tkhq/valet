@@ -66,7 +66,7 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
-import { allowWorkflowPermissions, analyzeDefinitionPermissions, analyzeWorkflowPermissions, canGrantWorkflowPermissions } from "./permissions.js";
+import { allowWorkflowPermissions, analyzeDefinitionPermissions, analyzeWorkflowPermissions, canGrantWorkflowPermissions, needsGrant } from "./permissions.js";
 import { readNodeDiagnostics } from "./node-diagnostics.js";
 import { readRunFollowUp } from "./run-follow-up.js";
 import { readStepTranscript } from "./step-transcript.js";
@@ -196,7 +196,7 @@ function stepParams(definition: unknown, nodeId: string): unknown {
 
 /** The distinct actions a workflow's steps wait on for approval. */
 function gatingActionIds(review: GetWorkflowPermissionsResponse): string[] {
-  return [...new Set(review.nodes.flatMap((node) => node.mode === "require_approval" && node.actionId ? [node.actionId] : []))];
+  return [...new Set(review.nodes.flatMap((node) => needsGrant(node) && node.actionId ? [node.actionId] : []))];
 }
 
 /** What a saved workflow still needs a person to allow, for a save result. */
@@ -500,7 +500,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!summary || !review) return { success: false, error: `workflow not found: ${workflow_id}` };
       const canGrant = await canGrantWorkflowPermissions(deps, person, summary);
       // An explicit policy keeps its own question; only the rest can be allowed here.
-      const gating = review.nodes.filter((node) => node.mode === "require_approval" && node.actionId);
+      const gating = review.nodes.filter((node) => needsGrant(node) && node.actionId);
       const grantable = canGrant ? gating.filter((node) => !POLICY_HELD.has(node.provenance ?? "")) : [];
       const held = gating.filter((node) => POLICY_HELD.has(node.provenance ?? ""));
       const actions = [...new Set(grantable.flatMap((node) => node.actionId ? [node.actionId] : []))];
@@ -515,7 +515,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const name = oneLine(summary.name, 80);
       const lines = [
         `Runs of "${name}" will run these steps without asking:`,
-        ...grantable.map((node) => `- ${node.nodeId}: ${node.actionId} ${oneLine(JSON.stringify(stepParams(summary.definition, node.nodeId) ?? {}), 240)}`),
+        ...grantable.map((node) => `- ${node.nodeId}: ${node.actionId} ${node.agentStep ? "(an agent step: the agent chooses when and with which values)"
+          : oneLine(JSON.stringify(stepParams(summary.definition, node.nodeId) ?? {}), 240)}`),
         ...(accounts.length ? [`They may use your accounts shared with ${oneLine(review.accountConsent?.teamName ?? "the team", 80)}: ${accounts.join(", ")}.`] : []),
         ...(held.length ? [`These still ask on every run, because a policy requires it: ${[...new Set(held.map((node) => node.actionId))].join(", ")}.`] : []),
         "A change to the steps asks again.",
@@ -627,7 +628,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
-      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope, ctx.toolScopeCeiling ?? {});
+      // Only the person's own signed-in prompt starts a run whose agent steps may use saved grants.
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope, ctx.toolScopeCeiling ?? {},
+        undefined, isDirectActor(ctx, owner) ? "person" : "agent");
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
         return {

@@ -123,6 +123,9 @@ export interface PolicyResolutionInput {
    * fails closed. It never matches an allow row, which would widen access.
    */
   partialParams?: boolean;
+  /** A workflow agent step that declares this exact action
+   * (`workflows/step-grants.ts`). Its saved workflow grant applies. */
+  agentStep?: boolean;
 }
 
 export interface PolicyDecisionProvenance {
@@ -237,6 +240,14 @@ function matchesPolicyRow(row: ActionPolicyRow, input: PolicyResolutionInput): b
   return matchesParams(row, input);
 }
 
+/** An explicit org or team rule that denies or requires approval for this
+ * call, whatever `appliesIn` it names. An agent step resolves as `session`,
+ * so a rule scoped to workflows is otherwise invisible to it. */
+export function restrictivePolicyAnywhere(rows: PolicyResolutionRows, input: PolicyResolutionInput): ActionPolicyRow | undefined {
+  return rows.policies.find((row) => row.mode !== "allow"
+    && matchesPolicyRow(row, { ...input, appliesIn: row.appliesIn === "any" ? input.appliesIn : row.appliesIn }));
+}
+
 function matchesOverrideRow(row: ActionPolicyOverrideRow, input: PolicyResolutionInput): boolean {
   if (!matchesTarget(row, input)) return false;
   return matchesParams(row, input);
@@ -341,8 +352,9 @@ export function resolvePolicyDecision(
     };
   }
 
-  // Durable workflow permission never weakens an explicit org/team rule.
-  const workflowGrant = input.appliesIn === "workflow" && !match
+  // Durable workflow permission never weakens an explicit org/team rule,
+  // including, for an agent step, one scoped to workflows.
+  const workflowGrant = !match && (input.appliesIn === "workflow" || (input.agentStep === true && !restrictivePolicyAnywhere(rows, input)))
     ? rows.workflowGrants?.find((row) => row.actionId === input.actionId) : undefined;
   if (workflowGrant) return { mode: "allow", provenance: {
     baseMode, matchedGrantId: workflowGrant.id, source: "workflow_grant",

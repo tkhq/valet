@@ -16,6 +16,7 @@ import { Value } from "typebox/value";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
+  retryWorkflowRun,
   workflowActionOrigin,
   type WorkflowServiceDeps,
 } from "./service.js";
@@ -526,6 +527,27 @@ describe("DB-backed actions", () => {
       expect(runHost.started.at(-1)?.[1].toolScope).toEqual({ actions: ["demo.echo"] });
     },
   );
+
+  it("marks a run an agent starts on its own, but not one the person's own prompt starts", async () => {
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    expect(await start.execute({ workflow_id: workflowId }, ctx())).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ interactiveActor: { id: "user1" } }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBeUndefined();
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ interactiveActor: { id: "user1" }, sessionPurpose: "workflow" }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+  });
+
+  it("keeps the agent-started marker when a person retries the run", async () => {
+    const workflowId = await seedWorkflow();
+    await deps.workflowStore.createRun("agent-run", { workflowId, definitionVersionId: "v", startedBy: "agent",
+      input: { type: "manual", timestamp: "t", data: {}, metadata: {} } }, {}, "v", { ownerType: "user", ownerId: "user1", actorUserId: "user1" });
+    await deps.workflowStore.settleRun("agent-run", "failed");
+    const person = { userId: "user1", orgId: "org1", principal: { type: "user" as const, id: "user1" }, humanAccountConsent: true };
+    expect(await retryWorkflowRun(deps, person, "agent-run")).toMatchObject({ runId: expect.any(String) });
+    expect(runHost.started.at(-1)?.[1].startedBy).toBe("agent");
+  });
 
   it("inherits a stored workflow audience and rejects unknown or foreign parents", async () => {
     const workflowId = await seedWorkflow();

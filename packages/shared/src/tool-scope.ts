@@ -10,6 +10,8 @@ export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
 export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
 /** Marks a workflow task that nobody watches. The engine refuses its decision requests before a gate opens. */
 export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
+/** The workflow agent step `{ runId, nodeId }` a submission belongs to. Only host dispatch writes it. */
+export const WORKFLOW_STEP_KEY = "workflowStep";
 /** The most model calls one submission may make. The engine stops before the next call and fails the submission. */
 export const MODEL_CALL_LIMIT_KEY = "modelCallLimit";
 

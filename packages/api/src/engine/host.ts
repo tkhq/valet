@@ -5,6 +5,7 @@ import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
+import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
@@ -1857,9 +1858,32 @@ export class EngineHost {
         credentials: this.opts.engineCredentials,
         ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
         ...(this.opts.plugins ? { plugins: this.opts.plugins } : {}),
+        workflowStepGrant: (input) => this.workflowStepGrant(input),
       });
     }
     return this.policyResolverInstance;
+  }
+
+  /** The workflow agent step a call runs in, when saved workflow grants may cover it. */
+  private async workflowStepGrant(input: { orgId: string; sessionId: string; queueItemId?: string; teamId?: string; userId?: string }): Promise<WorkflowStepGrant | undefined> {
+    if (!this.opts.db) return undefined;
+    const plugins = this.opts.actionPluginByService;
+    return resolveWorkflowStepGrant({ db: this.opts.db, engineStore: this.opts.engineStore,
+      credentialServiceFor: (service) => plugins?.get(service)?.actionPlugin.credentialService ?? service }, input);
+  }
+
+  /** Whether a team read may use `memberId`'s shared account. A workflow
+   * agent step also uses the account consent allowed for its workflow. */
+  private async mayBorrowAccount(
+    db: Parameters<typeof canBorrowCredential>[0],
+    scope: { orgId: string; teamId: string; sessionId: string; actor?: string; use: CredentialUse; service: string; memberId: string },
+  ): Promise<boolean> {
+    // A sender with no Valet account never rides a teammate's approval.
+    if (scope.use.externalSender) return false;
+    const step = await this.workflowStepGrant({ orgId: scope.orgId, sessionId: scope.sessionId, teamId: scope.teamId,
+      ...(scope.use.queueItemId ? { queueItemId: scope.use.queueItemId } : {}), ...(scope.actor ? { userId: scope.actor } : {}) });
+    return canBorrowCredential(db, { orgId: scope.orgId, teamId: scope.teamId, actorId: scope.actor, sessionId: scope.sessionId,
+      threadId: scope.use.threadId, service: scope.service, memberId: scope.memberId, ...(step ? { step } : {}) });
   }
 
   private buildCredentialResolver(
@@ -1936,8 +1960,8 @@ export class EngineHost {
             owner,
             ...(owner.type === "user" ? { userId: owner.id } : owner.type === "team" && actor ? { userId: actor } : {}),
             shares: (teamId, svc) => membersSharing(db, teamId, svc),
-            mayBorrow: async (memberId) => owner.type === "team" && !use.externalSender
-              && canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service: "openai", memberId }),
+            mayBorrow: async (memberId) => owner.type === "team"
+              && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service: "openai", memberId }),
             scopes,
             // The team read runs under the same policy a team workflow's
             // openai node reads with, so both reach the org-scoped item.
@@ -2005,9 +2029,7 @@ export class EngineHost {
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
-            // A sender with no Valet account never rides a teammate's approval.
-            mayBorrow: async (memberId) => !use.externalSender && db
-              ? await canBorrowCredential(db, { orgId, teamId: owner.id, actorId: actor, sessionId, threadId: use.threadId, service, memberId }) : false,
+            mayBorrow: async (memberId) => !!db && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service, memberId }),
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read

@@ -165,7 +165,7 @@ describe("policyResolver seam: resolve()", () => {
     const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
     await callTool.execute(
       { tool_id: "github.get_issue", params: { n: 7 }, summary: "s" },
-      makeCtx({ policyResolver: resolver, userId: "U", orgId: "O", sessionId: "S", threadId: "T" }),
+      makeCtx({ policyResolver: resolver, userId: "U", orgId: "O", sessionId: "S", threadId: "T", queueItemId: "Q" }),
     );
     expect(resolveInputs).toHaveLength(1);
     expect(resolveInputs[0]).toEqual({
@@ -177,6 +177,8 @@ describe("policyResolver seam: resolve()", () => {
       orgId: "O",
       sessionId: "S",
       threadId: "T",
+      // The host reads the running submission's workflow step from it.
+      queueItemId: "Q",
       appliesIn: "session",
     });
   });
