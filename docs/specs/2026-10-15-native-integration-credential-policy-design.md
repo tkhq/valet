@@ -258,7 +258,7 @@ deployment after merge.
    `vault`. The other texts for Linear, each followed by "or connect your
    own Linear account on the Integrations page":
    - Team connection: "Linear rejected the team's Linear connection. Ask
-     the team owner to reconnect Linear for the team".
+     a team admin to reconnect Linear for the team".
    - Another member's share: "Linear rejected the Linear account that
      Dana shared with the team. Ask Dana to reconnect Linear".
    - Org credential: "Linear rejected the organization's Linear

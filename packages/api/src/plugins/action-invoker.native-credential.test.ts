@@ -183,8 +183,7 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     const invoke = invokerFor(appDb, credentials);
 
     expect(await invoke(node("linear"), teamCtx)).toEqual(bareApp);
-    expect(record.mock.calls.length).toBeGreaterThan(0);
-    expect(record.mock.calls.every(([service, reason]) => service === "linear" && reason === "dead_delegated")).toBe(true);
+    expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
   });
 
   it("a team run counts one fallback per action, and none while it parks for a share's approval", async () => {

@@ -143,7 +143,7 @@ async function resolveToken(
  * answered with is bad, not the request. Name which credential it was and
  * the fix, per CLAUDE.md's "every user-facing error names the corrective
  * action" rule. The fix goes to whoever holds the account: the caller for
- * their own, the team owner for the team's, the sharing member for a share,
+ * their own, a team admin for the team's, the sharing member for a share,
  * an admin for the org's or the app's. Returns undefined for any other failure (bad request,
  * transport error, 5xx) — those keep today's verbatim error text, and for
  * `noAuth`/`staticToken` calls there is no personal/app connection to name.
@@ -167,10 +167,12 @@ function authRejectionMessage(
       return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or ${own}.`;
     }
     case 'team':
-      return `${label} rejected the team's ${label} connection. Ask the team owner to reconnect ${label} for the team, or ${own}.`;
+      return `${label} rejected the team's ${label} connection. Ask a team admin to reconnect ${label} for the team, or ${own}.`;
     case 'shared': {
-      const member = source.memberName ?? 'the member who shared it';
-      return `${label} rejected the ${label} account that ${member} shared with the team. Ask ${member} to reconnect ${label}, or ${own}.`;
+      if (source.memberName === undefined) {
+        return `${label} rejected a ${label} account a team member shared. Ask that member to reconnect ${label}, or ${own}.`;
+      }
+      return `${label} rejected the ${label} account that ${source.memberName} shared with the team. Ask ${source.memberName} to reconnect ${label}, or ${own}.`;
     }
     case 'org':
       return `${label} rejected the organization's ${label} credential. Ask an organization admin to reconnect ${label} in Settings, Organization, or ${own}.`;

@@ -903,7 +903,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     [
       'the team connection',
       { kind: 'team' },
-      "Linear rejected the team's Linear connection. Ask the team owner to reconnect Linear for the team, or connect your own Linear account on the Integrations page.",
+      "Linear rejected the team's Linear connection. Ask a team admin to reconnect Linear for the team, or connect your own Linear account on the Integrations page.",
     ],
     [
       "another member's share",
@@ -913,7 +913,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     [
       'a share whose member has no name',
       { kind: 'shared', memberId: 'u-002' },
-      'Linear rejected the Linear account that the member who shared it shared with the team. Ask the member who shared it to reconnect Linear, or connect your own Linear account on the Integrations page.',
+      'Linear rejected a Linear account a team member shared. Ask that member to reconnect Linear, or connect your own Linear account on the Integrations page.',
     ],
     [
       'the org credential',
