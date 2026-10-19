@@ -47,7 +47,7 @@ describe("Diagnostics", () => {
     const details = screen.getByText("Diagnostics", { selector: "summary > span" }).closest("details");
     if (details === null) throw new Error("Diagnostics is not a disclosure");
     expect(details.open).toBe(false);
-    expect(within(details).getByText("For organization admins: the intake trail for each event, stage by stage.")).toBeTruthy();
+    expect(within(details).getByText("How each event came in and was matched, step by step.")).toBeTruthy();
     expect(await within(details).findByText("Completed check · excluded by its filters")).toBeTruthy();
     expect(listEventReceipts).toHaveBeenCalledWith({ subscriptionId: "R4", limit: 10 });
   });

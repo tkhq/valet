@@ -43,7 +43,7 @@ export function Diagnostics({ id, name }: { id: string; name: string }) {
       {/* The muted line sits in the summary, so a closed disclosure still says what it holds. */}
       <summary className="cursor-pointer text-[13px] text-muted">
         <span className="font-medium hover:text-ink">Diagnostics</span>
-        <span className="ml-2">For organization admins: the intake trail for each event, stage by stage.</span>
+        <span className="ml-2">How each event came in and was matched, step by step.</span>
       </summary>
       <div className="mt-3">
         <WorkList>

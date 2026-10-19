@@ -450,7 +450,7 @@ describe("RulePage", () => {
     const summary = await screen.findByText("Diagnostics", { selector: "summary > span" });
     const receipts = summary.closest("details");
     if (receipts === null) throw new Error("Diagnostics is not a disclosure");
-    expect(within(receipts).getByText("For organization admins: the intake trail for each event, stage by stage.")).toBeTruthy();
+    expect(within(receipts).getByText("How each event came in and was matched, step by step.")).toBeTruthy();
     expect(receipts.open).toBe(false);
     expect(await within(receipts).findByText("Completed check · excluded by its filters")).toBeTruthy();
     // The last stage reads in words, not as its identifier.
