@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
+import { formatDateTime } from "~/lib/format-when";
 import { line } from "../test-fixtures";
 import { draftFromLine, newDraft, scheduleCron, type Draft, type EditorMode } from "./draft";
 
@@ -15,7 +16,7 @@ vi.mock("~/api/events", () => ({
   useFilterOptions: () => ({ data: { options: [], reason: "Connect first." }, isLoading: false }),
 }));
 
-import { WhenSection, conditionHint, conditionWords } from "./when-section";
+import { WhenSection, conditionHint, conditionWords, threadFollowHint } from "./when-section";
 
 const SERVICES: CatalogService[] = [
   {
@@ -185,5 +186,15 @@ describe("conditionHint", () => {
     expect(conditionHint("slack")).toBe("Any field these events carry, such as a channel or a sender.");
     expect(conditionHint("github")).toBe("Any field these events carry, such as a branch or an author.");
     expect(conditionHint("linear")).toBe("Any field these events carry, such as a team or a label.");
+  });
+});
+
+describe("threadFollowHint (E10)", () => {
+  it("reads the start time and the channel's name, never raw ids", () => {
+    const thread = { channel: "C123ABC", channelLabel: "#rollout", threadTs: "1750000000.123456" };
+    expect(threadFollowHint(thread, { timeZone: "UTC" })).toBe(
+      `Follows the thread started ${formatDateTime(1750000000123.456, { timeZone: "UTC" })} in #rollout. Paste another link to follow a different thread.`,
+    );
+    expect(threadFollowHint({ ...thread, channelLabel: "C123ABC" }, { timeZone: "UTC" })).not.toContain("C123ABC");
   });
 });

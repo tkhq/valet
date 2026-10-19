@@ -16,6 +16,7 @@ import { unionFilterFields, type CatalogService } from "~/components/events/subs
 import type { WhenService } from "~/components/events/wizard-preview";
 import { selectsSlackMention, hasChannelScopeFilter } from "~/lib/slack-mention";
 import { cn } from "~/lib/cn";
+import { formatDateTime } from "~/lib/format-when";
 import { ServiceGlyph, ServiceMark, SERVICE_NAMES, glyphColor } from "../service-mark";
 import { eventLabel, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
 import { BAD_THREAD_LINK, parseSlackThreadLink } from "./slack-thread-link";
@@ -196,6 +197,21 @@ function SlackListenFor({ draft, onChange, locked }: { draft: Draft; onChange: (
   );
 }
 
+/**
+ * The hint under the link field of a stored thread follow, in words: the
+ * time the thread started and its channel's name. A channel with no name
+ * stays out, so no raw Slack id shows. `timeZone` is for tests.
+ */
+export function threadFollowHint(
+  thread: { channel: string; channelLabel: string; threadTs: string },
+  options: { timeZone?: string } = {},
+): string {
+  const seconds = Number(thread.threadTs);
+  const started = Number.isFinite(seconds) && seconds > 0 ? ` started ${formatDateTime(seconds * 1000, options)}` : "";
+  const named = thread.channelLabel.length > 0 && thread.channelLabel !== thread.channel ? ` in ${thread.channelLabel}` : "";
+  return `Follows the thread${started}${named}. Paste another link to follow a different thread.`;
+}
+
 /** The thread's link. A link that parses sets the channel and thread conditions. */
 function ThreadLink({ draft, onChange }: { draft: Draft; onChange: (next: Draft) => void }) {
   const bad = draft.threadLink.trim().length > 0 && parseSlackThreadLink(draft.threadLink) === null;
@@ -214,7 +230,7 @@ function ThreadLink({ draft, onChange }: { draft: Draft; onChange: (next: Draft)
       {bad
         ? <p role="alert" className="text-xs text-danger-500">{BAD_THREAD_LINK}</p>
         : thread !== null && draft.threadLink.trim().length === 0
-          ? <p className="text-xs text-muted">Follows the thread {thread.threadTs} in {thread.channelLabel}. Paste another link to follow a different thread.</p>
+          ? <p className="text-xs text-muted">{threadFollowHint(thread)}</p>
           : <p className="text-xs text-muted">In Slack, copy the link from a message's menu. Only later human replies in that thread match. Valet must have access to the channel.</p>}
     </div>
   );

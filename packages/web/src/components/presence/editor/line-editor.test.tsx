@@ -277,7 +277,10 @@ describe("LineEditor", () => {
     });
     expect(summary("when")).toBe("a reply in one Slack thread in C123ABC");
     expect(screen.getByLabelText("Paste the thread's link")).toBeTruthy();
-    expect(screen.getByText("Follows the thread 1750000000.123456 in C123ABC. Paste another link to follow a different thread.")).toBeTruthy();
+    // The hint names the thread's start time, never the raw ts or channel id (E10).
+    const hint = screen.getByText(/^Follows the thread started /);
+    expect(hint.textContent).not.toContain("1750000000");
+    expect(hint.textContent).not.toContain("C123ABC");
     expect(screen.getByRole("button", { name: /^Remove channel is C123ABC/ })).toBeTruthy();
   });
 
