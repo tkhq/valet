@@ -871,17 +871,13 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     try {
       api = await bootTestApi();
       const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      await db.update(orgs).set({ reasoningSettings: { default: "medium" } }).where(eq(orgs.id, LOCAL_ORG.id));
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
       await seedRun(api, "wfrun_reasoning", "wf_reasoning");
-      // With no default anywhere, the Valet default applies, clamped to the org max.
-      await db.update(orgs).set({ reasoningSettings: { max: "low" } }).where(eq(orgs.id, LOCAL_ORG.id));
       await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi" });
-      expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "low" });
-      await db.update(orgs).set({ reasoningSettings: { default: "high" } }).where(eq(orgs.id, LOCAL_ORG.id));
-      await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi" });
+      expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "medium" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "high" });
       expect(stream.mock.calls[1]![2]).toMatchObject({ reasoning: "high" });
-      await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "minimal" });
-      expect(stream.mock.calls[2]![2]).toMatchObject({ reasoning: "minimal" });
     } finally { piAi.registerApiProvider(original); }
   });
 

@@ -13,7 +13,6 @@
 import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs, teams, users } from "../schema/index.js";
-import { VALET_DEFAULT_REASONING } from "../wire/types.js";
 
 /** The six reasoning levels, in order. */
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -162,16 +161,17 @@ export async function assertReasoningSelectable(
 
 /**
  * A workflow step's reasoning level: the one the step names, otherwise the
- * run owner's default (the team's or the user's), then the org's, then
- * `VALET_DEFAULT_REASONING`, capped at the org's maximum. Chat threads
- * resolve the same cascade.
+ * run owner's default (the team's or the user's), then the org's, capped at
+ * the org's maximum. Unlike chat threads, a step with no default sends no
+ * level, so a step that sets `temperature` keeps working on models that
+ * accept temperature only with reasoning off.
  */
 export async function workflowReasoningLevel(
   db: AppQueryable,
   orgId: string,
   owner: { type: string; id: string },
   requested: string | undefined,
-): Promise<ReasoningLevel> {
+): Promise<ReasoningLevel | undefined> {
   const settings = await getOrgReasoningSettings(db, orgId);
   let ownerDefault: string | null | undefined;
   if (requested === undefined && owner.type === "team") {
@@ -180,7 +180,7 @@ export async function workflowReasoningLevel(
     ownerDefault = (await db.select({ level: users.defaultReasoning }).from(users).where(eq(users.id, owner.id)).limit(1))[0]?.level;
   }
   const level = requested ?? ownerDefault ?? settings.default;
-  return clampToMax(isLevel(level) ? level : VALET_DEFAULT_REASONING, settings.max);
+  return isLevel(level) ? clampToMax(level, settings.max) : undefined;
 }
 
 function isLevel(value: unknown): value is ReasoningLevel {

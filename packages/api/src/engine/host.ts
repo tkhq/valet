@@ -3580,7 +3580,8 @@ export class EngineHost {
    * build and every new thread gets a concrete level. A restore that finds no
    * stored level (a session from before the Valet default) stores the
    * resolved one, so the store, the thread list, and later rebuilds agree
-   * with the runtime.
+   * with the runtime. A restore also stores the resolved level on each legacy
+   * `"off"` thread, so that thread never inherits a historical session level.
    *
    * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
    * site already uses for `resolveModelForBuild` — see that method's doc
@@ -3591,7 +3592,12 @@ export class EngineHost {
     orgId: string,
     prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
   ): Promise<ReasoningLevel> {
-    if (isReasoningLevel(existing?.reasoning)) return existing.reasoning;
+    const stored = isReasoningLevel(existing?.reasoning) ? existing.reasoning : undefined;
+    // Older builds stored "off" on a new thread when no default resolved.
+    const legacyOff = existing
+      ? (await this.opts.engineStore.listThreads(existing.id)).filter((thread) => thread.reasoning === "off")
+      : [];
+    if (stored && legacyOff.length === 0) return stored;
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
       prefs.assistantDefault ??
@@ -3605,8 +3611,12 @@ export class EngineHost {
       if (current && !isReasoningLevel(current.reasoning)) {
         await this.opts.engineStore.saveSession({ ...current, reasoning: resolved });
       }
+      // A legacy "off" thread gets what a new thread gets now, not a historical session level.
+      for (const thread of legacyOff) {
+        await this.opts.engineStore.saveThread(existing.id, { ...thread, reasoning: resolved });
+      }
     }
-    return resolved;
+    return stored ?? resolved;
   }
 
   /**

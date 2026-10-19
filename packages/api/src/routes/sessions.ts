@@ -1119,11 +1119,12 @@ sessionsRouter.patch("/:id", async (c) => {
     if (wantsReasoning) {
       try {
         // Clearing sets the level a new thread gets now, so the session
-        // never runs at the provider default.
+        // never runs at the provider default. The session's own user
+        // resolves it, not the member who clicks reset.
         await engineSession.setReasoning(
           typeof body.reasoning === "string"
             ? body.reasoning.trim().toLowerCase()
-            : (await engineHost.resolveFreshThreadSettings(id, meta, userId)).reasoning,
+            : (await engineHost.resolveFreshThreadSettings(id, meta)).reasoning,
         );
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400);
