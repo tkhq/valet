@@ -73,3 +73,15 @@ export function routine(
     },
   };
 }
+
+/**
+ * A node's text as the reader sees it on screen. A token with glued
+ * punctuation also holds a visually hidden copy for screen readers
+ * (`Ref`'s `readAs`), which `textContent` would read twice.
+ */
+export function visibleText(node: Node | null | undefined): string {
+  if (node === null || node === undefined) return "";
+  const copy = node.cloneNode(true);
+  if (copy instanceof Element) for (const hidden of copy.querySelectorAll(".sr-only")) hidden.remove();
+  return copy.textContent ?? "";
+}

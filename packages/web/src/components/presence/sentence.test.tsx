@@ -13,6 +13,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 import { GLUE_PULL, Sentence } from "./sentence";
 import { TOKEN_PAD_X } from "./ref";
 import type { SentencePart } from "./sentences";
+import { visibleText } from "./test-fixtures";
 
 const parts: SentencePart[] = [
   { kind: "text", text: "When " },
@@ -31,10 +32,10 @@ const parts: SentencePart[] = [
 describe("Sentence", () => {
   it("reads as the joined text and links each thing to its page", () => {
     const { container } = render(<p><Sentence parts={parts} /></p>);
-    expect(container.textContent).toBe("When Jack mentions Valet in #incidents, work in the Platform CI thread, then run Triage failures, as Unknown.");
-    expect(screen.getByRole("link", { name: "#incidents" }).getAttribute("href")).toBe("/presence/places/slack%3AC900");
+    expect(visibleText(container)).toBe("When Jack mentions Valet in #incidents, work in the Platform CI thread, then run Triage failures, as Unknown.");
+    expect(screen.getByRole("link", { name: "#incidents," }).getAttribute("href")).toBe("/presence/places/slack%3AC900");
     expect(screen.getByRole("link", { name: "Platform CI" }).getAttribute("href")).toBe("/threads/t-ci");
-    expect(screen.getByRole("link", { name: "Triage failures" }).getAttribute("href")).toBe("/workflows/wf-1");
+    expect(screen.getByRole("link", { name: "Triage failures," }).getAttribute("href")).toBe("/workflows/wf-1");
     // A person, and a thread with no id, have no page.
     expect(screen.queryByRole("link", { name: "Jack" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Unknown" })).toBeNull();
@@ -49,9 +50,9 @@ describe("Sentence", () => {
       { kind: "thread", text: "Platform CI" },
       { kind: "text", text: "." },
     ]} />);
-    expect(container.textContent).toBe("When a check completes on acme/web, work in the Platform CI.");
+    expect(visibleText(container)).toBe("When a check completes on acme/web, work in the Platform CI.");
     const glued = [...container.querySelectorAll("[data-glued]")];
-    expect(glued.map((span) => span.textContent)).toEqual(["acme/web,", "Platform CI."]);
+    expect(glued.map((span) => visibleText(span))).toEqual(["acme/web,", "Platform CI."]);
     // The token and its punctuation are adjacent nodes: no text node between them.
     for (const span of glued) expect([...span.childNodes].some((n) => n.nodeType === Node.TEXT_NODE)).toBe(false);
     // The pull equals the pill's right padding, in em, so it holds at any font size.
@@ -63,9 +64,13 @@ describe("Sentence", () => {
   it("reads a period after a token with no space in the accessible name", () => {
     render(<h1><Sentence parts={[{ kind: "text", text: "When x, reply, as " }, { kind: "person", text: "Ops Bot" }, { kind: "text", text: "." }]} /></h1>);
     expect(screen.getByRole("heading", { name: "When x, reply, as Ops Bot." })).toBeTruthy();
-    // The token keeps its own name and link.
+    // No generic element carries a name: a hidden span reads the token and its period once.
+    expect(document.querySelector("[aria-label]")).toBeNull();
+    expect([...document.querySelectorAll(".sr-only")].map((span) => span.textContent)).toEqual(["Ops Bot."]);
+    expect(document.querySelector("[data-glue]")?.getAttribute("aria-hidden")).toBe("true");
+    // A linked token keeps its link, named with its punctuation.
     render(<p><Sentence parts={[{ kind: "text", text: "in " }, { kind: "place", text: "#incidents", service: "slack", subject: "slack:C900" }, { kind: "text", text: ", work" }]} /></p>);
-    expect(screen.getByRole("link", { name: "#incidents" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "#incidents," })).toBeTruthy();
   });
 
   it("renders tokens without links when asked", () => {

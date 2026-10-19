@@ -31,24 +31,25 @@ function partKeys(parts: readonly SentencePart[]): string[] {
   });
 }
 
-export function SentencePartView({ part, links = true }: { part: SentencePart; links?: boolean }) {
+/** One part. `readAs` is what a screen reader reads for a token (`Ref`'s `readAs`). */
+export function SentencePartView({ part, links = true, readAs }: { part: SentencePart; links?: boolean; readAs?: string }) {
   switch (part.kind) {
     case "text":
       return <>{part.text}</>;
     case "place":
       return links
-        ? <Ref kind="place" service={part.service} text={part.text} to="/presence/places/$subject" params={{ subject: part.subject }} />
-        : <Ref kind="place" service={part.service} text={part.text} />;
+        ? <Ref kind="place" service={part.service} text={part.text} readAs={readAs} to="/presence/places/$subject" params={{ subject: part.subject }} />
+        : <Ref kind="place" service={part.service} text={part.text} readAs={readAs} />;
     case "thread":
       return links && part.threadId !== undefined
-        ? <Ref kind="thread" text={part.text} to="/threads/$threadId" params={{ threadId: part.threadId }} />
-        : <Ref kind="thread" text={part.text} />;
+        ? <Ref kind="thread" text={part.text} readAs={readAs} to="/threads/$threadId" params={{ threadId: part.threadId }} />
+        : <Ref kind="thread" text={part.text} readAs={readAs} />;
     case "workflow":
       return links
-        ? <Ref kind="workflow" text={part.text} to="/workflows/$workflowId" params={{ workflowId: part.id }} />
-        : <Ref kind="workflow" text={part.text} />;
+        ? <Ref kind="workflow" text={part.text} readAs={readAs} to="/workflows/$workflowId" params={{ workflowId: part.id }} />
+        : <Ref kind="workflow" text={part.text} readAs={readAs} />;
     case "person":
-      return <Ref kind="person" text={part.text} />;
+      return <Ref kind="person" text={part.text} readAs={readAs} />;
   }
 }
 
@@ -60,7 +61,11 @@ const CLOSING = /^[,.:;!?)]+/;
  * token has its punctuation glued to the token: no whitespace between the
  * two, one unbreakable span, and the punctuation pulled back by the token's
  * right padding, so a line never starts with a comma. The sentence's
- * accessible name reads the punctuation with no space before it.
+ * accessible name reads the punctuation with no space before it: the
+ * visible token text and punctuation are hidden from screen readers, and
+ * a visually hidden span inside the token reads the two as one (`Ref`'s
+ * `readAs`). A linked token takes that text as its name; no generic
+ * element has one.
  */
 export function Sentence({ parts, links = true }: { parts: readonly SentencePart[]; links?: boolean }) {
   const keys = partKeys(parts);
@@ -84,12 +89,12 @@ export function Sentence({ parts, links = true }: { parts: readonly SentencePart
               ? (
                 // The accessible name reads every element apart from its
                 // neighbors, so the punctuation would read after a space
-                // ("as Ops Bot ."). The label joins the token's text and its
-                // punctuation as `partsText` does; the token inside keeps its
-                // own name and link.
-                <span data-glued="" aria-label={`${part.text}${glued}`} className="whitespace-nowrap">
-                  <SentencePartView part={part} links={links} />
-                  <span data-glue="" className={GLUE_PULL}>{glued}</span>
+                // ("as Ops Bot ."). The token reads its text and its
+                // punctuation joined, as `partsText` does, and the visible
+                // punctuation is hidden from screen readers.
+                <span data-glued="" className="whitespace-nowrap">
+                  <SentencePartView part={part} links={links} readAs={`${part.text}${glued}`} />
+                  <span data-glue="" aria-hidden="true" className={GLUE_PULL}>{glued}</span>
                 </span>
               )
               : <SentencePartView part={part} links={links} />}

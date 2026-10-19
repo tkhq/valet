@@ -91,6 +91,7 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { RulePage } from "./rule-page";
+import { visibleText } from "./test-fixtures";
 
 const PIN_TEXT = "Pick another thread in Presence.";
 
@@ -131,7 +132,7 @@ function skipped(id: string, over: Partial<LineActivityEntryWire> = {}): LineAct
 /** The timeline's rows as their text, newest first. */
 function activityRows(): string[] {
   const section = screen.getByRole("region", { name: "Activity" });
-  return Array.from(section.querySelectorAll("li")).map((row) => row.textContent ?? "");
+  return Array.from(section.querySelectorAll("li")).map((row) => visibleText(row));
 }
 
 /** Opens the status line's overflow menu and picks Delete. */
@@ -210,7 +211,7 @@ describe("RulePage", () => {
     renderPage();
     const title = await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." });
     // The title reads the place and the pinned thread as tokens; the place links its page.
-    expect(within(title).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github:acme/api");
+    expect(within(title).getByRole("link", { name: "acme/api," }).getAttribute("href")).toBe("/presence/places/github:acme/api");
     expect(within(title).getByRole("link", { name: "Platform CI" }).getAttribute("href")).toBe("/threads/t-ci");
     // The service mark leads the title.
     expect(title.parentElement?.querySelector('[data-service="github"][data-size="lg"]')).not.toBeNull();
@@ -478,7 +479,7 @@ describe("RulePage", () => {
     expect(link.getAttribute("href")).toBe("/presence/places/slack:C900");
     expect(crumbs.textContent).toBe("Presence›#incidents›Failed checks");
     // The title's place token links the same page as the crumb.
-    expect(within(title).getByRole("link", { name: "#incidents" }).getAttribute("href")).toBe("/presence/places/slack:C900");
+    expect(within(title).getByRole("link", { name: "#incidents," }).getAttribute("href")).toBe("/presence/places/slack:C900");
   });
 
   it("names an unlabeled channel by its id in both the crumb and the title (S16)", async () => {
@@ -494,7 +495,7 @@ describe("RulePage", () => {
     const crumbs = screen.getByRole("navigation", { name: "Breadcrumb" });
     expect(crumbs.textContent).toBe("Presence›C123›Failed checks");
     expect(within(crumbs).getByRole("link", { name: "C123" })).toBeTruthy();
-    expect(within(title).getByRole("link", { name: "C123" })).toBeTruthy();
+    expect(within(title).getByRole("link", { name: "C123," })).toBeTruthy();
   });
 
   it("puts only Presence before the line for a line with no one place", async () => {

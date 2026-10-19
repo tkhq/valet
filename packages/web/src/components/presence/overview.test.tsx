@@ -60,7 +60,7 @@ import { routeTree } from "../../routeTree.gen";
 import { announceCreated, clearCreated } from "./created-highlight";
 import { HIGHLIGHT_MS } from "./overview";
 import { PIN_UNAVAILABLE } from "./problem-badge";
-import { PLATFORM_CI, PLATFORM_OPS, line, place } from "./test-fixtures";
+import { PLATFORM_CI, PLATFORM_OPS, line, place, visibleText } from "./test-fixtures";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -366,9 +366,9 @@ describe("Presence overview", () => {
     mountOverview();
     const banner = await screen.findByRole("region", { name: "Needs attention" });
     await within(banner).findByRole("link", { name: "Platform CI" });
-    expect(within(banner).getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
+    expect(visibleText(within(banner).getByRole("alert"))).toBe("In acme/api, Platform CI is archived. Pick another thread:");
     // The lead's place is a token that links its page.
-    expect(within(banner).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
+    expect(within(banner).getByRole("link", { name: "acme/api," }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
     const acme = screen.getByRole("region", { name: "acme/api" });
     // The row offers the same fix behind one button.
     await userEvent.click(await within(acme).findByRole("button", { name: "Pick another thread" }));
@@ -469,7 +469,7 @@ describe("Presence overview", () => {
     mountOverview();
     await screen.findByRole("searchbox", { name: "Filter places" });
     const banner = await screen.findByRole("region", { name: "Needs attention" });
-    expect(within(banner).getByRole("listitem").textContent).toMatch(/^In acme\/api, /);
+    expect(visibleText(within(banner).getByRole("listitem"))).toMatch(/^In acme\/api, /);
     await waitFor(() => expect(detailsOf(screen.getByRole("heading", { level: 2, name: "GitHub" })).open).toBe(true));
     expect(detailsOf(screen.getByRole("heading", { level: 2, name: "Slack" })).open).toBe(false);
   });

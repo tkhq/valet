@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { line } from "../test-fixtures";
+import { line, visibleText } from "../test-fixtures";
 import { text } from "../sentences";
 import { SidePane, collisionWords, editedAgo, type SidePaneProps } from "./side-pane";
 
@@ -27,7 +27,7 @@ describe("SidePane", () => {
   it("reads the sentence, the example, the permissions note, and the footer", () => {
     render(<SidePane {...props({ editedAt: Date.now() - 3 * 86_400_000 })} />);
     expect(screen.getByText("This line reads")).toBeTruthy();
-    expect(screen.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");
+    expect(visibleText(screen.getByTestId("editor-sentence"))).toBe("When a check completes on acme/api, work in its own thread.");
     expect(screen.getAllByRole("listitem").map((li) => li.textContent)).toEqual([
       "1A check completes on acme/api.", "2Valet reads the event.", "3It works in its own thread, as Valet.",
     ]);

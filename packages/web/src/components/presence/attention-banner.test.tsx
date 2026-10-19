@@ -47,7 +47,7 @@ vi.mock("./thread-picker", () => ({
 
 import { AttentionBanner } from "./attention-banner";
 import { PIN_UNAVAILABLE } from "./problem-badge";
-import { PLATFORM_CI, line } from "./test-fixtures";
+import { PLATFORM_CI, line, visibleText } from "./test-fixtures";
 import { faultsOf, type Fault } from "./use-faults";
 import type { Routine } from "./routine-helpers";
 
@@ -129,11 +129,11 @@ describe("AttentionBanner", () => {
       ],
     }]);
     const item = within(screen.getByRole("region", { name: "Needs attention" })).getByRole("listitem");
-    const place = within(item).getByRole("link", { name: "acme/api" });
+    const place = within(item).getByRole("link", { name: "acme/api," });
     expect(place.getAttribute("href")).toBe("/presence/places/github:acme/api");
     const thread = await within(item).findByRole("link", { name: "Platform CI" });
     expect(thread.getAttribute("href")).toBe("/threads/t-ci");
-    expect(within(item).getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:");
+    expect(visibleText(within(item).getByRole("alert"))).toBe("In acme/api, Platform CI is archived. Pick another thread:");
   });
 
   it("leads a service-wide line with its service row, and a dead delivery with its place", async () => {

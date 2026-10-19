@@ -88,6 +88,7 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { PlacePage } from "./place-page";
+import { visibleText } from "./test-fixtures";
 
 const PIN_TEXT = "Pick another thread in Presence.";
 
@@ -189,7 +190,7 @@ beforeEach(() => {
  * innermost element whose whole text is the sentence. */
 function sentenceText(sentence: string) {
   return (_content: string, element: Element | null) =>
-    element?.textContent === sentence && ![...element.children].some((child) => child.textContent === sentence);
+    visibleText(element) === sentence && ![...(element?.children ?? [])].some((child) => visibleText(child) === sentence);
 }
 
 function sectionsInOrder(names: readonly string[]) {
@@ -233,7 +234,7 @@ describe("PlacePage", () => {
     const r1 = within(here!).getByText(sentenceText("When a pull request review or a check completes on acme/api, work in one thread per pull request."));
     expect(r1.closest("a")?.getAttribute("href")).toBe("/presence/rules/R1");
     // The place and the pinned thread read as tokens inside the line's link.
-    expect(r1.querySelector('[data-ref="place"]')?.textContent).toBe("acme/api");
+    expect(visibleText(r1.querySelector('[data-ref="place"]'))).toBe("acme/api");
     expect(await within(here!).findByText(sentenceText("When a check completes on acme/api, work in the Platform CI thread."))).toBeTruthy();
     expect(listThreads).toHaveBeenCalledWith("s-ws", { threadId: "t-ci" });
 

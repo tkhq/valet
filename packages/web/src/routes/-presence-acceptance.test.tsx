@@ -108,7 +108,7 @@ import { BackgroundWorkSection } from "~/components/session/background-work";
 import { subjectPlaceLabel } from "~/components/session/session-header";
 import { TooltipProvider } from "~/components/primitives";
 import { clearCreated } from "~/components/presence/created-highlight";
-import { place } from "~/components/presence/test-fixtures";
+import { place, visibleText } from "~/components/presence/test-fixtures";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -568,7 +568,7 @@ function groupNames(): string[] {
 
 /** The sentence links of a section of lines, in order. */
 function sentences(section: HTMLElement): string[] {
-  return within(section).getAllByRole("link").map((link) => link.textContent ?? "").filter((text) => text.startsWith("When "));
+  return within(section).getAllByRole("link").map((link) => visibleText(link)).filter((text) => text.startsWith("When "));
 }
 
 /** The section toggles of an open editor, by accessible name: `Change When` while summarized, `Close When` while open. */
@@ -610,10 +610,10 @@ describe("Presence hub acceptance (P1 to P20)", () => {
 
     const attention = within(await screen.findByRole("region", { name: "Needs attention" }));
     expect(attention.getAllByRole("listitem")).toHaveLength(1);
-    await waitFor(() => expect(attention.getByRole("alert").textContent).toBe("In acme/api, Platform CI is archived. Pick another thread:"));
+    await waitFor(() => expect(visibleText(attention.getByRole("alert"))).toBe("In acme/api, Platform CI is archived. Pick another thread:"));
     expect(await within(attention.getByRole("listbox", { name: "Threads" })).findByRole("option", { name: /Platform Ops/ })).toBeTruthy();
     // The item's place is a reference token that links the place page (Part K).
-    const attentionPlace = attention.getByRole("link", { name: "acme/api" });
+    const attentionPlace = attention.getByRole("link", { name: "acme/api," });
     expect(attentionPlace.getAttribute("data-ref")).toBe("place");
     expect(attentionPlace.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
 
@@ -720,7 +720,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     await userEvent.click(editor.getByLabelText("Someone mentions Valet"));
     const preview = within(editor.getByRole("complementary", { name: "Preview" }));
     expect(preview.getByText("This line reads")).toBeTruthy();
-    expect(preview.getByTestId("editor-sentence").textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+    expect(visibleText(preview.getByTestId("editor-sentence"))).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
     const example = preview.getByText("For example").nextElementSibling;
     if (example === null) throw new Error("The side pane has no example.");
     expect(within(example as HTMLElement).getAllByRole("listitem").map((step) => step.textContent)).toEqual([
@@ -817,7 +817,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     ]);
     const timeline = within(screen.getByRole("region", { name: "Activity" }));
     const deadEntry = (await timeline.findByText(/could not reach/)).closest("li");
-    expect(deadEntry?.textContent).toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+    expect(visibleText(deadEntry)).toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
     expect(deadEntry?.querySelector('[data-mark="acted"]')).not.toBeNull();
     expect(within(timeline.getByRole("group", { name: "Show" })).getAllByRole("button").map((chip) => chip.textContent)).toEqual(["All", "Acted", "Skipped"]);
 
@@ -1033,7 +1033,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     await timeline.findByText(/could not reach/);
     /** The entries the timeline shows, as their text and their mark. */
     const shown = () => timeline.getAllByRole("listitem").map((entry) => ({
-      text: entry.textContent ?? "",
+      text: visibleText(entry),
       mark: entry.querySelector("[data-mark]")?.getAttribute("data-mark"),
     }));
     expect(shown().map((entry) => entry.mark)).toEqual(["acted", "skipped"]);
@@ -1080,7 +1080,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     const editor = within(sheet);
     expect(sectionToggles(sheet)).toEqual(["Change When", "Change Do", "Change Where", "Change Appears as", "Change Name"]);
     const preview = within(editor.getByRole("complementary", { name: "Preview" }));
-    await waitFor(() => expect(preview.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in the Platform CI thread."));
+    await waitFor(() => expect(visibleText(preview.getByTestId("editor-sentence"))).toBe("When a check completes on acme/api, work in the Platform CI thread."));
 
     // Where reads its thread policies as cards with one explanation line each.
     await userEvent.click(editor.getByRole("button", { name: "Change Where" }));
@@ -1096,7 +1096,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
       ["The Platform CI thread", "Pick an existing thread. If it is archived, this line stops until you pick another."],
     ]);
     await userEvent.click(where.getByRole("radio", { name: "Its own thread" }));
-    expect(preview.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");
+    expect(visibleText(preview.getByTestId("editor-sentence"))).toBe("When a check completes on acme/api, work in its own thread.");
     await userEvent.click(editor.getByRole("button", { name: "Save" }));
 
     // The patch carries only the thread (Review Focus 3).
@@ -1116,7 +1116,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     await userEvent.type(editor.getByLabelText("Paste the thread's link"), "https://acme.slack.com/archives/C900/p1750000000123456");
     const preview = within(editor.getByRole("complementary", { name: "Preview" }));
     // The link names the channel by its id only, so the sentence does too.
-    expect(preview.getByTestId("editor-sentence").textContent).toBe("When someone replies in the Slack thread in C900, work in its own thread.");
+    expect(visibleText(preview.getByTestId("editor-sentence"))).toBe("When someone replies in the Slack thread in C900, work in its own thread.");
     await userEvent.click(editor.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]!.eventKeys).toEqual(["slack.message"]);

@@ -63,7 +63,7 @@ vi.mock("./thread-picker", () => ({
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 import { PlaceRow } from "./place-row";
 import { PIN_UNAVAILABLE } from "./problem-badge";
-import { PLATFORM_CI, line } from "./test-fixtures";
+import { PLATFORM_CI, line, visibleText } from "./test-fixtures";
 import type { PlaceBlockData } from "./overview-groups";
 
 const ACME = [{ field: "repo", op: "eq" as const, value: "acme/api" }];
@@ -271,7 +271,7 @@ describe("PlaceRow", () => {
     const region = screen.getByRole("region", { name: "Everywhere in Slack" });
     expect(within(region).queryByRole("link", { name: "Everywhere in Slack" })).toBeNull();
     expect(within(region).getByText("Everywhere in Slack")).toBeTruthy();
-    const sentences = within(region).getAllByRole("link").map((link) => link.textContent);
+    const sentences = within(region).getAllByRole("link").map((link) => visibleText(link));
     expect(sentences).toEqual([
       "When you mention Valet, reply in a new thread.",
       "When you mention Valet in #a or #b, reply in a new thread.",

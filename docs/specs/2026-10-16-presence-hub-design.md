@@ -1223,12 +1223,15 @@ Review-fix deviations (2026-10-19):
   highlight is computed from the rows the filter shows; a row the filter
   hides keeps its store entry and shows nothing until the filter reveals
   it.
-- **The sentence's glued punctuation carries a label (Part K).** A token
-  and its punctuation sit in one span with `aria-label` so the
-  accessible name reads `Ops Bot.` with no space. ARIA 1.2 discourages a
-  name on a generic element; a plain period node still reads with a
-  space because the token is its own layout box. Moving the label to the
-  row's link is a follow-up.
+- **The sentence's glued punctuation reads from a hidden span (Part K).**
+  A plain period node reads with a space because the token is its own
+  layout box. So the token holds a visually hidden (`sr-only`) span with
+  its text and the punctuation, such as `Ops Bot.`, and its visible text
+  and the visible punctuation are `aria-hidden`. A linked token keeps the
+  hidden span inside the link, so the link's name is `acme/api,`. No
+  generic element carries a name. The hidden span is not selectable, so
+  a copied sentence holds its text once. `textContent` holds the text
+  twice; tests read `visibleText` from `test-fixtures.ts`.
 - **The delivered body heading reads `Instructions for this line:`.** The
   copy lint reads every api string with a space, so the heading the model
   receives uses Presence words too.

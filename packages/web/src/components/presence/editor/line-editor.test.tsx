@@ -16,7 +16,7 @@ import type {
 import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "~/api/client";
-import { line, routine } from "../test-fixtures";
+import { line, routine, visibleText } from "../test-fixtures";
 import { presenceSentence, routineSentence } from "../sentences";
 import { applyLinePatch, applyRoutinePatch, lineFromCreate, routineFromCreate } from "./draft";
 
@@ -93,7 +93,7 @@ const INCIDENTS = { subject: "slack:T1/C1", service: "slack" as const, label: "#
 
 function sentence(): string {
   const cards = screen.getAllByTestId("editor-sentence");
-  return cards[0]?.textContent ?? "";
+  return visibleText(cards[0]);
 }
 
 function sectionNames(): string[] {
@@ -329,7 +329,7 @@ describe("LineEditor", () => {
     fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "channel" } });
     fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "C1" } });
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')?.textContent).toBe("C1");
+    expect(visibleText(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]'))).toBe("C1");
     fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
     expect(screen.queryByText("channel is C1")).toBeNull();
     expect(sentence()).not.toContain("C1");
@@ -565,7 +565,7 @@ describe("LineEditor", () => {
     expect(screen.getByRole("dialog").getAttribute("data-layout")).toBe("phone");
     const header = screen.getByTestId("editor-phone-header");
     expect(header.className).toContain("sticky");
-    expect(within(header).getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");
+    expect(visibleText(within(header).getByTestId("editor-sentence"))).toBe("When a check completes on acme/api, work in its own thread.");
     expect(screen.getAllByTestId("editor-sentence")).toHaveLength(1);
     expect(screen.queryByRole("complementary", { name: "Preview" })).toBeNull();
     // The form comes before the rest of the side pane.

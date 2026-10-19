@@ -51,9 +51,15 @@ export function Ref({
   params,
   search,
   className,
+  readAs,
 }: {
   kind: RefKind;
   text: string;
+  /** What a screen reader reads in place of `text`, such as the text with
+   * the punctuation glued after the token. The token hides its visible text
+   * from screen readers and holds `readAs` in a visually hidden span, so a
+   * link takes it as its name and no generic element has one. */
+  readAs?: string;
   /** A place's service, for its mark. */
   service?: Exclude<MarkService, "schedule">;
   to?: AppPath;
@@ -74,18 +80,22 @@ export function Ref({
         : <KindGlyph kind={kind} />}
     </span>
   );
+  const label = readAs === undefined
+    ? text
+    // The hidden copy is not selectable, so a copied sentence holds its text once.
+    : <><span aria-hidden="true">{text}</span><span className="sr-only select-none">{readAs}</span></>;
   if (to !== undefined) {
     return (
       <Link to={to} params={params} search={search} data-ref={kind} className={cn(TOKEN, LINK, className)}>
         {mark}
-        {text}
+        {label}
       </Link>
     );
   }
   return (
     <span data-ref={kind} className={cn(TOKEN, className)}>
       {mark}
-      {text}
+      {label}
     </span>
   );
 }
