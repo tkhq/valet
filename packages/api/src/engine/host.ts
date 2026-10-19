@@ -3577,7 +3577,10 @@ export class EngineHost {
    * VALET_DEFAULT_REASONING` — most-specific wins — and the resolved level is
    * clamped to the org's cap (`clampToMax`). A value that isn't a known level
    * (a stale/invalid column) is treated as unset rather than thrown, so every
-   * build and every new thread gets a concrete level.
+   * build and every new thread gets a concrete level. A restore that finds no
+   * stored level (a session from before the Valet default) stores the
+   * resolved one, so the store, the thread list, and later rebuilds agree
+   * with the runtime.
    *
    * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
    * site already uses for `resolveModelForBuild` — see that method's doc
@@ -3595,7 +3598,15 @@ export class EngineHost {
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
-    return clampToMax(isReasoningLevel(level) ? level : VALET_DEFAULT_REASONING, settings.max);
+    const resolved = clampToMax(isReasoningLevel(level) ? level : VALET_DEFAULT_REASONING, settings.max);
+    if (existing) {
+      // saveSession writes the whole row: re-read it so the write changes only the level.
+      const current = await this.opts.engineStore.getSession(existing.id);
+      if (current && !isReasoningLevel(current.reasoning)) {
+        await this.opts.engineStore.saveSession({ ...current, reasoning: resolved });
+      }
+    }
+    return resolved;
   }
 
   /**

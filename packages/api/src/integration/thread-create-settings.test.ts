@@ -154,6 +154,23 @@ describe("POST /api/sessions/:id/threads settings", () => {
     );
   }, 30_000);
 
+  it("lists a legacy \"off\" thread in a session with no stored level as the Valet default", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
+    // Older builds stored no session level and "off" on a new thread.
+    const { engineHost, engineStore } = api.providers;
+    const session = (await engineStore.getSession(sessionId))!;
+    await engineStore.saveSession({ ...session, reasoning: undefined });
+    const stored = (await engineStore.getThread(sessionId, source.id))!;
+    await engineStore.saveThread(sessionId, { ...stored, reasoning: "off" });
+    engineHost.evictCache(sessionId);
+
+    const listed = (await listThreads(api.baseUrl, sessionId)).threads.find((thread) => thread.id === source.id);
+    expect(listed?.reasoning).toBe("medium");
+    expect((await engineStore.getSession(sessionId))?.reasoning).toBe("medium");
+  }, 30_000);
+
   it("lists a legacy \"off\" thread with the session default", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

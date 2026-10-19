@@ -1071,6 +1071,27 @@ describe("EngineHost model resolution wiring", () => {
       })).toMatchObject({ reasoning: "medium" });
     });
 
+    it("stores the resolved level when it restores a session with no stored level", async () => {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore } = api.providers;
+      const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
+      await engineHost.sessionFor("reasoning-legacy-null", meta);
+      // Sessions from before the Valet default stored no level.
+      const stored = (await engineStore.getSession("reasoning-legacy-null"))!;
+      await engineStore.saveSession({ ...stored, reasoning: undefined });
+      engineHost.evictAll();
+
+      const restored = await engineHost.sessionFor("reasoning-legacy-null", meta);
+      expect(restored.options.sampling?.reasoning).toBe("medium");
+      expect((await engineStore.getSession("reasoning-legacy-null"))?.reasoning).toBe("medium");
+
+      // The stored level now wins over a later org default, like any persisted level.
+      engineHost.evictAll();
+      await setOrgReasoningSettings(db, "local-org", { default: "low" });
+      const rebuilt = await engineHost.sessionFor("reasoning-legacy-null", meta);
+      expect(rebuilt.options.sampling?.reasoning).toBe("medium");
+    });
+
     it("clamps the Valet default to the org max", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
