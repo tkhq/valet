@@ -8,17 +8,17 @@
  * `scope` is `user` or a team id, resolved as the Channels reads resolve it.
  */
 import { Hono, type Context } from "hono";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { parsePrincipal, type Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, eventSubscriptions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
 import { orgSlackCredential, storedThreadRef } from "../services/thread-access.js";
 import { getPresencePlace, listPresencePlaces, listThreadFeeders, type PresenceAccess } from "../services/presence-places.js";
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 import { slackChannelNames, threadsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { rowToEventSummary, rowToSubscription } from "./events.js";
+import { rowToEventSummary, rowToSubscription, subscriptionProblems } from "./events.js";
 import type { PresencePlaceDetailResponse } from "../wire/types.js";
 
 export const presenceRouter = new Hono<AppEnv>();
@@ -78,9 +78,17 @@ presenceRouter.get("/places/:subject", async (c) => {
   if (!subject) return c.json({ error: CHANNEL_KEY_REFUSAL }, 404);
   const detail = await getPresencePlace(c.var.providers, c.var.user.orgId, owner, access, subject);
   if (!detail) return c.json({ error: "Valet is not present in that place in this workspace. Open Places to see where it is." }, 404);
+  // Each listener carries its open problem, as the list route reads it, so
+  // the place page shows the problem under the line (spec Part C step 5).
+  const ids = detail.listeners.map((row) => row.id);
+  const problems = ids.length === 0 ? new Map<string, string>()
+    : await subscriptionProblems(c.var.providers.db, [eq(eventSubscriptions.orgId, c.var.user.orgId), inArray(eventSubscriptions.id, ids)]);
   const body: PresencePlaceDetailResponse = {
     place: detail.place,
-    listeners: detail.listeners.map(rowToSubscription),
+    listeners: detail.listeners.map((row) => {
+      const problem = problems.get(row.id);
+      return problem ? { ...rowToSubscription(row), problem } : rowToSubscription(row);
+    }),
     threads: detail.threads,
     activity: detail.activity.map(rowToEventSummary),
   };

@@ -223,6 +223,10 @@ describe("Presence hub data scenario", () => {
     const listed = await read<ListEventSubscriptionsResponse>(a, `/api/event-subscriptions?ownerType=user&ownerId=${USER}`);
     expect(listed.subscriptions.find((s) => s.id === r4)?.problem).toBe(PIN_UNAVAILABLE);
     expect(listed.subscriptions.find((s) => s.id === r1)?.problem).toBeUndefined();
+    // The place page reads the same problem under R4 (Part C step 5, P3).
+    const acmeDead = await placeOf(a, "user", "github:acme/api");
+    expect(acmeDead.listeners.find((l) => l.id === r4)?.problem).toBe(PIN_UNAVAILABLE);
+    expect(acmeDead.listeners.find((l) => l.id === r1)?.problem).toBeUndefined();
     // A repin clears the problem.
     const ops = await createThread(a, "Platform Ops");
     const repinned = await call(a, "PATCH", `/api/event-subscriptions/${r4}`, { thread: { mode: "existing", ...ops } });

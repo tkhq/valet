@@ -5076,7 +5076,7 @@ export interface EventSubscriptionWire {
   createdAt: number;
   updatedAt: number;
   /** The rule's open problem, read from its deliveries on the list route
-   * only: the pin text when its latest settled delivery since its last
+   * and on a place page's listeners: the pin text when its latest settled delivery since its last
    * edit dead-lettered because the pinned thread cannot receive deliveries
    * (spec 2026-10-16: presence hub, Part C step 5). Absent otherwise. */
   problem?: string;

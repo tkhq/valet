@@ -130,7 +130,7 @@ export function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): 
  * problem when that delivery dead-lettered on its pin. A later delivery that
  * landed, or an edit such as a new pin, answers it.
  */
-async function subscriptionProblems(db: AppDb, conditions: (SQL | undefined)[]): Promise<Map<string, string>> {
+export async function subscriptionProblems(db: AppDb, conditions: (SQL | undefined)[]): Promise<Map<string, string>> {
   const latest = await db
     .selectDistinctOn([eventDeliveries.subscriptionId], {
       subscriptionId: eventDeliveries.subscriptionId,
