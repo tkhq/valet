@@ -143,18 +143,74 @@ function listenerServices(rule: { eventKeys: unknown }): PresencePlaceService[] 
   return [...new Set(keys.map(serviceOf).filter((service): service is PresencePlaceService => service !== null))];
 }
 
+/** The filter fields that name a place, by service. `subject` names a place in every service. */
+const PLACE_FIELDS: Readonly<Record<PresencePlaceService, readonly string[]>> = {
+  slack: ["channel", "channel_name"],
+  github: ["repo", "pr_number"],
+  linear: ["team", "identifier"],
+};
+
+/** The ops whose values the gate can list as places. */
+const EXACT_OPS: Readonly<Record<string, readonly string[]>> = {
+  subject: ["eq", "prefix"], channel: ["eq", "in"], repo: ["eq", "in"], pr_number: ["eq", "in"], team: ["eq", "in"], identifier: ["eq", "in"],
+};
+
+/**
+ * The services on which a line's filters put a condition the gate cannot
+ * list as places: a pattern op (`prefix`, `contains`, `regex`) on a place
+ * field, a channel name, a subject that names no place, or a repository
+ * without its owner. `anyCondition` is true when any filter is on a place
+ * field at all.
+ */
+function placeConditions(filters: unknown): { anyCondition: boolean; unlisted: Set<PresencePlaceService> } {
+  const unlisted = new Set<PresencePlaceService>();
+  let anyCondition = false;
+  if (!Array.isArray(filters)) return { anyCondition, unlisted };
+  for (const filter of filters) {
+    if (typeof filter !== "object" || filter === null || !("field" in filter) || typeof filter.field !== "string") continue;
+    const field = filter.field;
+    const services = field === "subject" ? [...SERVICES] : SERVICES.filter((service) => PLACE_FIELDS[service].includes(field));
+    if (services.length === 0) continue;
+    anyCondition = true;
+    const op = "op" in filter && typeof filter.op === "string" ? filter.op : "";
+    const value: unknown = "value" in filter ? filter.value : undefined;
+    const values = Array.isArray(value) ? value : [value];
+    if (field === "subject") {
+      // A subject of one service is a condition on that service only. One
+      // that names no place is a condition the gate cannot list.
+      const places = values.map((item) => typeof item === "string" ? placeOfSubject(item) : null);
+      const exact = (EXACT_OPS.subject ?? []).includes(op) && places.length > 0 && places.every((place) => place !== null);
+      if (exact) continue;
+      const own = values.map((item) => typeof item === "string" ? serviceOf(item) : null);
+      const bears = own.some((service) => service === null) ? services : own.filter((service): service is PresencePlaceService => service !== null);
+      for (const service of bears.length > 0 ? bears : services) unlisted.add(service);
+      continue;
+    }
+    const exactOp = (EXACT_OPS[field] ?? []).includes(op);
+    const listable = exactOp && values.length > 0
+      && values.every((item) => field === "repo" ? typeof item === "string" && item.includes("/") : typeof item === "string" || typeof item === "number");
+    if (!listable) for (const service of services) unlisted.add(service);
+  }
+  return { anyCondition, unlisted };
+}
+
 /**
  * The exact places a listener's filters name, for each service its event
- * keys name. A service whose filters name no place gives its top row.
- * Unlike `listenerPlaces`, several places never collapse to their parent,
- * so a gate on these places admits no place the line does not name
- * (spec Part D step 4).
+ * keys name (spec Part D step 4). Unlike `listenerPlaces`, several places
+ * never collapse to their parent, so a gate on these places admits no place
+ * the line does not name.
+ *
+ * A pattern op on a place field (`repo prefix acme/`) reaches places no list
+ * can name, so that service gives no place. A service gives its top row only
+ * when the line carries no condition on any place field of any service: a
+ * Slack and GitHub line with a channel filter gives its channel and nothing
+ * for GitHub. An empty list admits no skipped entry for a member.
  */
 export function lineNamedPlaces(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string[] {
-  return listenerServices(rule).flatMap((service) => {
-    const named = namedPlaces(service, rule.filters, slackTeam);
-    return named.length > 0 ? named : [rootOf(service, slackTeam)];
-  });
+  const services = listenerServices(rule);
+  const { anyCondition, unlisted } = placeConditions(rule.filters);
+  if (!anyCondition) return services.map((service) => rootOf(service, slackTeam));
+  return services.flatMap((service) => unlisted.has(service) ? [] : namedPlaces(service, rule.filters, slackTeam));
 }
 
 /**

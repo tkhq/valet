@@ -148,6 +148,49 @@ describe("mergeLineActivity", () => {
     expect(lineNamedPlaces({ eventKeys: ["github.push"], filters: [] }, "T1")).toEqual(["github:*"]);
   });
 
+  // Final review G1: a pattern op on a place field names places no list can
+  // show, so a member sees no skip from any repository.
+  it("gives a member no skipped entry for a line with a pattern on a place field", () => {
+    const decisions = [
+      decision("r_api", "filter_excluded", { at: 10, eventKey: "github.push" }),
+      decision("r_web", "filter_excluded", { at: 11, eventKey: "github.push", place: OTHER_REPO }),
+      decision("r_unknown", "filter_excluded", { at: 12, eventKey: "github.push", place: null }),
+    ];
+    for (const filter of [
+      { field: "repo", op: "prefix", value: "acme/" },
+      { field: "repo", op: "contains", value: "api" },
+      { field: "subject", op: "prefix", value: "github:acme/" },
+      { field: "pr_number", op: "eq", value: 12 },
+    ]) {
+      const linePlaces = lineNamedPlaces({ eventKeys: ["github.push"], filters: [filter] }, "T1");
+      expect(linePlaces).toEqual([]);
+      expect(mergeLineActivity([], decisions, { linePlaces, admin: false })).toEqual([]);
+      expect(mergeLineActivity([], decisions, { linePlaces, admin: true })).toHaveLength(3);
+    }
+    expect(lineNamedPlaces({ eventKeys: ["linear.Issue.update"], filters: [{ field: "team", op: "prefix", value: "EN" }] }, "T1")).toEqual([]);
+    expect(lineNamedPlaces({ eventKeys: ["slack.message"], filters: [{ field: "channel_name", op: "prefix", value: "inc-" }] }, "T1")).toEqual([]);
+    // A filter on another field keeps the service's top row.
+    expect(lineNamedPlaces({ eventKeys: ["github.push"], filters: [{ field: "head_branch", op: "prefix", value: "release/" }] }, "T1"))
+      .toEqual(["github:*"]);
+  });
+
+  // Final review G2: the top row is not per service. A Slack and GitHub line
+  // with a channel filter names its channel and no GitHub place.
+  it("gives a mixed-service line no top row when it names a place for one service", () => {
+    const line = { eventKeys: ["slack.message", "github.push"], filters: [{ field: "channel", op: "eq", value: "C1" }] };
+    const linePlaces = lineNamedPlaces(line, "T1");
+    expect(linePlaces).toEqual(["slack:T1/C1"]);
+    const decisions = [
+      decision("r_c1", "filter_excluded", { at: 10, eventKey: "slack.message", place: { key: "slack:T1/C1", label: "C1" } }),
+      decision("r_c2", "filter_excluded", { at: 11, eventKey: "slack.message", place: { key: "slack:T1/C2", label: "C2" } }),
+      decision("r_repo", "filter_excluded", { at: 12, eventKey: "github.push" }),
+      decision("r_gh_unknown", "filter_excluded", { at: 13, eventKey: "github.push", place: null }),
+    ];
+    expect(mergeLineActivity([], decisions, { linePlaces, admin: false }).map((e) => e.id)).toEqual(["receipt:r_c1"]);
+    // A mixed-service line with no place condition names both top rows.
+    expect(lineNamedPlaces({ eventKeys: ["slack.message", "github.push"], filters: [] }, "T1")).toEqual(["slack:T1", "github:*"]);
+  });
+
   it("treats a line with no place filter as naming its whole service", () => {
     const decisions = [
       decision("r_any", "filter_excluded", { at: 10, place: OTHER_REPO }),

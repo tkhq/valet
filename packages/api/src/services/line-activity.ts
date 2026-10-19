@@ -11,8 +11,9 @@
  *   entries. A receipt records an event even when no line stored it.
  *
  * A skipped entry for an event outside the places the line names shows only
- * to an organization admin. A line whose filters name no place names its
- * whole service. `mergeLineActivity` is the pure core; `loadLineActivity`
+ * to an organization admin. A line with no condition on a place field names
+ * the whole of each service. A pattern on a place field, or a place named
+ * for one service only, gives the other places nothing (`lineNamedPlaces`). `mergeLineActivity` is the pure core; `loadLineActivity`
  * reads both sources for one line.
  */
 import { and, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";

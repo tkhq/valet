@@ -446,7 +446,12 @@ Pass criterion: all steps, in one run, from a clean start.
    A skipped entry for an event whose place the line does not name is
    returned only to an organization admin; the gate reads the exact set
    of places the line names, never their common parent, and falls back
-   to the whole service only for a line that names no place. Each acted
+   to the whole service only for a line that names no place. A pattern
+   op on a place field (`repo prefix acme/`, `team contains EN`) names no
+   place the gate can list, so a member gets no skipped entry for that
+   service. A line that puts a condition on a place field of any service
+   gets no service-wide fallback for its other services, so a Slack and
+   GitHub line with `channel eq C1` gives a member no GitHub skips. Each acted
    entry carries `attempts`. Slack channels read their names. A cursor
    whose time is not a whole number is refused with a 400 that reads
    `Reload Activity and try again.` The response carries the
