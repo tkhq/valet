@@ -29,7 +29,7 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
-import { Button, FilterChips, Input, PageHeader, Select, pageClass } from "~/components/primitives";
+import { Button, FilterChips, Input, PageHeader, Select, TabBar, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatUsdPrecise } from "~/lib/format-usage";
 
@@ -38,6 +38,11 @@ export const Route = createFileRoute("/usage")({
 });
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
+const VIEWS = [
+  { id: "overview", label: "Overview" },
+  { id: "breakdown", label: "Breakdown" },
+  { id: "activity", label: "Activity" },
+] as const;
 /** Marks the field that holds the applied period: the month, or both custom dates. */
 const ACTIVE_PERIOD = "border-moss bg-moss-wash font-medium text-moss";
 type Window = (typeof WINDOWS)[number];
@@ -262,7 +267,7 @@ function UseCaseRow({
 }
 
 export function UsagePage() {
-  const [view, setView] = useState<"overview" | "breakdown" | "activity">("overview");
+  const [view, setView] = useState<(typeof VIEWS)[number]["id"]>("overview");
   const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
   const [month, setMonth] = useState("");
   const [customStart, setCustomStart] = useState("");
@@ -390,15 +395,7 @@ export function UsagePage() {
             : "Spend across all Valet use cases for your account."}
         />
 
-        <nav aria-label="Usage views" className="flex gap-1 border-b border-line">
-          {(["overview", "breakdown", "activity"] as const).map((item) => (
-            <button type="button" key={item} aria-current={view === item ? "page" : undefined}
-              onClick={() => setView(item)}
-              className={cn("min-h-11 flex-1 border-b-2 px-3 py-2 text-sm capitalize sm:flex-none",
-                view === item ? "border-moss text-ink" : "border-transparent text-muted hover:text-ink")}
-            >{item}</button>
-          ))}
-        </nav>
+        <TabBar label="Usage views" tabs={VIEWS} active={view} onSelect={setView} />
 
         {/* Disabled-gateway notice */}
         {view === "activity" && personalWorkspace && settingsQ.data?.enabled === false && (

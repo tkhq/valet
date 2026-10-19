@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Callout, Input, Label, Select, Spinner, cardClass } from "~/components/primitives";
+import { Badge, Button, Callout, Input, Label, RadioCard, Select, Spinner, cardClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -325,66 +325,40 @@ function NewReviewCard() {
           <p className="mt-1 text-xs text-muted">{selectedPreset.phases.length} passes{includeReport ? " · Written report included" : ""}</p>
         </div>
         <div role="radiogroup" aria-label="Review method" className="hidden sm:grid sm:grid-cols-2 gap-2">
-          {SECURITY_PRESETS.map((p) => {
-            const selected = p.id === preset;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                aria-label={p.label}
-                onClick={() => setPreset(p.id)}
-                className={cn(
-                  "flex flex-col gap-2 rounded-md border p-3 text-left transition-colors",
-                  selected
-                    ? "border-moss bg-moss-wash ring-1 ring-moss"
-                    : "border-line hover:border-ink-wash-strong",
-                )}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[13px] font-medium text-ink">{p.label}</span>
-                  <span
-                    className={cn(
-                      "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
-                      selected ? "border-moss bg-moss text-paper" : "border-line",
-                    )}
-                    aria-hidden
-                  >
-                    {selected && (
-                      <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none">
-                        <path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    )}
-                  </span>
-                </div>
-                <span className="text-[11px] leading-snug text-muted">{p.blurb}</span>
-                <div className="flex flex-wrap gap-1">
-                  {p.phases.map((ph, i) => {
-                    const det = DETERMINISTIC_PHASE_LABELS.has(ph);
-                    return (
-                      <span
-                        key={ph}
-                        className="inline-flex items-center gap-1 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
-                        title={det ? "Deterministic phase: scanner-driven or L0 decision" : undefined}
-                      >
-                        <span>{i + 1}.</span>
-                        <span>{ph}</span>
-                        {det && (
-                          <span
-                            className="font-mono font-bold text-danger-600"
-                            aria-label="Deterministic phase"
-                          >
-                            D
-                          </span>
-                        )}
-                      </span>
-                    );
-                  })}
-                </div>
-              </button>
-            );
-          })}
+          {SECURITY_PRESETS.map((p) => (
+            <RadioCard
+              key={p.id}
+              title={p.label}
+              description={p.blurb}
+              ariaLabel={p.label}
+              selected={p.id === preset}
+              onSelect={() => setPreset(p.id)}
+            >
+              <div className="flex flex-wrap gap-1">
+                {p.phases.map((ph, i) => {
+                  const det = DETERMINISTIC_PHASE_LABELS.has(ph);
+                  return (
+                    <span
+                      key={ph}
+                      className="inline-flex items-center gap-1 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
+                      title={det ? "Deterministic phase: scanner-driven or L0 decision" : undefined}
+                    >
+                      <span>{i + 1}.</span>
+                      <span>{ph}</span>
+                      {det && (
+                        <span
+                          className="font-mono font-bold text-danger-600"
+                          aria-label="Deterministic phase"
+                        >
+                          D
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            </RadioCard>
+          ))}
         </div>
       </div>
 

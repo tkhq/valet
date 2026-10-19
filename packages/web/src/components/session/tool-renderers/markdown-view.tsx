@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Markdown, type MemoryLinkHandling } from "~/components/markdown";
+import { TabBar, tabPanelId } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { DiffView } from "./diff-view";
 import { TruncatedText } from "./tool-shell";
@@ -26,40 +27,8 @@ export function isMarkdownPath(path: string): boolean {
 /** Collapse rendered markdown taller than this until the user expands it. */
 const CLAMP_LINES = 40;
 
-function ViewTabs<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: readonly T[];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      className="flex items-center gap-0.5 text-[10px] font-mono uppercase tracking-wider"
-    >
-      {options.map((opt) => (
-        <button
-          key={opt}
-          type="button"
-          role="tab"
-          onClick={() => onChange(opt)}
-          aria-selected={value === opt}
-          className={cn(
-            "px-1.5 py-0.5 rounded transition-colors",
-            value === opt
-              ? "bg-ink-wash text-[--fg]"
-              : "text-muted/70 hover:text-[--fg]",
-          )}
-        >
-          {opt}
-        </button>
-      ))}
-    </div>
-  );
-}
+const DOCUMENT_TABS = [{ id: "rendered", label: "Rendered" }, { id: "source", label: "Source" }] as const;
+const DIFF_TABS = [{ id: "diff", label: "Diff" }, { id: "preview", label: "Preview" }] as const;
 
 function ClampedMarkdown({ text, memoryLinks }: { text: string; memoryLinks?: MemoryLinkHandling }) {
   const [expanded, setExpanded] = useState(false);
@@ -97,7 +66,7 @@ export function ViewTabsBar({
   children: React.ReactNode;
 }) {
   return (
-    <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
+    <div className="px-3 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
       <div className="min-w-0 flex-1">{left}</div>
       {children}
     </div>
@@ -122,17 +91,20 @@ export function MarkdownBody({
   memoryLinks?: MemoryLinkHandling;
 }) {
   const [view, setView] = useState<"rendered" | "source">("rendered");
+  const id = useId();
   return (
     <>
       <ViewTabsBar left={left}>
-        <ViewTabs value={view} options={["rendered", "source"] as const} onChange={setView} />
+        <TabBar label="Document view" id={id} size="sm" className="shadow-none" tabs={DOCUMENT_TABS} active={view} onSelect={setView} />
         {actions}
       </ViewTabsBar>
-      {view === "rendered" ? (
-        <ClampedMarkdown text={text} memoryLinks={memoryLinks} />
-      ) : (
-        <TruncatedText text={text} className="px-3 py-2" />
-      )}
+      <div role="tabpanel" id={tabPanelId(id, view)} aria-labelledby={`${tabPanelId(id, view)}-tab`}>
+        {view === "rendered" ? (
+          <ClampedMarkdown text={text} memoryLinks={memoryLinks} />
+        ) : (
+          <TruncatedText text={text} className="px-3 py-2" />
+        )}
+      </div>
     </>
   );
 }
@@ -156,17 +128,20 @@ export function MarkdownDiffBody({
   memoryLinks?: MemoryLinkHandling;
 }) {
   const [view, setView] = useState<"diff" | "preview">("diff");
+  const id = useId();
   return (
     <>
       <ViewTabsBar left={left}>
-        <ViewTabs value={view} options={["diff", "preview"] as const} onChange={setView} />
+        <TabBar label="Change view" id={id} size="sm" className="shadow-none" tabs={DIFF_TABS} active={view} onSelect={setView} />
         {actions}
       </ViewTabsBar>
-      {view === "diff" ? (
-        <DiffView before={before} after={after} />
-      ) : (
-        <ClampedMarkdown text={after} memoryLinks={memoryLinks} />
-      )}
+      <div role="tabpanel" id={tabPanelId(id, view)} aria-labelledby={`${tabPanelId(id, view)}-tab`}>
+        {view === "diff" ? (
+          <DiffView before={before} after={after} />
+        ) : (
+          <ClampedMarkdown text={after} memoryLinks={memoryLinks} />
+        )}
+      </div>
     </>
   );
 }

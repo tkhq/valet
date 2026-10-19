@@ -410,7 +410,7 @@ function EditorDraft({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
           {!jsonMode && (
-            <TabBar label="Workflow view" active={mainView} onSelect={setMainView}
+            <TabBar label="Workflow view" size="sm" active={mainView} onSelect={setMainView}
               tabs={[{ id: "steps", label: "Steps" }, { id: "map", label: "Map" }]} />
           )}
           <Button variant="secondary" size="sm" aria-expanded={appearanceOpen} onClick={() => setAppearanceOpen(!appearanceOpen)}>Appears as</Button>

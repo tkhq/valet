@@ -21,7 +21,7 @@ import {
   useBrowserFrame,
   useBrowserStatus,
 } from "~/api/browser";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Button, Input, Spinner, TabBar } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { BrowserViewport } from "./browser-viewport";
 import { EvidenceAnnotations } from "./evidence-annotations";
@@ -406,29 +406,18 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
         </div>
       ) : (
         <>
-          <div
-            role="tablist"
-            aria-label="Browser pages"
-            className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2 pt-1"
-          >
-            {runtime.tabs.map((tab) => (
-              <div key={tab.id} className="flex max-w-60 shrink-0 items-center">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selected?.id === tab.id}
-                  title={tab.url}
-                  onClick={() => selectTab(tab.id)}
-                  className={cn(
-                    "max-w-48 truncate border-b-2 px-3 py-2 text-xs",
-                    selected?.id === tab.id
-                      ? "border-moss text-ink"
-                      : "border-transparent text-muted",
-                  )}
-                >
-                  {tab.title || tab.url || "New page"}
-                </button>
-                {canControl ? (
+          <div className="flex shrink-0 items-center gap-1 border-b border-line px-2">
+            <TabBar
+              label="Browser pages"
+              size="sm"
+              className="shadow-none"
+              active={selected?.id ?? ""}
+              onSelect={selectTab}
+              tabs={runtime.tabs.map((tab) => ({
+                id: tab.id,
+                label: tab.title || tab.url || "New page",
+                title: tab.url,
+                action: canControl && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -447,9 +436,9 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                   >
                     <X aria-hidden className="h-3 w-3" />
                   </Button>
-                ) : null}
-              </div>
-            ))}
+                ),
+              }))}
+            />
             <Button
               size="sm"
               variant="ghost"

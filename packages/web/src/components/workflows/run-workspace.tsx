@@ -1,6 +1,6 @@
 import { useId, type ReactNode } from "react";
 import type { WorkflowRunDetail } from "@valet/api/wire";
-import { Select } from "~/components/primitives";
+import { Select, TabBar, tabPanelId } from "~/components/primitives";
 import { SessionView } from "~/components/session/session-view";
 
 type Conversation = NonNullable<WorkflowRunDetail["conversations"]>[number];
@@ -24,20 +24,9 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ba
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-4 sm:px-6">
       {back && <div className="mr-2 min-w-0 max-w-full">{back}</div>}
-      <div role="tablist" aria-label="Automation run view" className="flex gap-4" onKeyDown={event => {
-        if (!selected || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-        event.preventDefault();
-        const next = event.key === "Home" ? "conversation" : event.key === "End" ? "details" : showChat ? "details" : "conversation";
-        onSelect(next, selected.threadId);
-        event.currentTarget.querySelector<HTMLButtonElement>(`[id="${tabId}-${next}"]`)?.focus();
-      }}>
-        <button type="button" role="tab" id={`${tabId}-conversation`} aria-controls={`${tabId}-conversation-panel`} tabIndex={showChat ? 0 : -1} aria-selected={showChat} disabled={!selected}
-          className={`min-h-11 border-b-2 text-sm disabled:opacity-50 ${showChat ? "border-moss text-ink" : "border-transparent text-muted"}`}
-          onClick={() => onSelect("conversation", selected?.threadId)}>Conversation</button>
-        <button type="button" role="tab" id={`${tabId}-details`} aria-controls={`${tabId}-details-panel`} tabIndex={!showChat ? 0 : -1} aria-selected={!showChat}
-          className={`min-h-11 border-b-2 text-sm ${!showChat ? "border-moss text-ink" : "border-transparent text-muted"}`}
-          onClick={() => onSelect("details", selected?.threadId)}>Run details</button>
-      </div>
+      <TabBar label="Automation run view" id={tabId} className="shadow-none" active={showChat ? "conversation" : "details"}
+        onSelect={next => onSelect(next, selected?.threadId)}
+        tabs={[{ id: "conversation", label: "Conversation", disabled: !selected }, { id: "details", label: "Run details" }]} />
       {showChat && conversations.length > 1 && <Select aria-label="Run conversation"
         className="my-1 min-w-0 max-w-full sm:ml-auto"
         value={selected?.threadId} onChange={event => onSelect("conversation", event.target.value)}>
@@ -46,13 +35,13 @@ export function RunWorkspace({ conversations, view, conversationId, onSelect, ba
         </option>)}
       </Select>}
     </div>
-    {selected && <div role="tabpanel" id={`${tabId}-conversation-panel`} aria-labelledby={`${tabId}-conversation`} hidden={!showChat}
+    {selected && <div role="tabpanel" id={tabPanelId(tabId, "conversation")} aria-labelledby={`${tabPanelId(tabId, "conversation")}-tab`} hidden={!showChat}
       className={showChat ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       <p className="shrink-0 border-b border-line px-4 py-2 text-xs text-muted">Replies continue this conversation; they do not restart the workflow.</p>
       <SessionView key={`${selected.sessionId}:${selected.threadId}`} sessionId={selected.sessionId}
         activeThreadId={selected.threadId} active={showChat} enableReplies />
     </div>}
-    <div role="tabpanel" id={`${tabId}-details-panel`} aria-labelledby={`${tabId}-details`} hidden={showChat} className={!showChat ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+    <div role="tabpanel" id={tabPanelId(tabId, "details")} aria-labelledby={`${tabPanelId(tabId, "details")}-tab`} hidden={showChat} className={!showChat ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       {children}
     </div>
   </div>;

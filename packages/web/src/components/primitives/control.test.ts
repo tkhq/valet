@@ -70,6 +70,12 @@ describe("control sizes", () => {
     expect(Object.keys(RAW_ALLOWED).filter((key) => !found.includes(key))).toEqual([]);
   });
 
+  it("uses TabBar and RadioCard instead of a raw tab or radio card", () => {
+    const found = files.flatMap(({ file, src }) =>
+      [...src.matchAll(/(?<=\s)role="(tab|radio)"/g)].map((match) => `${file}:${match[1]}`));
+    expect([...new Set(found)]).toEqual([]);
+  });
+
   it("takes a control's height from its size prop", () => {
     const found = files.flatMap(({ file, src }) =>
       ["Button", "Input", "Select"].flatMap((name) => openingTags(src, name))

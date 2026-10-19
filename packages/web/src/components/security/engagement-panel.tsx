@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, Callout, ConfirmDialog, Spinner, StatusDot } from "~/components/primitives";
+import { Button, Callout, ConfirmDialog, Spinner, StatusDot, TabBar } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -400,15 +400,22 @@ export function SecuritySessionLayout({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="md:hidden flex border-b border-line" role="tablist" aria-label="Session panes">
-        <MobileTab
-          label="Chat"
-          active={pane === "chat"}
-          dot={gatePending}
-          onSelect={() => setPane("chat")}
-        />
-        <MobileTab label="Panel" active={pane === "panel"} onSelect={() => setPane("panel")} />
-      </div>
+      <TabBar
+        label="Session panes"
+        className="md:hidden"
+        active={pane}
+        onSelect={setPane}
+        tabs={[
+          {
+            id: "chat",
+            label: "Chat",
+            badge: gatePending && (
+              <StatusDot data-testid="pending-gate-dot" label="A decision gate is pending" tone="warning" size="sm" />
+            ),
+          },
+          { id: "panel", label: "Panel" },
+        ]}
+      />
       <div className="flex-1 flex min-h-0" style={panel.containerStyle}>
         <div
           className={cn(
@@ -439,35 +446,5 @@ export function SecuritySessionLayout({
         </aside>
       </div>
     </div>
-  );
-}
-
-function MobileTab({
-  label,
-  active,
-  dot,
-  onSelect,
-}: {
-  label: string;
-  active: boolean;
-  dot?: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onSelect}
-      className={cn(
-        "min-h-11 flex-1 px-3 py-2 text-sm font-medium inline-flex items-center justify-center gap-1.5",
-        active ? "text-ink border-b-2 border-moss" : "text-muted",
-      )}
-    >
-      {label}
-      {dot && (
-        <StatusDot data-testid="pending-gate-dot" label="A decision gate is pending" tone="warning" size="sm" />
-      )}
-    </button>
   );
 }
