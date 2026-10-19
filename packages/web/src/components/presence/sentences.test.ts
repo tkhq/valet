@@ -804,6 +804,18 @@ describe("How it works explanations (Part D step 1.6)", () => {
       .toBe("Only when the title contains deploy.");
   });
 
+  it("reads a place field with another op as a condition, never as any place (S3)", () => {
+    const prefix = { field: "repo", op: "prefix" as const, value: "acme/" };
+    expect(whenExplanation([prefix], ["github.push"])).toBe("Only when the repository starts with acme/.");
+    expect(whenExplanation([{ field: "channel", op: "contains", value: "inc" }], ["slack.message"]))
+      .toBe("Only when the channel contains inc.");
+    const push = sub({ eventKeys: ["github.push"], filters: [prefix], target: { kind: "assistant", thread: { mode: "own" } } });
+    expect(presenceSentence(push, catalog, workflows, threads)).toBe("When a push lands on a repository that starts with acme/, work in its own thread.");
+    // An eq place filter still names the place.
+    const both = sub({ eventKeys: ["github.push"], filters: [acmeApi, { field: "repo", op: "contains", value: "api" }], target: { kind: "assistant", thread: { mode: "own" } } });
+    expect(presenceSentence(both, catalog, workflows, threads)).toBe("When a push lands on acme/api, work in its own thread.");
+  });
+
   it("reads Do as what Valet does and as whom", () => {
     const check = { eventKeys: ["github.check_run.completed"], target: { kind: "assistant" as const } };
     expect(partsText(doParts(check, []))).toBe("work on it as Valet");

@@ -487,11 +487,36 @@ export function placeParts(service: SentenceService, filter: EventSubscriptionFi
   );
 }
 
+/** True for a filter that names a place: `eq` or `in` on a place field.
+ * Another op on a place field (`starts with`, `contains`) is a condition. */
+function isPlaceFilter(filter: EventSubscriptionFilterWire): boolean {
+  return SENTENCE_PLACE_FIELD_SET.has(filter.field) && (filter.op === "eq" || filter.op === "in");
+}
+
+/** A place field as a noun: `repo` → `repository`. */
+const FIELD_WORDS: Readonly<Record<string, string>> = {
+  repo: "repository",
+  identifier: "issue",
+};
+
+function fieldWords(field: string): string {
+  return FIELD_WORDS[field] ?? field.replace(/_/g, " ");
+}
+
 function presencePlace(service: SentenceService | null, filters: readonly EventSubscriptionFilterWire[]): SentencePart[] | null {
   if (service === null) return null;
   for (const field of SENTENCE_PLACE_FIELDS[service]) {
-    const filter = filters.find((f) => f.field === field && (f.op === "eq" || f.op === "in"));
+    const filter = filters.find((f) => f.field === field && isPlaceFilter(f));
     if (filter && filterEntries(filter).length > 0) return placeParts(service, filter);
+  }
+  // A place field with another op narrows the place without naming one:
+  // `on a repository that starts with acme/`, never `on any repository`.
+  for (const field of SENTENCE_PLACE_FIELDS[service]) {
+    const filter = filters.find((f) => f.field === field);
+    if (filter && filterEntries(filter).length > 0) {
+      const values = filterEntries(filter).map((entry) => entry.label).join(" or ");
+      return [text(`${article(fieldWords(field))} that ${opWords(filter.op)} ${values}`)];
+    }
   }
   return [text(ANY_PLACE[service])];
 }
@@ -1010,6 +1035,7 @@ const ANY_EVENT: Readonly<Record<SentenceService, string>> = {
   linear: "Any issue, any author.",
 };
 
+/** An op as a verb after its field: `starts with`, `contains`. */
 function opWords(op: EventSubscriptionFilterWire["op"]): string {
   switch (op) {
     case "prefix": return "starts with";
@@ -1025,20 +1051,19 @@ function conditionInWords(filter: EventSubscriptionFilterWire): string {
   if (BRANCH_FIELDS.has(filter.field) && (filter.op === "eq" || filter.op === "in")) return `the ${values} branch`;
   if (SENDER_FIELDS.includes(filter.field) || filter.field === "author" || filter.field === "actor") return `from ${values}`;
   if (LABEL_FIELDS.has(filter.field)) return `with the label ${values}`;
-  return `when the ${filter.field.replace(/_/g, " ")} ${opWords(filter.op)} ${values}`;
+  return `when the ${fieldWords(filter.field)} ${opWords(filter.op)} ${values}`;
 }
 
 /**
  * How it works, **When**: the line's conditions in words (spec Part D step
  * 1.6). A line that names only a place reads what it hears there (`Any
  * branch, any author.`). Otherwise each condition reads after `Only` (`Only
- * the main branch.`). The place filters, the creator scope the server adds,
+ * the main branch.`). The place filters (`eq` or `in` on a place field;
+ * another op is a condition), the creator scope the server adds,
  * and a followed Slack thread are not conditions here: the title says them.
  */
 export function whenExplanation(filters: readonly EventSubscriptionFilterWire[], keys: readonly string[]): string {
-  const conditions = filters.filter(
-    (f) => !SENTENCE_PLACE_FIELD_SET.has(f.field) && !isCreatorScopeFilter(f) && f.field !== "thread_ts",
-  );
+  const conditions = filters.filter((f) => !isPlaceFilter(f) && !isCreatorScopeFilter(f) && f.field !== "thread_ts");
   if (conditions.length === 0) {
     const service = serviceOf(keys);
     return service === null ? "No other conditions." : ANY_EVENT[service];
