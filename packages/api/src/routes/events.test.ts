@@ -17,6 +17,7 @@ import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatche
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
+  eventReceipts,
   events,
   eventSubscriptions,
   orgMembers,
@@ -42,6 +43,7 @@ import type {
   GetEventCatalogResponse,
   GetEventResponse,
   EventLogResponse,
+  LineActivityResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
@@ -711,6 +713,141 @@ describe("GET /api/event-subscriptions/:id/deliveries", () => {
     await seedSubscriptionRow(a, "sub_here", "local-org");
     expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_foreign/deliveries`)).status).toBe(404);
     expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_here/deliveries?limit=0`)).status).toBe(400);
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part D step 4: a line's Activity merges its
+// deliveries and the receipt decisions that skipped it.
+describe("GET /api/event-subscriptions/:id/activity", () => {
+  const MEMBER = { "x-valet-test-user-id": "test-member" };
+
+  async function seedReceipt(
+    a: TestApi, id: string, createdAt: number,
+    decision: { outcome: string; failedFilters?: Array<{ field: string; op: string }> }, eventId: string | null = null,
+  ): Promise<void> {
+    await a.providers.db.insert(eventReceipts).values({
+      id, orgId: "local-org", service: "github", externalId: null, metadata: {}, stages: [],
+      eventKey: "github.pull_request.opened", eventId, createdAt, updatedAt: createdAt,
+      subscriptions: [{ id: "sub_line", ownerType: "user", ownerId: "someone", target: "assistant", ...decision }],
+    });
+  }
+
+  async function activity(a: TestApi, query = "", headers: Record<string, string> = {}): Promise<LineActivityResponse> {
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity${query}`, { headers });
+    expect(res.status).toBe(200);
+    return (await res.json()) as LineActivityResponse;
+  }
+
+  it("lists acted and skipped entries newest first, with tookMs and the reason", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000, subjects: ["github:acme/widgets"] });
+    await a.providers.db.insert(eventDeliveries).values([
+      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 1, nextAttemptAt: 1_000, deliveredAt: 1_250, createdAt: 1_000 },
+    ]);
+    await seedReceipt(a, "r_filter", 2_000, { outcome: "filter_excluded", failedFilters: [{ field: "repo", op: "eq" }] });
+    await seedReceipt(a, "r_matched", 3_000, { outcome: "matched" });
+
+    const body = await activity(a);
+    expect(body.entries.map((e) => [e.id, e.kind])).toEqual([["receipt:r_filter", "skipped"], ["d_a", "acted"]]);
+    expect(body.entries[1]).toMatchObject({ eventId: "ev_a", place: "github:acme/widgets", placeLabel: "acme/widgets", tookMs: 250, outcome: { status: "delivered" } });
+    // An admin sees a skip whose place is unknown; this receipt names no stored event.
+    expect(body.entries[0]).toMatchObject({ reason: "filters", reasonText: "the repository filter", eventId: null });
+    expect(body.lastActedAt).toBe(1_250);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  // Review Focus 1.
+  it("shows a member skipped entries only in the line's places", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_in", receivedAt: 1_000, subjects: ["github:acme/widgets#7"] });
+    await seedEventRow(a, { id: "ev_out", receivedAt: 1_000, subjects: ["github:acme/other"] });
+    await seedReceipt(a, "r_in", 1_000, { outcome: "authorization_denied" }, "ev_in");
+    await seedReceipt(a, "r_out", 2_000, { outcome: "disabled" }, "ev_out");
+    await seedReceipt(a, "r_unknown", 3_000, { outcome: "key_mismatch" });
+
+    const member = await activity(a, "", MEMBER);
+    expect(member.entries.map((e) => e.id)).toEqual(["receipt:r_in"]);
+    const admin = await activity(a);
+    expect(admin.entries.map((e) => [e.id, e.reason])).toEqual([
+      ["receipt:r_unknown", "other"], ["receipt:r_out", "off"], ["receipt:r_in", "sender"],
+    ]);
+  });
+
+  it("counts delivered entries per UTC day for 30 days", async () => {
+    const a = await boot();
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    await seedSubscriptionRow(a, "sub_line", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: now });
+    const rows = [
+      { id: "d_29", at: now - 29 * day, status: "delivered" as const },
+      { id: "d_31", at: now - 31 * day, status: "delivered" as const },
+      { id: "d_now", at: now, status: "delivered" as const },
+      { id: "d_dead", at: now, status: "dead" as const },
+    ];
+    await a.providers.db.insert(eventDeliveries).values(rows.map((r) => ({
+      id: r.id, eventId: "ev_a", subscriptionId: "sub_line", status: r.status, attempts: 1, nextAttemptAt: r.at,
+      deliveredAt: r.status === "delivered" ? r.at : null, createdAt: r.at,
+    })));
+    const body = await activity(a);
+    expect(body.perDay).toHaveLength(30);
+    expect(body.perDay[0]).toBe(1);
+    expect(body.perDay[29]).toBe(1);
+    expect(body.actedLast30Days).toBe(2);
+    expect(body.lastActedAt).toBe(now);
+  });
+
+  it("pages through both sources with the before cursor", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org");
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1_000 });
+    for (let i = 0; i < 5; i++) {
+      await a.providers.db.insert(eventDeliveries).values({
+        id: `d_${i}`, eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 1,
+        nextAttemptAt: 1_000, deliveredAt: 1_000 + i * 20 + 5, createdAt: 1_000 + i * 20,
+      });
+      await seedReceipt(a, `r_${i}`, 1_010 + i * 20, { outcome: "filter_excluded" });
+    }
+    const seen: string[] = [];
+    let query = "?limit=3";
+    for (let page = 0; page < 5; page++) {
+      const body = await activity(a, query);
+      seen.push(...body.entries.map((e) => e.id));
+      if (!body.nextCursor) break;
+      query = `?limit=3&before=${body.nextCursor}`;
+    }
+    expect(seen).toEqual([
+      "receipt:r_4", "d_4", "receipt:r_3", "d_3", "receipt:r_2", "d_2", "receipt:r_1", "d_1", "receipt:r_0", "d_0",
+    ]);
+    expect((await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity?before=bad`)).status).toBe(400);
+  });
+
+  it("keeps a short source's older rows when the other source fills a batch", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
+    await seedEventRow(a, { id: "ev_a", receivedAt: 1, subjects: ["github:acme/widgets"] });
+    await a.providers.db.insert(eventDeliveries).values([1, 2].map((at) => ({
+      id: `d_${at}`, eventId: "ev_a", subscriptionId: "sub_line", status: "delivered" as const, attempts: 1,
+      nextAttemptAt: at, deliveredAt: at, createdAt: at,
+    })));
+    // A member may not see these skips (their place is unknown), so one read
+    // scans past a full batch of them to reach the older deliveries.
+    for (let i = 0; i < 6; i++) await seedReceipt(a, `r_${i}`, 100 + i, { outcome: "disabled" });
+    const body = await activity(a, "?limit=3", MEMBER);
+    expect(body.entries.map((e) => e.id)).toEqual(["d_2", "d_1"]);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  it("404s a missing line with text that names the fix", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_foreign", "other-org");
+    for (const id of ["sub_missing", "sub_foreign"]) {
+      const res = await fetch(`${a.baseUrl}/api/event-subscriptions/${id}/activity`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "This line was not found. Refresh Presence and try again." });
+    }
   });
 });
 

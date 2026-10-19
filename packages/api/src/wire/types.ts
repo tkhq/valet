@@ -5279,6 +5279,57 @@ export interface ListSubscriptionDeliveriesResponse {
   deliveries: Array<EventDeliveryWire & { event: EventSummaryWire }>;
 }
 
+/** What one acted entry on a line's Activity reached: the delivery's status,
+ * and the thread or run when the viewer may open it. `deadText` is the
+ * delivery's last error when it is `dead`. */
+export interface LineActivityOutcome {
+  status: EventDeliveryWire["status"];
+  thread?: EventDeliveryThreadRef;
+  runId?: string;
+  deadText?: string;
+}
+
+/** Why a line skipped an event (spec 2026-10-16: presence hub, Part D step 1.7). */
+export type LineActivitySkipReason = "filters" | "sender" | "off" | "claimed" | "other";
+
+/** One entry on a line's Activity: a delivery the line made (`acted`), or an
+ * event it skipped (`skipped`). */
+export interface LineActivityEntryWire {
+  /** The delivery id, or `receipt:<receipt id>` for a skip read from a receipt. */
+  id: string;
+  kind: "acted" | "skipped";
+  at: number;
+  /** Null when the event was skipped by every line, so it was not stored. */
+  eventId: string | null;
+  eventKey: string;
+  /** The event's place key, such as `slack:T1/C1`, or null when it names none. */
+  place: string | null;
+  placeLabel: string | null;
+  /** On an acted entry. */
+  outcome?: LineActivityOutcome;
+  /** On an acted entry that was delivered: deliveredAt minus the delivery's createdAt. */
+  tookMs?: number;
+  /** On a skipped entry. */
+  reason?: LineActivitySkipReason;
+  /** For `filters`, the first filter the event failed, in words (`the
+   * repository filter`, or `its filters`). For `other`, the recorded skip text
+   * when there is one. */
+  reasonText?: string;
+}
+
+/** `GET /api/event-subscriptions/:id/activity?before=<cursor>&limit=50`:
+ * one line's timeline, newest first, and the counts its health strip shows. */
+export interface LineActivityResponse {
+  entries: LineActivityEntryWire[];
+  nextCursor?: string;
+  /** When the line last delivered an event, or null when it never did. */
+  lastActedAt: number | null;
+  /** The sum of `perDay`. */
+  actedLast30Days: number;
+  /** 30 counts of delivered entries, one per UTC day, oldest first; the last is today. */
+  perDay: number[];
+}
+
 /** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
  * whose earlier attempts failed or were given up on. Always writes NEW
  * delivery rows: the workflow dispatcher derives a run id from the delivery

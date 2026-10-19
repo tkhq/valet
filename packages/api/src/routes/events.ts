@@ -50,6 +50,7 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  LineActivityResponse,
   ListEventSubscriptionsResponse,
   ListSubscriptionDeliveriesResponse,
   PatchEventSubscriptionRequest,
@@ -60,7 +61,8 @@ import { workflowRequestContext } from "../workflows/request-context.js";
 import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
-import { slackEventChannel, storedThreadRef } from "../services/thread-access.js";
+import { orgSlackCredential, slackEventChannel, storedThreadRef } from "../services/thread-access.js";
+import { loadLineActivity } from "../services/line-activity.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
@@ -1107,6 +1109,57 @@ eventsRouter.get("/event-subscriptions/:id/deliveries", async (c) => {
   const wire = await deliveriesToWire(c, visible);
   const resp: ListSubscriptionDeliveriesResponse = {
     deliveries: wire.map((d, index) => ({ ...d, event: rowToEventSummary(visible[index]!.event) })),
+  };
+  return c.json(resp);
+});
+
+/** The activity read's answer for a line that is missing or in another org. */
+export const LINE_NOT_FOUND = "This line was not found. Refresh Presence and try again.";
+
+/**
+ * `GET /api/event-subscriptions/:id/activity`: one line's Activity, newest
+ * first, and the counts its health strip shows (spec 2026-10-16: presence
+ * hub, Part D step 4). It reads as the deliveries list does: the line is
+ * org-visible, and an event from a Slack channel this request may not see is
+ * left out. A skipped event outside the line's places shows only to an
+ * organization admin (`services/line-activity.ts`).
+ */
+eventsRouter.get("/event-subscriptions/:id/activity", async (c) => {
+  const { db, plugins } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const limit = readLimit(c.req.query("limit"), 50, 100);
+  if (limit === undefined) return c.json({ error: "Send a positive whole number for limit." }, 400);
+
+  const [line] = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId)))
+    .limit(1);
+  if (!line) return c.json({ error: LINE_NOT_FOUND }, 404);
+
+  const scope = `line-activity:${id}`;
+  const rawCursor = c.req.query("before");
+  const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
+  const before = decoded && decoded.orgId === user.orgId && decoded.scope === scope &&
+    typeof decoded.at === "number" && Number.isFinite(decoded.at) && typeof decoded.id === "string"
+    ? { at: decoded.at, id: decoded.id } : undefined;
+  if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor does not match this line. Load its activity again from the top." }, 400);
+
+  const teamId = (await orgSlackCredential(c.var.providers, user.orgId))?.metadata?.teamId;
+  const page = await loadLineActivity({ db, plugins }, {
+    orgId: user.orgId, line, admin: await isOrgAdminUser(c),
+    slackTeam: typeof teamId === "string" && teamId !== "" ? teamId : null,
+    ...(before ? { before } : {}), limit,
+    channelVisible: channelsVisibleTo(c),
+    deliveryLinks: (rows) => deliveriesToWire(c, rows),
+  });
+  const resp: LineActivityResponse = {
+    entries: page.entries,
+    ...(page.next ? { nextCursor: encodePageCursor({ orgId: user.orgId, scope, at: page.next.at, id: page.next.id }) } : {}),
+    lastActedAt: page.lastActedAt,
+    actedLast30Days: page.actedLast30Days,
+    perDay: page.perDay,
   };
   return c.json(resp);
 });
