@@ -71,10 +71,10 @@ import { WhereSection, whereSummaryParts } from "./where-section";
 
 export type { EditorMode } from "./draft";
 
-/** What a Create or Save stored: a line or a routine, by its id. */
 /** The controls a section's first focus may land on. */
 const FOCUSABLE = 'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
 
+/** What a Create or Save stored: a line or a routine, by its id. */
 export interface EditorSaved {
   kind: "line" | "routine";
   id: string;
