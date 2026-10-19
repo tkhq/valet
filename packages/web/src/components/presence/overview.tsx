@@ -30,7 +30,7 @@ import { useListOwner } from "~/lib/use-list-owner";
 import { AttentionBanner } from "./attention-banner";
 import { announceCreated, clearCreated, useCreatedTarget, type CreatedTarget } from "./created-highlight";
 import { LineEditor } from "./editor/line-editor";
-import { Onboarding } from "./onboarding";
+import { Onboarding, overviewEmpty } from "./onboarding";
 import { COLLAPSE_THRESHOLD, countText, overviewGroups, type OverviewGroup } from "./overview-groups";
 import { CREATED_HIGHLIGHT_CLASS, PlaceRow, QUIET_ADD_CLASS } from "./place-row";
 import { SERVICE_NAMES } from "./places";
@@ -70,15 +70,6 @@ export function filterGroups(groups: readonly OverviewGroup[], text: string): Ov
   return groups
     .map((group) => ({ ...group, blocks: group.blocks.filter((block) => block.label.toLowerCase().includes(needle)) }))
     .filter((group) => group.blocks.length > 0);
-}
-
-/** True when the workspace has no place row and no routine (spec Part B step 9). */
-export function overviewEmpty(
-  places: readonly PresencePlaceWire[],
-  lines: readonly EventSubscriptionWire[],
-  triggers: readonly WorkflowTriggerItem[],
-): boolean {
-  return overviewGroups(places, lines, new Set()).length === 0 && !triggers.some(isRoutine);
 }
 
 /** The overview's three reads, refreshed every minute. */

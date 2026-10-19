@@ -21,6 +21,7 @@ const ONE_PLACE: PresencePlaceWire = {
 };
 let places: PresencePlaceWire[] | undefined = [ONE_PLACE];
 let triggers: WorkflowTriggerItem[] | undefined = [];
+let lines: "default" | EventSubscriptionWire[] | undefined = "default";
 const receiptsQuery = vi.fn();
 const logQuery = vi.fn();
 
@@ -34,7 +35,9 @@ vi.mock("~/api/events", () => ({
     data: { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: 30 }] },
     isPending: false, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
   }),
-  useEventSubscriptions: () => ({ data: { subscriptions: [workflowListener] } }),
+  useEventSubscriptions: () => (lines === undefined
+    ? { isSuccess: false, data: undefined }
+    : { isSuccess: true, data: { subscriptions: lines === "default" ? [workflowListener] : lines } }),
   useEventReceipts: (...args: unknown[]) => {
     receiptsQuery(...args);
     return {
@@ -73,6 +76,7 @@ afterEach(() => {
   role = "admin";
   places = [ONE_PLACE];
   triggers = [];
+  lines = "default";
   receiptsQuery.mockClear();
   logQuery.mockClear();
 });
@@ -320,6 +324,7 @@ describe("ActivityPane with no place and no routine", () => {
   it("keeps the log, shows no onboarding paragraphs, and offers its own Add", () => {
     places = [];
     triggers = [];
+    lines = [];
     renderTab();
     expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
     expect(screen.getByRole("group", { name: "Show" })).toBeTruthy();
@@ -328,7 +333,7 @@ describe("ActivityPane with no place and no routine", () => {
     expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create");
   });
 
-  it("offers no Add with a place (Review Focus 1)", () => {
+  it("offers no Add with a line on a row (Review Focus 1)", () => {
     places = [ONE_PLACE];
     triggers = [];
     renderTab();
@@ -336,8 +341,17 @@ describe("ActivityPane with no place and no routine", () => {
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });
 
+  it("offers its Add when only threads and events touched the places, as the overview shows onboarding", () => {
+    places = [ONE_PLACE];
+    triggers = [];
+    lines = [];
+    renderTab();
+    expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
+  });
+
   it("offers no Add with a routine and no place", () => {
     places = [];
+    lines = [];
     triggers = [{ kind: "schedule", id: "S1", name: "Morning summary", enabled: true, detail: {
       cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1",
     } }];
@@ -353,6 +367,11 @@ describe("ActivityPane with no place and no routine", () => {
     cleanup();
     places = [];
     triggers = undefined;
+    renderTab();
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+    cleanup();
+    triggers = [];
+    lines = undefined;
     renderTab();
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });

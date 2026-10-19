@@ -6,21 +6,36 @@
  * header carries **Add**.
  */
 import { Link } from "@tanstack/react-router";
+import type { EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
+import { useEventSubscriptions } from "~/api/events";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
 import { textLinkClass } from "~/components/primitives";
 import { useListOwner } from "~/lib/use-list-owner";
+import { overviewGroups } from "./overview-groups";
 import { isRoutine } from "./routine-helpers";
 
-/** True once the places and the routines have loaded and both are empty.
- * While either loads, or after an error, it is false. Activity reads it to
- * offer its own Add. */
+/** True when the workspace has no place row and no routine (spec Part B step 9). */
+export function overviewEmpty(
+  places: readonly PresencePlaceWire[],
+  lines: readonly EventSubscriptionWire[],
+  triggers: readonly WorkflowTriggerItem[],
+): boolean {
+  return overviewGroups(places, lines, new Set()).length === 0 && !triggers.some(isRoutine);
+}
+
+/** True once the places, the lines, and the routines have loaded and the
+ * overview has no place row and no routine (`overviewEmpty`). A place that
+ * only threads or events touched is no row. While a read loads, or after an
+ * error, it is false. Activity reads it to offer its own Add. */
 export function useNotPresentAnywhere(): boolean {
   const owner = useListOwner();
+  const enabled = owner !== undefined;
   const placesQ = usePresencePlaces();
-  const triggersQ = useWorkflowTriggers(undefined, owner, { enabled: owner !== undefined });
-  return placesQ.isSuccess && placesQ.data.places.length === 0
-    && triggersQ.isSuccess && triggersQ.data.triggers.filter(isRoutine).length === 0;
+  const linesQ = useEventSubscriptions(owner, { enabled });
+  const triggersQ = useWorkflowTriggers(undefined, owner, { enabled });
+  return placesQ.isSuccess && linesQ.isSuccess && triggersQ.isSuccess
+    && overviewEmpty(placesQ.data.places, linesQ.data.subscriptions, triggersQ.data.triggers);
 }
 
 /**
