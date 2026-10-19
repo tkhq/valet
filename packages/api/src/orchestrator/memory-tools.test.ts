@@ -458,7 +458,7 @@ describe("mem_* tools: real HTTP round trip", () => {
       threadId: "th-step",
       sandbox: sandbox as Sandbox,
       owner: { type: "user", id: "local-user" },
-      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken(), publishWithoutSource: true },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken(), workflowStep: true },
     });
 
     const published = await artifactPublishTool.execute({ path: "/tmp/pulse.html", key: "pages/sales-team-pulse" }, step);
@@ -482,6 +482,40 @@ describe("mem_* tools: real HTTP round trip", () => {
       { ...step, config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } },
     );
     expect(refused.text).toMatch(/Source work not found/);
+  });
+
+  // Moving a publish from an assistant step to a session step republishes the
+  // same key. The page must stop reporting to the assistant thread, and a step
+  // must not revoke a page another member may have published.
+  it("a workflow step clears an earlier source when it republishes, and cannot revoke", async () => {
+    api = await bootTestApi();
+    const assistant = makeCtx({
+      userId: "local-user",
+      owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+    });
+    await seedPublishingContext(api, assistant);
+    await artifactPublishTool.execute({ key: "pages/board", content: "<h1>From the assistant</h1>", format: "html" }, assistant);
+    const sandbox: Partial<Sandbox> & { id: string } = {
+      id: "sb-step",
+      stat: async () => ({ isFile: true, isDirectory: false, size: 24 }),
+      readFile: async () => "<h1>From the workflow</h1>",
+    };
+    const step = makeCtx({
+      userId: "local-user", sessionId: "wf:wfrun_board:build", threadId: "th-step", sandbox: sandbox as Sandbox,
+      owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken(), workflowStep: true },
+    });
+
+    const republished = await artifactPublishTool.execute({ path: "/tmp/board.html", key: "pages/board" }, step);
+    expect(republished.text).toContain("(version 2)");
+    const [saved] = await api.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/board"));
+    expect(saved).toMatchObject({ content: "<h1>From the workflow</h1>", sourceSessionId: "", sourceThreadId: null });
+
+    const revoke = await artifactPublishTool.execute({ key: "pages/board", revoke: true }, step);
+    expect(revoke.text).toContain("A workflow step cannot revoke a page");
+    const [still] = await api.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/board"));
+    expect(still.revokedAt).toBeNull();
   });
 });
 

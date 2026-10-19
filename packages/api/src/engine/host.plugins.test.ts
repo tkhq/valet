@@ -171,7 +171,7 @@ describe("EngineHost + plugin extras", () => {
     const names = session.options.tools?.map((tool) => tool.name) ?? [];
     expect(names).toContain("artifact_publish");
     expect(names.filter((name) => name.startsWith("mem_"))).toEqual([]);
-    expect(session.options.toolConfig).toMatchObject({ publishWithoutSource: true });
+    expect(session.options.toolConfig).toMatchObject({ workflowStep: true });
   });
 
   it("with plugins: [] the orchestrator keeps catalog and memory tools", async () => {

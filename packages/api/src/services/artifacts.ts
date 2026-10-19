@@ -136,6 +136,8 @@ export interface PublishArtifactOpts {
   orgId: string;
   sourceSessionId?: string;
   sourceThreadId?: string;
+  /** Replace an earlier source with none, for a workflow step's publish. */
+  clearSource?: boolean;
 }
 
 /** What every publish path hands the upsert, after its own validation. */
@@ -149,6 +151,7 @@ interface PublishInput {
   orgId: string;
   sourceSessionId?: string;
   sourceThreadId?: string;
+  clearSource?: boolean;
 }
 
 /**
@@ -215,6 +218,7 @@ export async function publishArtifact(db: AppDb, scope: ArtifactScope, opts: Pub
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
     sourceThreadId: opts.sourceThreadId,
+    ...(opts.clearSource ? { clearSource: true } : {}),
   });
 }
 
@@ -308,8 +312,8 @@ async function writeArtifact(db: AppDb, scope: ArtifactScope, input: PublishInpu
         icon: input.icon,
         version: nextVersion,
         actorUserId: scope.actorUserId,
-        sourceSessionId: input.sourceSessionId ?? existing.sourceSessionId,
-        sourceThreadId: input.sourceSessionId ? input.sourceThreadId ?? null : existing.sourceThreadId,
+        sourceSessionId: input.clearSource ? "" : input.sourceSessionId ?? existing.sourceSessionId,
+        sourceThreadId: input.clearSource ? null : input.sourceSessionId ? input.sourceThreadId ?? null : existing.sourceThreadId,
         updatedAt: now,
         revokedAt: null,
         ...(reactivating

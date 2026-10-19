@@ -4183,7 +4183,7 @@ export class EngineHost {
       // tool, not the memory tools. Its pages belong to the run owner and name
       // no source session: a step session has no `agent_sessions` row.
       tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...extras.tools] : extras.tools.length ? extras.tools : undefined,
-      ...(this.opts.apiBaseUrl ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken(), publishWithoutSource: true } } : {}),
+      ...(this.opts.apiBaseUrl ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken(), workflowStep: true } } : {}),
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       ...(skillsProvider ? { skillsProvider } : {}),

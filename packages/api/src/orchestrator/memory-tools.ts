@@ -40,9 +40,10 @@ function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
 interface MemoryToolConfig {
   apiBaseUrl: string;
   internalToken: string;
-  /** Omit the source session and thread. A workflow step session has no
-   * `agent_sessions` row, so the share route would refuse it as a source. */
-  withoutSource: boolean;
+  /** A workflow step session. It has no `agent_sessions` row, so it names
+   * no source and clears the source of a page it replaces. It cannot revoke
+   * a page, which may belong to another member of the run owner. */
+  workflowStep: boolean;
 }
 
 /** `ctx.config` is a verbatim `Record<string, unknown>` passthrough
@@ -53,7 +54,7 @@ function resolveMemoryConfig(ctx: ToolContext): MemoryToolConfig | null {
   const internalToken = ctx.config?.internalToken;
   if (typeof apiBaseUrl !== "string" || apiBaseUrl.length === 0) return null;
   if (typeof internalToken !== "string" || internalToken.length === 0) return null;
-  return { apiBaseUrl, internalToken, withoutSource: ctx.config?.publishWithoutSource === true };
+  return { apiBaseUrl, internalToken, workflowStep: ctx.config?.workflowStep === true };
 }
 
 function resolveOwner(ctx: ToolContext): Principal {
@@ -65,7 +66,7 @@ function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext
     "x-valet-internal": cfg.internalToken,
     "x-valet-owner": serializePrincipal(owner),
     "x-valet-actor": ctx.userId,
-    ...(cfg.withoutSource ? {} : { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId }),
+    ...(cfg.workflowStep ? { "x-valet-source": "none" } : { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId }),
     "x-valet-org-id": ctx.orgId,
   };
   if (json) headers["Content-Type"] = "application/json";
@@ -705,6 +706,9 @@ export const artifactPublishTool = defineTool({
     let format = args.format;
 
     if (args.revoke === true) {
+      if (cfg.workflowStep) {
+        return { text: "[artifact_error] A workflow step cannot revoke a page. Revoke it from the page in Valet.", ok: false };
+      }
       if (!key && hasPath) key = args.path;
       if (!key) return { text: "[artifact_error] pass `key` (or `path`) to name the page to revoke." };
     } else {
