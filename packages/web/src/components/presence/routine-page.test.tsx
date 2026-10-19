@@ -387,6 +387,31 @@ describe("RoutinePage", () => {
     expect(listWorkflowRuns).toHaveBeenCalledWith("wf-1");
   });
 
+  it("counts the firings its 30 bars show, so the count is the sum of the bars (S11)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const now = Date.UTC(2026, 9, 19, 12);
+      vi.setSystemTime(now);
+      const firstBarDay = Date.UTC(2026, 9, 19) - 29 * 86_400_000;
+      listWorkflowRuns.mockResolvedValue({
+        runs: [
+          { runId: `${scheduleRunPrefix("S3")}2`, workflowId: "wf-1", status: "running", createdAt: now - 3_600_000, updatedAt: now - 3_600_000 },
+          // Inside 30 × 24 hours, but on the UTC day before the first bar.
+          { runId: `${scheduleRunPrefix("S3")}1`, workflowId: "wf-1", status: "running", createdAt: firstBarDay - 3_600_000, updatedAt: firstBarDay - 3_600_000 },
+        ],
+      });
+      wrap(<RoutinePage id="S3" />);
+      await waitFor(() => expect(activityRows()).toHaveLength(2));
+      const strip = screen.getByRole("region", { name: "Health" });
+      const bars = Array.from(strip.querySelectorAll<HTMLElement>("[data-day]")).map((bar) => Number.parseInt(bar.title, 10));
+      const count = strip.querySelector('[data-fact="count"] [data-fact-value]')?.textContent;
+      expect(count).toBe(String(bars.reduce((sum, n) => sum + n, 0)));
+      expect(count).toBe("1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows an assistant routine's last firing, and no count it does not record", async () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 2 * 3_600_000 } })] });
     wrap(<RoutinePage id="S1" />);

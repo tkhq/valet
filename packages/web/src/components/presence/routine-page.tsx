@@ -52,8 +52,6 @@ export { scheduleRunPrefix };
 
 export { routineReadOnly } from "./routine-helpers";
 
-const MONTH_MS = 30 * 86_400_000;
-
 export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
   const triggersQ = useWorkflowTriggers();
@@ -142,8 +140,9 @@ function RoutineBody({ routine }: { routine: Routine }) {
     : lastFired === null
       ? []
       : [{ id: `fired:${lastFired}`, kind: "acted", at: lastFired, parts: firingParts(routine, workflowNames, pinTitles) }];
-  const now = Date.now();
   const times = workflowRoutine ? runs.map((run) => run.createdAt) : lastFired === null ? [] : [lastFired];
+  // The count is the sum of the bars, so the two always agree.
+  const perDay = perDayCounts(times, Date.now());
   const newestRun = runs.reduce<number | null>((max, run) => (max === null || run.createdAt > max ? run.createdAt : max), null);
   const lastAt = lastFired !== null && (newestRun === null || lastFired > newestRun) ? lastFired : newestRun;
   const fault = routineFault(routine.detail.disabledReason, pinThreadTitle);
@@ -205,8 +204,8 @@ function RoutineBody({ routine }: { routine: Routine }) {
         {(!workflowRoutine || runsQ.isSuccess) && (
           <HealthStrip
             lastAt={lastAt}
-            count={workflowRoutine ? runs.filter((run) => now - run.createdAt < MONTH_MS).length : null}
-            perDay={perDayCounts(times, now)}
+            count={workflowRoutine ? perDay.reduce((sum, n) => sum + n, 0) : null}
+            perDay={perDay}
             {...(fault !== undefined ? { fault } : {})}
             labels={{ last: "last fired" }}
           />
