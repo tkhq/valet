@@ -244,6 +244,23 @@ describe("LineEditor", () => {
     expect(openSections()).toEqual(["where"]);
   });
 
+  it("scrolls to the named section and focuses its first control (E4)", () => {
+    // jsdom has no scrollIntoView; record where it is called.
+    const scrolled: Element[] = [];
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) { scrolled.push(this); },
+    });
+    try {
+      renderEditor({ kind: "edit", line: CHECK_LINE, initialSection: "do" });
+      expect(scrolled).toEqual([document.querySelector('[data-section="do"]')]);
+      // The Do cards of a stored line are fixed, so the first control is the instructions.
+      expect(document.activeElement).toBe(screen.getByLabelText("Instructions (optional)"));
+    } finally {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    }
+  });
+
   it("starts a Slack mention line for a preselected team (the team Slack setup)", () => {
     renderEditor({ kind: "create", preselected: { team: { id: "t_platform", name: "Platform" } } });
     expect(screen.getByRole("button", { name: "Slack" }).getAttribute("aria-pressed")).toBe("true");

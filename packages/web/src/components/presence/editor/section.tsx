@@ -60,7 +60,7 @@ export function Section({
         )}
       </div>
       {open && !fixed && (
-        <div id={bodyId} className="mt-3.5 grid min-w-0 gap-4 sm:ml-[88px]">
+        <div id={bodyId} data-section-body className="mt-3.5 grid min-w-0 gap-4 sm:ml-[88px]">
           {children}
         </div>
       )}

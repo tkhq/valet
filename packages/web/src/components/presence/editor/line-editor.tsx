@@ -71,6 +71,9 @@ import { WhereSection, whereSummaryParts } from "./where-section";
 export type { EditorMode } from "./draft";
 
 /** What a Create or Save stored: a line or a routine, by its id. */
+/** The controls a section's first focus may land on. */
+const FOCUSABLE = 'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
 export interface EditorSaved {
   kind: "line" | "routine";
   id: string;
@@ -177,15 +180,23 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   const dirty = draftKey(draft) !== baseline;
   const [openSection, setOpenSection] = useState<SectionId | null>(mode.initialSection ?? (mode.kind === "create" ? "when" : null));
   const [confirming, setConfirming] = useState(false);
-  // A section named at open time scrolls into view, so a `Change` link
-  // under Where lands on Where and not on the top of the form.
-  const initialSection = mode.initialSection;
   const formRef = useRef<HTMLFieldSetElement>(null);
-  useEffect(() => {
-    if (initialSection === undefined) return;
-    const el = formRef.current?.querySelector(`[data-section="${initialSection}"]`);
-    if (el instanceof HTMLElement && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "start" });
-  }, [initialSection]);
+  // A section named at open time scrolls into view and takes focus, so a
+  // `Change` link under Where lands on Where and not on the top of the
+  // form. The dialog's open focus runs once its portal has mounted; an
+  // effect here would run before the form exists.
+  function openAutoFocus(event: Event) {
+    const id = mode.initialSection;
+    if (id === undefined) return;
+    const section = formRef.current?.querySelector(`[data-section="${id}"]`);
+    if (!(section instanceof HTMLElement)) return;
+    section.scrollIntoView?.({ block: "start" });
+    const body = section.querySelector("[data-section-body]");
+    const control = (body ?? section).querySelector<HTMLElement>(FOCUSABLE);
+    if (control === null) return;
+    event.preventDefault();
+    control.focus();
+  }
   const [error, setError] = useState<string | null>(null);
   const [collisions, setCollisions] = useState<{ report: EventSubscriptionCollisionsWire; committed: boolean } | null>(null);
   // A create or save that stored the line but reported overlaps. The form
@@ -493,6 +504,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     <Dialog open onOpenChange={(next) => { if (!next) requestClose(); }}>
       <DialogContent
         hideClose
+        onOpenAutoFocus={openAutoFocus}
         onCloseAutoFocus={onCloseAutoFocus}
         data-layout={phone ? "phone" : "wide"}
         className={cn(
