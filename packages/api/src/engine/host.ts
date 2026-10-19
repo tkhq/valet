@@ -138,7 +138,7 @@ import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
-import { buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { artifactPublishTool, buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
 import {
@@ -4178,7 +4178,12 @@ export class EngineHost {
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
-      tools: extras.tools.length ? extras.tools : undefined,
+      // A step publishes a page from a file in its own sandbox, so a large page
+      // never has to travel between steps as model output. A step gets this one
+      // tool, not the memory tools. Its pages belong to the run owner and name
+      // no source session: a step session has no `agent_sessions` row.
+      tools: this.opts.apiBaseUrl ? [artifactPublishTool, ...extras.tools] : extras.tools.length ? extras.tools : undefined,
+      ...(this.opts.apiBaseUrl ? { toolConfig: { apiBaseUrl: this.opts.apiBaseUrl, internalToken: internalToken(), publishWithoutSource: true } } : {}),
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
       ...(skillsProvider ? { skillsProvider } : {}),

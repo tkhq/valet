@@ -40,6 +40,9 @@ function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
 interface MemoryToolConfig {
   apiBaseUrl: string;
   internalToken: string;
+  /** Omit the source session and thread. A workflow step session has no
+   * `agent_sessions` row, so the share route would refuse it as a source. */
+  withoutSource: boolean;
 }
 
 /** `ctx.config` is a verbatim `Record<string, unknown>` passthrough
@@ -50,7 +53,7 @@ function resolveMemoryConfig(ctx: ToolContext): MemoryToolConfig | null {
   const internalToken = ctx.config?.internalToken;
   if (typeof apiBaseUrl !== "string" || apiBaseUrl.length === 0) return null;
   if (typeof internalToken !== "string" || internalToken.length === 0) return null;
-  return { apiBaseUrl, internalToken };
+  return { apiBaseUrl, internalToken, withoutSource: ctx.config?.publishWithoutSource === true };
 }
 
 function resolveOwner(ctx: ToolContext): Principal {
@@ -62,8 +65,7 @@ function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext
     "x-valet-internal": cfg.internalToken,
     "x-valet-owner": serializePrincipal(owner),
     "x-valet-actor": ctx.userId,
-    "x-valet-session-id": ctx.sessionId,
-    "x-valet-thread-id": ctx.threadId,
+    ...(cfg.withoutSource ? {} : { "x-valet-session-id": ctx.sessionId, "x-valet-thread-id": ctx.threadId }),
     "x-valet-org-id": ctx.orgId,
   };
   if (json) headers["Content-Type"] = "application/json";

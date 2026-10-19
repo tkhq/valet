@@ -440,6 +440,49 @@ describe("mem_* tools: real HTTP round trip", () => {
     const revoked = await artifactPublishTool.execute({ key: "pages/board", revoke: true }, ctx);
     expect(revoked.text).toBe("revoked page pages/board");
   });
+
+  // A large page used to travel from a session step to an orchestrator step
+  // as model output, which truncated or corrupted it. A step now publishes
+  // its own sandbox file, and has no agent_sessions row to name as source.
+  it("artifact_publish from a workflow step publishes a sandbox file byte for byte, with no source session", async () => {
+    api = await bootTestApi();
+    const page = `<!doctype html><title>Pulse</title><body>${"<p>row ✓ 7am ET</p>".repeat(5000)}</body>`;
+    const sandbox: Partial<Sandbox> & { id: string } = {
+      id: "sb-step",
+      stat: async () => ({ isFile: true, isDirectory: false, size: Buffer.byteLength(page) }),
+      readFile: async () => page,
+    };
+    const step = makeCtx({
+      userId: "local-user",
+      sessionId: "wf:wfrun_pulse:build",
+      threadId: "th-step",
+      sandbox: sandbox as Sandbox,
+      owner: { type: "user", id: "local-user" },
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken(), publishWithoutSource: true },
+    });
+
+    const published = await artifactPublishTool.execute({ path: "/tmp/pulse.html", key: "pages/sales-team-pulse" }, step);
+    expect(published.text).toContain("published pages/sales-team-pulse → ");
+    const [saved] = await api.providers.db.select().from(artifacts).where(eq(artifacts.sourceMemoryPath, "pages/sales-team-pulse"));
+    expect(saved.content).toBe(page);
+    expect(saved.format).toBe("html");
+    expect(saved.sourceSessionId).toBe("");
+
+    // A team-owned run publishes into the team, as team assistants do.
+    const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Sales", creatorUserId: "local-user" });
+    const teamStep = { ...step, owner: { type: "team" as const, id: team.id } };
+    const teamPage = await artifactPublishTool.execute({ path: "/tmp/pulse.html", key: "pages/sales-team-pulse" }, teamStep);
+    expect(teamPage.text).toContain("published pages/sales-team-pulse → ");
+    const [teamSaved] = await api.providers.db.select().from(artifacts).where(eq(artifacts.ownerId, team.id));
+    expect(teamSaved).toMatchObject({ ownerType: "team", content: page });
+
+    // Without the step setting, the share route refuses the step session as a source.
+    const refused = await artifactPublishTool.execute(
+      { path: "/tmp/pulse.html", key: "pages/other" },
+      { ...step, config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() } },
+    );
+    expect(refused.text).toMatch(/Source work not found/);
+  });
 });
 
 
