@@ -61,7 +61,7 @@ import type {
   SessionEntry,
   SessionStartRef,
   SkillSource,
-  StoredCredential,
+  ResolvedCredential,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -1800,7 +1800,7 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string): Promise<StoredCredential | null> =>
+    const read = (service: string): Promise<ResolvedCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
@@ -1827,6 +1827,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
       async request(service: string, reason: string) {
@@ -1842,6 +1843,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
     };

@@ -32,11 +32,13 @@ import {
   type Credential,
   type CredentialOwner,
   type CredentialProvider,
+  type CredentialSource,
   type CredentialStore,
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
   type Principal,
+  type ResolvedCredential,
   type RiskLevel,
   type Sandbox,
   type StoredCredential,
@@ -67,8 +69,7 @@ import {
   resolveOrgNativeAppRead,
   resolveOrgCredentialRead,
   readTeamCredential,
-  resolveTeamCredentialRead,
-  resolveUserCredentialRead,
+  readUserCredential,
   onePasswordScopesFor,
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -76,7 +77,7 @@ import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/sessi
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome, type AuditInvocationRow } from "../policies/service.js";
 import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
-import { membersSharing } from "../services/credential-shares.js";
+import { membersSharing, withSharerName } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -1004,6 +1005,7 @@ function buildCredentialProvider(
         expiresAt: stored.expiresAt,
         scopes: stored.scopes,
         metadata: stored.metadata,
+        ...(stored.source ? { source: stored.source } : {}),
       };
     },
     request(): Promise<Credential> {
@@ -1011,15 +1013,21 @@ function buildCredentialProvider(
     },
   };
 
-  async function read(svc: string, registry: ValetPlugin[]): Promise<StoredCredential | null> {
+  /** The row, with whose account it is, so a plugin names the right fix
+   * when the provider rejects the token. */
+  function from(stored: StoredCredential | null, source: CredentialSource | undefined): ResolvedCredential | null {
+    return stored ? { ...stored, ...(source ? { source } : {}) } : null;
+  }
+
+  async function read(svc: string, registry: ValetPlugin[]): Promise<ResolvedCredential | null> {
     // A node pinned to `app` acts as the app identity for its own service
     // and for the app step alike (native credential policy, Part E).
     if (appService && selection === "app" && (svc === defaultService || svc === appService)) {
-      return resolveNativeAppCredentialRead(readDeps, { orgId: ctx.orgId }, defaultService, appService, registry);
+      return from(await resolveNativeAppCredentialRead(readDeps, { orgId: ctx.orgId }, defaultService, appService, registry), { kind: "app" });
     }
     // The app step. A node pinned to `user` never reaches it.
     if (appTier && svc === appTier) {
-      return selection === "user" ? null : resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry);
+      return selection === "user" ? null : from(await resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry), { kind: "app" });
     }
     // Escalation applies to THIS provider's own service only. An incidental
     // read of some other service must not reach the org's credentials, even
@@ -1038,18 +1046,18 @@ function buildCredentialProvider(
     // (`valet_credentials_app_fallback_total`).
     const countsFallback = selection === "auto" && appTier !== undefined && svc === defaultService;
     if (owner.type === "user") {
-      const stored = await resolveUserCredentialRead(
+      const { credential: stored, source } = await readUserCredential(
         deps,
         { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
         svc,
         fallback,
       );
       if (!stored && countsFallback) await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, "no_personal", registry);
-      return stored;
+      return from(stored, source);
     }
     if (owner.type === "team") {
       let deadDelegated = false;
-      const stored = await resolveTeamCredentialRead(
+      const { credential: stored, source } = await readTeamCredential(
         deps,
         {
           orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
@@ -1072,13 +1080,13 @@ function buildCredentialProvider(
       if (!stored && countsFallback) {
         await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, deadDelegated ? "dead_delegated" : "no_delegated", registry);
       }
-      return stored;
+      return from(stored, await withSharerName(opts.db, source));
     }
     if (countsFallback) {
       const app = await resolveOrgNativeAppRead(readDeps, { orgId: ctx.orgId }, svc, registry);
-      if (app) return app;
+      if (app) return from(app, { kind: "app" });
     }
-    return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+    return from(await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc), { kind: "org" });
   }
 }
 

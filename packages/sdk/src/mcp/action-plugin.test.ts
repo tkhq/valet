@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Credential, CredentialProvider, PluginActionContext, RiskLevel } from '@valet/engine';
+import type { Credential, CredentialProvider, CredentialSource, PluginActionContext, RiskLevel } from '@valet/engine';
 import { mcpActionPlugin } from './action-plugin.js';
 import type { McpTool, McpToolResult } from './types.js';
 
@@ -896,6 +896,58 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       success: false,
       error: 'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
     });
+  });
+
+  // A rejected account gets the fix from whoever holds it, not the caller.
+  it.each([
+    [
+      'the team connection',
+      { kind: 'team' },
+      "Linear rejected the team's Linear connection. Ask the team owner to reconnect Linear for the team, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      "another member's share",
+      { kind: 'shared', memberId: 'u-002', memberName: 'Dana' },
+      'Linear rejected the Linear account that Dana shared with the team. Ask Dana to reconnect Linear, or connect your own Linear account on the Integrations page.',
+    ],
+    [
+      'a share whose member has no name',
+      { kind: 'shared', memberId: 'u-002' },
+      'Linear rejected the Linear account that the member who shared it shared with the team. Ask the member who shared it to reconnect Linear, or connect your own Linear account on the Integrations page.',
+    ],
+    [
+      'the org credential',
+      { kind: 'org' },
+      "Linear rejected the organization's Linear credential. Ask an organization admin to reconnect Linear in Settings, Organization, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      'the app identity the host resolved',
+      { kind: 'app' },
+      "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
+    ],
+    [
+      'a 1Password item',
+      { kind: 'vault' },
+      'Linear rejected the token from its 1Password item. Ask the owner of the Linear item in 1Password to update it, or connect your own Linear account on the Integrations page.',
+    ],
+  ] satisfies [string, CredentialSource, string][])('names the fix for %s', async (_label, source, error) => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'held-token', source },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({ success: false, error });
   });
 
   it('falls back to the service id when no displayName is configured', async () => {

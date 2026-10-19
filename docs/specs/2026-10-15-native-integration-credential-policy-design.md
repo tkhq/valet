@@ -246,6 +246,21 @@ deployment after merge.
      connect your own Linear account on the Integrations page."
    - Personal token: "Linear rejected your connected account. Reconnect
      Linear on the Integrations page."
+   The fix goes to whoever holds the account. The host resolver tags each
+   resolved credential with its source (`Credential.source`): `personal`,
+   `team`, `shared` (with the sharing member's name), `org`, `app`, or
+   `vault`. The other texts for Linear, each followed by "or connect your
+   own Linear account on the Integrations page":
+   - Team connection: "Linear rejected the team's Linear connection. Ask
+     the team owner to reconnect Linear for the team".
+   - Another member's share: "Linear rejected the Linear account that
+     Dana shared with the team. Ask Dana to reconnect Linear".
+   - Org credential: "Linear rejected the organization's Linear
+     credential. Ask an organization admin to reconnect Linear in
+     Settings, Organization".
+   - 1Password item: "Linear rejected the token from its 1Password item.
+     Ask the owner of the Linear item in 1Password to update it".
+   A credential with no source reads as the caller's own.
 7. **Workflow tool nodes follow Part B on `auto`, and Part E for pins.**
    `auto` reads a person's credential first and the app token last. A
    team run is not refused when the app token answers, and it keeps

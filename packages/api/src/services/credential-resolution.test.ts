@@ -779,10 +779,10 @@ describe("resolveTeamCredentialRead", () => {
       const credentials = await storeWith([[al, { type: "api_key", apiKey: "al-key" }], [team, { type: "api_key", apiKey: "team-key" }]]);
       const deps = { credentials, shares: shares(["bea", "al"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "al-key" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "al-key" }), source: { kind: "personal" } });
       // Without a share of their own, a member uses the team's connection.
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "cy" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }), source: { kind: "team" } });
     });
 
     it("asks the member whose share it would use, and uses it once they approved", async () => {
@@ -791,14 +791,14 @@ describe("resolveTeamCredentialRead", () => {
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
         .resolves.toEqual({ credential: null, approvalFrom: "bea" });
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "bea" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "bea-key" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "bea-key" }), source: { kind: "shared", memberId: "bea" } });
     });
 
     it("uses a later sharer who already approved before asking an older one", async () => {
       const credentials = await storeWith([[bea, { type: "api_key", apiKey: "bea-key" }], [{ type: "user", id: "cy" }, { type: "api_key", apiKey: "cy-key" }]]);
       const deps = { credentials, shares: shares(["bea", "cy"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "cy" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "cy-key" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "cy-key" }), source: { kind: "shared", memberId: "cy" } });
     });
 
     it("reads past a team connection that can no longer refresh, still asking the share's member", async () => {
@@ -808,11 +808,11 @@ describe("resolveTeamCredentialRead", () => {
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
         .resolves.toEqual({ credential: null, approvalFrom: "bea" });
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "bea" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }), source: { kind: "shared", memberId: "bea" } });
       // With nothing else to use, the dead row stays the answer, so the caller still sees the provider's refusal.
       const alone = { credentials: await storeWith([[team, dead]]), shares: shares([]) };
       await expect(readTeamCredential(alone, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "dead" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "dead" }), source: { kind: "team" } });
     });
 
     it("skips expired OAuth without refresh for an approved share, and requires consent otherwise", async () => {
@@ -822,7 +822,7 @@ describe("resolveTeamCredentialRead", () => {
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "none"))
         .resolves.toEqual({ credential: null, approvalFrom: "bea" });
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async () => true }, "linear", "none"))
-        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }), source: { kind: "shared", memberId: "bea" } });
       await expect(readTeamCredential({ credentials: await storeWith([[team, expired]]) }, { orgId, teamId }, "linear", "none"))
         .resolves.toEqual({ credential: null });
     });
@@ -831,14 +831,14 @@ describe("resolveTeamCredentialRead", () => {
       const expired: StoredCredential = { type: "oauth2", accessToken: "expired", expiresAt: 1 };
       const deps = { credentials: await storeWith([[al, expired], [bea, expired], [team, { type: "api_key", apiKey: "team-key" }]]), shares: shares(["al", "bea"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async () => true }, "linear", "none"))
-        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }), source: { kind: "team" } });
     });
 
     it("keeps an expired team connection whose refresh failed only temporarily", async () => {
       const expired: StoredCredential = { type: "oauth2", accessToken: "team", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
       const deps = { credentials: await storeWith([[team, expired], [bea, { type: "api_key", apiKey: "bea-key" }]]), shares: shares(["bea"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
-        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "team" }) });
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "team" }), source: { kind: "team" } });
     });
 
     it("falls back to the org bot behind a share whose account is gone", async () => {

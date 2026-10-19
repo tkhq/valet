@@ -1,7 +1,7 @@
 import { decode as decodeToon } from '@toon-format/toon';
 import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
-import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
+import type { ActionPlugin, CredentialProvider, CredentialSource, PluginAction, RiskLevel } from '@valet/engine';
 import { hasToonCollectionMarker } from '@valet/shared';
 import { McpClient, McpHttpError } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
@@ -49,9 +49,6 @@ interface RejectionText {
   label: string;
   appConnectHint?: string;
 }
-
-/** Which credential answered the lookup — drives the auth-rejection message. */
-type CredentialSource = 'personal' | 'app';
 
 interface ResolvedToken {
   token: string | undefined;
@@ -132,10 +129,11 @@ async function resolveToken(
   if (noAuth) return { token: undefined };
   if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
-  if (cred) return { token: cred.accessToken, source: 'personal' };
+  // A host that does not say whose account it is gives the caller's own.
+  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' } };
   if (appCredentialService) {
     const appCred = await credentials.get(appCredentialService);
-    if (appCred) return { token: appCred.accessToken, source: 'app' };
+    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' } };
   }
   throw new Error(`${serviceName}: no credential connected`);
 }
@@ -144,7 +142,9 @@ async function resolveToken(
  * The MCP server rejected the bearer token (401/403): the connection it
  * answered with is bad, not the request. Name which credential it was and
  * the fix, per CLAUDE.md's "every user-facing error names the corrective
- * action" rule. Returns undefined for any other failure (bad request,
+ * action" rule. The fix goes to whoever holds the account: the caller for
+ * their own, the team owner for the team's, the sharing member for a share,
+ * an admin for the org's or the app's. Returns undefined for any other failure (bad request,
  * transport error, 5xx) — those keep today's verbatim error text, and for
  * `noAuth`/`staticToken` calls there is no personal/app connection to name.
  *
@@ -160,11 +160,25 @@ function authRejectionMessage(
 ): string | undefined {
   if (!source) return undefined;
   if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
-  if (source === 'app') {
-    const where = appConnectHint ? ` in ${appConnectHint}` : '';
-    return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or connect your own ${label} account on the Integrations page.`;
+  const own = `connect your own ${label} account on the Integrations page`;
+  switch (source.kind) {
+    case 'app': {
+      const where = appConnectHint ? ` in ${appConnectHint}` : '';
+      return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or ${own}.`;
+    }
+    case 'team':
+      return `${label} rejected the team's ${label} connection. Ask the team owner to reconnect ${label} for the team, or ${own}.`;
+    case 'shared': {
+      const member = source.memberName ?? 'the member who shared it';
+      return `${label} rejected the ${label} account that ${member} shared with the team. Ask ${member} to reconnect ${label}, or ${own}.`;
+    }
+    case 'org':
+      return `${label} rejected the organization's ${label} credential. Ask an organization admin to reconnect ${label} in Settings, Organization, or ${own}.`;
+    case 'vault':
+      return `${label} rejected the token from its 1Password item. Ask the owner of the ${label} item in 1Password to update it, or ${own}.`;
+    case 'personal':
+      return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
   }
-  return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
 }
 
 function mapToolToAction(

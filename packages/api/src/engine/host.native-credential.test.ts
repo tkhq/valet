@@ -14,7 +14,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { teamMembers, teams } from "../schema/index.js";
+import { teamMembers, teams, users } from "../schema/index.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { shareCredential } from "../services/credential-shares.js";
@@ -181,6 +181,27 @@ describe("EngineHost native credential policy (Part B)", () => {
       // The team's own connection still answers, as before the policy.
       await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "team-linear" });
       expect((await partB(provider))?.accessToken).toBe("team-linear");
+    });
+
+    // A plugin names the fix from whoever holds the account it was handed.
+    it("says whose account each tier is", async () => {
+      const { appDb, credentials } = await harness();
+      await appDb.insert(users).values({ id: sharer, name: "Dana", email: "dana@example.test" });
+      await credentials.save({ type: "user", id: sharer }, "linear", { type: "oauth2", accessToken: "u-002-linear" });
+      await shareCredential(appDb, { teamId, service: "linear", userId: sharer, createdAt: 1, borrowConsentAt: 1 });
+      const h = makeHost(appDb, credentials);
+
+      const team = (await h.sessionFor("sess-src1", teamMeta)).credentialProvider({ actorId: userId });
+      expect(await team.get("linear")).toMatchObject({ accessToken: "u-002-linear", source: { kind: "shared", memberId: sharer, memberName: "Dana" } });
+      await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "team-linear" });
+      expect(await team.get("linear")).toMatchObject({ accessToken: "team-linear", source: { kind: "team" } });
+      expect(await team.get("linear:app")).toMatchObject({ source: { kind: "app" } });
+
+      await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "personal-linear" });
+      const personal = (await h.sessionFor("sess-src2", userMeta)).credentialProvider();
+      expect(await personal.get("linear")).toMatchObject({ accessToken: "personal-linear", source: { kind: "personal" } });
+      const org = (await h.sessionFor("sess-src3", orgMeta)).credentialProvider();
+      expect(await org.get("linear")).toMatchObject({ source: { kind: "app" } });
     });
 
     it("P4: with no share, team row, or approved share, the read ends at the app token", async () => {

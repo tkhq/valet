@@ -32,7 +32,7 @@
  * carry: `plugin-slack` declares `requires.orgCredential`, so the policy
  * covers it without naming it.
  */
-import { credentialSecret, type CredentialStore, type StoredCredential, type ValetPlugin } from "@valet/engine";
+import { credentialSecret, type CredentialSource, type CredentialStore, type StoredCredential, type ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { recordAppCredentialFallback, type AppFallbackReason } from "../observability/credential-metrics.js";
 import { findCredentialDeclaration } from "./integration-availability.js";
@@ -175,22 +175,35 @@ export async function resolveUserCredentialRead(
   service: string,
   orgFallback: OrgFallback,
 ): Promise<StoredCredential | null> {
-  if (isDeniedCredentialService(service)) return null;
+  return (await readUserCredential(deps, ctx, service, orgFallback)).credential;
+}
+
+/** `resolveUserCredentialRead`, plus whose account answered: the user's own
+ * row, the org row, or a 1Password item. */
+export async function readUserCredential(
+  deps: CredentialReadDeps,
+  ctx: UserReadCtx,
+  service: string,
+  orgFallback: OrgFallback,
+): Promise<{ credential: StoredCredential | null; source?: CredentialSource }> {
+  if (isDeniedCredentialService(service)) return { credential: null };
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
   const fromUser = await resolveRow(deps, userRow, ctx, "skip");
-  if (fromUser) return fromUser;
-  if (orgFallback === "none") return null;
+  if (fromUser) return { credential: fromUser, source: { kind: "personal" } };
+  if (orgFallback === "none") return { credential: null };
   // Skip the org read entirely when only a reference could qualify and no
   // 1Password service is wired. `CredentialStore.get` is NOT side-effect free:
   // `OAuthRefreshingCredentialStore` refreshes on read and writes the result
   // back under the owner it read, so an org read is an org write.
-  if (orgFallback === "reference-only" && !deps.onePassword) return null;
+  if (orgFallback === "reference-only" && !deps.onePassword) return { credential: null };
   // A plain org row stays invisible. An org-owned `linear` row carries
   // `metadata.webhookSecret` (`plugins/http-linear-connection.ts`), so returning the
   // whole row to every member's session would hand out the webhook HMAC.
   // With no row to answer, the read falls through to the vault lookup.
   const fromOrg = await readOrgRow(deps, ctx, service, "skip", (row) => orgFallback === "org-provided" || !!onePasswordMeta(row));
-  return fromOrg === ABSENT ? lookupInOnePassword(deps, ctx, service) : fromOrg;
+  if (fromOrg !== ABSENT) return fromOrg ? { credential: fromOrg, source: { kind: "org" } } : { credential: null };
+  const fromVault = await lookupInOnePassword(deps, ctx, service);
+  return fromVault ? { credential: fromVault, source: { kind: "vault" } } : { credential: null };
 }
 
 /**
@@ -540,7 +553,7 @@ export async function readTeamCredential(
   ctx: TeamReadCtx,
   service: string,
   orgFallback: OrgFallback,
-): Promise<{ credential: StoredCredential | null; approvalFrom?: string }> {
+): Promise<{ credential: StoredCredential | null; source?: CredentialSource; approvalFrom?: string }> {
   if (isDeniedCredentialService(service)) return { credential: null };
   const scopes = (ctx.scopes ?? onePasswordScopesFor("team", ctx.teamId)).filter((scope) => scope !== "personal");
   const readCtx = { orgId: ctx.orgId, teamId: ctx.teamId, userId: ctx.userId ?? "", scopes };
@@ -558,7 +571,7 @@ export async function readTeamCredential(
 
   if (ctx.userId && sharers.includes(ctx.userId)) {
     const own = await fromShare(ctx.userId);
-    if (own) return { credential: own };
+    if (own) return { credential: own, source: { kind: "personal" } };
   }
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
   const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
@@ -566,14 +579,14 @@ export async function readTeamCredential(
   // and members' shares, still asking a share's member first. It stays the
   // last answer, so with nothing else the caller gets the provider's refusal.
   const deadTeam = fromTeam && isDeadConnection(fromTeam, Date.now()) ? fromTeam : null;
-  if (fromTeam && !deadTeam && !isUnusableOAuthCredential(fromTeam, Date.now())) return { credential: fromTeam };
+  if (fromTeam && !deadTeam && !isUnusableOAuthCredential(fromTeam, Date.now())) return { credential: fromTeam, source: { kind: "team" } };
   if (orgFallback !== "none") {
     if (orgFallback === "org-provided") {
       const fromOrg = await readOrgRow(deps, readCtx, service, "resolve");
-      if (fromOrg !== ABSENT && fromOrg) return { credential: fromOrg };
+      if (fromOrg !== ABSENT && fromOrg) return { credential: fromOrg, source: { kind: "org" } };
     }
     const fromVault = await lookupInOnePassword(deps, readCtx, service);
-    if (fromVault) return { credential: fromVault };
+    if (fromVault) return { credential: fromVault, source: { kind: "vault" } };
   }
   // A member who already approved comes before asking anyone new, so an
   // approval holds even when an older sharer is listed first.
@@ -582,14 +595,14 @@ export async function readTeamCredential(
   for (const [i, memberId] of others.entries()) {
     if (!approved[i]) continue;
     const borrowed = await fromShare(memberId);
-    if (borrowed) return { credential: borrowed };
+    if (borrowed) return { credential: borrowed, source: { kind: "shared", memberId } };
   }
   for (const [i, memberId] of others.entries()) {
     // Only an account that would actually answer is worth an approval.
     if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
   }
   if ((deadTeam || brokenShare) && await ctx.laterTier?.()) return { credential: null };
-  if (deadTeam) return { credential: deadTeam };
+  if (deadTeam) return { credential: deadTeam, source: { kind: "team" } };
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);
   return { credential: null };
