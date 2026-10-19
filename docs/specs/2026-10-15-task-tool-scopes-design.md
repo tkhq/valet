@@ -21,7 +21,7 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - Security driver nudges and stall reports intersect the session ceiling, thread focus, and durable continuation ceilings. They cannot recover broader access by starting a new turn or pruning queue history.
 - Continuations recheck all session thread ceilings when they claim a turn. The claim atomically persists the result on the queue item, closing races with newer scoped tasks and preserving scope for restart and signal readers.
 - A workflow report retains the starting member's authority. Private team run evidence still requires that member's access.
-- Workflow approval and completion reports inherit `originToolScope`, the starting task's authorization ceiling. The run's `toolScope` separately includes mutable thread focus.
+- Workflow approval and completion reports inherit `originToolScope`, the starting task's authorization ceiling. The run's `toolScope` is the same ceiling. The starting thread's focus stays with that thread, as it does for a child task.
 - An empty `originToolScope` records an unrestricted starting task. Older runs without this field retain their execution scope as the report ceiling.
 - A headless tool action has no mutable focus. Nested starts use its delegated execution scope as the origin ceiling.
 - A retry preserves both stored scopes. Legacy retries keep their execution scope as the report ceiling.
@@ -47,7 +47,7 @@ Exact action scopes still permit the internal account-discovery approval needed 
 Scopes constrain tools and brokered integration actions. They do not restrict network access from an explicitly allowed shell.
 Do not describe a tool scope as a sandbox firewall.
 
-A run started by a scoped task inherits its effective scope, including nested runs.
+A run started by a scoped task inherits its ceilings, not its thread focus, including nested runs.
 Its approval and completion reports can change from validate focus to repair focus within the captured origin ceiling.
 This change does not widen the run's execution scope or remove inherited authorization limits.
 Saving a definition does not bind future independent UI, schedule, event, or webhook runs to the authoring task's ceiling.
