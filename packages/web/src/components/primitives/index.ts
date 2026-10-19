@@ -1,3 +1,4 @@
+export * from "./control.js";
 export * from "./button.js";
 export * from "./input.js";
 export * from "./label.js";

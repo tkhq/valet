@@ -5,6 +5,7 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import { cn } from "~/lib/cn";
+import { CONTROL_SIZE, type ControlSize } from "./control.js";
 
 // The surface that every text field and native select shares: border, colors,
 // and focus ring. Each control sets its own width, because a select often sits
@@ -15,19 +16,25 @@ const FIELD_BASE =
   "focus-visible:border-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed " +
   "max-sm:rounded-xl max-sm:shadow-sm max-sm:hover:border-muted max-sm:focus-visible:border-moss max-sm:focus-visible:ring-4 max-sm:focus-visible:ring-moss-wash motion-reduce:transition-none";
 
-export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {}
+// A field takes its height from the shared control scale. On a phone, its text
+// is 16px, so iOS does not zoom on focus.
+const FIELD_SIZE: Record<ControlSize, string> = {
+  md: `${CONTROL_SIZE.md} px-3 max-sm:text-base`,
+  sm: `${CONTROL_SIZE.sm} px-2.5 max-sm:text-base`,
+};
 
+// The app does not use the native `size` attribute (a width in characters on an
+// input, a count of visible rows on a select), so the prop holds the visual size.
+export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "size"> {
+  size?: ControlSize;
+}
+
+/** A text, date, or number field. Use `size="sm"` in a toolbar or filter row. */
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { className, ...rest },
+  { className, size = "md", ...rest },
   ref,
 ) {
-  return (
-    <input
-      ref={ref}
-      className={cn(FIELD_BASE, "h-9 w-full px-3 text-sm max-sm:min-h-12 max-sm:text-base", className)}
-      {...rest}
-    />
-  );
+  return <input ref={ref} className={cn(FIELD_BASE, FIELD_SIZE[size], "w-full", className)} {...rest} />;
 });
 
 export interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {}
@@ -46,19 +53,8 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
   );
 });
 
-export type SelectSize = "md" | "sm";
-
-// On a phone, a select uses a 16px font, so iOS does not zoom on focus, and a
-// touch target of 44px or more.
-const SELECT_SIZE: Record<SelectSize, string> = {
-  md: "h-9 px-3 text-sm max-sm:min-h-12 max-sm:text-base",
-  sm: "h-8 px-2 text-xs max-sm:min-h-11 max-sm:text-base",
-};
-
-// The app does not use the native `size` attribute (the count of visible
-// rows), so the prop name holds the visual size.
 export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, "size"> {
-  size?: SelectSize;
+  size?: ControlSize;
 }
 
 /**
@@ -70,5 +66,5 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
   { className, size = "md", ...rest },
   ref,
 ) {
-  return <select ref={ref} className={cn(FIELD_BASE, SELECT_SIZE[size], className)} {...rest} />;
+  return <select ref={ref} className={cn(FIELD_BASE, FIELD_SIZE[size], className)} {...rest} />;
 });

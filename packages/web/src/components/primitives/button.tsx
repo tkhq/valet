@@ -1,6 +1,7 @@
 import { Slot } from "@radix-ui/react-slot";
 import { forwardRef, type ButtonHTMLAttributes } from "react";
 import { cn } from "~/lib/cn";
+import { CONTROL_SIZE } from "./control.js";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
 type Size = "sm" | "md" | "lg" | "icon";
@@ -17,8 +18,8 @@ const VARIANT: Record<Variant, string> = {
 };
 
 const SIZE: Record<Size, string> = {
-  sm: "h-8 px-2.5 text-xs gap-1.5",
-  md: "h-9 px-3.5 text-sm gap-2",
+  sm: `${CONTROL_SIZE.sm} px-2.5 gap-1.5`,
+  md: `${CONTROL_SIZE.md} px-3.5 gap-2`,
   lg: "h-10 px-4 text-sm gap-2",
   // A square button that holds only an icon. Give it an aria-label.
   icon: "h-6 w-6 p-0 text-muted",

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "~/lib/cn";
+import { CONTROL_SIZE } from "./control.js";
 
 /**
  * A row of single-choice chips, such as a log's status filter or a tool's
@@ -26,7 +27,7 @@ export function FilterChips<T extends string>({ options, value, onChange, label,
             disabled={option.disabled}
             onClick={() => onChange(option.value)}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs transition-colors max-sm:min-h-11",
+              "inline-flex items-center gap-1.5 rounded-full border px-3 transition-colors", CONTROL_SIZE.sm,
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss",
               "disabled:cursor-not-allowed disabled:opacity-50",
               selected ? "border-ink bg-ink text-paper" : "border-line text-muted hover:border-muted hover:text-ink",
