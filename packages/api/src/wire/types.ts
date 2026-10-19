@@ -42,6 +42,9 @@ export interface AuthConfigResponse {
   stub: boolean;
   social: ("google" | "github")[];
   sso: { name: string } | null;
+  /** The configured public origin that generated file links use. Absent
+   * when the deployment has no public URL. */
+  publicOrigin?: string;
 }
 
 // ── REST: sessions ────────────────────────────────────────────────────────

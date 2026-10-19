@@ -10,12 +10,13 @@
  * paths between files, which a new tab cannot open.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const renderMermaidMock = vi.hoisted(() => vi.fn());
 vi.mock("~/lib/mermaid", () => ({ renderMermaid: renderMermaidMock }));
 
 import { Markdown, localDownloadHref } from "./markdown";
+import { setPublicOrigin } from "~/lib/public-origin";
 
 describe("Markdown", () => {
   function pointer(type: string, pointerId: number, clientX: number, clientY: number): Event {
@@ -198,27 +199,38 @@ describe("Markdown", () => {
       expect(anchor("sibling").target).toBe("_blank");
     });
 
-    it("opens a chat message's own generated download on this page's hostname, and leaves other links alone", () => {
-      const scope = { sessionId: "assistant:asst_1", threadId: "th-1" };
-      const file = "/api/sessions/assistant%3Aasst_1/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
+    it("opens a generated download on the public origin on this page's hostname, and leaves other links alone", () => {
+      const publicOrigin = "https://valet.example.com";
       const here = "https://valet.example.dev";
-      expect(localDownloadHref(`https://valet.example.com${file}`, scope, here)).toBe(file);
-      expect(localDownloadHref(`${here}${file}`, scope, here)).toBe(`${here}${file}`);
-      expect(localDownloadHref(`https://valet.example.com${file}?x=1`, scope, here)).toBe(`https://valet.example.com${file}?x=1`);
-      expect(localDownloadHref("https://example.com/x", scope, here)).toBe("https://example.com/x");
-      // Another conversation's file, or another deployment's, keeps its own host.
-      const other = "https://other-valet.example/api/sessions/s/threads/t/files/e9339072-c505-4142-a1e0-b568a2356986";
-      expect(localDownloadHref(other, scope, here)).toBe(other);
-
-      render(<Markdown fileScope={scope}>{`[Form.docx](https://valet.example.com${file}) and [Other.docx](${other})`}</Markdown>);
-      expect(anchor("Form.docx").getAttribute("href")).toBe(file);
-      expect(anchor("Other.docx").getAttribute("href")).toBe(other);
+      // A child session's file, relayed into a parent message: any conversation on this deployment.
+      const file = "/api/sessions/child_1/threads/th-child/files/e9339072-c505-4142-a1e0-b568a2356986";
+      expect(localDownloadHref(`${publicOrigin}${file}`, publicOrigin, here)).toBe(file);
+      // Another deployment with the same route shape keeps its host.
+      expect(localDownloadHref(`https://other-valet.example${file}`, publicOrigin, here)).toBe(`https://other-valet.example${file}`);
+      // Another path on the public origin, a query, or a non-HTTP scheme keeps its href.
+      expect(localDownloadHref(`${publicOrigin}/api/sessions/s/messages`, publicOrigin, here)).toBe(`${publicOrigin}/api/sessions/s/messages`);
+      expect(localDownloadHref(`${publicOrigin}${file}?x=1`, publicOrigin, here)).toBe(`${publicOrigin}${file}?x=1`);
+      expect(localDownloadHref(`ftp://valet.example.com${file}`, publicOrigin, here)).toBe(`ftp://valet.example.com${file}`);
+      // Without a public origin, or on the public hostname itself, nothing moves.
+      expect(localDownloadHref(`${publicOrigin}${file}`, null, here)).toBe(`${publicOrigin}${file}`);
+      expect(localDownloadHref(`${publicOrigin}${file}`, publicOrigin, publicOrigin)).toBe(`${publicOrigin}${file}`);
+      expect(localDownloadHref(file, publicOrigin, here)).toBe(file);
     });
 
-    it("keeps every href outside chat, where no conversation is given", () => {
-      const link = "https://valet.example.com/api/sessions/assistant%3Aasst_1/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
-      render(<Markdown>{`[Report.pdf](${link})`}</Markdown>);
-      expect(anchor("Report.pdf").getAttribute("href")).toBe(link);
+    it("moves a public-origin download in any rendered Markdown, such as a workflow report", () => {
+      const file = "/api/sessions/wf%3Arun_1%3Abuild/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
+      const other = `https://other-valet.example${file}`;
+      const view = render(<Markdown>{`[Report.pdf](https://valet.example.com${file}) and [Other.pdf](${other})`}</Markdown>);
+      // Before the app entry loads the public origin, links keep their href.
+      expect(anchor("Report.pdf").getAttribute("href")).toBe(`https://valet.example.com${file}`);
+      try {
+        act(() => setPublicOrigin("https://valet.example.com"));
+        expect(anchor("Report.pdf").getAttribute("href")).toBe(file);
+        expect(anchor("Other.pdf").getAttribute("href")).toBe(other);
+      } finally {
+        act(() => setPublicOrigin(null));
+        view.unmount();
+      }
     });
 
     it("routes a memory cross-reference in place instead of opening a tab", () => {

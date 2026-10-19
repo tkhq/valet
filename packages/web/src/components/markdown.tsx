@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
+import { usePublicOrigin } from "~/lib/public-origin";
 import { CodeBlock } from "./code-block";
 import { MermaidDiagram } from "./mermaid-diagram";
 
@@ -56,38 +57,24 @@ export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** A download that `file_attach` created (`services/generated-files.ts`).
- * The path names the session and thread that own the file. */
-const GENERATED_FILE_PATH = /^\/api\/sessions\/([^/]+)\/threads\/([^/]+)\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A download that `file_attach` created (`services/generated-files.ts`). */
+const GENERATED_FILE_PATH = /^\/api\/sessions\/[^/]+\/threads\/[^/]+\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** The conversation a chat message belongs to. Its own generated downloads
- * open on the hostname of this page. */
-export interface FileScope { sessionId: string; threadId: string }
-
-function decoded(segment: string): string | null {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return null;
-  }
-}
-
-/** A generated download from this conversation, moved to the hostname of
- * this page. A deployment can serve the app on more than one hostname, and
- * the tool links its configured public one. A sign-in belongs to one
+/** A generated download on this deployment's public origin, moved to the
+ * hostname of this page. A deployment can serve the app on more than one
+ * hostname, and `file_attach` links the public one. A sign-in belongs to one
  * hostname, so a person signed in on another one got a 401 from the link.
- * A link to any other file or site keeps its href. Exported for tests. */
-export function localDownloadHref(href: string | undefined, scope: FileScope, origin = window.location.origin): string | undefined {
-  if (!href) return href;
+ * A link on any other origin keeps its href. Exported for tests. */
+export function localDownloadHref(href: string | undefined, publicOrigin: string | null, origin = window.location.origin): string | undefined {
+  if (!href || !publicOrigin || publicOrigin === origin) return href;
   let url: URL;
   try {
-    url = new URL(href, origin);
+    url = new URL(href);
   } catch {
     return href;
   }
-  if (url.origin === origin || !["https:", "http:"].includes(url.protocol) || url.search || url.hash) return href;
-  const match = GENERATED_FILE_PATH.exec(url.pathname);
-  return match && decoded(match[1]) === scope.sessionId && decoded(match[2]) === scope.threadId ? url.pathname : href;
+  if (url.origin !== publicOrigin || url.search || url.hash) return href;
+  return GENERATED_FILE_PATH.test(url.pathname) ? url.pathname : href;
 }
 
 /** True for a click the browser would handle as a plain same-tab
@@ -113,14 +100,12 @@ export function Markdown({
   children,
   className,
   memoryLinks,
-  fileScope,
 }: {
   children: string;
   className?: string;
   memoryLinks?: MemoryLinkHandling;
-  /** A chat message's conversation. Only chat passes it. */
-  fileScope?: FileScope;
 }) {
+  const publicOrigin = usePublicOrigin();
   return (
     <div
       className={cn(
@@ -201,7 +186,7 @@ export function Markdown({
               );
             }
             return (
-              <a href={fileScope ? localDownloadHref(href, fileScope) : href} target="_blank" rel="noopener noreferrer" {...rest}>
+              <a href={localDownloadHref(href, publicOrigin)} target="_blank" rel="noopener noreferrer" {...rest}>
                 {children}
               </a>
             );

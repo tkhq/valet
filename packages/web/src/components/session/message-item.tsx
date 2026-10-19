@@ -8,7 +8,7 @@ import type {
   MessageReplyReference,
 } from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
-import { Markdown, type FileScope } from "~/components/markdown";
+import { Markdown } from "~/components/markdown";
 import { CodeBlock } from "~/components/code-block";
 import { CopyButton } from "./tool-renderers/tool-shell";
 import { pickRenderer, ToolShell } from "./tool-renderers";
@@ -71,7 +71,6 @@ export const MessageItem = memo(function MessageItem({
 }) {
   if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
-  const fileScope: FileScope | undefined = message.threadId ? { sessionId: message.sessionId, threadId: message.threadId } : undefined;
   const collapseStructured = message.role === "assistant" && message.completed === true &&
     message.stopReason !== "error" && !message.settledOutcome;
   const copyText = messageCopyText(message);
@@ -135,7 +134,7 @@ export const MessageItem = memo(function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} fileScope={fileScope} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} collapseStructured={collapseStructured} />
             )}
             {message.parts.map((part, i) => (
               // Tool cards hold per-mount UI state (expansion, user-touch
@@ -149,7 +148,6 @@ export const MessageItem = memo(function MessageItem({
                 part={part}
                 skillMeta={isUser ? message.skill : undefined}
                 detectSkill={isUser}
-                fileScope={fileScope}
                 collapseStructured={collapseStructured}
               />
             ))}
@@ -252,17 +250,15 @@ function PartView({
   skillMeta,
   detectSkill,
   collapseStructured,
-  fileScope,
 }: {
   part: MessagePart;
-  fileScope?: FileScope;
   skillMeta?: MessageSkillInvocation;
   detectSkill?: boolean;
   collapseStructured?: boolean;
 }) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} fileScope={fileScope} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} collapseStructured={collapseStructured} />;
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
@@ -275,10 +271,8 @@ function TextBlock({
   skillMeta,
   detectSkill = false,
   collapseStructured = false,
-  fileScope,
 }: {
   text: string;
-  fileScope?: FileScope;
   /** Wire skill stamp from the enclosing message (user messages only). */
   skillMeta?: MessageSkillInvocation;
   /** True only for user messages — the dispatcher writes skill blocks
@@ -302,11 +296,11 @@ function TextBlock({
     return (
       <>
         <SkillInvocationBlock block={block} />
-        {block.rest && <Markdown fileScope={fileScope}>{block.rest}</Markdown>}
+        {block.rest && <Markdown>{block.rest}</Markdown>}
       </>
     );
   }
-  return <Markdown fileScope={fileScope}>{text}</Markdown>;
+  return <Markdown>{text}</Markdown>;
 }
 
 interface StructuredText {
