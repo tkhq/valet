@@ -2076,8 +2076,9 @@ describe("GET /api/events/filter-options", () => {
         },
       },
     };
-    api = await bootTestApi({ plugins: [emptyPlugin] });
-    const read = async () => (await (await fetch(`${api.baseUrl}/api/events/filter-options?source=fixture.unconnected`)).json()) as {
+    const a = await bootTestApi({ plugins: [emptyPlugin] });
+    api = a;
+    const read = async () => (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.unconnected`)).json()) as {
       options: unknown[];
       reason?: string;
     };
