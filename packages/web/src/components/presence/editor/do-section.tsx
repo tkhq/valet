@@ -1,7 +1,8 @@
 /**
  * The editor's **Do** section (docs/specs/2026-10-16-presence-hub-design.md
- * Part H step 4): three cards, the instructions with `Insert a detail from
- * the event`, the workflow picker, and the assistant choice when the
+ * Part H step 4): three cards, the instructions, the workflow picker with a
+ * routine's run input under Advanced, the event message under Advanced with
+ * `Insert a detail from the event`, and the assistant choice when the
  * workspace offers more than one.
  */
 import { useId, useRef } from "react";
@@ -18,7 +19,7 @@ import {
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { WorkflowNames } from "../sentences";
-import type { AssistantKind, DoKind, Draft, EditorMode } from "./draft";
+import { parseRunInput, type AssistantKind, type DoKind, type Draft, type EditorMode } from "./draft";
 
 /** One assistant the reader may pick. */
 export interface AssistantOption {
@@ -89,6 +90,9 @@ export function DoSection({
   const box = useRef<HTMLTextAreaElement>(null);
   const routine = draft.service === "schedule";
   const stored = mode.kind !== "create";
+  // The team Slack setup fixes the team's assistant.
+  const fixedTeam = mode.kind === "create" && mode.preselected?.team !== undefined;
+  const runInputBad = parseRunInput(draft.runInput).kind === "bad";
   const assistant = draft.doKind !== "workflow";
   const required = routine && assistant;
 
@@ -172,6 +176,26 @@ export function DoSection({
           {workflows.length === 0 && (
             <p className="text-xs text-muted">You have no workflows yet. Make one on the Workflows page, then come back.</p>
           )}
+          {routine && (
+            <details className="mt-1 text-sm" open={draft.runInput.trim().length > 0}>
+              <summary className="cursor-pointer text-xs text-muted hover:text-ink">Advanced</summary>
+              <div className="mt-2 grid gap-1">
+                <Label htmlFor={`${id}-run-input`}>Run input (JSON)</Label>
+                <Textarea
+                  id={`${id}-run-input`}
+                  rows={3}
+                  value={draft.runInput}
+                  onChange={(e) => onChange({ ...draft, runInput: e.target.value })}
+                  placeholder={'{"env": "prod"}'}
+                  aria-invalid={runInputBad}
+                  className="font-mono text-xs"
+                />
+                {runInputBad
+                  ? <p role="alert" className="text-xs text-danger-500">The run input is not valid JSON. Fix it, or empty the field.</p>
+                  : <p className="text-xs text-muted">The workflow receives this input on each run. Leave it empty to send none.</p>}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
@@ -233,7 +257,7 @@ export function DoSection({
               <input
                 type="radio"
                 name={`${id}-assistant`}
-                disabled={stored}
+                disabled={stored || (fixedTeam && a.value !== "team")}
                 checked={draft.assistant === a.value}
                 onChange={() => onChange({ ...draft, assistant: a.value, teamId: a.teamId ?? null, where: null, whereChosen: false, whereTitle: undefined })}
               />

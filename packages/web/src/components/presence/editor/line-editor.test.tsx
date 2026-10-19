@@ -236,6 +236,8 @@ describe("LineEditor", () => {
     expect(summary("when")).toContain("mentions Valet");
     fireEvent.click(screen.getByRole("button", { name: "Change Do" }));
     expect((screen.getByRole("radio", { name: "Platform's assistant" }) as HTMLInputElement).checked).toBe(true);
+    // The setup fixes the team's assistant: the other choices are off.
+    expect((screen.getByRole("radio", { name: "Your assistant" }) as HTMLInputElement).disabled).toBe(true);
   });
 
   it("follows one Slack thread from a pasted link, with the old wizard's body", () => {
@@ -300,6 +302,48 @@ describe("LineEditor", () => {
     expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
     fireEvent.click(screen.getByLabelText("A check completes"));
     expect(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]')).toBeNull();
+  });
+
+  describe("a workflow routine's run input", () => {
+    const WORKFLOW_ROUTINE = routine("S9", {
+      name: "Nightly triage",
+      workflowId: "wf_1",
+      detail: { targetKind: "workflow", prompt: undefined, input: { env: "prod" } },
+    });
+
+    it("shows the stored input and saves an edit", () => {
+      renderEditor({ kind: "edit-routine", routine: WORKFLOW_ROUTINE, initialSection: "do" });
+      const field = screen.getByLabelText("Run input (JSON)") as HTMLTextAreaElement;
+      expect(JSON.parse(field.value)).toEqual({ env: "prod" });
+      fireEvent.change(field, { target: { value: '{"env": "staging"}' } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      const { body } = updateSchedule.mock.calls[0]?.[0] as { body: UpdateWorkflowScheduleRequest };
+      expect(body).toEqual({ input: { env: "staging" } });
+    });
+
+    it("clears the stored input when the field is emptied", () => {
+      renderEditor({ kind: "edit-routine", routine: WORKFLOW_ROUTINE, initialSection: "do" });
+      fireEvent.change(screen.getByLabelText("Run input (JSON)"), { target: { value: "" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      const { body } = updateSchedule.mock.calls[0]?.[0] as { body: UpdateWorkflowScheduleRequest };
+      expect(body).toEqual({ input: null });
+    });
+
+    it("blocks Save while the input is not valid JSON", () => {
+      renderEditor({ kind: "edit-routine", routine: WORKFLOW_ROUTINE, initialSection: "do" });
+      fireEvent.change(screen.getByLabelText("Run input (JSON)"), { target: { value: "{env" } });
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.getByText("The run input is not valid JSON.")).toBeTruthy();
+    });
+
+    it("sends the input on create", () => {
+      renderEditor({ kind: "create", preselected: { schedule: true, workflowId: "wf_1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Change Do" }));
+      fireEvent.change(screen.getByLabelText("Run input (JSON)"), { target: { value: '{"env": "prod"}' } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      const body = createSchedule.mock.calls[0]?.[0] as CreateWorkflowScheduleRequest;
+      expect(body.target).toEqual({ kind: "workflow", workflowId: "wf_1", input: { env: "prod" } });
+    });
   });
 
   it("closes on Esc at once with no changes (Review Focus 5)", () => {

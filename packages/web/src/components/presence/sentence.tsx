@@ -10,6 +10,9 @@
  */
 import { Fragment } from "react";
 import { Ref } from "./ref";
+
+/** The pull on glued punctuation: the token's right padding (`TOKEN_PAD_X`), in em, so the gap closes at every size. */
+export const GLUE_PULL = "-ml-[0.4em]";
 import type { SentencePart } from "./sentences";
 
 /**
@@ -53,8 +56,8 @@ const CLOSING = /^[,.:;!?)]+/;
 /**
  * A sentence of parts. A text part that starts with punctuation after a
  * token has its punctuation glued to the token: no whitespace between the
- * two, one unbreakable span, and the punctuation tucked against the token's
- * padding, so a line never starts with a comma.
+ * two, one unbreakable span, and the punctuation pulled back by the token's
+ * right padding, so a line never starts with a comma.
  */
 export function Sentence({ parts, links = true }: { parts: readonly SentencePart[]; links?: boolean }) {
   const keys = partKeys(parts);
@@ -78,7 +81,7 @@ export function Sentence({ parts, links = true }: { parts: readonly SentencePart
               ? (
                 <span data-glued="" className="whitespace-nowrap">
                   <SentencePartView part={part} links={links} />
-                  <span className="-ml-0.5">{glued}</span>
+                  <span data-glue="" className={GLUE_PULL}>{glued}</span>
                 </span>
               )
               : <SentencePartView part={part} links={links} />}

@@ -193,13 +193,13 @@ describe("AttentionBanner", () => {
   });
 
   it("names the scheduler's fix for a routine whose workflow was deleted, with an Edit link (Review Focus 3)", () => {
-    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    const reason = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
     const gone: Routine = { ...S2, workflowId: "wf-gone", detail: { ...S2.detail, targetKind: "workflow", disabledReason: reason } };
     const [fault] = faultsOf({ rules: [], triggers: [gone], log: [], places: [], titles: {}, now: 0 }).faults;
     if (fault === undefined) throw new Error("The routine has no fault.");
     renderBanner([fault]);
     const banner = screen.getByRole("region", { name: "Needs attention" });
-    expect(within(banner).getByText("Morning summary is off: Its workflow was deleted. Edit the routine and pick another workflow.")).toBeTruthy();
+    expect(within(banner).getByText("Morning summary is off: Its workflow was deleted. Delete this routine and make a new one with another workflow.")).toBeTruthy();
     expect(within(banner).getByRole("link", { name: "Edit" }).getAttribute("href")).toBe("/presence/routines/S2");
   });
 

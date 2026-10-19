@@ -301,7 +301,7 @@ describe("RoutinePage", () => {
   });
 
   it("shows a scheduler reason as written, with Edit to fix it", async () => {
-    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    const reason = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
     listWorkflowTriggers.mockResolvedValue({
       triggers: [routine("S1", { enabled: false, workflowId: "wf-gone", detail: { targetKind: "workflow", disabledReason: reason } })],
     });

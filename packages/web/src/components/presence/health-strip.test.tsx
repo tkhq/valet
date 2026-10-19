@@ -58,6 +58,18 @@ describe("HealthStrip", () => {
     expect(bars()[29]?.getAttribute("title")).toBe("1 fired");
   });
 
+  it("marks each fact with a data-fact hook", () => {
+    const { container } = render(
+      <HealthStrip lastAt={null} count={2} perDay={[]} fault={{ title: "Needs attention", detail: "Pin archived" }} labels={{ last: "last acted" }} />,
+    );
+    const facts = [...container.querySelectorAll("[data-fact]")].map((el) => [
+      el.getAttribute("data-fact"),
+      el.querySelector("[data-fact-value]")?.textContent,
+      el.querySelector("[data-fact-label]")?.textContent,
+    ]);
+    expect(facts).toEqual([["last", "never", "last acted"], ["count", "2", "times in 30 days"], ["fault", "Needs attention", "Pin archived"]]);
+  });
+
   it("hides the count when the history does not record it", () => {
     render(<HealthStrip lastAt={null} count={null} perDay={[]} labels={{ last: "last fired" }} />);
     expect(screen.queryByText("times in 30 days")).toBeNull();

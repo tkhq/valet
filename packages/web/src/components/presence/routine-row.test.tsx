@@ -140,7 +140,7 @@ describe("RoutineRosterRow", () => {
   });
 
   it("shows a scheduler reason as written, with no picker button", () => {
-    const reason = "Its workflow was deleted. Edit the routine and pick another workflow.";
+    const reason = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
     renderRow(weekdayRoutine({ disabledReason: reason }));
     const row = screen.getByRole("region", { name: "Morning summary" });
     expect(within(row).getByText(reason)).toBeTruthy();

@@ -38,7 +38,9 @@ function KindGlyph({ kind }: { kind: Exclude<RefKind, "place"> }) {
   return <svg {...common}><circle cx="12" cy="8" r="4" /><path d="M4 21c1-4 4-6 8-6s7 2 8 6" /></svg>;
 }
 
-const TOKEN = "inline-flex items-center gap-1 rounded-[5px] bg-ink-wash px-1.5 font-medium text-ink whitespace-nowrap align-baseline";
+/** The pill's side padding, in em so it scales with the sentence's size. `Sentence` pulls closing punctuation back by the same amount. */
+export const TOKEN_PAD_X = "px-[0.4em]";
+const TOKEN = `inline-flex items-center gap-1 rounded-[5px] bg-ink-wash ${TOKEN_PAD_X} font-medium text-ink whitespace-nowrap align-baseline`;
 const LINK = "no-underline hover:bg-moss-wash hover:text-accent-600";
 
 export function Ref({

@@ -23,6 +23,8 @@ export function useLineActivity(id: string) {
     queryFn: ({ pageParam }): Promise<LineActivityResponse> =>
       api.getLineActivity(id, { limit: LINE_ACTIVITY_PAGE, ...(pageParam !== undefined ? { before: pageParam } : {}) }),
     getNextPageParam: (page) => page.nextCursor ?? undefined,
+    // A line's page has no live feed; a 30 s poll shows new acted and
+    // skipped entries while the page stays open, at one cheap read.
     refetchInterval: 30_000,
   });
 }

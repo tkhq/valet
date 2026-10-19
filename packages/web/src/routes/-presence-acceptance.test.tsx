@@ -229,7 +229,7 @@ const S1: WorkflowTriggerItem = {
   },
 };
 /** P15: a routine the scheduler turned off because its workflow was deleted. */
-const DELETED_WORKFLOW = "Its workflow was deleted. Edit the routine and pick another workflow.";
+const DELETED_WORKFLOW = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
 const S_OFF: WorkflowTriggerItem = {
   kind: "schedule", id: "S-off", workflowId: "wf-gone", name: "Nightly report", enabled: false,
   detail: {
@@ -788,11 +788,17 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     expect((await status.findByText("set up by", { exact: false })).textContent).toMatch(/^set up by U One /);
     expect(status.getByRole("switch", { name: "Turn off CI failures" }).parentElement?.textContent).toBe("On");
     expect(status.getByRole("button", { name: "Edit" })).toBeTruthy();
-    const health = within(await screen.findByRole("region", { name: "Health" }));
+    const healthRegion = await screen.findByRole("region", { name: "Health" });
+    const health = within(healthRegion);
+    /** A health fact's value and label, read through its `data-fact` hook. */
+    const fact = (name: "last" | "count" | "fault") => {
+      const el = healthRegion.querySelector(`[data-fact="${name}"]`);
+      return [el?.querySelector("[data-fact-value]")?.textContent, el?.querySelector("[data-fact-label]")?.textContent];
+    };
     // R4 never delivered: its only acted entry dead-lettered.
-    expect(health.getByText("last acted").previousElementSibling?.textContent).toBe("never");
-    expect(health.getByText("times in 30 days").previousElementSibling?.textContent).toBe("0");
-    expect(health.getByText("Needs attention").nextElementSibling?.textContent).toBe("Platform CI is archived");
+    expect(fact("last")).toEqual(["never", "last acted"]);
+    expect(fact("count")).toEqual(["0", "times in 30 days"]);
+    expect(fact("fault")).toEqual(["Needs attention", "Platform CI is archived"]);
     const pulse = health.getByRole("img", { name: "Activity over the last 30 days" });
     expect(pulse.children).toHaveLength(30);
     expect(pulse.lastElementChild?.className).toContain("bg-moss");
@@ -1063,7 +1069,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     mountApp("/presence/rules/R4");
     const status = within(await screen.findByRole("region", { name: "CI failures" }));
     const health = await screen.findByRole("region", { name: "Health" });
-    expect(within(health).getByText("Needs attention")).toBeTruthy();
+    expect(health.querySelector('[data-fact="fault"] [data-fact-value]')?.textContent).toBe("Needs attention");
 
     // The editor opens full height with every section summarized and the
     // side pane reading the current sentence.
@@ -1096,7 +1102,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     await waitFor(() => expect(patches).toEqual([{ id: "R4", body: { thread: { mode: "own" } } }]));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "CI failures" })).toBeNull());
     expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in its own thread." })).toBeTruthy();
-    await waitFor(() => expect(within(screen.getByRole("region", { name: "Health" })).queryByText("Needs attention")).toBeNull());
+    await waitFor(() => expect(screen.getByRole("region", { name: "Health" }).querySelector('[data-fact="fault"]')).toBeNull());
   });
 
   it("P20: Add, then A reply in one Slack thread and a pasted link, reads the thread follow", { timeout: 30_000 }, async () => {

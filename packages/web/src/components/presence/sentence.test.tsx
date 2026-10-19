@@ -10,7 +10,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ),
 }));
 
-import { Sentence } from "./sentence";
+import { GLUE_PULL, Sentence } from "./sentence";
+import { TOKEN_PAD_X } from "./ref";
 import type { SentencePart } from "./sentences";
 
 const parts: SentencePart[] = [
@@ -53,6 +54,10 @@ describe("Sentence", () => {
     expect(glued.map((span) => span.textContent)).toEqual(["acme/web,", "Platform CI."]);
     // The token and its punctuation are adjacent nodes: no text node between them.
     for (const span of glued) expect([...span.childNodes].some((n) => n.nodeType === Node.TEXT_NODE)).toBe(false);
+    // The pull equals the pill's right padding, in em, so it holds at any font size.
+    expect(TOKEN_PAD_X).toBe("px-[0.4em]");
+    for (const glue of container.querySelectorAll("[data-glue]")) expect(glue.className).toBe(GLUE_PULL);
+    expect(GLUE_PULL).toBe("-ml-[0.4em]");
   });
 
   it("renders tokens without links when asked", () => {

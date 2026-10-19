@@ -108,7 +108,7 @@ pin.
 | P12 | Visit `/events?tab=subscriptions`, `/events/<eventId>`, `/channel?key=slack:C900`, `/presence/listeners/<id>`, `/presence/routines`, `/presence/routines?routine=<id>`, `/presence/workflows`, `/presence/runs/<runId>`. | Each redirects: the first three into Presence, `/presence/listeners/<id>` to `/presence/rules/<id>`, `/presence/routines` to `/presence`, `/presence/routines?routine=<id>` to `/presence/routines/<id>`, the last two to `/workflows`. No URL returns a 404. |
 | P13 | Open a proposal from its `Proposed` row and press **Turn on**. | The page shows `Proposed by the assistant.` and, when the proposal replaces a line, `Turning it on turns off <name>.` **Turn on** opens the editor in review mode: every section summarized, the side pane note `Proposed by the assistant. Turning it on turns off Reviews and checks.`, and **Turn on** in place of **Save**. After the reader confirms, the line is on, its row reads its sentence without `Proposed`, and the line it replaces is off. |
 | P14 | As a user outside `sre`, open a `sre` line from the `sre` workspace. | On the overview row, the switch and the row menu's Edit, Appears as, and Delete are disabled. The line's page shows the `Team` mark, disables the switch, **Edit**, and **Delete**, hides the thread picker, and reads `Only members of SRE can change this.` |
-| P15 | Delete the workflow of a routine that runs a workflow, then let the routine fire. | The routine is off. The **Needs attention** banner reads `<name> is off: Its workflow was deleted. Edit the routine and pick another workflow.` with an `Edit` link to `/presence/routines/<id>`. |
+| P15 | Delete the workflow of a routine that runs a workflow, then let the routine fire. | The routine is off. The **Needs attention** banner reads `<name> is off: Its workflow was deleted. Delete this routine and make a new one with another workflow.` with an `Edit` link to `/presence/routines/<id>`. |
 | P16 | With Slack, GitHub, and Linear all not connected, click **Add**. | The editor's **When** opens on `On a schedule`. The Slack, GitHub, and Linear service choices are disabled, each with `Connect first`. The line under them reads `To use another service, connect it in Integrations.` and links to Integrations. |
 | P17 | On the `acme/api` place page, click **View all** under **Recent activity**. | `/presence/activity?place=github:acme/api` opens with the removable chip `In acme/api` and lists only events whose place is `acme/api` or inside it. Removing the chip lists every event again. |
 | P18 | On R4's page, choose the `Skipped` chip. | The timeline keeps only skipped entries, such as `Completed check on acme/web#8 → skipped, not for this line: the repository filter`, each with a hollow mark. Choosing `Acted` keeps only the acted entries. An organization admin also sees **Diagnostics**; a member does not. |
@@ -441,8 +441,9 @@ Pass criterion: all steps, in one run, from a clean start.
    scheduler disables a routine. The wire exposes `disabledReason` and the
    routine's owner. Each reason names its fix: the pin text for an
    undeliverable pin, `Its prompt is empty. Edit the routine and add a
-   prompt.`, `Its workflow was deleted. Edit the routine and pick another
-   workflow.`, or `Its schedule does not parse. Edit the routine and fix
+   prompt.`, `Its workflow was deleted. Delete this routine and make a
+   new one with another workflow.` (a routine's workflow cannot change),
+   or `Its schedule does not parse. Edit the routine and fix
    the schedule.` An enable clears any reason. An edit of the field a
    reason names also clears it: the schedule or its timezone for the
    schedule reason, and the prompt for the prompt reason. A thread change

@@ -41,11 +41,12 @@ export function barHeight(count: number, max: number): number {
   return Math.max(BAR_MIN, Math.round((count / max) * BAR_MAX));
 }
 
-function Fact({ value, label, danger = false }: { value: string; label: string; danger?: boolean }) {
+/** One fact of the strip. `data-fact` names it for tests and tools; `data-fact-value` and `data-fact-label` mark its two lines. */
+function Fact({ fact, value, label, danger = false }: { fact: "last" | "count" | "fault"; value: string; label: string; danger?: boolean }) {
   return (
-    <div className="min-w-0">
-      <p className={cn("text-lg font-medium leading-tight", danger ? "text-danger-500" : "text-ink")}>{value}</p>
-      <p className="text-[13px] text-muted [overflow-wrap:anywhere]">{label}</p>
+    <div data-fact={fact} className="min-w-0">
+      <p data-fact-value="" className={cn("text-lg font-medium leading-tight", danger ? "text-danger-500" : "text-ink")}>{value}</p>
+      <p data-fact-label="" className="text-[13px] text-muted [overflow-wrap:anywhere]">{label}</p>
     </div>
   );
 }
@@ -74,9 +75,9 @@ export function HealthStrip({
       aria-label="Health"
       className="grid grid-cols-2 items-center gap-x-6 gap-y-3 border-y border-line py-3.5 text-sm sm:grid-cols-[auto_auto_auto_1fr]"
     >
-      <Fact value={lastAt === null ? "never" : relativeTime(lastAt)} label={labels.last} />
-      {count !== null && <Fact value={String(count)} label="times in 30 days" />}
-      {fault !== undefined && <Fact value={fault.title} label={fault.detail} danger />}
+      <Fact fact="last" value={lastAt === null ? "never" : relativeTime(lastAt)} label={labels.last} />
+      {count !== null && <Fact fact="count" value={String(count)} label="times in 30 days" />}
+      {fault !== undefined && <Fact fact="fault" value={fault.title} label={fault.detail} danger />}
       <div
         role="img"
         aria-label="Activity over the last 30 days"

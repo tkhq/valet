@@ -100,6 +100,8 @@ export interface Draft {
   teamId: string | null;
   /** Who may mention a team assistant. Sent only for a team reply line. */
   audience: EventSubscriptionAudienceWire;
+  /** A workflow routine's run input, as JSON text. Empty sends no input. */
+  runInput: string;
   /** The line's standing instruction (`systemPrompt`), or the routine's prompt. */
   instructions: string;
   /** The event message template, under Advanced. */
@@ -202,6 +204,7 @@ export function newDraft(options: {
     assistant: teamId !== undefined ? "team" : "user",
     teamId: teamId ?? null,
     audience: "organization",
+    runInput: "",
     instructions: "",
     promptTemplates: { userPromptTemplate: "" },
     where: null,
@@ -243,6 +246,7 @@ export function draftFromLine(sub: EventSubscriptionWire, timezone = "UTC"): Dra
     assistant: assistant ? target.assistant ?? "user" : sub.ownerType === "team" ? "team" : sub.ownerType === "org" ? "org" : "user",
     teamId: assistant ? target.teamId ?? (sub.ownerType === "team" ? sub.ownerId : null) : null,
     audience: sub.audience ?? "organization",
+    runInput: "",
     instructions: assistant ? target.systemPrompt ?? "" : "",
     promptTemplates: { userPromptTemplate: assistant ? target.userPromptTemplate ?? "" : "" },
     where: assistant ? displayThreadPolicy(target, sub.eventKeys) : null,
@@ -277,6 +281,7 @@ export function draftFromRoutine(routine: Routine): Draft {
     assistant: detail.ownerType === "team" ? "team" : "user",
     teamId: detail.ownerType === "team" ? detail.ownerId : null,
     audience: "organization",
+    runInput: detail.input != null ? JSON.stringify(detail.input, null, 2) : "",
     instructions: detail.prompt ?? "",
     promptTemplates: { userPromptTemplate: "" },
     where: workflow ? null : detail.thread ?? { mode: "own" },
@@ -541,9 +546,22 @@ function patchLineBody(draft: Draft, sub: EventSubscriptionWire, review: boolean
   return review && !sub.enabled ? { ...body, enabled: true } : body;
 }
 
+/** The run input text as JSON: `none` for an empty field, `bad` for text that does not parse. */
+export function parseRunInput(text: string): { kind: "none" } | { kind: "bad" } | { kind: "value"; value: unknown } {
+  if (text.trim().length === 0) return { kind: "none" };
+  try {
+    return { kind: "value", value: JSON.parse(text) };
+  } catch {
+    return { kind: "bad" };
+  }
+}
+
 function createRoutineBody(draft: Draft): CreateWorkflowScheduleRequest {
   const base = { name: draft.name.trim(), cron: scheduleCron(draft.schedule), timezone: draft.schedule.timezone.trim() };
-  if (draft.doKind === "workflow") return { ...base, target: { kind: "workflow", workflowId: draft.workflowId } };
+  if (draft.doKind === "workflow") {
+    const input = parseRunInput(draft.runInput);
+    return { ...base, target: { kind: "workflow", workflowId: draft.workflowId, ...(input.kind === "value" ? { input: input.value } : {}) } };
+  }
   const where = effectiveWhere(draft);
   return {
     ...base,
@@ -561,6 +579,13 @@ function patchRoutineBody(draft: Draft, routine: Routine): UpdateWorkflowSchedul
   if (name !== routine.name) body.name = name;
   if (cron !== detail.cron) body.cron = cron;
   if (draft.schedule.timezone !== detail.timezone) body.timezone = draft.schedule.timezone;
+  if (detail.targetKind === "workflow") {
+    // An emptied field clears the stored input with `null`.
+    const input = parseRunInput(draft.runInput);
+    const stored = detail.input ?? null;
+    if (input.kind === "value" && JSON.stringify(input.value) !== JSON.stringify(stored)) body.input = input.value;
+    if (input.kind === "none" && stored !== null) body.input = null;
+  }
   if (detail.targetKind === "assistant") {
     if (draft.instructions.trim() !== (detail.prompt ?? "")) body.prompt = draft.instructions.trim();
     const where = effectiveWhere(draft);
@@ -768,6 +793,7 @@ export function saveBlocker(draft: Draft, mode: EditorMode, context: { connected
     }
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
+  if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";
   if (draft.doKind !== "workflow" && effectiveWhere(draft) === null) return "Pick a thread for Where, or choose another option.";
   if (routine && draft.doKind !== "workflow" && draft.instructions.trim().length === 0) return "Give the routine instructions.";
   if (!routine) {
