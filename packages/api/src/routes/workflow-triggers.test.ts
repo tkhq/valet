@@ -427,7 +427,7 @@ describe("POST /api/workflows/schedules/:id/run", () => {
 // ── 9. POST/PATCH/DELETE /api/workflows/event-triggers round trip + 400 ──
 
 describe("event-trigger CRUD", () => {
-  it("PATCH 404 error body contains corrective suffix", async () => {
+  it("PATCH and DELETE 404 with text that names the fix", async () => {
     const a = await boot();
     const res = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_missing`, {
       method: "PATCH",
@@ -436,7 +436,11 @@ describe("event-trigger CRUD", () => {
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Confirm the id");
+    expect(body.error).toBe("This routine was not found. Refresh Presence and try again.");
+    // Review A7: DELETE answers with the same text.
+    const gone = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_missing`, { method: "DELETE" });
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toEqual({ error: "This routine was not found. Refresh Presence and try again." });
   });
 
   it("stores the trigger appearance under workflow ownership and rejects invalid identity", async () => {
@@ -941,7 +945,7 @@ describe("GET /api/workflows/{triggers,runs}?ownerType=&ownerId=", () => {
 });
 
 describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
-  const NO_SUBJECT = "These events have no natural thread. Pick Runs in: its own thread or a new thread.";
+  const NO_SUBJECT = "These events have no natural thread. Pick another choice under Where: its own thread or a new thread.";
 
   async function createSchedule(a: TestApi, thread: unknown, target: unknown = { kind: "assistant", prompt: "Summarize the morning" }): Promise<Response> {
     return fetch(`${a.baseUrl}/api/workflows/schedules`, {

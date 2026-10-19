@@ -212,7 +212,7 @@ export async function deliverToAssistantThread(
       throw new PinUnavailableError();
     }
     if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, destination.sessionId))) {
-      throw new Error("The original conversation is unavailable. Restore its owner before retrying delivery.");
+      throw new Error("The original conversation is unavailable. Restore its owner, then redeliver the event.");
     }
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, destination.sessionId),
       eq(agentSessions.orgId, args.orgId), eq(agentSessions.ownerType, args.owner.type), eq(agentSessions.ownerId, args.owner.id))).limit(1);
@@ -247,14 +247,14 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
     WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
     LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
   if (result.rows.length === 0) return null;
-  if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
+  if (result.rows.length !== 1) throw new Error("This event reached its thread more than once. Check the thread's messages, then redeliver the event if one is missing.");
   const prior = result.rows[0]!;
   if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
-    throw new Error("The original event owner differs from this delivery. Inspect its line before retrying delivery.");
+    throw new Error("The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
   }
   const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
   if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {
-    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
   }
   // First channel admissions include fetched history. Compare the original
   // signal beneath that known wrapper without fetching mutable history again.
@@ -264,11 +264,11 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   const expected: unknown = JSON.parse(JSON.stringify({ ...args.signal, tagName: args.signal.tagName ?? "signal" }));
   const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
   if (!isDeepStrictEqual({ ...content, body, tagName }, expected)) {
-    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
   }
   if (prior.status !== "settled") {
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
-    if (!row || row.status === "deleted") throw new Error("The original event session was deleted. Inspect its submission before retrying delivery.");
+    if (!row || row.status === "deleted") throw new Error("The session that first took this event was deleted. Pick another thread in Presence, then redeliver the event.");
     // Session recovery already owns queued, interrupted, and approval-blocked
     // work. Restoring it never requires another prompt admission here.
     await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
@@ -320,9 +320,9 @@ async function deliverToAssistantThreadInner(
       orgId: args.orgId,
       reason: args.mismatchReason,
       conversationKey: args.dispatchId,
-      detail: `assistant session ${session.id} belongs to org ${data.orgId}, delivery belongs to org ${args.orgId}`,
+      detail: `The assistant session ${session.id} belongs to organization ${data.orgId}, and the event belongs to organization ${args.orgId}. Check the line's workspace.`,
     });
-    throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
+    throw new Error(`The assistant belongs to another organization (${data.orgId}, not ${args.orgId}). Check the line's workspace.`);
   }
   const destination = args.destination;
   const thread = destination.kind === "target" ? session.threadById(destination.threadId) : await deps.engineHost.ensureFreshThread(session, destination.key, {
@@ -330,20 +330,7 @@ async function deliverToAssistantThreadInner(
     orgId: data.orgId,
     workspace: data.workspace,
   }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
-  if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
-  // A pinned thread is not this rule's own thread, and other people may read
-  // it. A private channel recorded on it would hide it from every reader
-  // outside that channel, so the delivery dead-letters instead (spec
-  // Deviations, "Channel privacy follows content"). The write-time check
-  // (`thread-policy-write.ts`) covers channels the rule's filters name; this
-  // covers the rest, such as an any-channel rule.
-  if (args.slackChannel && destination.kind === "target" && destination.reason === "policy_existing") {
-    const data = thread.toThreadData();
-    const narrows = await recordingNarrowsThread({ db: deps.db, ...deps.slackAccess },
-      args.orgId, { ownerType: args.owner.type, sessionId: session.id, threadId: thread.id, key: data.key ?? null, recorded: recordedSlackChannels(data.metadata) },
-      args.slackChannel);
-    if (narrows) throw new PinUnavailableError(pinNarrowsMessage(args.slackChannel));
-  }
+  if (!thread) throw new Error("The original thread is unavailable. Restore it, then redeliver the event.");
   // Record the channel on a thread that already existed, and on a team
   // execution's governing thread, before the title seed and the context
   // fetch, so a reader outside a private channel never sees the content.
@@ -381,7 +368,7 @@ async function deliverToAssistantThreadInner(
   }
   if (destination.kind === "target") {
     if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, destination))) {
-      throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+      throw new Error("The original conversation was archived or deleted. Restore it, then redeliver the event.");
     }
   }
   // A person waits on an attended delivery, so its thread is a conversation

@@ -25,9 +25,7 @@ describe("subject filter (spec Part G)", () => {
 
   it("refuses an op the spec does not define for subject", () => {
     const error = validateSubscription([githubPlugin], { ...body, filters: [{ field: "subject", op: "contains", value: "lean-proofs" }] });
-    expect(error).toContain("subject");
-    expect(error).toContain("eq");
-    expect(error).toContain("prefix");
+    expect(error).toBe('A place condition matches only with "is" or "starts with", not "contains". Change how the condition matches.');
   });
 });
 
@@ -66,7 +64,7 @@ describe("thread policy (spec 2026-10-16: delivery threads, Part A)", () => {
 
   it("refuses subject when no selected event names a subject", () => {
     expect(validateSubscription([githubWithoutSubject], { ...body, target: { kind: "assistant", thread: { mode: "subject" } } }))
-      .toBe("These events have no natural thread. Pick Runs in: its own thread or a new thread.");
+      .toBe("These events have no natural thread. Pick another choice under Where: its own thread or a new thread.");
   });
 
   it("refuses a thread policy on a workflow target", () => {

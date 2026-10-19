@@ -1252,7 +1252,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     patchedTarget = { ...patchedTarget, appearance };
   }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
-    if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant." }, 400);
+    if (row.ownerType !== "user" || patchedTarget.kind !== "assistant") return c.json({ error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." }, 400);
     patchedTarget = { ...patchedTarget,
       ...(body.deliveryPolicy !== undefined ? { deliveryPolicy: body.deliveryPolicy } : {}),
       ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),

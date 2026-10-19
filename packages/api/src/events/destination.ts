@@ -96,6 +96,8 @@ function resolveByPolicy(input: DestinationInput): Destination {
     }
     // No plugin named a subject for this event (or this is a schedule, which
     // carries no event at all). Fall back to the rule's own thread.
+    // A stored stamp note that no reader shows.
+    // copy-lint: allow subject
     return { ...ownDestination(rule), note: "subject mode with no natural subject" };
   }
   // policy.mode === "own"

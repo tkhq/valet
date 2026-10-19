@@ -12,7 +12,7 @@ import { isPersonalThreadKey, recordingNarrowsThread, storedThreadRef, threadVis
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
 
-export const NO_SUBJECT_ERROR = "These events have no natural thread. Pick Runs in: its own thread or a new thread.";
+export const NO_SUBJECT_ERROR = "These events have no natural thread. Pick another choice under Where: its own thread or a new thread.";
 export const CROSS_OWNER_THREAD_ERROR = "This thread belongs to another owner. Pick a thread in your workspace.";
 export const ARCHIVED_THREAD_ERROR = "This thread is archived. Pick an open thread.";
 export const NOT_ASSISTANT_THREAD_ERROR =

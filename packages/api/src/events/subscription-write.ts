@@ -115,7 +115,7 @@ export function validateSubscription(
     // declared-field check below. The spec defines only eq and prefix for it.
     if (f.field === SUBJECT_FILTER_FIELD) {
       if (f.op !== "eq" && f.op !== "prefix") {
-        return `subject filter accepts only op eq or prefix, not ${f.op}`;
+        return `A place condition matches only with "is" or "starts with", not "${f.op}". Change how the condition matches.`;
       }
     } else if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
       return `filter field ${f.field} is not declared by any event selected by eventKeys`;
@@ -154,8 +154,8 @@ export function validateSubscription(
     return "workflow target requires workflowId";
   }
   if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
-    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant.";
-    if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown delivery policy.";
+    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant.";
+    if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown choice for when a team also listens. Pick one of the listed choices.";
     if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
   }
   if (target.kind === "assistant") {
@@ -177,7 +177,7 @@ export function validateSubscription(
       return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
     if (target.replaces !== undefined && (typeof target.replaces !== "string" || target.replaces.length === 0)) {
-      return "replaces must be the ID of the subscription this rule updates";
+      return "The line this proposal replaces was not found. Ask the assistant for a new proposal.";
     }
     // Both prompt templates are validated against the SELECTED catalog
     // entries, the same set a filter field is held to: a template addresses
@@ -242,7 +242,7 @@ export async function validateSubscriptionWrite(
   const error = validateSubscription(plugins, body);
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
-      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to a personal assistant line. Remove them, or point the line at your personal assistant." };
+      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." };
   const filters = body.filters as SubscriptionFilter[];
   // The audience is read on every write, including one that changes nothing
   // about the match: a patch may set it alone.

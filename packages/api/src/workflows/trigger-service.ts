@@ -131,7 +131,7 @@ export async function createWorkflowTrigger(
       // jsonb, so drizzle types the column `unknown`; the dag validator ran
       // before any definition reached the row.
       definition: owned.definition as WorkflowDefinition,
-      step: "create the trigger",
+      step: "save the line",
     });
     if (blocked) return { ok: false, error: blocked };
   }
@@ -197,7 +197,7 @@ export async function createWorkflowTrigger(
   }
 
   const trigger = rowToTrigger(insertedRow!);
-  if (!trigger) return { ok: false, error: "trigger insert produced an unexpected row shape" };
+  if (!trigger) return { ok: false, error: "The new line could not be read back. Refresh Presence and try again." };
   return { ok: true, trigger };
 }
 
@@ -285,7 +285,7 @@ export async function updateWorkflowTrigger(
 > {
   const { db, plugins } = deps;
   const accessible = await accessibleTriggerRow(db, owner, triggerId);
-  if (!accessible) return { ok: false, status: 404, error: "trigger not found" };
+  if (!accessible) return { ok: false, status: 404, error: "This routine was not found. Refresh Presence and try again." };
   const current = accessible.trigger;
 
   const name = patch.name ?? current.name;
@@ -326,7 +326,7 @@ export async function updateWorkflowTrigger(
     .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)))
     .returning();
   const trigger = rowToTrigger(updated[0]!);
-  if (!trigger) return { ok: false, status: 400, error: "trigger update produced an unexpected row shape" };
+  if (!trigger) return { ok: false, status: 400, error: "The changed line could not be read back. Refresh Presence and try again." };
   return { ok: true, trigger };
 }
 

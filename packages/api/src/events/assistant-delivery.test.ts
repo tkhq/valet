@@ -227,11 +227,11 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       destination: { kind: "target" as const, sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
       dispatchId: "event:pr-cutover", mismatchReason: "test" };
     await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id, recovered: true });
-    await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("different content");
+    await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
     expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
-    await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("original event owner differs");
+    await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
     // An identical ID in another organization must not resolve this receipt.
-    await expect(deliverToAssistantThread(deps, { ...args, orgId: "other-org" })).rejects.toThrow("original conversation is unavailable");
+    await expect(deliverToAssistantThread(deps, { ...args, orgId: "other-org" })).rejects.toThrow("The original conversation is unavailable. Restore its owner, then redeliver the event.");
   });
 
   it("restores the exact private PR thread and refuses deliveries archived while queued", async () => {

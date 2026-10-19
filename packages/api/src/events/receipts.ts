@@ -80,7 +80,7 @@ export function destinationReceiptStage(
   outcome: { kind: "key"; key: string; reason: string } | { kind: "target"; sessionId: string; threadId: string; reason: string }
     | { kind: "skip"; reason: string; outcome?: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string },
 ): { stage: string; outcome: string; detail: string } {
-  const prefix = `Subscription ${ids.subscriptionId}, delivery ${ids.deliveryId}:`;
+  const prefix = `Line ${ids.subscriptionId}, ${destinationStageMarker(ids.deliveryId)}`;
   switch (outcome.kind) {
     case "key": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} thread key ${outcome.key}.` };
     case "target": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} session ${outcome.sessionId}, thread ${outcome.threadId}.` };
@@ -115,5 +115,5 @@ export async function appendReceiptStageForEvent(
 
 /** The text that names one delivery in its `destination` stage, for `onceFor`. */
 export function destinationStageMarker(deliveryId: string): string {
-  return `delivery ${deliveryId}:`;
+  return `handoff ${deliveryId}:`;
 }

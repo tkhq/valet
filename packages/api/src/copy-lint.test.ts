@@ -1,13 +1,16 @@
 // INV-H2 (docs/specs/2026-10-16-presence-hub-design.md) for the api side:
 // the sentences the api sends to Presence use only the Terminology table's
 // words. This lint parses the event and workflow services and the events,
-// presence, and workflow-triggers routes. It reads each string literal or
-// template that starts with a capital letter and ends with a period: a sentence a reader sees,
-// such as an error or a reason. It fails on a banned word. A line that
+// presence, and workflow-triggers routes. It reads each string literal,
+// template, or `+` chain of them that holds a space, whatever its first
+// letter: text a reader may see, such as an error, a reason, or a stage
+// detail. It fails on a banned word. The banned words match the web lint
+// (`packages/web/src/components/presence/copy-lint.test.ts`). A line that
 // carries `// copy-lint: allow <word>` (on the line or the line before) may
-// use that word, for the few sentences that name a system value such as a
-// tool id. Comments, identifiers, and test files are not copy, and neither
-// are the files only the model reads (MODEL_FACING).
+// use that word, for the few texts that name a system value such as a tool
+// id or a stored text. Comments, identifiers, test files, log lines
+// (`console.*` arguments and text that opens with a `[tag]`), and the files
+// only the model reads (MODEL_FACING) are not copy.
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
@@ -19,8 +22,12 @@ const FILES = ["routes/events.ts", "routes/presence.ts", "routes/workflow-trigge
 /** Files whose sentences only the model reads: tool descriptions, tool
  * results, and thread prompts. They name tool ids such as
  * `events.list_subscriptions`, so the system words stay. */
-const MODEL_FACING = new Set(["events/actions.ts", "workflows/actions.ts", "workflows/editor-thread-context.ts"]);
-const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
+const MODEL_FACING = new Set([
+  "events/actions.ts", "workflows/actions.ts", "workflows/editor-thread-context.ts",
+  // Workflow template prompts, and the run notes a workflow's agent reads.
+  "workflows/template-definitions.ts", "workflows/run-attention.ts", "workflows/run-follow-up.ts",
+]);
+const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter", "delivery", "receipt", "Runs in"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
 const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
 
@@ -45,10 +52,36 @@ function sourceFiles(): string[] {
   return files.filter((file) => !MODEL_FACING.has(relative(SRC, file))).sort();
 }
 
-/** A sentence a reader sees: it starts with a capital letter and ends with a period. */
+/** Text a reader may see: any text with a space in it. A text with no space
+ * is a code value (an event key, a column, a path, a discriminant). A text
+ * that opens with a `[tag]` is a log line. */
 function isSentence(text: string): boolean {
   const trimmed = text.trim();
-  return /^[A-Z]/.test(trimmed) && /\.$/.test(trimmed);
+  return /\s/.test(trimmed) && !trimmed.startsWith("[");
+}
+
+/** Whether a node is an argument of a `console.*` call: a log line, not copy. */
+function inConsoleCall(node: ts.Node): boolean {
+  for (let current = node.parent; current !== undefined; current = current.parent) {
+    if (ts.isCallExpression(current)) {
+      const callee = current.expression;
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "console") return true;
+    }
+  }
+  return false;
+}
+
+/** The text of a `+` chain of literals and templates, or null when a part is not text. */
+function chainText(node: ts.Expression): string | null {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isTemplateExpression(node)) return templateText(node);
+  if (ts.isParenthesizedExpression(node)) return chainText(node.expression);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = chainText(node.left);
+    const right = chainText(node.right);
+    return left === null || right === null ? null : left + right;
+  }
+  return null;
 }
 
 /** The text of a template with each substitution read as `X`. */
@@ -70,7 +103,7 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
   };
 
   const check = (node: ts.Node, text: string) => {
-    if (!isSentence(text)) return;
+    if (!isSentence(text) || inConsoleCall(node)) return;
     const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
     for (const match of text.matchAll(BANNED_RE)) {
       const word = match[1]!.toLowerCase();
@@ -80,6 +113,11 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
   };
 
   const visit = (node: ts.Node) => {
+    // A message split over a `+` chain reads as one text.
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const text = chainText(node);
+      if (text !== null) { check(node, text); return; }
+    }
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) check(node, node.text);
     else if (ts.isTemplateExpression(node)) check(node, templateText(node));
     ts.forEachChild(node, visit);
@@ -89,7 +127,7 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
 }
 
 describe("api Presence copy lint (INV-H2)", () => {
-  it("reads only sentences, and honors the allow comment", () => {
+  it("reads every text with a space, skips log lines, and honors the allow comment", () => {
     const hits = lintApiCopy(
       "sample.ts",
       [
@@ -98,12 +136,20 @@ describe("api Presence copy lint (INV-H2)", () => {
         'const c = `Edit the trigger for ${name}.`;',
         "// copy-lint: allow rule",
         'const d = "Call create_rule to add it.";',
-        'const e = "Rule names must be unique";',
+        'const e = "rule names must be unique";',
+        'console.warn("delivery failed", err);',
+        'const f = "[ingest] receipt write failed";',
+        'const g = "This line covers " +',
+        '  "every receipt.";',
+        'const h = "Runs in a new thread.";',
       ].join("\n"),
     );
     expect(hits.map((hit) => [hit.line, hit.word])).toEqual([
       [2, "subscription"],
       [3, "trigger"],
+      [6, "rule"],
+      [9, "receipt"],
+      [11, "runs in"],
     ]);
   });
 

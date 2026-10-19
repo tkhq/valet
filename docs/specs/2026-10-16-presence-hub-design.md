@@ -830,7 +830,11 @@ Revision 1 deviations that still hold, with the revision 3 part numbers:
   pure `subjectPlaceLabel`.
 - **The copy lint reads source files (INV-H2).** It scans string
   literals and JSX text and skips identifiers, imports, types, comments,
-  test files, and the `idPrefix` attribute.
+  test files, and the `idPrefix` attribute. The api has a second lint
+  (`packages/api/src/copy-lint.test.ts`) with the same banned words. It
+  reads every text with a space in the event and workflow services and
+  the events, presence, and workflow-triggers routes, and skips log lines
+  and the files only the model reads.
 - **A routine page is read-only until it knows the viewer (Part E step 2).**
   Team and org routines are editable only by a member with access.
 - **The place page edits Appears as in the editor (Part C step 6).** The

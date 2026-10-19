@@ -1480,7 +1480,7 @@ describe("EventDispatcher", () => {
       const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.id, "rcpt-1"));
       expect(receipt?.stages).toEqual([expect.objectContaining({
         stage: "destination", outcome: "policy_own",
-        detail: `Subscription ${subscriptionId}, delivery ${deliveryId}: thread key sub:${subscriptionId}.`,
+        detail: `Line ${subscriptionId}, handoff ${deliveryId}: thread key sub:${subscriptionId}.`,
       })]);
       expect(recordDestination.mock.calls).toEqual([["policy_own"]]);
     });

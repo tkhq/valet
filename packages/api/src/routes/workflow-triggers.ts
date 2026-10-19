@@ -301,9 +301,7 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
   const result = await updateWorkflowTrigger(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
-      result.status === 404
-        ? `${result.error} Confirm the id and that you have access to it.`
-        : result.error;
+      result.status === 404 ? ROUTINE_NOT_FOUND : result.error;
     return c.json({ error: msg }, result.status);
   }
   const resp: WorkflowEventTriggerResponse = { trigger: result.trigger };
@@ -315,6 +313,6 @@ workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
   const owner = ownerFrom(c);
   const result = await deleteWorkflowTrigger(db, owner, c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
+    return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   return c.json({ ok: true });
 });

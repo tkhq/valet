@@ -168,7 +168,7 @@ describe("renderEventPrompt", () => {
 
   it("prepends the instructions block and keeps the default body under it", () => {
     const body = renderEventPrompt({ systemPrompt: "Answer in one sentence." }, values);
-    expect(body).toBe(`Instructions for this subscription:\nAnswer in one sentence.\n\n---\n\n${EVENT.body}`);
+    expect(body).toBe(`Instructions for this line:\nAnswer in one sentence.\n\n---\n\n${EVENT.body}`);
   });
 
   it("combines the instructions block with a user template", () => {
@@ -177,7 +177,7 @@ describe("renderEventPrompt", () => {
       values,
     );
     expect(body).toBe(
-      "Instructions for this subscription:\nWatch the repository.\n\n---\n\nIssue #7 opened: broken build",
+      "Instructions for this line:\nWatch the repository.\n\n---\n\nIssue #7 opened: broken build",
     );
   });
 
@@ -235,7 +235,7 @@ describe("renderEventPrompt", () => {
       { systemPrompt: "Follow this: {{payload.sender}} {{event.summary}} {{event.body}}" },
       values,
     );
-    expect(body).toBe(`Instructions for this subscription:\nFollow this:   \n\n---\n\n${EVENT.body}`);
+    expect(body).toBe(`Instructions for this line:\nFollow this:   \n\n---\n\n${EVENT.body}`);
   });
 
   it("delivers the default body when the user template renders to nothing", () => {

@@ -293,7 +293,7 @@ export async function ingestEvent(
   const place = receiptPlace(deps.plugins, service, event);
   await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` },
     { eventKey: event.key, ...(place !== null ? { metadata: { place } } : {}) });
-  let phase = "subscription lookup";
+  let phase = "the line lookup";
   try {
     const now = Date.now();
     const eventId = randomUUID();
@@ -328,7 +328,7 @@ export async function ingestEvent(
     const decisions: ReceiptSubscriptionDecision[] = [];
     const matched: typeof subs = [];
     let authorizationDenied = false;
-    phase = "subscription filter and sender authorization checks";
+    phase = "the line filter and sender checks";
     for (const sub of subs) {
       const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
       if (outcome === "matched") matched.push(sub);
@@ -422,11 +422,11 @@ export async function ingestEvent(
     }
     if (matched.length === 0) {
       await appendDigests(claims?.waiters);
-      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the match decisions." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No line took this event, so its payload was not stored. Check the match decisions below." });
       return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 
-    phase = "event and delivery persistence";
+    phase = "event storage";
     const persist = () => deps.db.transaction(async (tx) => {
       const inserted = await tx
         .insert(events)
@@ -486,16 +486,16 @@ export async function ingestEvent(
     await appendDigests(claims?.waiters);
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
-      detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored with ${result.deliveries} pending deliveries. Open its activity entry for delivery attempts and workflow results.`,
+      detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
     }, result.linkedEventId ? { eventId: result.linkedEventId } : undefined);
     if (!result.duplicate && result.deliveries > 0) {
       phase = "dispatcher wake after storing pending deliveries";
       deps.onIngest?.();
-      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "Delivery records are pending. Enqueueing does not mean a workflow has completed." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "The lines' work is queued. A queued workflow has not completed yet." });
     }
     return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
-    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Check server logs using this receipt reference; no exception payload is retained here.` });
+    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Search the server logs for this event's ID; the error itself is not kept here.` });
     console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }

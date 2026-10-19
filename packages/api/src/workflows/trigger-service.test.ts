@@ -188,7 +188,7 @@ describe("createWorkflowTrigger team readiness", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error).toBe("Connect linear for this team, then create the trigger.");
+    expect(result.error).toBe("Connect linear for this team, then save the line.");
   });
 
   it("arms once the team holds the credential", async () => {
