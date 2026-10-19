@@ -63,6 +63,9 @@ describe("mergeLineActivity", () => {
       delivery({ id: "d_claim", status: "skipped", createdAt: 10, lastError: "Skipped, claimed by thread t9.", destination: { kind: "skip", reason: "claimed by thread t9" } }),
       delivery({ id: "d_off", status: "skipped", createdAt: 11, lastError: "This line is off. Turn it on to receive these events." }),
       delivery({ id: "d_team", status: "skipped", createdAt: 12, lastError: "The team already listens for this." }),
+      // Review A6: rows written before the line wording.
+      delivery({ id: "d_old_off", status: "skipped", createdAt: 13, lastError: "Skipped — subscription is disabled." }),
+      delivery({ id: "d_old_team", status: "skipped", createdAt: 14, lastError: "Skipped — matching team subscription." }),
     ], [
       decision("r_repo", "filter_excluded", { at: 20, failedFilters: [{ field: "repo", op: "eq" }, { field: "channel", op: "eq" }] }),
       decision("r_chan", "filter_excluded", { at: 21, failedFilters: [{ field: "channel", op: "in" }] }),
@@ -79,6 +82,8 @@ describe("mergeLineActivity", () => {
       d_claim: ["skipped", "claimed", undefined],
       d_off: ["skipped", "off", undefined],
       d_team: ["skipped", "other", "The team already listens for this."],
+      d_old_off: ["skipped", "off", undefined],
+      d_old_team: ["skipped", "other", "The team already listens for this."],
       "receipt:r_repo": ["skipped", "filters", "the repository filter"],
       "receipt:r_chan": ["skipped", "filters", "the channel filter"],
       "receipt:r_branch": ["skipped", "filters", "the branch filter"],
@@ -90,6 +95,7 @@ describe("mergeLineActivity", () => {
     });
     // The claim's text names the claiming thread, so it stays off the wire.
     expect(JSON.stringify(entries)).not.toContain("t9");
+    expect(JSON.stringify(entries)).not.toMatch(/—|subscription/);
     expect(entries[0]?.id).toBe("receipt:r_key");
   });
 

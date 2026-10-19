@@ -107,14 +107,21 @@ function decisionReason(decision: ReceiptSubscriptionDecision): { reason: LineAc
   }
 }
 
-/** The dispatcher's text for a delivery it skipped because the line was off. */
-const LINE_OFF_SKIP = /^This line is off\./;
+/** The dispatcher's text for a delivery it skipped because the line was off.
+ * Rows written before the line wording read "Skipped — subscription is disabled." */
+const LINE_OFF_SKIP = /^(?:This line is off\.|Skipped — subscription is disabled\.$)/;
+
+/** The dispatcher's text for a personal delivery that a team line took. */
+const TEAM_SKIP_TEXT = "The team already listens for this.";
+/** The same skip as written before the line wording. */
+const LEGACY_TEAM_SKIP = "Skipped — matching team subscription.";
 
 /** A skipped delivery's reason. A claim names the claiming thread's id, so
- * its text stays off the wire. */
+ * its text stays off the wire. An old row's text reads as today's text. */
 function deliverySkipReason(delivery: LineDeliveryInput): { reason: LineActivitySkipReason; reasonText?: string } {
   if (claimedThreadId(delivery.destination) !== null) return { reason: "claimed" };
   if (delivery.lastError !== null && LINE_OFF_SKIP.test(delivery.lastError)) return { reason: "off" };
+  if (delivery.lastError === LEGACY_TEAM_SKIP) return { reason: "other", reasonText: TEAM_SKIP_TEXT };
   return delivery.lastError ? { reason: "other", reasonText: delivery.lastError } : { reason: "other" };
 }
 
