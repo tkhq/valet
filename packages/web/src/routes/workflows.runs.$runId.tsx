@@ -1,6 +1,6 @@
 import { RunWorkspace } from "~/components/workflows/run-workspace";
 import { textParam } from "~/lib/search-params";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail, WorkflowRunProvenance } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
@@ -26,6 +26,7 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 import { formatUsdPrecise } from "~/lib/format-usage";
+import { errorText } from "~/lib/error-text";
 
 /**
  * `/workflows/runs/$runId` — the settled run's result first, then
@@ -51,6 +52,10 @@ function RunDetailPage() {
   useAdoptWorkspaceScope(data?.owner);
   const cancelRun = useCancelRun(runId);
   const retryRun = useRetryRun(runId);
+  const resetRetry = retryRun.reset;
+  // A refused retry belongs to its run. This page stays mounted when it
+  // moves to another run, so the refusal must not follow it there.
+  useEffect(() => resetRetry(), [runId, resetRetry]);
   const navigate = useNavigate();
   const [retryInputOpen, setRetryInputOpen] = useState(false);
   // A retry from the start can change the trigger inputs, for example a
@@ -93,6 +98,7 @@ function RunDetailPage() {
           retryRun.mutate({ from }, { onSuccess: ({ runId: newRunId }) => goToRun(newRunId) });
         }}
         retryPending={retryRun.isPending}
+        retryError={retryRun.error ? errorText(retryRun.error) : undefined}
         onExplainFailure={(nodeId, iteration) => void navigate({
           to: "/workflows/$workflowId",
           params: { workflowId: data.run.workflowId },
@@ -127,8 +133,10 @@ export interface RunDetailBodyProps {
   data: WorkflowRunDetail;
   onCancel: () => void;
   cancelPending: boolean;
-  onRetry: (from: "failed_step" | "start") => void;
+  onRetry: (from: "failed_step" | "start" | "changed_steps") => void;
   retryPending: boolean;
+  /** Why the last retry was refused, with the corrective action. */
+  retryError?: string;
   /** Opens the workflow editor and asks its assistant why this step failed. */
   onExplainFailure?: (nodeId: string, iteration: number) => void;
 }
@@ -146,10 +154,13 @@ export function RunDetailBody({
   cancelPending,
   onRetry,
   retryPending,
+  retryError,
   onExplainFailure,
 }: RunDetailBodyProps) {
   // Cancel stops a run part-way and cannot be undone, so it asks first.
   const [cancelOpen, setCancelOpen] = useState(false);
+  // A re-run repeats the actions of the tool steps it runs, so it asks first.
+  const [rerunOpen, setRerunOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
   const stepCosts = data.stepCosts ?? [];
@@ -162,6 +173,12 @@ export function RunDetailBody({
   // Only worth offering when a finished step can be reused.
   const stepRetryable = retryable && run.outcome === "failed" && checkpoints.some((cp) => cp.status === "completed");
   const definition = isWorkflowDefinitionShape(run.definition) ? run.definition : undefined;
+  // The server lists the steps that run again only for a completed run.
+  const rerunSteps = run.status === "settled" && run.outcome === "completed" ? data.rerunSteps ?? [] : [];
+  const repeatedActions = rerunSteps.flatMap((id) => {
+    const node = definition?.nodes.find((n) => n.id === id);
+    return node?.type === "tool" ? [`${id} (${node.service}.${node.action})`] : [];
+  });
   const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
   const activeSteps = Object.entries(nodeStatuses.status)
@@ -220,8 +237,33 @@ export function RunDetailBody({
               {stepRetryable ? "Retry from start" : retryPending ? "Retrying…" : "Retry run"}
             </Button>
           )}
+          {rerunSteps.length > 0 && (
+            <Button size="sm" onClick={() => setRerunOpen(true)} disabled={retryPending}
+              title={`Runs again: ${rerunSteps.join(", ")}. Every other step keeps this run's result.`}>
+              {retryPending ? "Re-running…" : "Re-run changed steps"}
+            </Button>
+          )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={rerunOpen && rerunSteps.length > 0}
+        onOpenChange={setRerunOpen}
+        title="Re-run changed steps?"
+        description={`These steps run again: ${rerunSteps.join(", ")}. Every other step keeps this run's result.`}
+        confirmLabel="Re-run changed steps"
+        confirmVariant="primary"
+        onConfirm={() => {
+          setRerunOpen(false);
+          onRetry("changed_steps");
+        }}
+      >
+        {repeatedActions.length > 0 && (
+          <p className="rounded border border-line bg-warning-wash px-3 py-2 text-sm text-ink">
+            These tool steps do their action again: {repeatedActions.join(", ")}.
+          </p>
+        )}
+      </ConfirmDialog>
 
       {/* Tied to `nonTerminal` so a run that settles while the dialog is open
           takes the dialog with it — a confirm on a settled run does nothing. */}
@@ -238,6 +280,8 @@ export function RunDetailBody({
       />
 
       <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+        {retryError && <p role="alert" className="text-sm text-danger-500">{retryError}</p>}
+
         {/* Above the answer: with no edit, a changed model is the likely
             reason a result differs from the last run. The Steps list marks
             the changed steps. */}

@@ -26,6 +26,7 @@ import { stringify as stringifyYaml } from "yaml";
 import {
   canReadWorkflowRun,
   cancelWorkflowRun,
+  changedStepsToRerun,
   createWorkflowDefinition,
   copyWorkflowDefinition,
   deleteWorkflowDefinition,
@@ -873,9 +874,11 @@ workflowsRouter.get("/runs/:runId", async (c) => {
     workflowRunStepCosts(deps.db, deps.workflowStore, runId),
     workflowRunProvenance(deps.db, resp.run),
   ]);
-  const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts,
-    (id) => canReadWorkflowRun(deps, owner, id));
-  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance });
+  const [modelChanges, rerunSteps] = await Promise.all([
+    workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts, (id) => canReadWorkflowRun(deps, owner, id)),
+    changedStepsToRerun(deps, owner, resp.run, resp.checkpoints),
+  ]);
+  return c.json({ ...resp, conversations, stepCosts, modelChanges, provenance, ...(rerunSteps ? { rerunSteps } : {}) });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
@@ -963,8 +966,8 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.from !== undefined && body.from !== "start" && body.from !== "failed_step") {
-    return c.json({ error: 'from must be "start" or "failed_step".' }, 400);
+  if (body.from !== undefined && body.from !== "start" && body.from !== "failed_step" && body.from !== "changed_steps") {
+    return c.json({ error: 'from must be "start", "failed_step", or "changed_steps".' }, 400);
   }
   if (body.input !== undefined && (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))) {
     return c.json({ error: "input must be an object of trigger input values." }, 400);
@@ -973,7 +976,9 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   const result = await retryWorkflowRun(deps, owner, runId, { from: body.from, input: body.input });
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
   if (result === "input_needs_start") {
-    return c.json({ error: "A retry from the failed step reuses the original input. To change the input, retry from the start." }, 400);
+    return c.json({ error: body.from === "changed_steps"
+      ? "A re-run of changed steps reuses the original input. To change the input, start a new run of the workflow."
+      : "A retry from the failed step reuses the original input. To change the input, retry from the start." }, 400);
   }
   if (result === "workflow_deleted") {
     return c.json(
@@ -983,7 +988,25 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
   }
   if (result === "not_retryable") {
     return c.json(
-      { error: "Only failed or cancelled runs can be retried. Wait for the run to settle, or cancel it first." },
+      { error: "This run is still in progress. Wait for the run to settle, or cancel it first." },
+      409,
+    );
+  }
+  if (result === "run_completed") {
+    return c.json(
+      { error: 'This run completed. To run the steps you edited since this run, retry with from "changed_steps".' },
+      409,
+    );
+  }
+  if (result === "run_not_completed") {
+    return c.json(
+      { error: 'Only a completed run can re-run its changed steps. To retry this run, use from "failed_step" or "start".' },
+      409,
+    );
+  }
+  if (result === "nothing_changed") {
+    return c.json(
+      { error: "No step changed since this run, so no step would run again. Edit the workflow first, or start a new run." },
       409,
     );
   }
@@ -999,6 +1022,6 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
     );
   }
 
-  const resp: RetryWorkflowRunResponse = { runId: result.runId };
+  const resp: RetryWorkflowRunResponse = { runId: result.runId, ...(result.rerunSteps ? { rerunSteps: result.rerunSteps } : {}) };
   return c.json(resp, 201);
 });

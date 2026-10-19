@@ -254,6 +254,44 @@ describe("RunDetailBody", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("re-runs a completed run's changed steps after it names them and the actions that repeat", async () => {
+    const onRetry = vi.fn();
+    const data: WorkflowRunDetail = {
+      ...baseRun({
+        status: "settled",
+        outcome: "completed",
+        definition: {
+          version: "dag/v1",
+          nodes: [
+            { id: "trigger", type: "trigger" },
+            { id: "summarize", type: "session", mode: "start", prompt: "Summarize" },
+            { id: "notify", type: "tool", service: "slack", action: "send_message", params: {} },
+          ],
+          edges: [{ from: "trigger", to: "summarize" }, { from: "summarize", to: "notify" }],
+        },
+      }),
+      rerunSteps: ["summarize", "notify"],
+    };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={onRetry} retryPending={false} />);
+    expect(screen.queryByRole("button", { name: "Retry run" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-run changed steps" }));
+    expect(onRetry).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("These steps run again: summarize, notify. Every other step keeps this run's result.")).toBeTruthy();
+    expect(within(dialog).getByText("These tool steps do their action again: notify (slack.send_message).")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Re-run changed steps" }));
+    expect(onRetry.mock.calls).toEqual([["changed_steps"]]);
+  });
+
+  it("offers no re-run when no step changed since a completed run, and shows a refused retry", () => {
+    const data: WorkflowRunDetail = { ...baseRun({ status: "settled", outcome: "completed" }), rerunSteps: [] };
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false}
+      retryError="No step changed since this run, so no step would run again. Edit the workflow first, or start a new run." />);
+    expect(screen.queryByRole("button", { name: "Re-run changed steps" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Edit the workflow first");
+  });
+
   it("shows the Retry button for a settled cancelled run", () => {
     const data = baseRun({ status: "settled", outcome: "cancelled" });
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);

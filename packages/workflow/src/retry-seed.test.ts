@@ -4,7 +4,7 @@ import type { WorkflowDefinition } from './dag/shape.js';
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import { makeRunHostFixtureEngine } from './conformance/run-host.js';
-import { retrySeedCheckpoints } from './retry-seed.js';
+import { retryRerunSteps, retrySeedCheckpoints } from './retry-seed.js';
 import type { NodeCheckpoint } from './store.js';
 
 function cp(nodeId: string, status: NodeCheckpoint['status'], iteration = 0, result?: unknown): NodeCheckpoint {
@@ -84,6 +84,25 @@ describe('retrySeedCheckpoints', () => {
     };
     const run = [cp('trigger', 'completed'), cp('list', 'completed'), cp('loop', 'completed'), cp('report', 'failed')];
     expect(ids(retrySeedCheckpoints(previous, reordered, run))).toEqual(['trigger#0', 'list#0', 'loop#0']);
+  });
+});
+
+describe('retryRerunSteps', () => {
+  const completed = [cp('trigger', 'completed'), cp('list', 'completed'), cp('qualify', 'completed', 0), cp('loop', 'completed'), cp('report', 'completed'), cp('stop', 'completed')];
+
+  it('names an edited step and every step after it for a completed run, and matches the seed', () => {
+    const edited = chain('qualify {{item}} strictly');
+    expect(retryRerunSteps(chain(), edited, completed)).toEqual(['loop', 'report', 'stop']);
+    expect(ids(retrySeedCheckpoints(chain(), edited, completed))).toEqual(['trigger#0', 'list#0']);
+  });
+
+  it('is empty for a completed run when no step changed', () => {
+    expect(retryRerunSteps(chain(), chain(), completed)).toEqual([]);
+  });
+
+  it('names the failed step of a failed run', () => {
+    const run = [cp('trigger', 'completed'), cp('list', 'completed'), cp('loop', 'completed'), cp('report', 'failed')];
+    expect(retryRerunSteps(chain(), chain(), run)).toEqual(['report', 'stop']);
   });
 });
 

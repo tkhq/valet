@@ -1116,6 +1116,67 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
     expect((startRun?.params as { input?: { data?: unknown } }).input?.data).toEqual({ days: 1, repo: "mono" });
   });
 
+  it("re-runs a completed run's changed steps, and refuses with the corrective action when no step changed", async () => {
+    const stub = new StubRunHost();
+    api = await bootTestApi({ workflowRunHost: stub });
+    const definition = (prompt: string) => ({
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "fetch", type: "set", values: { prs: [1, 2] } },
+        { id: "summary", type: "set", values: { text: prompt } },
+        { id: "stop", type: "stop" },
+      ],
+      edges: [{ from: "trigger", to: "fetch" }, { from: "fetch", to: "summary" }, { from: "summary", to: "stop" }],
+    });
+    const created = (await (await fetch(`${api.baseUrl}/api/workflows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "rerun-changed", definition: definition("v1") }),
+    })).json()) as CreateWorkflowResponse;
+    const store = api.providers.workflowStore;
+    const runId = "wfrun_completed_rerun";
+    await store.createRun(runId, { workflowId: created.id, definitionVersionId: "v1", input: { type: "manual", timestamp: "t", data: {}, metadata: {} } },
+      created.definition, "v1", { ownerType: "user", ownerId: "local-user" });
+    for (const nodeId of ["trigger", "fetch", "summary", "stop"]) {
+      await store.putIntent({ runId, nodeId, iteration: 0, status: "intent", attempt: 0, createdAt: 1 });
+      await store.completeCheckpoint(runId, nodeId, 0, 0, { runId, nodeId, iteration: 0, status: "completed", attempt: 0, createdAt: 1, result: { ok: nodeId } });
+    }
+    await store.settleRun(runId, "completed");
+    const { baseUrl } = api;
+    const retry = (body: unknown) => fetch(`${baseUrl}/api/workflows/runs/${runId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const unchanged = await retry({ from: "changed_steps" });
+    expect(unchanged.status).toBe(409);
+    expect(((await unchanged.json()) as { error: string }).error)
+      .toBe("No step changed since this run, so no step would run again. Edit the workflow first, or start a new run.");
+    const before = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
+    expect(before.rerunSteps).toEqual([]);
+
+    const fromStart = await retry({ from: "start" });
+    expect(fromStart.status).toBe(409);
+    expect(((await fromStart.json()) as { error: string }).error).toContain('retry with from "changed_steps"');
+    expect(stub.started).toHaveLength(0);
+
+    const edited = await fetch(`${api.baseUrl}/api/workflows/${created.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition: definition("v2") }),
+    });
+    expect(edited.status).toBe(200);
+    const after = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
+    expect(after.rerunSteps).toEqual(["summary", "stop"]);
+
+    const rerun = await retry({ from: "changed_steps" });
+    expect(rerun.status).toBe(201);
+    expect(((await rerun.json()) as RetryWorkflowRunResponse).rerunSteps).toEqual(["summary", "stop"]);
+    expect(stub.started.at(-1)?.opts?.seed?.map((cp) => cp.nodeId)).toEqual(["trigger", "fetch"]);
+  });
+
   it("400s a retry when the current trigger schema no longer accepts the original input", async () => {
     const stub = new StubRunHost();
     api = await bootTestApi({ workflowRunHost: stub });

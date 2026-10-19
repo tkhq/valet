@@ -2205,6 +2205,10 @@ export interface WorkflowRunDetail {
   /** Steps whose models changed since the previous run with the same steps.
    * Empty for a first run and for a run after an edit. */
   modelChanges?: WorkflowModelChange[];
+  /** For a completed run: the steps that a re-run of its changed steps
+   * (`from: "changed_steps"`) runs again, from the current saved workflow.
+   * Empty when no step changed since the run. Absent for other runs. */
+  rerunSteps?: string[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2249,14 +2253,21 @@ export interface CancelWorkflowRunResponse {
 
 /** `POST /api/workflows/runs/:runId/retry`. An empty body retries from the start with the original input. */
 export interface RetryWorkflowRunRequest {
-  /** `failed_step` reuses the finished steps before the failure. Default `start`. */
-  from?: "start" | "failed_step";
+  /** For a failed or cancelled run: `failed_step` reuses the finished steps
+   * before the failure, and `start` (the default) runs every step. For a
+   * completed run: `changed_steps` reuses every step not edited since the
+   * run, so only the edited steps and the steps after them run again. */
+  from?: "start" | "failed_step" | "changed_steps";
   /** Trigger input values that replace the original ones. Only with `from: "start"`. */
   input?: Record<string, unknown>;
 }
 
 export interface RetryWorkflowRunResponse {
   runId: string;
+  /** With `changed_steps`: the steps that run again, in workflow order. A
+   * tool step in this list does its action again, for example it sends a
+   * message again. */
+  rerunSteps?: string[];
 }
 
 // ── Workflow permissions preview ──────────────────────────────────────────

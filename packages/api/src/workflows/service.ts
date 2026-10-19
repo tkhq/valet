@@ -8,7 +8,7 @@ import { prepareWorkflowPermissions, persistWorkflowPermissions } from "./permis
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError, readToolScope } from "@valet/shared";
-import { matchesGateOccurrence, normalizeLegacyDefinition, retrySeedCheckpoints, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { matchesGateOccurrence, normalizeLegacyDefinition, retryRerunSteps, retrySeedCheckpoints, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { saveWorkflowAccountConsent, revokeWorkflowAccountConsent } from "../services/workflow-account-consent.js";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
@@ -1406,7 +1406,8 @@ export async function startWorkflowRun(
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
   originToolScope?: import("@valet/shared").ToolScope,
-  /** Finished checkpoints a retry from the failed step reuses (`retrySeedCheckpoints`). */
+  /** Finished checkpoints a retry reuses (`retrySeedCheckpoints`). A throw
+   * stops the start before the run exists. */
   seedFor?: (run: { definition: unknown }) => Promise<readonly NodeCheckpoint[]>,
   /** "agent": an agent started this run on its own, or a retry repeats such a
    * run's input. "person": the caller checked that a person asked. Omitted:
@@ -1928,16 +1929,22 @@ export async function cancelWorkflowRun(
 }
 
 export type RetryWorkflowRunResult =
-  | { runId: string }
+  | { runId: string; rerunSteps?: string[] }
   | { invalidInput: TriggerInputError[] }
   | "not_found"
   | "not_retryable"
+  | "run_completed"
+  | "run_not_completed"
+  | "nothing_changed"
   | "workflow_deleted"
   | "input_needs_start";
 
 /** Where a retry starts. `failed_step` reuses the finished steps before the
- * failure (`retrySeedCheckpoints`); `start` runs every step again. */
-export type RetryFrom = "start" | "failed_step";
+ * failure (`retrySeedCheckpoints`); `start` runs every step again. Both are
+ * for a failed or cancelled run. `changed_steps` is for a completed run: it
+ * reuses every step not edited since the run, so only the edited steps and
+ * the steps after them run again (`retryRerunSteps`). */
+export type RetryFrom = "start" | "failed_step" | "changed_steps";
 
 /** A stored definition as dag/v1, or undefined when it is not one. */
 function dagDefinition(value: unknown): WorkflowDefinition | undefined {
@@ -1948,14 +1955,19 @@ function dagDefinition(value: unknown): WorkflowDefinition | undefined {
   return Array.isArray(nodes) && Array.isArray(edges) ? (normalized as WorkflowDefinition) : undefined;
 }
 
+/** No step changed since the run, so a re-run of its changed steps would run nothing. */
+class NothingChangedError extends Error {}
+
 /**
- * Starts a fresh run of the same workflow, reusing the failed run's trigger
- * input. Only settled runs with outcome `failed` or `cancelled` are
- * retryable. The new run snapshots the CURRENT definition, not the old run's
- * snapshot — the usual retry motive is "I fixed the workflow; run it again".
- * `invalidInput` surfaces when the current definition's trigger schema no
- * longer accepts the original input. `not_found` covers unknown AND un-owned
- * run ids.
+ * Starts a fresh run of the same workflow, reusing the old run's trigger
+ * input. A failed or cancelled run is retryable from the start or from the
+ * failed step. A completed run is retryable only with `changed_steps`, and
+ * only when a step changed since the run. The new run snapshots the CURRENT
+ * definition, not the old run's snapshot, because the usual retry motive is
+ * "I fixed the workflow; run it again". `invalidInput` surfaces when the
+ * current definition's trigger schema no longer accepts the original input.
+ * `not_found` covers unknown AND un-owned run ids. A `changed_steps` result
+ * names the steps that run again; a tool step among them repeats its action.
  */
 export async function retryWorkflowRun(
   deps: WorkflowServiceDeps,
@@ -1965,34 +1977,71 @@ export async function retryWorkflowRun(
 ): Promise<RetryWorkflowRunResult> {
   const run = await ownedRun(deps, owner, runId);
   if (!run) return "not_found";
-  if (run.status !== "settled" || run.outcome === "completed") return "not_retryable";
+  if (run.status !== "settled") return "not_retryable";
   const from = opts.from ?? "start";
+  const completed = run.outcome === "completed";
+  if (completed && from !== "changed_steps") return "run_completed";
+  if (!completed && from === "changed_steps") return "run_not_completed";
   // Reused steps already used the original input.
-  if (from === "failed_step" && opts.input) return "input_needs_start";
+  if (from !== "start" && opts.input) return "input_needs_start";
   const original = triggerData(run.params.input);
 
-  const started = await startWorkflowRun(
-    deps,
-    owner,
-    run.params.workflowId,
-    opts.input ? { ...original, ...opts.input } : original,
-    // The old run's origin, so the retry and the results it reuses stay
-    // with the same audience.
-    run.params.origin,
-    // Event provenance also carries the private-channel audience.
-    typeof run.params.input === "object" && run.params.input !== null
-      && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
-    readToolScope(run.params.toolScope),
-    readToolScope(run.params.originToolScope),
-    from === "failed_step" ? async (next) => {
-      const previous = dagDefinition(run.definition);
-      const current = dagDefinition(next.definition);
-      return previous && current ? retrySeedCheckpoints(previous, current, await deps.workflowStore.getCheckpoints(runId)) : [];
-    } : undefined,
-    run.params.startedBy,
-  );
+  // Written by the seed callback, which TypeScript does not track.
+  const plan: { rerunSteps?: string[] } = {};
+  let started: Awaited<ReturnType<typeof startWorkflowRun>>;
+  try {
+    started = await startWorkflowRun(
+      deps,
+      owner,
+      run.params.workflowId,
+      opts.input ? { ...original, ...opts.input } : original,
+      // The old run's origin, so the retry and the results it reuses stay
+      // with the same audience.
+      run.params.origin,
+      // Event provenance also carries the private-channel audience.
+      typeof run.params.input === "object" && run.params.input !== null
+        && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
+      readToolScope(run.params.toolScope),
+      readToolScope(run.params.originToolScope),
+      from === "start" ? undefined : async (next) => {
+        const previous = dagDefinition(run.definition);
+        const current = dagDefinition(next.definition);
+        if (!previous || !current) return [];
+        const checkpoints = await deps.workflowStore.getCheckpoints(runId);
+        if (from === "changed_steps") {
+          // The same definition the new run snapshots, so the list matches what runs.
+          plan.rerunSteps = retryRerunSteps(previous, current, checkpoints);
+          if (plan.rerunSteps.length === 0) throw new NothingChangedError();
+        }
+        return retrySeedCheckpoints(previous, current, checkpoints);
+      },
+      run.params.startedBy,
+    );
+  } catch (err) {
+    if (err instanceof NothingChangedError) return "nothing_changed";
+    throw err;
+  }
   if (!started) return "workflow_deleted";
-  return started;
+  if ("invalidInput" in started) return started;
+  return plan.rerunSteps ? { ...started, rerunSteps: plan.rerunSteps } : started;
+}
+
+/**
+ * For a completed run: the steps that a re-run of its changed steps runs
+ * again, from the current saved workflow. Empty when no step changed.
+ * Undefined for any other run, and when the caller cannot start the workflow.
+ */
+export async function changedStepsToRerun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  run: { runId: string; workflowId: string; status: string; outcome?: string | null; definition: unknown },
+  checkpoints: readonly { nodeId: string; status: NodeCheckpoint["status"] }[],
+): Promise<string[] | undefined> {
+  if (run.status !== "settled" || run.outcome !== "completed") return undefined;
+  const row = await ownedDefinitionRow(deps.db, owner, run.workflowId);
+  const previous = dagDefinition(run.definition);
+  const current = row ? dagDefinition(row.definition) : undefined;
+  return previous && current ? retryRerunSteps(previous, current, checkpoints) : undefined;
 }
 
 /**
