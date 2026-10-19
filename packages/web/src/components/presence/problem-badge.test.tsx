@@ -63,6 +63,12 @@ describe("ThreadProblem", () => {
     expect(screen.queryByText("Select Edit, then choose another option under Where.")).toBeNull();
   });
 
+  it("names who may change it for any problem, not only a pin (S10)", () => {
+    render(<ThreadProblem problem="The workflow is gone." workspace="user" readOnly readOnlyText="Only members of SRE can change this." onPick={vi.fn()} />);
+    expect(screen.getByText("The workflow is gone.")).toBeTruthy();
+    expect(screen.getByText("Only members of SRE can change this.")).toBeTruthy();
+  });
+
   it("names the edit path when no workspace lists threads", () => {
     render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} onPick={vi.fn()} />);
     expect(screen.getByText("Select Edit, then choose another option under Where.")).toBeTruthy();

@@ -81,7 +81,8 @@ export function ThreadProblem({
   threadId?: string;
   /** The archived pin's title, when the caller knows it. */
   threadTitle?: string;
-  /** The viewer may not change the rule: no picker, and the text names who can. */
+  /** The viewer may not change the rule: no picker, and the text names who
+   * can, for any problem. */
   readOnly?: boolean;
   /** Who may change it, for a read-only viewer. */
   readOnlyText?: string;
@@ -108,7 +109,7 @@ export function ThreadProblem({
           ? <><Ref kind="thread" text={threadTitle} to="/threads/$threadId" params={{ threadId }} />{pinProblemTail}</>
           : text}
       </p>
-      {pin && readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
+      {readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (
         <p className="text-xs text-muted">Select Edit, then choose another option under Where.</p>

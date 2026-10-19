@@ -322,6 +322,18 @@ describe("RoutinePage", () => {
     expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
   });
 
+  it("names who may change a routine with a scheduler reason for a read-only viewer (S10)", async () => {
+    const reason = "The prompt is empty. Edit the routine and write a prompt.";
+    listWorkflowTriggers.mockResolvedValue({
+      triggers: [routine("S1", { enabled: false, detail: { ownerId: "u-other", disabledReason: reason } })],
+    });
+    wrap(<RoutinePage id="S1" />);
+    const problem = await screen.findByRole("region", { name: "Problem" });
+    expect(within(problem).getByText(reason)).toBeTruthy();
+    expect(within(problem).getByText("Only its owner can change this routine.")).toBeTruthy();
+    expect(within(problem).queryByRole("button", { name: "Edit the routine" })).toBeNull();
+  });
+
   it("reads a routine as read-only until the viewer and the teams load", () => {
     const team = routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } });
     const mine = routine("S2");
