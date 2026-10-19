@@ -123,15 +123,22 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     index += 1;
     const rows: string[][] = [];
     const tableLines = [line, delimiter];
+    const endsBlock = (text: string): boolean => /^\s*$|^(?: {4}|\t)/.test(text) || BLOCK_START.test(text);
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
-      if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
-      const cells = tableCells(next);
-      // GFM reads a line without a pipe right after the rows as one more
-      // row. A model that ends a table with a sentence means prose, and
-      // Slack's markdown block showed such a table as raw pipes, so the line
-      // ends the table and stays prose.
-      if (!cells) break;
+      if (endsBlock(next)) break;
+      let cells = tableCells(next);
+      if (!cells) {
+        // GFM reads a line without a pipe as a one-cell row. When more rows
+        // follow it, it is one. When it is the last line of the block, a
+        // model that ends a table with a sentence means prose, and Slack's
+        // markdown block showed such a table as raw pipes, so the line ends
+        // the table and stays prose.
+        let later = index + 2;
+        while (later < lines.length && !endsBlock(lines[later]) && !tableCells(lines[later])) later += 1;
+        if (later >= lines.length || endsBlock(lines[later])) break;
+        cells = [next.trim()];
+      }
       rows.push(cells);
       tableLines.push(next);
       index += 1;

@@ -614,8 +614,9 @@ with `only_one_table_allowed`, which the `invalid_blocks` retry does not catch.
 The message is split only where Markdown reads the table as a block of its
 own. The single Markdown block stays when a table continues a blockquote or
 list item, follows an indented line with no blank line between them, or has an
-indented delimiter row. A line without a pipe directly after the rows ends the
-table and stays prose (2026-10-19). GFM reads that line as another row, but a
+indented delimiter row. A line without a pipe that is the last line of the
+table's block ends the table and stays prose (2026-10-19); when more pipe rows
+follow it, it is a one-cell row, as in GFM. GFM reads that line as another row, but a
 model that ends a table with a sentence means prose, and Slack's `markdown`
 block showed such a table as raw pipes: a 1-day release report short enough for
 one message lost its table this way. It also stays when the message has a link

@@ -215,6 +215,21 @@ describe('tablesToTableBlocks', () => {
     expect(tablesToTableBlocks(source, 50)).toBeUndefined();
   });
 
+  it('keeps a line without a pipe as a one-cell row when more rows follow it', () => {
+    // GFM reads `bob` as a row with one cell, so carol stays in the table.
+    const source = 'Name | Status\n--- | ---\nalice | active\nbob\ncarol | paused';
+    const blocks = tablesToTableBlocks(source, 50);
+    expect(blocks?.map((block) => block.type)).toEqual(['table']);
+    expect(blocks?.[0]).toMatchObject({
+      rows: [
+        [raw('Name'), raw('Status')],
+        [cell(text('alice')), cell(text('active'))],
+        [cell(text('bob')), blank],
+        [cell(text('carol')), cell(text('paused'))],
+      ],
+    });
+  });
+
   it.each([
     ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo', 'foo'],
     ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n===', '==='],
