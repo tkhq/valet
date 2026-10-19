@@ -5,10 +5,17 @@ const empty = { entries: [] };
 const full = { entries: [{ id: "d-1" }] };
 
 describe("a line's Activity query", () => {
-  it("polls only while one page is loaded (S12)", () => {
+  it("polls only while at most one loaded page holds entries (S12)", () => {
     expect(lineActivityPollMs(undefined)).toBe(false);
-    expect(lineActivityPollMs(1)).toBe(30_000);
-    expect(lineActivityPollMs(2)).toBe(false);
+    expect(lineActivityPollMs([full])).toBe(30_000);
+    expect(lineActivityPollMs([empty])).toBe(30_000);
+    expect(lineActivityPollMs([full, full])).toBe(false);
+  });
+
+  it("keeps polling a quiet line after the hook fetches past an empty first page", () => {
+    expect(lineActivityPollMs([empty, full])).toBe(30_000);
+    expect(lineActivityPollMs([empty, empty])).toBe(30_000);
+    expect(lineActivityPollMs([empty, full, full])).toBe(false);
   });
 
   it("counts the empty pages at the end", () => {

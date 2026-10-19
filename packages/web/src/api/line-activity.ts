@@ -47,10 +47,15 @@ export function shouldFetchPastEmpty(state: {
   return empty > 0 && empty <= LINE_ACTIVITY_AUTO_FETCHES;
 }
 
-/** The poll interval: 30 s while one page is loaded. With more pages a poll
- * would read every loaded page again, so it stops. */
-export function lineActivityPollMs(pageCount: number | undefined): number | false {
-  return pageCount === 1 ? POLL_MS : false;
+/**
+ * The poll interval: 30 s while at most one loaded page holds entries. A
+ * poll reads every loaded page again, so it stops once the reader loads a
+ * second page of entries. The empty pages the hook fetches past by itself
+ * do not count: a quiet line keeps its poll.
+ */
+export function lineActivityPollMs(pages: readonly { entries: readonly unknown[] }[] | undefined): number | false {
+  if (pages === undefined || pages.length === 0) return false;
+  return pages.filter((page) => page.entries.length > 0).length <= 1 ? POLL_MS : false;
 }
 
 export function useLineActivity(id: string) {
@@ -62,7 +67,7 @@ export function useLineActivity(id: string) {
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     // A line's page has no live feed; a poll shows new acted and skipped
     // entries while the page stays open, at one cheap read.
-    refetchInterval: (q) => lineActivityPollMs(q.state.data?.pages.length),
+    refetchInterval: (q) => lineActivityPollMs(q.state.data?.pages),
   });
   const { data, hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage } = query;
   const fetchPastEmpty = shouldFetchPastEmpty({
