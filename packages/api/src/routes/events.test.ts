@@ -2061,6 +2061,33 @@ describe("GET /api/events/filter-options", () => {
     expect(second.reason).toBeUndefined();
     expect(calls).toBe(2);
   });
+
+  // A cache hit used to answer `{ options: [] }` without the reason, and the
+  // picker then showed a search box with no free-text input: a dead end.
+  it("answers a cache hit with the reason the first call gave", async () => {
+    let calls = 0;
+    // Its own source name, as above: the memo outlives the api instance.
+    const emptyPlugin: ValetPlugin = {
+      ...fixturePlugin,
+      filterOptionResolvers: {
+        "fixture.unconnected": async () => {
+          calls += 1;
+          return [];
+        },
+      },
+    };
+    api = await bootTestApi({ plugins: [emptyPlugin] });
+    const read = async () => (await (await fetch(`${api.baseUrl}/api/events/filter-options?source=fixture.unconnected`)).json()) as {
+      options: unknown[];
+      reason?: string;
+    };
+
+    const reason = "Connect the integration on the Integrations page to choose from a list. Type the value instead.";
+    expect(await read()).toEqual({ options: [], reason });
+    expect(await read()).toEqual({ options: [], reason });
+    // The second answer came from the cache.
+    expect(calls).toBe(1);
+  });
 });
 
 // ── Mention scoping (TKAI-299) ─────────────────────────────────────────────

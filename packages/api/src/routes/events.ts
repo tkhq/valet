@@ -342,7 +342,9 @@ function dependsOnForSource(plugins: ValetPlugin[], source: string): string[] {
 /** Per-(org, source, deps, q) memo so a keystroke does not re-hit the provider. */
 const FILTER_OPTIONS_TTL_MS = 60_000;
 const FILTER_OPTIONS_CACHE_CAP = 500;
-const filterOptionsCache = new Map<string, { options: FilterOption[]; expiresAt: number }>();
+// The whole answer, `reason` included: a hit without the reason turned the
+// picker into a search box with no free-text way out.
+const filterOptionsCache = new Map<string, { resp: FilterOptionsResponse; expiresAt: number }>();
 
 /**
  * Lists the options for one filter field's source, so a rule filters on a
@@ -374,7 +376,7 @@ eventsRouter.get("/events/filter-options", async (c) => {
   const cacheKey = `${user.orgId}:${source}:${JSON.stringify(deps)}:${q ?? ""}`;
   const cached = filterOptionsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    return c.json({ options: cached.options } satisfies FilterOptionsResponse);
+    return c.json(cached.resp);
   }
 
   // The plugin name is its credential service (slack/github/linear).
@@ -406,7 +408,7 @@ eventsRouter.get("/events/filter-options", async (c) => {
     failed = true;
   }
   if (options.length === 0 && reason === undefined && credential === null) {
-    reason = "Connect the integration in Settings to choose from a list. Type the value instead.";
+    reason = "Connect the integration on the Integrations page to choose from a list. Type the value instead.";
   }
 
   // Never memoize a failed lookup. A provider that rate-limits one keystroke
@@ -421,6 +423,7 @@ eventsRouter.get("/events/filter-options", async (c) => {
   // (`plugin-slack/src/transport/directory-cache.ts`). Caching the failure
   // here would only re-introduce the sticky "no matches" without adding a
   // bound the provider layer does not already give.
+  const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
   if (!failed) {
     // Evict the oldest single entry (Map preserves insertion order), not the
     // whole cache — one org's typeahead must not flush every other org's.
@@ -428,10 +431,9 @@ eventsRouter.get("/events/filter-options", async (c) => {
       const oldest = filterOptionsCache.keys().next().value;
       if (oldest !== undefined) filterOptionsCache.delete(oldest);
     }
-    filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
+    filterOptionsCache.set(cacheKey, { resp, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
   }
 
-  const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
   return c.json(resp);
 });
 
