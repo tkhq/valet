@@ -151,12 +151,12 @@ export function validateSubscription(
     }
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
-    return "workflow target requires workflowId";
+    return "A workflow line needs workflowId. Choose the workflow that runs.";
   }
   if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
     if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant.";
     if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown choice for when a team also listens. Pick one of the listed choices.";
-    if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
+    if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be true or false. Send true to pause this line when a team also listens.";
   }
   if (target.kind === "assistant") {
     const who = target.assistant;
@@ -177,7 +177,7 @@ export function validateSubscription(
       return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
     if (target.replaces !== undefined && (typeof target.replaces !== "string" || target.replaces.length === 0)) {
-      return "The line this proposal replaces was not found. Ask the assistant for a new proposal.";
+      return "replaces must name the line this proposal updates. Pick the line again.";
     }
     // Both prompt templates are validated against the SELECTED catalog
     // entries, the same set a filter field is held to: a template addresses
@@ -196,7 +196,7 @@ export function validateSubscription(
     // A workflow keeps its own prompt configuration on its llm and session
     // nodes. A prompt field here would name a prompt nothing renders.
     for (const field of PROMPT_FIELDS) {
-      if (target[field] !== undefined) return `${field} is only valid on an assistant target`;
+      if (target[field] !== undefined) return `${field} is only valid on an assistant target. Remove ${field}, or point the line at an assistant.`;
     }
   }
   return null;

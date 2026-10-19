@@ -29,6 +29,24 @@ describe("subject filter (spec Part G)", () => {
   });
 });
 
+// Final review G8: each target refusal says what is wrong and the fix.
+describe("target refusals", () => {
+  const body = { name: "PR helper", eventKeys: ["github.pull_request.opened"], filters: [] };
+
+  it("names the fix for a malformed replaces, a missing workflow, pauseOnOverlap, and a workflow prompt", () => {
+    for (const replaces of ["", 7]) {
+      expect(validateSubscription([githubPlugin], { ...body, target: { kind: "assistant", replaces } }))
+        .toBe("replaces must name the line this proposal updates. Pick the line again.");
+    }
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "workflow" } }))
+      .toBe("A workflow line needs workflowId. Choose the workflow that runs.");
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "assistant", pauseOnOverlap: "yes" } }))
+      .toBe("pauseOnOverlap must be true or false. Send true to pause this line when a team also listens.");
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "workflow", workflowId: "wf-1", userPromptTemplate: "Hi" } }))
+      .toBe("userPromptTemplate is only valid on an assistant target. Remove userPromptTemplate, or point the line at an assistant.");
+  });
+});
+
 describe("derived event keys (spec Part G, Non-goals)", () => {
   const body = { name: "CI", filters: [], target: { kind: "assistant" } };
 

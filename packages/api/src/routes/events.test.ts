@@ -1888,7 +1888,7 @@ describe("event-subscription prompt templates", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe(
-      "systemPrompt is only valid on an assistant target",
+      "systemPrompt is only valid on an assistant target. Remove systemPrompt, or point the line at an assistant.",
     );
   });
 

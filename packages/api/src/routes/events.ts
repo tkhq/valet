@@ -1300,7 +1300,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     const patched = body[field];
     if (patched === undefined) continue;
     if (patchedTarget.kind !== "assistant") {
-      return c.json({ error: `${field} is only valid on an assistant target` }, 400);
+      return c.json({ error: `${field} is only valid on an assistant target. Remove ${field}, or point the line at an assistant.` }, 400);
     }
     if (patched === null) {
       const { [field]: _cleared, ...rest } = patchedTarget;
