@@ -132,9 +132,14 @@ export function useRedeliverEvent(id: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkEvents.detail(id) });
       qc.invalidateQueries({ queryKey: ["events", "log"] });
+      // A line's Activity lists the redelivered entries too.
+      qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
     },
   });
 }
+
+/** The prefix of every line's Activity query (`qkLineActivity.line` in `api/line-activity.ts`). */
+const LINE_ACTIVITY_PREFIX = ["events", "line-activity"] as const;
 
 /** `owner` scopes the list to one workspace plus every org-owned
  * subscription. Undefined lists every subscription in the org; an undefined
@@ -156,9 +161,11 @@ export function useEventSubscriptions(
  * mutation invalidates that key too. Otherwise the trigger list serves a stale
  * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`.
  * The Presence reads (places, a place page) list the same rules, so a
- * listener added from a place page shows there at once. */
+ * listener added from a place page shows there at once. A line's Activity
+ * and health strip read the line too, so an edit refreshes them. */
 function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+  void qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
   void qc.invalidateQueries({ queryKey: qkPresence.all });
 }

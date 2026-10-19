@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ListEventSubscriptionsResponse } from "@valet/api/wire";
 
@@ -22,10 +22,13 @@ vi.mock("./client", () => ({
   api: {
     listEventReceipts: () => listEventReceipts(),
     listEventSubscriptions: () => listEventSubscriptions(),
+    patchEventSubscription: () => Promise.resolve({ subscription: ORG_SUBSCRIPTIONS.subscriptions[0] }),
+    redeliverEvent: () => Promise.resolve({ deliveries: [] }),
   },
 }));
 
-import { qkEvents, useEventReceipts, useEventSubscriptions } from "./events";
+import { qkEvents, useEventReceipts, useEventSubscriptions, usePatchEventSubscription, useRedeliverEvent } from "./events";
+import { qkLineActivity } from "./line-activity";
 
 const ORG_SUBSCRIPTIONS: ListEventSubscriptionsResponse = {
   subscriptions: [
@@ -106,4 +109,24 @@ it("does not request receipts without admin permission or a resolved org", () =>
   renderHook(() => useEventReceipts("org", {}, false), { wrapper });
   renderHook(() => useEventReceipts(undefined, {}, true), { wrapper });
   expect(listEventReceipts).not.toHaveBeenCalled();
+});
+
+describe("a line's Activity refresh", () => {
+  // The line page's Activity and health strip read the line, so an edit and a redeliver must refetch them.
+  it.each([
+    ["an edit", (client: QueryClient) => {
+      const { result } = renderHook(() => usePatchEventSubscription(), { wrapper: makeWrapper(client) });
+      return () => result.current.mutateAsync({ id: "sub_1", body: { enabled: false } });
+    }],
+    ["a redeliver", (client: QueryClient) => {
+      const { result } = renderHook(() => useRedeliverEvent("ev_1"), { wrapper: makeWrapper(client) });
+      return () => result.current.mutateAsync();
+    }],
+  ])("marks the line's Activity stale after %s", async (_name, start) => {
+    const client = newClient();
+    client.setQueryData(qkLineActivity.line("sub_1"), { pages: [], pageParams: [] });
+    const run = start(client);
+    await act(async () => { await run(); });
+    expect(client.getQueryState(qkLineActivity.line("sub_1"))?.isInvalidated).toBe(true);
+  });
 });
