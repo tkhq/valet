@@ -295,10 +295,14 @@ export function Composer({
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
   const sendWasPending = useRef(false);
-  // Focus that moved to another composer, such as the Ask Valet dock, stays there.
+  // With the Ask Valet dock beside the page, only the composer used last
+  // takes focus back, and only from the body, so overlapping sends end
+  // where the person typed last.
+  const identity = useRef({});
   useEffect(() => {
     const active = document.activeElement;
-    if (sendWasPending.current && !send.isPending && (!active || active === document.body || active === inputRef.current)) inputRef.current?.focus();
+    if (sendWasPending.current && !send.isPending && lastUsedComposer === identity.current
+      && (!active || active === document.body || active === inputRef.current)) inputRef.current?.focus();
     sendWasPending.current = send.isPending;
   }, [send.isPending]);
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
@@ -636,7 +640,8 @@ export function Composer({
       // A newer draft in the slot wins: another composer on this thread,
       // such as the Ask Valet dock, wrote it while the POST was in flight.
       const drafts = useComposerDraftStore.getState();
-      const untouched = drafts.byKey[slot] === undefined;
+      const current = drafts.byKey[slot];
+      const untouched = !current || (!current.text.trim() && current.images.length === 0 && current.files.length === 0);
       if (untouched) {
         drafts.setText(slot, t);
         drafts.setImages(slot, pendingImages);
@@ -972,7 +977,7 @@ export function Composer({
             ref={inputRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            onFocus={() => setSelected(true)}
+            onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             placeholder={threadId ? ACTION_PLACEHOLDER[action] : "Loading thread…"}
@@ -1072,6 +1077,9 @@ export function Composer({
     </form>
   );
 }
+
+/** The composer the person focused last. See the send-settle focus effect. */
+let lastUsedComposer: object | undefined;
 
 function apiErrorDetail(err: unknown, fallback: string): string {
   const payload =

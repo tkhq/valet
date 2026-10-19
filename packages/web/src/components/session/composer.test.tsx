@@ -19,7 +19,7 @@ import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
 const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
-const sendState: { pending: boolean; sessionId?: string } = { pending: false };
+const sendState: { pending: boolean; sessions?: string[] } = { pending: false };
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 const addUserMessage = vi.fn(() => "user-opt-1");
 const setMessageQueueItemId = vi.fn();
@@ -44,7 +44,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
-    useSendPrompt: (sessionId: string) => ({ isPending: sendState.pending && (sendState.sessionId ?? sessionId) === sessionId, mutateAsync: sendMutateAsync }),
+    useSendPrompt: (sessionId: string) => ({ isPending: sendState.pending && (sendState.sessions ?? [sessionId]).includes(sessionId), mutateAsync: sendMutateAsync }),
     useAbortThread: () => ({
       isPending: false,
       mutateAsync: abortMutateAsync,
@@ -126,7 +126,7 @@ function renderComposer(
 beforeEach(() => {
   queueStateRef.current = undefined;
   sendState.pending = false;
-  sendState.sessionId = undefined;
+  sendState.sessions = undefined;
   useComposerPrefillStore.setState({ text: null });
   // Drafts live in a module-global store keyed by (session, thread) — the
   // same key across tests would leak one test's draft into the next.
@@ -810,9 +810,39 @@ describe("Composer beside the Ask Valet dock", () => {
     const { page, dock, rerender } = renderPageAndDock({ status: "idle", dockSession: "orchestrator:dock" });
     act(() => page.focus());
     sendState.pending = true;
-    sendState.sessionId = "orchestrator:user-1";
+    sendState.sessions = ["orchestrator:user-1"];
     rerender();
     act(() => dock.focus());
+    sendState.pending = false;
+    rerender();
+    expect(document.activeElement).toBe(dock);
+  });
+
+  it("restores a failed send when the slot holds only an attachment error", async () => {
+    let fail: (error: Error) => void = () => undefined;
+    sendMutateAsync.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    const { page } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "first question" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+    act(() => useComposerDraftStore.getState().setImageErrors(draftKey("orchestrator:user-1", "shared"), ["That image is too large."]));
+    await act(async () => fail(new Error("connection lost")));
+    expect(page.value).toBe("first question");
+  });
+
+  it("returns focus to the composer used last when sends overlap", () => {
+    const { page, dock, rerender } = renderPageAndDock({ status: "idle", dockSession: "orchestrator:dock" });
+    act(() => page.focus());
+    sendState.pending = true;
+    sendState.sessions = ["orchestrator:user-1"];
+    rerender();
+    act(() => dock.focus());
+    // A disabled input drops focus to the body. jsdom does not, so blur first.
+    act(() => dock.blur());
+    sendState.sessions = ["orchestrator:user-1", "orchestrator:dock"];
+    rerender();
+    sendState.sessions = ["orchestrator:dock"];
+    rerender();
     sendState.pending = false;
     rerender();
     expect(document.activeElement).toBe(dock);
