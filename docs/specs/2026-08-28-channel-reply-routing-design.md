@@ -617,7 +617,8 @@ list item, follows an indented line with no blank line between them, or has an
 indented delimiter row. A line without a pipe in the table body is a one-cell
 row, as in GFM, with one exception (2026-10-19): when it is the last line of the
 block and reads as a sentence (it has a space and ends with `.`, `!`, or `?`),
-it ends the table and stays prose. GFM reads that line as another row, but a
+it ends the table and stays prose. A thematic break (`---`, `***`, `___`) also
+ends the table, as in GFM. GFM reads a closing sentence as another row, but a
 model that ends a table with a sentence means prose, and Slack's `markdown`
 block showed such a table as raw pipes: a 1-day release report short enough for
 one message lost its table this way. It also stays when the message has a link

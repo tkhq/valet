@@ -238,6 +238,21 @@ describe('tablesToTableBlocks', () => {
     expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({ rows: [expect.anything(), expect.anything(), [cell(text(value)), blank]] });
   });
 
+  it.each(['---', '***', '___', ' - - -'])('ends the table at a %s thematic break, as GFM does', (rule) => {
+    const source = `| a | b |\n|-|-|\n| 1 | 2 |\n${rule}\nDo not deploy`;
+    const blocks = tablesToTableBlocks(source, 50);
+    expect(blocks?.map((block) => block.type)).toEqual(['table', 'markdown']);
+    expect(blocks?.[0]).toMatchObject({ rows: [expect.anything(), expect.anything()] });
+    expect(blocks?.[1]).toEqual({ type: 'markdown', text: `${rule}\nDo not deploy` });
+  });
+
+  it('scans a long run of pipe-less lines after a table in linear time', () => {
+    const source = '| a | b |\n|-|-|\n| 1 | 2 |\n' + Array.from({ length: 8_000 }, () => 'x').join('\n');
+    const started = performance.now();
+    tablesToTableBlocks(source, 50);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it('ends the table at a closing sentence after the rows and keeps it as prose', () => {
     // A model's closing sentence; Slack's markdown block showed this table
     // as raw pipes when the sentence counted as a row.

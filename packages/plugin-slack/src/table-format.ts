@@ -66,6 +66,9 @@ export type MarkdownSegment =
   | { type: 'text'; lines: string[] }
   | { type: 'table'; table: MarkdownTable };
 
+/** A thematic break (`---`, `***`, `___`), which ends a table in GFM. */
+const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+
 /** Prose, not a cell value: words with a space, ending as a sentence ends. */
 function readsAsSentence(line: string): boolean {
   const text = line.trim();
@@ -129,20 +132,26 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     index += 1;
     const rows: string[][] = [];
     const tableLines = [line, delimiter];
-    const endsBlock = (text: string): boolean => /^\s*$|^(?: {4}|\t)/.test(text) || BLOCK_START.test(text);
+    const endsBlock = (text: string): boolean =>
+      /^\s*$|^(?: {4}|\t)/.test(text) || BLOCK_START.test(text) || THEMATIC_BREAK.test(text);
+    // Where the current run of pipe-less lines stops: one scan per run, so a
+    // long run stays linear.
+    let runEnd = -1;
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
       if (endsBlock(next)) break;
       let cells = tableCells(next);
       if (!cells) {
         // GFM reads a line without a pipe as a one-cell row, and it stays
-        // one. The exception is a closing sentence: the last line of the
-        // block that reads as prose. A model ends a table that way and means
-        // prose, and Slack's markdown block showed such a table as raw
-        // pipes, so that line ends the table.
-        let later = index + 2;
-        while (later < lines.length && !endsBlock(lines[later]) && !tableCells(lines[later])) later += 1;
-        const lastInBlock = later >= lines.length || endsBlock(lines[later]);
+        // one. The exception is a closing sentence: a line that reads as
+        // prose with no pipe row after it in the block. A model ends a table
+        // that way and means prose, and Slack's markdown block showed such a
+        // table as raw pipes, so that line ends the table.
+        if (runEnd <= index + 1) {
+          runEnd = index + 2;
+          while (runEnd < lines.length && !endsBlock(lines[runEnd]) && !tableCells(lines[runEnd])) runEnd += 1;
+        }
+        const lastInBlock = runEnd >= lines.length || endsBlock(lines[runEnd]);
         if (lastInBlock && readsAsSentence(next)) break;
         cells = [next.trim()];
       }
