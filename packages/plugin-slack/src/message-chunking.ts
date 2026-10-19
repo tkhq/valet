@@ -24,6 +24,29 @@ export interface ContentBlockOptions extends MarkdownToSlackMrkdwnOptions {
 /** Max characters in the `text` field of chat.postMessage before we switch to blocks. */
 export const SLACK_TEXT_LIMIT = 4000;
 
+/**
+ * Max UTF-8 bytes in chat.update's `text` field. chat.postMessage truncates a
+ * long text, but chat.update rejects one over 4,000 bytes with msg_too_long,
+ * so a 4,000-character slice with any multi-byte character fails the edit.
+ */
+export const SLACK_UPDATE_TEXT_BYTES = 4000;
+
+const utf8 = new TextEncoder();
+
+/** Cuts `text` to at most `maxBytes` UTF-8 bytes without splitting a character. */
+export function truncateUtf8(text: string, maxBytes: number): string {
+  if (utf8.encode(text).length <= maxBytes) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const size = utf8.encode(char).length;
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
 /** Cumulative character limit across all markdown blocks in a single payload. */
 export const SLACK_MARKDOWN_LIMIT = 12000;
 

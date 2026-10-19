@@ -1981,6 +1981,42 @@ describe('slack actions', () => {
     expect(body.text.length).toBeLessThanOrEqual(SLACK_TEXT_LIMIT);
   });
 
+  it('update_message cuts the fallback text to 4,000 UTF-8 bytes', async () => {
+    // chat.update rejects a text over 4,000 bytes (msg_too_long); a report row's
+    // "Oct 16 · @author" made a 4,000-character slice 4,004 bytes.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Report\n${'Oct 16 · @author\n'.repeat(400)}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    const bytes = new TextEncoder().encode(body.text).length;
+    expect(bytes).toBeLessThanOrEqual(4000);
+    expect(bytes).toBeGreaterThan(3990);
+  });
+
+  it('update_message uses blocks for a short text that is over 4,000 bytes', async () => {
+    // 1,400 characters but 4,200 bytes: needsContentBlocks is false, so only the
+    // byte check keeps this edit from sending an over-limit text with no blocks.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: '中'.repeat(1400) },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
   it('update_message maps cant_update_message to a corrective error', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'cant_update_message' }));

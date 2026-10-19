@@ -23,7 +23,7 @@ import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, hasTableBlock, needsContentBlocks, splitTableMessage, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, splitTableMessage, truncateUtf8, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, SLACK_UPDATE_TEXT_BYTES } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
@@ -1454,8 +1454,10 @@ const updateMessage = action(Type.Object({
     // keeps a message's existing blocks unless the field is sent, so always send
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
-    // the stale blocks rendering.
+    // the stale blocks rendering. chat.update counts the text limit in UTF-8
+    // bytes, so the fallback text is cut by bytes, not characters.
     const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
+    const fallbackText = truncateUtf8(formattedText, SLACK_UPDATE_TEXT_BYTES);
     const body: Record<string, unknown> = {
       channel: args.channel,
       ts: args.ts,
@@ -1463,9 +1465,9 @@ const updateMessage = action(Type.Object({
       parse: 'none',
     };
     let fallbackBlocks: Record<string, unknown>[] | undefined;
-    if (needsContentBlocks(args.text)) {
+    if (needsContentBlocks(args.text) || fallbackText !== formattedText) {
       body.blocks = buildContentBlocks(args.text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
-      body.text = formattedText.slice(0, SLACK_TEXT_LIMIT);
+      body.text = fallbackText;
       fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], args.text, formattedText, SLACK_MAX_BLOCKS);
     } else {
       body.blocks = [];
