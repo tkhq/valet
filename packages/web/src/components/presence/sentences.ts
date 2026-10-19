@@ -1267,11 +1267,10 @@ const SKIP_WORDS: Readonly<Record<Exclude<NonNullable<LineActivityEntryWire["rea
   claimed: "another line claimed it",
 };
 
-/** `gave up after <n> tries` when the api sends the attempt count, else `gave up`. */
+/** `gave up after <n> tries` when the entry records an attempt, else `gave up`. */
 function gaveUpWords(outcome: LineActivityEntryWire["outcome"]): string {
-  // `attempts` is not on the wire type yet; read it only when the api sends it.
-  const attempts = outcome !== undefined && "attempts" in outcome && typeof outcome.attempts === "number" ? outcome.attempts : undefined;
-  if (attempts === undefined || attempts < 1) return "gave up";
+  const attempts = outcome?.attempts ?? 0;
+  if (attempts < 1) return "gave up";
   return `gave up after ${attempts} ${attempts === 1 ? "try" : "tries"}`;
 }
 

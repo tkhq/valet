@@ -347,9 +347,9 @@ describe("RulePage", () => {
   it("lists acted and skipped entries; the chips keep one kind (P18)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ problem: PIN_TEXT })] });
     getLineActivity.mockResolvedValue(activity([
-      acted("d-2", { outcome: { status: "delivered", thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } }, tookMs: 120_000 }),
+      acted("d-2", { outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } }, tookMs: 120_000 }),
       skipped("receipt:r-1", { place: "github:acme/web#8", placeLabel: "acme/web#8", reason: "filters", reasonText: "the repository filter" }),
-      acted("d-1", { at: NOW - 180_000, outcome: { status: "dead", deadText: PIN_TEXT } }),
+      acted("d-1", { at: NOW - 180_000, outcome: { status: "dead", attempts: 3, deadText: PIN_TEXT } }),
     ]));
     renderPage();
     await screen.findByText(/worked in/);
@@ -369,8 +369,8 @@ describe("RulePage", () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     // The api counts every acted delivery, dead ones too, as the timeline lists them.
     getLineActivity.mockResolvedValue(activity([
-      acted("d-2", { outcome: { status: "delivered", thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } }, tookMs: 40_000 }),
-      acted("d-1", { at: NOW - 180_000, outcome: { status: "dead", deadText: "error: HTTP 500" } }),
+      acted("d-2", { outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s-ws", threadId: "t-ci", title: "Platform CI" } }, tookMs: 40_000 }),
+      acted("d-1", { at: NOW - 180_000, outcome: { status: "dead", attempts: 3, deadText: "error: HTTP 500" } }),
     ], { lastActedAt: NOW - 60_000, actedLast30Days: 2, perDay: [...Array.from({ length: 29 }, () => 0), 2] }));
     renderPage();
     await waitFor(() => expect(activityRows()).toHaveLength(2));
@@ -409,8 +409,8 @@ describe("RulePage", () => {
   it("loads the next page from Show earlier", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     getLineActivity.mockImplementation(async (_id, params) => (params?.before === "c-1"
-      ? activity([acted("d-old", { at: NOW - 5 * 86_400_000, outcome: { status: "delivered" } })])
-      : activity([acted("d-new", { outcome: { status: "delivered" } })], { nextCursor: "c-1" })));
+      ? activity([acted("d-old", { at: NOW - 5 * 86_400_000, outcome: { status: "delivered", attempts: 1 } })])
+      : activity([acted("d-new", { outcome: { status: "delivered", attempts: 1 } })], { nextCursor: "c-1" })));
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Show earlier" }));
     await waitFor(() => expect(activityRows()).toHaveLength(2));
@@ -419,10 +419,10 @@ describe("RulePage", () => {
 
   it("reads a dead entry's error once, in the right column, as a sentence (S14)", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
-    getLineActivity.mockResolvedValue(activity([acted("d-dead", { outcome: { status: "dead", deadText: "error: HTTP 500 from the assistant" } })]));
+    getLineActivity.mockResolvedValue(activity([acted("d-dead", { outcome: { status: "dead", attempts: 3, deadText: "error: HTTP 500 from the assistant" } })]));
     renderPage();
     await waitFor(() => expect(activityRows()).toHaveLength(1));
-    expect(activityRows()[0]).toContain("Completed check on acme/api#14 → gave upHTTP 500 from the assistant.");
+    expect(activityRows()[0]).toContain("Completed check on acme/api#14 → gave up after 3 triesHTTP 500 from the assistant.");
     expect(activityRows()[0]).not.toMatch(/error:/i);
   });
 

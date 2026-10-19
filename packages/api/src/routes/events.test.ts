@@ -745,14 +745,14 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
     await seedSubscriptionRow(a, "sub_line", "local-org", { filters: [{ field: "repo", op: "eq", value: "acme/widgets" }] });
     await seedEventRow(a, { id: "ev_a", receivedAt: 1_000, subjects: ["github:acme/widgets"] });
     await a.providers.db.insert(eventDeliveries).values([
-      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 1, nextAttemptAt: 1_000, deliveredAt: 1_250, createdAt: 1_000 },
+      { id: "d_a", eventId: "ev_a", subscriptionId: "sub_line", status: "delivered", attempts: 2, nextAttemptAt: 1_000, deliveredAt: 1_250, createdAt: 1_000 },
     ]);
     await seedReceipt(a, "r_filter", 2_000, { outcome: "filter_excluded", failedFilters: [{ field: "repo", op: "eq" }] });
     await seedReceipt(a, "r_matched", 3_000, { outcome: "matched" });
 
     const body = await activity(a);
     expect(body.entries.map((e) => [e.id, e.kind])).toEqual([["receipt:r_filter", "skipped"], ["d_a", "acted"]]);
-    expect(body.entries[1]).toMatchObject({ eventId: "ev_a", place: "github:acme/widgets", placeLabel: "acme/widgets", tookMs: 250, outcome: { status: "delivered" } });
+    expect(body.entries[1]).toMatchObject({ eventId: "ev_a", place: "github:acme/widgets", placeLabel: "acme/widgets", tookMs: 250, outcome: { status: "delivered", attempts: 2 } });
     // An admin sees a skip whose place is unknown; this receipt names no stored event.
     expect(body.entries[0]).toMatchObject({ reason: "filters", reasonText: "the repository filter", eventId: null });
     expect(body.lastActedAt).toBe(1_250);

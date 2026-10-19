@@ -14,7 +14,7 @@ const OTHER_REPO = { key: "github:acme/web", label: "acme/web" };
 function delivery(over: Partial<LineDeliveryInput> & { id: string }): LineDeliveryInput {
   return {
     eventId: `ev_${over.id}`, subscriptionId: "sub_1", status: "delivered", createdAt: 1_000, deliveredAt: null,
-    lastError: null, destination: null, eventKey: "github.pull_request.opened", place: REPO, ...over,
+    attempts: 1, lastError: null, destination: null, eventKey: "github.pull_request.opened", place: REPO, ...over,
   };
 }
 
@@ -43,11 +43,18 @@ describe("mergeLineActivity", () => {
     expect(entries[2]).toEqual({
       id: "d_ok", kind: "acted", at: 1_000, eventId: "ev_d_ok", eventKey: "github.pull_request.opened",
       place: "github:acme/api", placeLabel: "acme/api",
-      outcome: { status: "delivered", thread: { sessionId: "s1", threadId: "t1" } }, tookMs: 450,
+      outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s1", threadId: "t1" } }, tookMs: 450,
     });
     expect(entries[1]).not.toHaveProperty("tookMs");
     expect(entries[0]).toMatchObject({ outcome: { status: "dead", deadText: "Pick another thread in Presence." } });
     expect(entries[0]).not.toHaveProperty("tookMs");
+  });
+
+  it("carries the delivery's attempt count on the outcome", () => {
+    const entries = mergeLineActivity([
+      delivery({ id: "d_dead", status: "dead", attempts: 3, lastError: "error: HTTP 500" }),
+    ], [], MEMBER);
+    expect(entries[0]?.outcome).toEqual({ status: "dead", attempts: 3, deadText: "error: HTTP 500" });
   });
 
   it("leaves out a dead delivery that a later delivery settled", () => {

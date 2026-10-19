@@ -45,6 +45,8 @@ export interface LineDeliveryInput {
   status: EventDeliveryWire["status"];
   createdAt: number;
   deliveredAt: number | null;
+  /** The delivery attempts the dispatcher recorded. */
+  attempts: number;
   lastError: string | null;
   /** The destination stamp. A claim stamp marks a delivery a waiter claimed. */
   destination: unknown;
@@ -159,6 +161,7 @@ export function mergeLineActivity(
       ...common, kind: "acted",
       outcome: {
         status: d.status,
+        attempts: d.attempts,
         ...(d.thread ? { thread: d.thread } : {}),
         ...(d.runId ? { runId: d.runId } : {}),
         ...(d.status === "dead" && d.lastError ? { deadText: d.lastError } : {}),
@@ -400,7 +403,7 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
       const link = links[index];
       deliveries.push({
         id: row.id, eventId: row.event.id, subscriptionId: row.subscriptionId, status: row.status,
-        createdAt: row.createdAt, deliveredAt: row.deliveredAt, lastError: row.lastError, destination: row.destination,
+        createdAt: row.createdAt, deliveredAt: row.deliveredAt, attempts: row.attempts, lastError: row.lastError, destination: row.destination,
         eventKey: row.event.eventKey, place,
         ...(link?.thread ? { thread: link.thread } : {}), ...(link?.runId ? { runId: link.runId } : {}),
       });

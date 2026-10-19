@@ -286,7 +286,7 @@ const DEAD_ROW = logEvent("ev-14", "github", "github.check_run.completed", "acme
 const R4_ACTIVITY: LineActivityResponse = {
   entries: [{
     id: "d-14", kind: "acted", at: NOW - 60_000, eventId: "ev-14", eventKey: "github.check_run.completed",
-    place: "github:acme/api#14", placeLabel: "acme/api#14", outcome: { status: "dead", deadText: PIN_UNAVAILABLE },
+    place: "github:acme/api#14", placeLabel: "acme/api#14", outcome: { status: "dead", attempts: 3, deadText: PIN_UNAVAILABLE },
   }, {
     id: "rc-8", kind: "skipped", at: NOW - 120_000, eventId: null, eventKey: "github.check_run.completed",
     place: "github:acme/web#8", placeLabel: "acme/web#8", reason: "filters", reasonText: "the repository filter",

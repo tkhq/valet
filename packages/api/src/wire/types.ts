@@ -5301,6 +5301,8 @@ export interface LineActivityOutcome {
   thread?: EventDeliveryThreadRef;
   runId?: string;
   deadText?: string;
+  /** How many delivery attempts the dispatcher recorded for this entry. */
+  attempts: number;
 }
 
 /** Why a line skipped an event (spec 2026-10-16: presence hub, Part D step 1.7). */

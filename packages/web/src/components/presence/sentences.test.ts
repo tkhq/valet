@@ -973,7 +973,7 @@ describe("lineEntryParts (Part D step 1.7)", () => {
   const isPinText = (text: string) => text === PIN;
 
   it("reads a delivered entry as worked in its thread, with the place as a token", () => {
-    const parts = lineEntryParts(entry({ outcome: { status: "delivered", thread: { sessionId: "s", threadId: "t-ci", title: "Platform CI" } } }));
+    const parts = lineEntryParts(entry({ outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s", threadId: "t-ci", title: "Platform CI" } } }));
     expect(partsText(parts)).toBe("Completed check on acme/api#14 → worked in Platform CI");
     expect(parts).toContainEqual({ kind: "place", text: "acme/api#14", service: "github", subject: "github:acme/api#14" });
     expect(parts).toContainEqual({ kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" });
@@ -982,30 +982,28 @@ describe("lineEntryParts (Part D step 1.7)", () => {
   it("reads a mention as replied in, in its channel", () => {
     const parts = lineEntryParts(entry({
       eventKey: "slack.app_mention", place: "slack:T1/C900", placeLabel: "#incidents",
-      outcome: { status: "delivered", thread: { sessionId: "s", threadId: "t-inc", title: "t-inc" } },
+      outcome: { status: "delivered", attempts: 1, thread: { sessionId: "s", threadId: "t-inc", title: "t-inc" } },
     }));
     expect(partsText(parts)).toBe("Mention in #incidents → replied in t-inc");
   });
 
   it("reads a run as started <workflow> run", () => {
-    const parts = lineEntryParts(entry({ outcome: { status: "delivered", runId: "run-1" } }), { workflow: { id: "wf-1", name: "Triage" } });
+    const parts = lineEntryParts(entry({ outcome: { status: "delivered", attempts: 1, runId: "run-1" } }), { workflow: { id: "wf-1", name: "Triage" } });
     expect(partsText(parts)).toBe("Completed check on acme/api#14 → started Triage run");
     expect(parts).toContainEqual({ kind: "workflow", text: "Triage", id: "wf-1" });
   });
 
   it("reads a dead pin as could not reach the thread, and other dead text as gave up", () => {
-    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: PIN } }), { pinTitle: "Platform CI", isPinText })))
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", attempts: 3, deadText: PIN } }), { pinTitle: "Platform CI", isPinText })))
       .toBe("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
     // The error goes to the right column once (deadErrorSentence); the left text says gave up (S14).
-    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: "error: HTTP 500" } }), { isPinText })))
-      .toBe("Completed check on acme/api#14 → gave up");
-    // The api's attempt count, once it sends one.
-    const counted = { status: "dead" as const, deadText: "error: HTTP 500", attempts: 3 };
-    expect(partsText(lineEntryParts(entry({ outcome: counted }), { isPinText })))
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", attempts: 3, deadText: "error: HTTP 500" } }), { isPinText })))
       .toBe("Completed check on acme/api#14 → gave up after 3 tries");
+    // A row with no recorded attempt says only gave up.
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", attempts: 0 } })))).toBe("Completed check on acme/api#14 → gave up");
     const once = { status: "dead" as const, attempts: 1 };
     expect(partsText(lineEntryParts(entry({ outcome: once })))).toBe("Completed check on acme/api#14 → gave up after 1 try");
-    expect(partsText(lineEntryParts(entry({ outcome: { status: "pending" } }))))
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "pending", attempts: 0 } }))))
       .toBe("Completed check on acme/api#14 → waiting for the first attempt");
   });
 
