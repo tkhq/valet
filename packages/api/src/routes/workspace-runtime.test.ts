@@ -3,7 +3,7 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, sessionThreads, teams, teamMembers } from "../schema/index.js";
 import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse, EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
@@ -204,40 +204,53 @@ describe("Ask Valet conversations", () => {
   });
   // Thread ids are random, so space out creations to order them by time.
   const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+  // A sent message records the person's activity on the thread.
+  const use = async ({ sessionId, threadId }: EnsureWorkspaceConversationResponse) => {
+    const at = Date.now();
+    await api!.providers.db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: at, lastUserActivityAt: at })
+      .onConflictDoUpdate({ target: sessionThreads.id, set: { lastUserActivityAt: at } });
+    await tick();
+  };
+  const waitForApproval = ({ sessionId, threadId }: EnsureWorkspaceConversationResponse) => api!.providers.engineStore.saveDecisionGate(sessionId, threadId, {
+    id: "gate-settings", sessionId, threadId, queueItemId: "q-settings", resumeKey: "rk-settings", ordinal: 0,
+    type: "approval", title: "Change your name?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+  });
 
-  it("starts a fresh conversation unless the latest one waits for an approval", async () => {
+  it("reuses an empty conversation and starts a fresh one after a message", async () => {
     api = await bootTestApi();
     const { open, list } = conversations("user");
     const first = await open();
     expect(await open()).toEqual(first);
-    await tick();
+    // Opening and closing the panel without a message saves no new thread.
+    for (let i = 0; i < 3; i++) expect(await open({ fresh: true, unlessBusy: true })).toEqual(first);
+    expect((await list()).conversations).toEqual([]);
+    await use(first);
     const fresh = await open({ fresh: true });
     expect(fresh.threadId).not.toBe(first.threadId);
-    expect(await open()).toEqual(fresh);
+    expect(await open({ fresh: true })).toEqual(fresh);
+    expect(await open()).toEqual(first);
     const keys = (await api.providers.engineStore.listThreads(first.sessionId)).map(thread => thread.key);
     expect(keys).toContain("app-assistant:local-user");
     expect(keys.filter(key => /^app-assistant:local-user:[0-9a-f-]{36}$/.test(key))).toHaveLength(1);
-
-    await tick();
-    const next = await open({ fresh: true, unlessBusy: true });
-    expect(next.threadId).not.toBe(fresh.threadId);
-    await api.providers.engineStore.saveDecisionGate(next.sessionId, next.threadId, {
-      id: "gate-settings", sessionId: next.sessionId, threadId: next.threadId, queueItemId: "q-settings", resumeKey: "rk-settings", ordinal: 0,
-      type: "approval", title: "Change your name?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
-    });
-    expect(await open({ fresh: true, unlessBusy: true })).toEqual(next);
-    await tick();
-    const newChat = await open({ fresh: true });
-    expect(newChat.threadId).not.toBe(next.threadId);
-
-    const recent = await list();
-    expect(recent.sessionId).toBe(first.sessionId);
-    expect(recent.conversations.map(item => [item.threadId, item.busy])).toEqual([
-      [newChat.threadId, false], [next.threadId, true], [fresh.threadId, false], [first.threadId, false],
-    ]);
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([first.threadId]);
     // Ask Valet conversations stay out of the Threads list.
     const threads = await (await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=10`)).json() as ListThreadsResponse;
     expect(threads.threads.some(thread => thread.key?.startsWith("app-assistant:"))).toBe(false);
+  });
+
+  it("reopens the latest conversation while it waits for an approval, also after New chat", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const waiting = await open();
+    await use(waiting);
+    await waitForApproval(waiting);
+    const newChat = await open({ fresh: true });
+    expect(newChat.threadId).not.toBe(waiting.threadId);
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(waiting);
+    await use(newChat);
+    const next = await open({ fresh: true, unlessBusy: true });
+    expect([waiting.threadId, newChat.threadId]).not.toContain(next.threadId);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[newChat.threadId, false], [waiting.threadId, true]]);
   });
 
   it("keeps each team member's conversations to that member", async () => {
@@ -249,10 +262,10 @@ describe("Ask Valet conversations", () => {
     ]);
     const mine = conversations("ask-team");
     const theirs = conversations("ask-team", "test-member");
-    await mine.open();
-    await tick();
     const own = await mine.open({ fresh: true });
     const other = await theirs.open({ fresh: true });
+    await use(own);
+    await use(other);
     expect(own.sessionId).toMatch(/^execution:/);
     expect(own.sessionId).not.toBe(other.sessionId);
     const [execution] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, own.sessionId));

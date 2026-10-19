@@ -39,7 +39,10 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   // refuses every mutation, so the gallery never sends this request.
   const ensureConversation = useMutation({ ...ENSURE_CONVERSATION_MUTATION,
     mutationFn: ({ workspace, request }: { workspace: string; request: EnsureWorkspaceConversationRequest }) => api.ensureWorkspaceConversation(workspace, request) });
+  // In-flight requests by workspace and body. The latest start in each
+  // workspace decides which conversation the panel shows.
   const starting = useRef(new Map<string, Promise<Conversation>>());
+  const latestStart = useRef(new Map<string, number>());
   const lastRequest = useRef<EnsureWorkspaceConversationRequest>({ fresh: true, unlessBusy: true });
   const [opened, setOpened] = useState<string>();
   const [loaded, setLoaded] = useState<Record<string, Conversation>>({});
@@ -80,11 +83,15 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   }
   async function start(request: EnsureWorkspaceConversationRequest, prompt?: string) {
     const draftOwner = useComposerDraftStore.getState().owner;
+    const generation = (latestStart.current.get(workspace) ?? 0) + 1;
+    latestStart.current.set(workspace, generation);
+    const isLatest = () => latestStart.current.get(workspace) === generation;
+    const requestKey = `${workspace}\u0000${JSON.stringify(request)}`;
     lastRequest.current = request;
     setOpened(workspace);
     setErrors((current) => ({ ...current, [workspace]: "" }));
     setLoaded(({ [workspace]: _replaced, ...current }) => current);
-    let pending = starting.current.get(workspace);
+    let pending = starting.current.get(requestKey);
     if (!pending) {
       pending = (async () => {
         try {
@@ -92,17 +99,17 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
           await qc.invalidateQueries({ queryKey: qk.threads(conversation.sessionId) });
           return conversation;
         } finally {
-          starting.current.delete(workspace);
+          starting.current.delete(requestKey);
         }
       })();
-      starting.current.set(workspace, pending);
+      starting.current.set(requestKey, pending);
     }
     try {
       const conversation = await pending;
       if (prompt && useComposerDraftStore.getState().owner === draftOwner) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
-      setLoaded((current) => ({ ...current, [workspace]: conversation }));
+      if (isLatest()) setLoaded((current) => ({ ...current, [workspace]: conversation }));
     } catch (error) {
-      setErrors((current) => ({ ...current, [workspace]: error instanceof Error ? error.message : "Could not open Valet." }));
+      if (isLatest()) setErrors((current) => ({ ...current, [workspace]: error instanceof Error ? error.message : "Could not open Valet." }));
     }
   }
   const conversation = loaded[workspace];

@@ -73,18 +73,19 @@ function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
   return ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
 }
 
-/** The viewer's Ask Valet conversations in one session, the most recently used first. */
-async function assistantConversations(c: Context<AppEnv>, session: Session): Promise<WorkspaceConversationSummary[]> {
+/** The viewer's Ask Valet conversations in one session, the most recently used
+ * first. A conversation starts with its first message; until then it is empty. */
+async function assistantConversations(c: Context<AppEnv>, session: Session): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
   const { db, engineStore } = c.var.providers;
   const threads = (await engineStore.listThreads(session.id)).filter(thread => isAssistantConversationOf(thread.key, c.var.user.id));
   if (!threads.length) return [];
   const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt })
     .from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
   const waiting = new Set((await engineStore.listDecisionGates(session.id, undefined, "pending")).map(gate => gate.threadId));
-  return threads.map((thread): WorkspaceConversationSummary => {
+  return threads.map((thread) => {
     const row = meta.get(thread.id);
     return { threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
-      lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt,
+      lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null,
       busy: session.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
   }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
 }
@@ -97,10 +98,15 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   const body: unknown = await c.req.json().catch(() => undefined);
   const request: EnsureWorkspaceConversationRequest = body && typeof body === "object" ? body : {};
   const { sessionId, session } = await assistantConversationSession(c, owner);
-  const [latest] = await assistantConversations(c, session);
-  if (latest && (request.fresh !== true || (request.unlessBusy === true && latest.busy))) {
-    return c.json({ sessionId, threadId: latest.threadId } satisfies EnsureWorkspaceConversationResponse);
-  }
+  const conversations = await assistantConversations(c, session);
+  const latest = conversations.find(item => item.started);
+  // An empty conversation is reused, so opening the panel without a message
+  // saves no new thread and an empty one never counts as the latest.
+  const empty = conversations.find(item => !item.started);
+  let reuse = empty;
+  if (request.fresh !== true) reuse = latest ?? empty;
+  else if (request.unlessBusy === true && latest?.busy) reuse = latest;
+  if (reuse) return c.json({ sessionId, threadId: reuse.threadId } satisfies EnsureWorkspaceConversationResponse);
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
   // Without `fresh`, the first conversation keeps the older per-person key, so
@@ -118,7 +124,8 @@ workspaceRuntimeRouter.get("/:workspace/conversations", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const { sessionId, session } = await assistantConversationSession(c, owner);
-  const body: ListWorkspaceConversationsResponse = { sessionId, conversations: (await assistantConversations(c, session)).slice(0, 20) };
+  const started = (await assistantConversations(c, session)).filter(item => item.started);
+  const body: ListWorkspaceConversationsResponse = { sessionId, conversations: started.slice(0, 20).map(({ started: _, ...item }) => item) };
   return c.json(body);
 });
 

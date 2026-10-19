@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MutationObserver, QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { api } from "~/api/client";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
@@ -110,6 +110,22 @@ describe("Ask Valet conversation rule", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try in chat" }));
     expect(ensure).toHaveBeenCalledTimes(2);
     expect(draft("open")).toBe("Summarize this page");
+  });
+
+  it("gives a contextual prompt its own conversation while the panel is still opening", async () => {
+    let finishOpen: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finishOpen = resolve; }))
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "contextual" });
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Ask Valet" }));
+    await userEvent.click(screen.getByRole("button", { name: "Try in chat" }));
+    expect(ensure.mock.calls).toEqual([["user", { fresh: true, unlessBusy: true }], ["user", { fresh: true }]]);
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    await act(async () => finishOpen({ sessionId: "s1", threadId: "waiting" }));
+    expect(screen.getByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Summarize this page");
+    expect(draft("waiting")).toBeUndefined();
   });
 
   it("starts a new chat from the header and reopens a recent conversation", async () => {

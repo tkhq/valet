@@ -166,8 +166,10 @@ Amended 2026-10-19: the Ask Valet panel docks beside every page, including `/cha
 Amended 2026-10-19: each Ask Valet conversation has its own thread key, `app-assistant:<user>:<conversation>`. A thread with the older `app-assistant:<user>` key stays that person's conversation. Ownership checks read the person from the segment after `app-assistant:`. A team keeps one execution session per person, keyed `app-assistant:<user>`, so one person's conversations share one sandbox.
 
 - Opening the panel from closed starts a new conversation. If the latest conversation runs a turn or waits for an approval, the panel reopens that conversation instead, so a pending settings change stays in view.
+- A conversation starts with its first message. The latest conversation is the most recently used one that started. An empty conversation is reused, so opening the panel without a message saves no new thread.
 - A contextual prompt starts a new conversation. If the panel is open, the prompt goes to the open conversation.
-- The panel header has New chat and a Recent menu. Recent lists only the viewer's Ask Valet conversations, the most recently used first. The Threads list still leaves them out.
+- The panel header has New chat and a Recent menu. Recent lists only the viewer's started Ask Valet conversations, the most recently used first. The Threads list still leaves them out.
+- If the panel gets a second request while the first is in flight, each body gets its own request, and the latest one decides the conversation the panel shows.
 - `POST /api/workspaces/:workspace/conversation` takes `{ fresh, unlessBusy }`. With no body it returns the latest conversation. `GET /api/workspaces/:workspace/conversations` lists the viewer's conversations.
 
 Amended 2026-10-16: personal and team home dashboards show workspace activity directly. Generated briefings, their loading states, polling, and dismissal actions are removed.
