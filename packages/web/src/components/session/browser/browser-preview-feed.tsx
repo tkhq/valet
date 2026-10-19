@@ -111,7 +111,7 @@ export function BrowserPreviewFeed({
               size="sm"
               aria-label="Follow active tab"
               title="Follow active tab"
-              className="h-7 shrink-0 px-2 text-[10px]"
+              className="shrink-0"
               onClick={() => onChoose(undefined)}
             >
               Follow active

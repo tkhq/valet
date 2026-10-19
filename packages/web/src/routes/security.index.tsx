@@ -263,7 +263,8 @@ function NewReviewCard() {
                 value={repo.ref}
                 placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
-                className="min-h-11 sm:min-h-0 sm:h-8 w-full sm:w-52 text-base sm:text-xs"
+                size="sm"
+                className="sm:w-52"
               />
               <span className="text-[11px] text-muted">Leave blank to scan the default branch.</span>
             </div>
@@ -423,7 +424,6 @@ function NewReviewCard() {
               value={pathsInput}
               onChange={(e) => setPathsInput(e.target.value)}
               placeholder="packages/api, src/auth"
-              className="min-h-11 sm:min-h-0 sm:h-9 text-base sm:text-xs"
             />
             <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
           </div>

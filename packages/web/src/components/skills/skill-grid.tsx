@@ -112,6 +112,7 @@ export function SkillGrid({
 
           <div className="ml-auto w-full sm:w-56">
             <SearchInput
+              size="sm"
               value={filters.query}
               onSettled={(query) => onFiltersChange({ ...filters, query })}
               placeholder="Search skills…"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useWorkspaceAssistant, WorkspaceAssistantButton } from "./workspace-assistant";
+import { useWorkspaceAssistant } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
@@ -12,6 +12,7 @@ import {
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { cn } from "~/lib/cn";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { useSidebarControls } from "./app-shell";
@@ -28,7 +29,7 @@ function ArtifactsNav() {
   return <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
     <DropdownMenuTrigger asChild>
       <Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}
-        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash"
+        className={cn(NAV_BASE, "gap-1")}
         activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}
         onPointerEnter={(event) => {
           if (event.pointerType !== "mouse") return;
@@ -60,8 +61,9 @@ function ArtifactsNav() {
  * which was added last (the old `text-muted` base + `text-ink` active pair
  * rendered no visible active state at all).
  */
-/** One look for every top-level destination, the Plugins menu included. */
-const NAV_BASE = "shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash";
+/** One look for every control in the bar: links, the Plugins menu, and Ask
+ * Valet. It matches the `sm` control height with the nav's text size. */
+const NAV_BASE = "inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded px-2 text-sm hover:bg-ink-wash";
 const NAV_ACTIVE = "text-ink font-medium bg-ink-wash";
 const NAV_INACTIVE = "text-muted hover:text-ink";
 
@@ -122,7 +124,7 @@ function SidebarToggle() {
   if (controls === null || !controls.present) return null;
 
   const buttonClass =
-    "shrink-0 min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
+    "shrink-0 min-h-8 min-w-8 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
 
   return (
     <>
@@ -214,7 +216,7 @@ export function TopNav() {
 
       <Link
         to="/"
-        className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash md:min-h-0 md:min-w-0"
+        className="inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash max-sm:min-h-11 max-sm:min-w-11"
         aria-label="Valet — dashboard"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
@@ -242,7 +244,7 @@ export function TopNav() {
       </nav>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className={`${NAV_BASE} hidden items-center gap-1 md:inline-flex ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
+          <button type="button" className={cn(NAV_BASE, "hidden gap-1 md:inline-flex", onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE)}>
             Plugins <ChevronDown className="h-3 w-3" aria-hidden />
           </button>
         </DropdownMenuTrigger>
@@ -255,7 +257,7 @@ export function TopNav() {
       <div className="ml-auto shrink-0 md:hidden">
         <DropdownMenu open={mobileNav.open} onOpenChange={mobileNav.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" aria-label="Open navigation" className="h-11 w-11 p-0">
+            <Button variant="ghost" size="sm" aria-label="Open navigation" className="w-8 px-0">
               <Menu className="h-5 w-5" aria-hidden />
             </Button>
           </DropdownMenuTrigger>
@@ -291,13 +293,16 @@ export function TopNav() {
       </div>
 
       <div className="flex shrink-0 items-center">
-        <div className="hidden md:block"><WorkspaceAssistantButton /></div>
+        <button type="button" className={cn(NAV_BASE, NAV_INACTIVE, "hidden gap-1.5 md:inline-flex")} onClick={() => assistant.open()}>
+          <Sparkles className="h-4 w-4" aria-hidden />
+          Ask Valet
+        </button>
         <NotificationsBell />
       </div>
 
       <Link
         to="/settings"
-        className="hidden shrink-0 md:inline-flex items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
+        className="hidden h-8 w-8 shrink-0 md:inline-flex items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"
         activeProps={{ className: "text-ink" }}
         aria-label="Settings"
       >

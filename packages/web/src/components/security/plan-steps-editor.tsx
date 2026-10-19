@@ -428,7 +428,7 @@ function StepRow({
             value={step.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="e.g. authz-sweep"
-            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
+            size="sm"
           />
         </div>
 
@@ -450,7 +450,7 @@ function StepRow({
             value={step.pathsText}
             onChange={(e) => onChange({ pathsText: e.target.value })}
             placeholder="e.g. packages/api, src/auth"
-            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
+            size="sm"
           />
         </div>
 

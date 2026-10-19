@@ -395,7 +395,7 @@ describe("TopNav — sidebar toggle", () => {
 });
 
 const openAssistant = vi.fn();
-vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }), WorkspaceAssistantButton: () => <button>Ask Valet</button> }));
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: openAssistant }) }));
 
 it("opens Memory on hover while Artifacts remains a direct link", async () => {
   const user = userEvent.setup();
@@ -420,7 +420,16 @@ it("navigates directly to Artifacts and opens the list with Arrow Down", async (
   expect(screen.queryByRole("menu")).toBeNull();
 });
 
+it("opens Ask Valet from the bar", async () => {
+  openAssistant.mockClear();
+  const user = userEvent.setup();
+  renderNav();
+  await user.click(await screen.findByRole("button", { name: "Ask Valet" }));
+  expect(openAssistant).toHaveBeenCalledOnce();
+});
+
 it("opens Ask Valet from the mobile menu", async () => {
+  openAssistant.mockClear();
   const user = userEvent.setup();
   renderNav();
   await user.click(await screen.findByRole("button", { name: "Open navigation" }));

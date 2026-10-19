@@ -385,6 +385,7 @@ export function FindingsReview({
           </div>
           <Button
             variant="ghost"
+            size="sm"
             className="md:hidden"
             aria-expanded={filtersOpen}
             aria-controls={`finding-filters-${sessionId}`}
@@ -398,26 +399,27 @@ export function FindingsReview({
               value={severity}
               options={SEVERITY_OPTIONS}
               onChange={setSeverity}
-              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+              triggerClassName="max-w-full"
             />
             <SelectMenu
               value={status}
               options={STATUS_OPTIONS}
               onChange={setStatus}
-              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+              triggerClassName="max-w-full"
             />
             <SelectMenu
               value={cellId}
               options={cellOptions}
               onChange={setCellId}
-              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+              triggerClassName="max-w-full"
             />
             <Input
               value={pathInput}
               onChange={(e) => setPathInput(e.target.value)}
               placeholder="Filter by path"
               aria-label="Filter by path"
-              className="h-11 w-full text-base md:h-7 md:w-36 md:text-xs"
+              size="sm"
+              className="md:w-36"
             />
             <SelectMenu
               value={sort}
@@ -426,7 +428,7 @@ export function FindingsReview({
                 { value: "recency", label: "By recency" },
               ]}
               onChange={setSort}
-              triggerClassName="min-h-11 max-w-full text-sm md:min-h-0 md:h-7 md:text-xs"
+              triggerClassName="max-w-full"
             />
           </div>
           <span className="hidden md:flex-1 md:block" />
@@ -523,7 +525,7 @@ export function FindingsReview({
 
         {/* Detail */}
         <div className={cn("flex-1 min-w-0 md:overflow-y-auto", !(mobileDetail && selected) && "hidden md:block")}>
-          <Button ref={backRef} variant="ghost" className="mx-2 mt-1 min-h-11 text-muted md:hidden" onClick={() => {
+          <Button ref={backRef} variant="ghost" className="mx-2 mt-1 text-muted md:hidden" onClick={() => {
             pendingFocus.current = "list";
             setMobileDetail(false);
           }}>← Back to findings</Button>
@@ -871,7 +873,7 @@ function FindingDetail({
         <div className="md:hidden">
           <DropdownMenu open={actions.open} onOpenChange={actions.setOpen}>
             <DropdownMenuTrigger asChild>
-              <Button variant="secondary" aria-label="Finding actions"><MoreHorizontal className="h-4 w-4" aria-hidden />More</Button>
+              <Button variant="secondary" size="sm" aria-label="Finding actions"><MoreHorizontal className="h-4 w-4" aria-hidden />More</Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={onFileIssue}><FileWarning className="h-4 w-4" aria-hidden />File issue</DropdownMenuItem>

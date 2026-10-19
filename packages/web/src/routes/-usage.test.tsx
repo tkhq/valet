@@ -1112,10 +1112,12 @@ describe("UsagePage custom period controls", () => {
     fireEvent.change(end, { target: { value: "2024-02-29" } });
     fireEvent.click(apply);
     expect(apply.getAttribute("aria-pressed")).toBe("true");
+    expect(apply.className).not.toContain("bg-moss");
 
     fireEvent.change(start, { target: { value: "2024-02-02" } });
     expect(apply.getAttribute("aria-pressed")).toBe("false");
-    expect(apply.className).toContain("border-amber-500");
+    // Pending edits fill the button, so the reader sees they are not applied yet.
+    expect(apply.className).toContain("bg-moss");
     const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
     expect(csvLink.href).toContain("start=2024-02-01&end=2024-02-29");
     expect(breakdownCalls.at(-1)?.[0]).toEqual({

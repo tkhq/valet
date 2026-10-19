@@ -29,7 +29,7 @@ import { RequestLog } from "~/components/usage/RequestLog";
 import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodSelection, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
-import { FilterChips, PageHeader, Select, pageClass } from "~/components/primitives";
+import { Button, FilterChips, Input, PageHeader, Select, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { formatUsdPrecise } from "~/lib/format-usage";
 
@@ -38,6 +38,8 @@ export const Route = createFileRoute("/usage")({
 });
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
+/** Marks the field that holds the applied period: the month, or both custom dates. */
+const ACTIVE_PERIOD = "border-moss bg-moss-wash font-medium text-moss";
 type Window = (typeof WINDOWS)[number];
 
 function usageErrorText(error: unknown): string {
@@ -420,64 +422,58 @@ export function UsagePage() {
             onChange={(w) => { const window = WINDOWS.find((candidate) => candidate === w); if (window) handleWindowChange(window); }}
             options={WINDOWS.map((w) => ({ value: w, label: w }))}
           />
-          <label className="flex items-center gap-2 text-sm text-muted">
+          <label className="flex items-center gap-2 text-xs text-muted">
             <span>Month</span>
-            <input
+            <Input
+              size="sm"
               type="month"
               aria-label="Calendar month"
               max={currentMonthUtc}
               value={month}
               onChange={(event) => handleMonthChange(event.target.value)}
               aria-current={period.kind === "month" ? "date" : undefined}
-              className={`min-h-11 rounded border bg-paper px-2 sm:min-h-0 ${
-                period.kind === "month"
-                  ? "border-moss bg-moss-wash font-medium text-moss"
-                  : "border-line text-ink"
-              }`}
+              className={cn("w-auto", period.kind === "month" && ACTIVE_PERIOD)}
             />
           </label>
           {/* One row that shrinks its inputs, so the range never splits. */}
           <div className="flex min-w-0 items-center gap-2 max-sm:w-full">
-            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+            <label className="min-w-0 flex-1 sm:flex-none">
               <span className="sr-only">Custom start date</span>
-              <input
+              <Input
+                size="sm"
                 type="date"
                 aria-label="Custom start date"
                 max={todayUtc}
                 value={customStart}
                 onChange={(event) => setCustomStart(event.target.value)}
-                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+                className={cn("min-w-0", customPeriodApplied && ACTIVE_PERIOD)}
               />
             </label>
-            <span className="text-sm text-muted">to</span>
-            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+            <span className="text-xs text-muted">to</span>
+            <label className="min-w-0 flex-1 sm:flex-none">
               <span className="sr-only">Custom end date</span>
-              <input
+              <Input
+                size="sm"
                 type="date"
                 aria-label="Custom end date"
                 min={customStart}
                 max={todayUtc}
                 value={customEnd}
                 onChange={(event) => setCustomEnd(event.target.value)}
-                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+                className={cn("min-w-0", customPeriodApplied && ACTIVE_PERIOD)}
               />
             </label>
           </div>
-          <button
-            type="button"
+          {/* Edited dates that differ from the applied range fill the button. */}
+          <Button
+            size="sm"
+            variant={customPeriodPending ? "primary" : "secondary"}
             disabled={!customStart || !customEnd || customStart > customEnd}
             onClick={applyCustomPeriod}
             aria-pressed={customPeriodApplied}
-            className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
-              customPeriodApplied
-                ? "border-moss bg-moss-wash font-medium text-moss"
-                : customPeriodPending
-                  ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
-                  : "border-line text-muted hover:border-ink hover:text-ink"
-            }`}
           >
             Apply dates
-          </button>
+          </Button>
           {personalWorkspace && isOrgAdmin && (
             <FilterChips
               label="Whose usage"
@@ -489,9 +485,10 @@ export function UsagePage() {
           )}
           {scopeKnown && (
             <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
-              <label className="text-sm text-muted">
+              <label>
                 <span className="sr-only">CSV granularity</span>
                 <Select
+                  size="sm"
                   aria-label="CSV granularity"
                   value={exportGranularity}
                   onChange={(event) => {
@@ -504,15 +501,16 @@ export function UsagePage() {
                   <option value="turn">Itemized (per turn)</option>
                 </Select>
               </label>
-              <button
-                type="button"
+              <Button
+                size="sm"
+                variant="secondary"
                 disabled={exporting}
                 onClick={handleCsvDownload}
-                className="inline-flex min-h-11 flex-1 items-center justify-center rounded border border-line px-3 py-2 text-sm text-muted hover:border-ink hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:flex-none sm:py-1"
+                className="flex-1 sm:flex-none"
                 aria-label={`Download CSV (${periodLabel}, ${scope})`}
               >
                 {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
-              </button>
+              </Button>
               <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
             </div>
           )}

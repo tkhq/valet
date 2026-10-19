@@ -1,7 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { Check, ChevronLeft, ChevronRight } from "lucide-react";
 import type { SecurityCellWire, SecurityCoverageWire } from "@valet/api/wire";
-import { cn } from "~/lib/cn";
+import { Button, FilterChips } from "~/components/primitives";
 
 /**
  * The coverage-honesty section (NOT_ASSESSED ledger, M-P2d, spec §Coverage
@@ -54,14 +54,16 @@ export function CoverageSection({
         </span>
       </div>
 
-      <div className="mt-2 flex items-center gap-1 text-[11px]">
-        <TabButton active={tab === "gaps"} tone="amber" onClick={() => selectTab("gaps")}>
-          Not assessed <span className="tabular-nums">{gaps.length}</span>
-        </TabButton>
-        <TabButton active={tab === "assessed"} tone="neutral" onClick={() => selectTab("assessed")}>
-          Assessed <span className="tabular-nums">{assessed.length}</span>
-        </TabButton>
-      </div>
+      <FilterChips
+        label="Coverage status"
+        className="mt-2"
+        value={tab}
+        onChange={selectTab}
+        options={[
+          { value: "gaps", label: <>Not assessed <span className="tabular-nums">{gaps.length}</span></> },
+          { value: "assessed", label: <>Assessed <span className="tabular-nums">{assessed.length}</span></> },
+        ]}
+      />
 
       {rows.length === 0 ? (
         <p className="mt-2 text-[11px] text-muted">
@@ -87,19 +89,21 @@ export function CoverageSection({
             {start + 1}–{Math.min(start + PAGE_SIZE, rows.length)} of {rows.length}
           </span>
           <div className="flex items-center gap-1">
-            <PagerButton disabled={clamped === 0} onClick={() => setPage(clamped - 1)} label="Previous page">
+            <Button variant="ghost" size="icon" disabled={clamped === 0} onClick={() => setPage(clamped - 1)} aria-label="Previous page">
               <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
-            </PagerButton>
+            </Button>
             <span className="tabular-nums">
               {clamped + 1}/{pageCount}
             </span>
-            <PagerButton
+            <Button
+              variant="ghost"
+              size="icon"
               disabled={clamped >= pageCount - 1}
               onClick={() => setPage(clamped + 1)}
-              label="Next page"
+              aria-label="Next page"
             >
               <ChevronRight className="h-3.5 w-3.5" aria-hidden />
-            </PagerButton>
+            </Button>
           </div>
         </div>
       )}
@@ -120,36 +124,6 @@ function CoverageBar({ assessed, notAssessed }: { assessed: number; notAssessed:
         <div className="bg-amber-500" style={{ width: `${(notAssessed / total) * 100}%` }} />
       )}
     </div>
-  );
-}
-
-function TabButton({
-  active,
-  tone,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  tone: "amber" | "neutral";
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "inline-flex items-center gap-1 rounded px-2 py-0.5",
-        active
-          ? tone === "amber"
-            ? "bg-amber-500/15 font-medium text-amber-800 dark:text-amber-300"
-            : "bg-ink-wash font-medium text-ink"
-          : "text-muted hover:text-ink",
-      )}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -180,29 +154,5 @@ function AssessedRow({ row, cellDir }: { row: SecurityCoverageWire; cellDir?: st
         <span className="rounded bg-ink-wash px-1 py-0.5 text-[10px] text-muted">{row.tool}</span>
       )}
     </li>
-  );
-}
-
-function PagerButton({
-  disabled,
-  onClick,
-  label,
-  children,
-}: {
-  disabled: boolean;
-  onClick: () => void;
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      aria-label={label}
-      className="rounded p-0.5 text-muted hover:bg-ink-wash hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
-    >
-      {children}
-    </button>
   );
 }

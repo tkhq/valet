@@ -935,8 +935,8 @@ function ThreadNode({
         )}
       >
         {isEditing ? (
-          <div className={cn("flex-1 min-w-0 py-1", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
-            <input
+          <div className={cn("flex-1 min-w-0", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
+            <Input
               ref={inputRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -953,10 +953,6 @@ function ThreadNode({
               maxLength={200}
               aria-label={`Rename thread: ${label}`}
               placeholder="Thread name"
-              className={cn(
-                "w-full rounded border border-line bg-surface px-1.5 py-0.5 text-sm text-ink",
-                "outline-none focus:ring-1 focus:ring-moss",
-              )}
             />
           </div>
         ) : (

@@ -509,6 +509,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
               <RotateCw aria-hidden className="h-4 w-4" />
             </Button>
             <Input
+              size="sm"
               aria-label="Browser address"
               value={address}
               readOnly={!canControl}
@@ -516,7 +517,7 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
                 touchedAddress.current = true;
                 setAddress(event.target.value);
               }}
-              className="min-w-0 flex-1 font-mono text-xs"
+              className="min-w-0 flex-1 font-mono"
               placeholder="https://example.com"
             />
             <Button

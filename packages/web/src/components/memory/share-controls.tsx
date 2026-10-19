@@ -8,7 +8,7 @@ import {
   useArtifactVersions,
   useShareArtifact,
 } from "~/api/artifacts";
-import { Button, Popover, PopoverContent, PopoverTrigger, Select, Switch } from "~/components/primitives";
+import { Button, Input, Popover, PopoverContent, PopoverTrigger, Select, Switch } from "~/components/primitives";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
@@ -54,11 +54,12 @@ export function ShareControls({ path }: { path: string }) {
         {artifact ? (
           <>
             <div className="flex items-center gap-1.5">
-              <input
+              <Input
                 readOnly
+                size="sm"
                 value={artifact.url}
                 onFocus={(e) => e.currentTarget.select()}
-                className="min-w-0 flex-1 rounded border border-line bg-transparent px-2 py-1 font-mono text-[11px] max-sm:min-h-11 max-sm:text-base"
+                className="min-w-0 flex-1 font-mono"
                 aria-label="Share link"
               />
               <button
