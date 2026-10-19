@@ -85,7 +85,7 @@ export function destinationReceiptStage(
     case "key": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} thread key ${outcome.key}.` };
     case "target": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} session ${outcome.sessionId}, thread ${outcome.threadId}.` };
     case "skip": return { stage: "destination", outcome: outcome.outcome ?? "claim_skip", detail: `${prefix} skipped, ${outcome.reason}.` };
-    case "pin_unavailable": return { stage: "destination", outcome: "pin_unavailable", detail: `${prefix} pinned session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive deliveries.` };
+    case "pin_unavailable": return { stage: "destination", outcome: "pin_unavailable", detail: `${prefix} pinned session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive events.` };
   }
 }
 

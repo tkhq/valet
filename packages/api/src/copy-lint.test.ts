@@ -10,8 +10,10 @@
 // carries `// copy-lint: allow <word>` (on the line or the line before) may
 // use that word, for the few texts that name a system value such as a tool
 // id or a stored text. Comments, identifiers, test files, log lines
-// (`console.*` arguments and text that opens with a `[tag]`), and the files
-// only the model reads (MODEL_FACING) are not copy.
+// (`console.*` arguments and text that opens with a `[tag]`), tagged
+// templates such as `sql` queries, and the files only the model reads
+// (MODEL_FACING) are not copy. Each banned word is a stem, so it also
+// catches its inflections (deliveries, subscribed, triggered).
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
@@ -19,7 +21,10 @@ import { describe, expect, it } from "vitest";
 
 const SRC = resolve(__dirname);
 const DIRS = ["events", "workflows"] as const;
-const FILES = ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "channels/slack-inbox.ts"] as const;
+const FILES = [
+  "routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "routes/workflows.ts", "channels/slack-inbox.ts",
+  "services/line-activity.ts", "services/presence-places.ts", "services/event-log.ts",
+] as const;
 /** Files whose sentences only the model reads: tool descriptions, tool
  * results, and thread prompts. They name tool ids such as
  * `events.list_subscriptions`, so the system words stay. */
@@ -28,8 +33,19 @@ const MODEL_FACING = new Set([
   // Workflow template prompts, and the run notes a workflow's agent reads.
   "workflows/template-definitions.ts", "workflows/run-attention.ts", "workflows/run-follow-up.ts",
 ]);
-const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter", "delivery", "receipt", "Runs in"] as const;
-const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
+/** Each banned word's stem. A stem matches every inflection: `deliver`
+ * matches delivery, deliveries, and delivered; `subscri` matches subscribe,
+ * subscribed, and subscriptions. */
+const BANNED_STEMS = ["listener", "automation", "subscri", "trigger", "subject", "rule", "deliver", "receipt"] as const;
+/** Banned phrases, matched as written. */
+const BANNED_PHRASES = ["event waiter", "Runs in"] as const;
+const BANNED_RE = new RegExp(`\\b((?:${BANNED_STEMS.join("|")})[a-z]*|${BANNED_PHRASES.join("|")})`, "gi");
+
+/** The stem or phrase a banned word matches, so `allow delivery` also allows "deliveries". */
+function bannedRoot(word: string): string {
+  const lower = word.toLowerCase();
+  return BANNED_STEMS.find((stem) => lower.startsWith(stem)) ?? lower;
+}
 const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
 
 interface CopyHit {
@@ -98,7 +114,7 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
   const allowed = (line: number, word: string): boolean => {
     for (const candidate of [lines[line], lines[line - 1]]) {
       const match = candidate ? ALLOW_RE.exec(candidate) : null;
-      if (match && match[1]!.toLowerCase() === word.toLowerCase()) return true;
+      if (match && bannedRoot(match[1]!) === bannedRoot(word)) return true;
     }
     return false;
   };
@@ -114,6 +130,8 @@ function lintApiCopy(file: string, source: string): CopyHit[] {
   };
 
   const visit = (node: ts.Node) => {
+    // A tagged template (`sql\`…\``) is a query, not copy.
+    if (ts.isTaggedTemplateExpression(node)) return;
     // A message split over a `+` chain reads as one text.
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
       const text = chainText(node);
@@ -143,6 +161,12 @@ describe("api Presence copy lint (INV-H2)", () => {
         'const g = "This line covers " +',
         '  "every receipt.";',
         'const h = "Runs in a new thread.";',
+        'const q = sql`SELECT 1 FROM event_deliveries WHERE subscription_id = ${id}`;',
+        'const i = "No duplicate deliveries were created.";',
+        'const j = "Subscribe to the channel, then retry.";',
+        'const k = "It was delivered and triggered twice.";',
+        "// copy-lint: allow delivery",
+        'const l = "Two deliveries ran.";',
       ].join("\n"),
     );
     expect(hits.map((hit) => [hit.line, hit.word])).toEqual([
@@ -151,12 +175,19 @@ describe("api Presence copy lint (INV-H2)", () => {
       [6, "rule"],
       [9, "receipt"],
       [11, "runs in"],
+      [13, "deliveries"],
+      [14, "subscribe"],
+      [15, "delivered"],
+      [15, "triggered"],
     ]);
   });
 
   it("reads the event and workflow services and both routes", () => {
     const read = new Set(sourceFiles().map((file) => relative(SRC, file)));
-    for (const file of ["routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "events/dispatcher.ts", "workflows/service.ts"]) {
+    for (const file of [
+      "routes/events.ts", "routes/presence.ts", "routes/workflow-triggers.ts", "routes/workflows.ts", "events/dispatcher.ts", "workflows/service.ts",
+      "services/line-activity.ts", "services/presence-places.ts", "services/event-log.ts",
+    ]) {
       expect(read.has(file), file).toBe(true);
     }
     expect(read.has("events/actions.ts")).toBe(false);

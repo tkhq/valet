@@ -389,7 +389,7 @@ export class EventDispatcher {
       if (event) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
-        .set({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to deliver." })
+        .set({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to send." })
         .where(eq(eventDeliveries.id, deliveryId));
       return;
     }
@@ -765,6 +765,8 @@ export class EventDispatcher {
     // delivers it, or the reply reaches no thread.
     if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread
       && followRouterPassed(route, event.payload)) {
+      // The delivery-threads spec (C3b) names this stored text.
+      // copy-lint: allow delivery
       return { text: "the followed thread delivers this reply", reason: "follow_routed" };
     }
     const plugins = this.deps.plugins ?? [];
@@ -775,6 +777,8 @@ export class EventDispatcher {
     const catalog = allCatalogEntries(plugins);
     const covered = await mentionCoveredBy(db, subs, { type: sub.ownerType, id: sub.ownerId }, twin, catalog,
       (rule, mention) => hasTeamCoverage(db, rule, { eventKey: mention.key, payload: mention.payload, subjects: mention.subjects ?? null }, catalog));
+    // The delivery-threads spec (C2b, C5) names this stored text.
+    // copy-lint: allow delivery
     return covered ? { text: "the mention delivers this post", reason: "mention_covered" } : null;
   }
 

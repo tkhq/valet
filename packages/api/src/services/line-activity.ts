@@ -118,6 +118,7 @@ const LINE_OFF_SKIP = /^(?:This line is off\.|Skipped — subscription is disabl
 /** The dispatcher's text for a personal delivery that a team line took. */
 const TEAM_SKIP_TEXT = "The team already listens for this.";
 /** The same skip as written before the line wording. */
+// copy-lint: allow subscription
 const LEGACY_TEAM_SKIP = "Skipped — matching team subscription.";
 
 /** A skipped delivery's reason. A claim names the claiming thread's id, so

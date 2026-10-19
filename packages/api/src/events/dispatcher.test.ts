@@ -1155,7 +1155,7 @@ describe("EventDispatcher", () => {
         await tdb.appDb.delete(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
         const recover = vi.fn(async () => true);
         await dispatcherWith(recover).pollOnce();
-        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to deliver." });
+        expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to send." });
         expect(recover).toHaveBeenCalledOnce();
         expect(recover.mock.calls[0]).toEqual([expect.objectContaining({ waiterId: "w-inc" })]);
       });

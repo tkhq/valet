@@ -450,7 +450,7 @@ describe("POST /api/channels/slack/webhook", () => {
       .where(eq(eventDropLog.orgId, "local-org")), { timeout: 5_000 }).toEqual([
       expect.objectContaining({
         eventKey: "slack.message", reason: "filter_excluded",
-        detail: expect.stringContaining("Subscribe to `slack.bot_message`"),
+        detail: expect.stringContaining("add a line for `slack.bot_message`"),
         eventMetadata: channel === "C_FORM" ? expect.objectContaining({ channel: "C_FORM", botId: "B_FORM" }) : {},
       }),
     ]);

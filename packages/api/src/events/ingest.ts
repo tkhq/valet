@@ -50,7 +50,7 @@ export interface IngestDeps {
 export const CLAIM_FAILURE_STAGE = {
   stage: "claim_resolution",
   outcome: "failed",
-  detail: "Claim resolution failed. The deliveries land by their conversation binding or thread policy, and every matching waiter appends its digest.",
+  detail: "Claim resolution failed. Each line's work lands by its conversation binding or thread policy, and every matching waiter appends its digest.",
 } as const;
 
 /**
@@ -230,7 +230,7 @@ export async function logSlackMessageBotNearMiss(
   payload: unknown,
 ): Promise<void> {
   await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.message", "filter_excluded",
-    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.", catalogForService(deps.plugins, "slack"));
+    "A Slack bot message arrived, but `slack.message` accepts only human messages. To act on bot messages, add a line for `slack.bot_message`.", catalogForService(deps.plugins, "slack"));
 }
 
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
@@ -486,10 +486,10 @@ export async function ingestEvent(
     await appendDigests(claims?.waiters);
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
-      detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
+      detail: result.duplicate ? "This provider event was already stored. No line acted on it again." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
     }, result.linkedEventId ? { eventId: result.linkedEventId } : undefined);
     if (!result.duplicate && result.deliveries > 0) {
-      phase = "dispatcher wake after storing pending deliveries";
+      phase = "the dispatcher wake after event storage";
       deps.onIngest?.();
       await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "The lines' work is queued. A queued workflow has not completed yet." });
     }

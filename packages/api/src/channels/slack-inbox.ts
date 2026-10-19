@@ -261,7 +261,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
       },
       { orgId: deps.orgId, raw },
     );
-    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "completed", detail: "Followed-thread check completed. This does not imply a binding existed or a prompt was delivered." });
+    await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "completed", detail: "Followed-thread check completed. This does not show that a binding existed or that a prompt reached a thread." });
   } catch (err) {
     await appendReceiptStage(deps.db, receiptId, { stage: "follow", outcome: "failed", detail: "Followed-thread processing failed. Search the server logs for this Diagnostics entry's ID. The other checks ran separately." });
     failed = true;
@@ -391,7 +391,7 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
       const credential = await providers.engineCredentials.get({ type: "org", id: row.orgId }, "slack");
       const transport = providers.channelHost.transportFor("slack");
       if (!transport || credential?.metadata?.teamId !== payload.credentialTeamId) {
-        throw new Error("Reconnect the accepted Slack workspace before processing its pending deliveries.");
+        throw new Error("The Slack workspace that accepted these events is not connected. Reconnect it in Settings to process them.");
       }
       const credentialTeamId = payload.credentialTeamId;
       const accessToken = credentialSecret(credential);
