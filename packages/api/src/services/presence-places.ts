@@ -243,13 +243,20 @@ function isMidGrain(place: string): boolean {
 
 /**
  * The overview row a listener lists at (spec Part B steps 2 and 3): the
- * place `listenerPlaces` gives for its first service, rolled up the parent
+ * place `listenerPlaces` gives for one of its services, rolled up the parent
  * chain to a mid-grain row or a service's top row. A pull request lists at
  * its repository and a Linear issue at its team. Null for a listener whose
  * event keys name no service with places.
+ *
+ * A line with keys of several services takes the first service in the fixed
+ * order Slack, GitHub, Linear (`SERVICES`), never the order of its keys, so
+ * a write that reorders the keys does not move the line's row.
  */
 export function listenerRowPlace(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string | null {
-  let place = listenerPlaces(rule, slackTeam)[0];
+  const services = listenerServices(rule);
+  const first = SERVICES.find((service) => services.includes(service));
+  if (first === undefined) return null;
+  let place = listenerPlaces(rule, slackTeam)[services.indexOf(first)];
   if (place === undefined) return null;
   while (!isServiceRoot(place) && !isMidGrain(place)) {
     const parent = parentPlace(place);
@@ -591,9 +598,9 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   for (const [id, name] of resolved) channelNames.set(id, name);
   for (const state of places.values()) {
     state.wire.label = placeLabel(state.wire.subject, channelNames);
-    // The reach describes listeners that list here, so a row with none (such
-    // as a parent only its children name) carries no reach.
-    const scopeLabel = state.listeners.length > 0 ? placeScopeLabel(state.wire.subject) : undefined;
+    // The reach describes listeners that list here or roll up here, so a row
+    // with none (such as a parent only its children name) carries no reach.
+    const scopeLabel = state.listeners.length + state.rolledUp.length > 0 ? placeScopeLabel(state.wire.subject) : undefined;
     if (scopeLabel !== undefined) state.wire.scopeLabel = scopeLabel;
     state.wire.listenerCount = state.listeners.length + state.rolledUp.length;
     state.wire.activeThreadCount = state.active.size;

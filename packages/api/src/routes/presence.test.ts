@@ -160,6 +160,15 @@ it("lists the parent of a lone child place, with no counts and the child's activ
   expect(detail.threads.subject.map((t) => t.threadId)).toEqual([lone.id]);
 });
 
+// Final review G4: a row whose only line rolls up to it still names its reach.
+it("names the reach of a repository row whose only line is a pull request line", async () => {
+  api = await boot();
+  await rule(api, { id: "r-pr", eventKeys: ["github.pull_request_review.submitted"], filters: [{ field: "subject", op: "eq", value: "github:acme/api#12" }] });
+  const map = bySubject(await places(api, "user"));
+  expect(map.get("github:acme/api")).toMatchObject({ scopeLabel: "Across acme/api", listenerCount: 1 });
+  expect(map.get("github:acme/api#12")?.scopeLabel).toBeUndefined();
+});
+
 // Final review G3: the list route and the place page pick the Slack
 // workspace the same way, so a line's `placeKey` agrees on both.
 it("gives a Slack line the same placeKey on the list and the place page with no credential", async () => {
