@@ -57,7 +57,7 @@ describe("Sentence", () => {
     // The pull equals the pill's right padding, in em, so it holds at any font size.
     expect(TOKEN_PAD_X).toBe("px-[0.4em]");
     for (const glue of container.querySelectorAll("[data-glue]")) expect(glue.className).toBe(GLUE_PULL);
-    expect(GLUE_PULL).toBe("-ml-[0.4em]");
+    expect(GLUE_PULL).toBe("-ml-[0.2em]");
   });
 
   it("renders tokens without links when asked", () => {

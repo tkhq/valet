@@ -11,8 +11,10 @@
 import { Fragment } from "react";
 import { Ref } from "./ref";
 
-/** The pull on glued punctuation: the token's right padding (`TOKEN_PAD_X`), in em, so the gap closes at every size. */
-export const GLUE_PULL = "-ml-[0.4em]";
+/** The pull on glued punctuation: half the token's padding (`TOKEN_PAD_X`), in
+ * em, so at every size the mark sits at the pill's edge, not inside its tint
+ * and not a full padding away from it. */
+export const GLUE_PULL = "-ml-[0.2em]";
 import type { SentencePart } from "./sentences";
 
 /**
