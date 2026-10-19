@@ -66,6 +66,15 @@ export type MarkdownSegment =
   | { type: 'text'; lines: string[] }
   | { type: 'table'; table: MarkdownTable };
 
+/** A thematic break (`---`, `***`, `___`), which ends a table in GFM. */
+const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+
+/** Prose, not a cell value: words with a space, ending as a sentence ends. */
+function readsAsSentence(line: string): boolean {
+  const text = line.trim();
+  return /\s/.test(text) && /[.!?]$/.test(text);
+}
+
 /** A line that opens a fence, blockquote, heading, or list item. It never
  * starts a table header and always ends a table body. */
 const BLOCK_START = /^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/;
@@ -119,17 +128,32 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     }
     // An indented delimiter row may be code, and the header may continue a
     // container. GFM also reads a following line without a pipe as a row.
-    let standalone = !inContainer && !/^\s/.test(delimiter);
+    const standalone = !inContainer && !/^\s/.test(delimiter);
     index += 1;
     const rows: string[][] = [];
     const tableLines = [line, delimiter];
+    const endsBlock = (text: string): boolean =>
+      /^\s*$|^(?: {4}|\t)/.test(text) || BLOCK_START.test(text) || THEMATIC_BREAK.test(text);
+    // Where the current run of pipe-less lines stops: one scan per run, so a
+    // long run stays linear.
+    let runEnd = -1;
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
-      if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
-      const cells = tableCells(next);
+      if (endsBlock(next)) break;
+      let cells = tableCells(next);
       if (!cells) {
-        standalone = false;
-        break;
+        // GFM reads a line without a pipe as a one-cell row, and it stays
+        // one. The exception is a closing sentence: a line that reads as
+        // prose with no pipe row after it in the block. A model ends a table
+        // that way and means prose, and Slack's markdown block showed such a
+        // table as raw pipes, so that line ends the table.
+        if (runEnd <= index + 1) {
+          runEnd = index + 2;
+          while (runEnd < lines.length && !endsBlock(lines[runEnd]) && !tableCells(lines[runEnd])) runEnd += 1;
+        }
+        const lastInBlock = runEnd >= lines.length || endsBlock(lines[runEnd]);
+        if (lastInBlock && readsAsSentence(next)) break;
+        cells = [next.trim()];
       }
       rows.push(cells);
       tableLines.push(next);

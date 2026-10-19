@@ -169,22 +169,9 @@ export function splitTableMessage(text: string, maxBlocks: number, note: string)
   // fallback loses it.
   if (buildContentBlocks(text, '', maxBlocks).every((block) => block.type !== 'section')) return undefined;
   const renders = (part: string): boolean => hasTableBlock(buildContentBlocks(part, '', maxBlocks));
-  let segments = splitMarkdownTables(text);
-  let tables = segments.filter((segment) => segment.type === 'table');
-  if (tables.length !== 1) return undefined;
-  if (!tables[0].table.standalone) {
-    // GFM reads a line without a pipe right after the rows as one more row.
-    // The parts end the table with a blank line, so that line stays prose.
-    // Any other reason (a list item or an indented delimiter) keeps the
-    // single message.
-    const lines = text.split(/\r?\n/);
-    const before = segments.slice(0, segments.indexOf(tables[0]))
-      .reduce((count, segment) => count + (segment.type === 'text' ? segment.lines.length : segment.table.lines.length), 0);
-    const end = before + tables[0].table.lines.length;
-    segments = splitMarkdownTables([...lines.slice(0, end), '', ...lines.slice(end)].join('\n'));
-    tables = segments.filter((segment) => segment.type === 'table');
-    if (tables.length !== 1 || !tables[0].table.standalone) return undefined;
-  }
+  const segments = splitMarkdownTables(text);
+  const tables = segments.filter((segment) => segment.type === 'table');
+  if (tables.length !== 1 || !tables[0].table.standalone) return undefined;
   const at = segments.indexOf(tables[0]);
   const prose = (from: number, to: number): string =>
     segments.slice(from, to).flatMap((segment) => segment.type === 'text' ? segment.lines : []).join('\n').trim();

@@ -215,11 +215,50 @@ describe('tablesToTableBlocks', () => {
     expect(tablesToTableBlocks(source, 50)).toBeUndefined();
   });
 
+  it('keeps a line without a pipe as a one-cell row when more rows follow it', () => {
+    // GFM reads `bob` as a row with one cell, so carol stays in the table.
+    const source = 'Name | Status\n--- | ---\nalice | active\nbob\ncarol | paused';
+    const blocks = tablesToTableBlocks(source, 50);
+    expect(blocks?.map((block) => block.type)).toEqual(['table']);
+    expect(blocks?.[0]).toMatchObject({
+      rows: [
+        [raw('Name'), raw('Status')],
+        [cell(text('alice')), cell(text('active'))],
+        [cell(text('bob')), blank],
+        [cell(text('carol')), cell(text('paused'))],
+      ],
+    });
+  });
+
   it.each([
-    ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo'],
-    ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n==='],
-  ])('keeps the Markdown block when GFM reads %s after the rows as a row', (_name, source) => {
-    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+    ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo', 'foo'],
+    ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n===', '==='],
+  ])('keeps %s after the rows as a one-cell row, as GFM reads it', (_name, source, value) => {
+    expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['table']);
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({ rows: [expect.anything(), expect.anything(), [cell(text(value)), blank]] });
+  });
+
+  it.each(['---', '***', '___', ' - - -'])('ends the table at a %s thematic break, as GFM does', (rule) => {
+    const source = `| a | b |\n|-|-|\n| 1 | 2 |\n${rule}\nDo not deploy`;
+    const blocks = tablesToTableBlocks(source, 50);
+    expect(blocks?.map((block) => block.type)).toEqual(['table', 'markdown']);
+    expect(blocks?.[0]).toMatchObject({ rows: [expect.anything(), expect.anything()] });
+    expect(blocks?.[1]).toEqual({ type: 'markdown', text: `${rule}\nDo not deploy` });
+  });
+
+  it('scans a long run of pipe-less lines after a table in linear time', () => {
+    const source = '| a | b |\n|-|-|\n| 1 | 2 |\n' + Array.from({ length: 8_000 }, () => 'x').join('\n');
+    const started = performance.now();
+    tablesToTableBlocks(source, 50);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it('ends the table at a closing sentence after the rows and keeps it as prose', () => {
+    // A model's closing sentence; Slack's markdown block showed this table
+    // as raw pipes when the sentence counted as a row.
+    const source = '| a | b |\n|-|-|\n| 1 | 2 |\nRelated details are in the thread.';
+    expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['table', 'markdown']);
+    expect(tablesToTableBlocks(source, 50)?.[1]).toEqual({ type: 'markdown', text: 'Related details are in the thread.' });
   });
 
   it('keeps the Markdown block when the delimiter row is indented code', () => {
