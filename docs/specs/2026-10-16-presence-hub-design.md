@@ -250,7 +250,13 @@ Pass criterion: all steps, in one run, from a clean start.
     mid grain and the service roots), `GET /api/event-subscriptions` (the
     sentences), and the workspace's schedules, refreshed on every write the
     section makes and every 60 seconds. Loading reads `Loading…` in place of
-    the groups; a failed read names its fix.
+    the groups; a failed read names its fix. Each line on
+    `GET /api/event-subscriptions` and on a place page's listeners carries
+    `placeKey`: the row the places read lists it at, rolled up from a pull
+    request or a Linear issue to its parent row. The overview groups a line
+    by `placeKey`, so a line and its row's place page agree. A Slack line
+    has no `placeKey` while the org has no Slack workspace connected; the
+    overview then groups it by its filters.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.
@@ -411,7 +417,8 @@ Pass criterion: all steps, in one run, from a clean start.
    whatever its status. Each row counts on the day it landed, or on the
    day it was created when it has not landed. `GET /api/event-subscriptions/:id/deliveries` stays for
    callers that want deliveries alone. `EventSubscriptionWire` carries
-   `problem?: string` as before.
+   `problem?: string` as before, on the list route and on a place page's
+   listeners.
 
 ## Part E: Routines
 
