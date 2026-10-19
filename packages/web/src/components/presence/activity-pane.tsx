@@ -5,7 +5,8 @@
  * `q`, the name the old Log used, so a redirected `/events` link opens the
  * same view. A place page's `View all` writes `place`, its key; the server
  * keeps the events in that place or inside it, and the pane shows a
- * removable `In <place>` chip. The page is a drill-in under the breadcrumb `Presence ›
+ * removable `In <place>` chip. The Diagnostics disclosure writes
+ * `diagnostics=1` while it is open. The page is a drill-in under the breadcrumb `Presence ›
  * Activity` (Part F step 2). The overview owns the onboarding paragraphs; with
  * no place and no routine, Activity keeps the log and offers its own Add.
  */
@@ -27,6 +28,8 @@ export interface ActivitySearch {
   /** A place key (`slack:T1/C900`): only the events in that place or inside it. */
   place?: string;
   q?: string;
+  /** `diagnostics=1`: the Diagnostics disclosure is open. */
+  diagnostics?: 1;
 }
 
 const SERVICES: readonly LogService[] = ["slack", "github", "linear"];
@@ -43,11 +46,14 @@ export function readActivitySearch(raw: unknown): ActivitySearch {
   const service = textParam(raw, "service");
   const place = textParam(raw, "place");
   const q = textParam(raw, "q");
+  // The router parses `diagnostics=1` as the number 1; a hand-typed string reads the same.
+  const diagnostics = typeof raw === "object" && raw !== null && "diagnostics" in raw && String(raw.diagnostics) === "1";
   return {
     ...(status === "problems" ? { status } : {}),
     ...(status !== "problems" && isService(service) ? { service } : {}),
     ...(place ? { place } : {}),
     ...(q ? { q } : {}),
+    ...(diagnostics ? { diagnostics: 1 as const } : {}),
   };
 }
 
@@ -86,6 +92,7 @@ export function ActivityPane({ search, onSearchChange }: {
   // A blank box clears q. The draft keeps its spaces, so the box's own echo matches it.
   const keepQ = (q: string | undefined) => (q !== undefined && q.trim() !== "" ? { q } : {});
   const keepPlace = search.place !== undefined ? { place: search.place } : {};
+  const keepDiagnostics = search.diagnostics !== undefined ? { diagnostics: search.diagnostics } : {};
   const keepChip = {
     ...(search.status ? { status: search.status } : {}),
     ...(search.service ? { service: search.service } : {}),
@@ -95,9 +102,16 @@ export function ActivityPane({ search, onSearchChange }: {
     ...(isService(filter) ? { service: filter } : {}),
     ...keepPlace,
     ...keepQ(search.q),
+    ...keepDiagnostics,
   });
-  const onQueryChange = (q: string) => onSearchChange({ ...keepChip, ...keepPlace, ...keepQ(q) });
-  const onClearPlace = () => onSearchChange({ ...keepChip, ...keepQ(search.q) });
+  const onQueryChange = (q: string) => onSearchChange({ ...keepChip, ...keepPlace, ...keepQ(q), ...keepDiagnostics });
+  const onClearPlace = () => onSearchChange({ ...keepChip, ...keepQ(search.q), ...keepDiagnostics });
+  const onDiagnosticsChange = (open: boolean) => onSearchChange({
+    ...keepChip,
+    ...keepPlace,
+    ...keepQ(search.q),
+    ...(open ? { diagnostics: 1 as const } : {}),
+  });
   return (
     <PresenceDetailPage crumbs={[PRESENCE_CRUMB, { label: "Activity" }]} title="Activity">
       {/* This page has no header Add, so a workspace that is not present anywhere gets one here. */}
@@ -113,6 +127,8 @@ export function ActivityPane({ search, onSearchChange }: {
         onFilterChange={onFilterChange}
         query={search.q ?? ""}
         onQueryChange={onQueryChange}
+        diagnostics={search.diagnostics === 1}
+        onDiagnosticsChange={onDiagnosticsChange}
         {...(search.place !== undefined
           ? { place: search.place, placeName: placeName(search.place, places.data?.places ?? []) }
           : {})}

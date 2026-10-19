@@ -291,21 +291,67 @@ describe("ActivityPane place filter (spec Part C step 7)", () => {
   });
 });
 
-describe("ActivityPane receipts", () => {
-  it("shows receipts under a disclosure for an admin", () => {
+describe("ActivityPane diagnostics (L8)", () => {
+  function disclosure(): HTMLDetailsElement {
+    const summary = screen.getByText("Diagnostics").closest("summary");
+    const details = summary?.closest("details");
+    if (!(details instanceof HTMLDetailsElement)) throw new Error("no Diagnostics disclosure");
+    return details;
+  }
+
+  it("has one diagnostics control, the disclosure, and no checkbox", () => {
     renderTab();
-    const disclosure = screen.getByText("Diagnostics", { selector: "summary" }).closest("details")!;
-    expect(disclosure.open).toBe(false);
-    expect(within(disclosure).queryByText("Receipts list")).toBeNull();
-    disclosure.open = true;
-    fireEvent(disclosure, new Event("toggle"));
-    expect(within(disclosure).getByText("Receipts list")).toBeTruthy();
+    expect(disclosure().open).toBe(false);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByText(/Show diagnostics/)).toBeNull();
   });
 
-  it("has no receipts disclosure for a member", () => {
-    role = "member";
+  it("writes diagnostics=1 to the URL when it opens, and drops it when it closes", () => {
+    const { onSearchChange } = renderTab({ status: "problems", q: "boom" });
+    const details = disclosure();
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(onSearchChange).toHaveBeenLastCalledWith({ status: "problems", q: "boom", diagnostics: 1 });
+    cleanup();
+    const reopened = renderTab({ status: "problems", q: "boom", diagnostics: 1 });
+    const open = disclosure();
+    expect(open.open).toBe(true);
+    open.open = false;
+    fireEvent(open, new Event("toggle"));
+    expect(reopened.onSearchChange).toHaveBeenLastCalledWith({ status: "problems", q: "boom" });
+  });
+
+  it("asks the Log for diagnostics and shows an admin the receipts while open", () => {
+    renderTab({ diagnostics: 1 });
+    expect(logQuery).toHaveBeenLastCalledWith(expect.objectContaining({ diagnostics: true }));
+    expect(within(disclosure()).getByText("Receipts list")).toBeTruthy();
+    cleanup();
     renderTab();
-    expect(screen.queryByText("Diagnostics", { selector: "summary" })).toBeNull();
+    expect(logQuery).toHaveBeenLastCalledWith(expect.objectContaining({ diagnostics: false }));
+    expect(screen.queryByText("Receipts list")).toBeNull();
+  });
+
+  it("gives a member the disclosure for the organization's problems, with no receipts", () => {
+    role = "member";
+    renderTab({ diagnostics: 1 });
+    expect(disclosure().open).toBe(true);
+    expect(logQuery).toHaveBeenLastCalledWith(expect.objectContaining({ diagnostics: true }));
+    expect(screen.queryByText("Receipts list")).toBeNull();
+  });
+
+  it("keeps diagnostics open when a chip, Search, or the place changes", () => {
+    const { onSearchChange } = renderTab({ place: "slack:T1/C900", diagnostics: 1 });
+    fireEvent.click(screen.getByRole("button", { name: "Problems" }));
+    expect(onSearchChange).toHaveBeenLastCalledWith({ status: "problems", place: "slack:T1/C900", diagnostics: 1 });
+    fireEvent.click(screen.getByRole("button", { name: /^Remove the place filter/ }));
+    expect(onSearchChange).toHaveBeenLastCalledWith({ diagnostics: 1 });
+  });
+
+  it("reads diagnostics=1 from the URL, as the router's number or as text", () => {
+    expect(readActivitySearch({ diagnostics: 1 })).toEqual({ diagnostics: 1 });
+    expect(readActivitySearch({ diagnostics: "1" })).toEqual({ diagnostics: 1 });
+    expect(readActivitySearch({ diagnostics: 0 })).toEqual({});
+    expect(readActivitySearch({ diagnostics: true })).toEqual({});
   });
 });
 

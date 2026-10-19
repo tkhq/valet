@@ -15,6 +15,7 @@ let lastParams: { owner: OwnerFilter | undefined; problems: boolean; diagnostics
 let items: EventLogItem[] = [];
 let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u1" };
 let role = "member";
+let hasNext = false;
 
 vi.mock("~/api/events", () => ({
   useEventLog: (params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string }) => {
@@ -22,7 +23,7 @@ vi.mock("~/api/events", () => ({
     const held = params.owner === undefined;
     return {
       data: held ? undefined : { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: 30 }] },
-      isPending: held, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
+      isPending: held, error: null, hasNextPage: hasNext, isFetchingNextPage: false, fetchNextPage: vi.fn(),
     };
   },
   useEventSubscriptions: () => ({ data: { subscriptions: [] } }),
@@ -45,6 +46,7 @@ afterEach(() => {
   items = [];
   owner = { ownerType: "user", ownerId: "u1" };
   role = "member";
+  hasNext = false;
 });
 
 function renderLog(filter: LogFilter = "all") {
@@ -104,17 +106,28 @@ describe("EventLog", () => {
     expect(screen.getByText(/The text did not match\./)).toBeTruthy();
   });
 
-  it("offers receipts to admins only, under a disclosure beside the list", () => {
-    renderLog();
-    expect(screen.queryByText("Diagnostics", { selector: "summary" })).toBeNull();
+  it("points to Load more when a service chip hides every loaded row and more rows wait", () => {
+    items = [event];
+    hasNext = true;
+    renderLog("slack");
+    expect(screen.getByText("No Slack events in the loaded rows. Load more to look further.")).toBeTruthy();
+    expect(screen.queryByText("Nothing matches. Choose All.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+    cleanup();
+    hasNext = false;
+    renderLog("slack");
+    expect(screen.getByText("Nothing matches. Choose All.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("offers receipts to admins only, inside the open Diagnostics disclosure", () => {
+    render(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={vi.fn()} />);
+    expect(screen.getByText("Diagnostics").closest("details")?.open).toBe(true);
+    expect(screen.queryByText("Receipts list")).toBeNull();
     cleanup();
     role = "admin";
     items = [event];
-    renderLog();
-    const disclosure = screen.getByText("Diagnostics", { selector: "summary" }).closest("details")!;
-    expect(screen.queryByText("Receipts list")).toBeNull();
-    disclosure.open = true;
-    fireEvent(disclosure, new Event("toggle"));
+    render(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={vi.fn()} />);
     expect(screen.getByText("Receipts list")).toBeTruthy();
     // The list stays, scoped to the workspace.
     expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" })).toBeTruthy();
@@ -122,13 +135,26 @@ describe("EventLog", () => {
   });
 });
 
-it("opts into diagnostics and stops requesting them when switched off", () => {
+it("asks for diagnostics only while the caller's disclosure is open, and has no checkbox", () => {
+  role = "admin";
+  const onDiagnosticsChange = vi.fn();
+  const { rerender } = render(
+    <EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics={false} onDiagnosticsChange={onDiagnosticsChange} />,
+  );
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(lastParams?.diagnostics).toBe(false);
+  const details = screen.getByText("Diagnostics").closest("details")!;
+  details.open = true;
+  fireEvent(details, new Event("toggle"));
+  expect(onDiagnosticsChange).toHaveBeenCalledWith(true);
+  rerender(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={onDiagnosticsChange} />);
+  expect(lastParams?.diagnostics).toBe(true);
+});
+
+it("has no disclosure when the caller does not keep its state", () => {
   role = "admin";
   renderLog();
-  expect(lastParams?.diagnostics).toBe(false);
-  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
-  expect(lastParams?.diagnostics).toBe(true);
-  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
+  expect(screen.queryByText("Diagnostics")).toBeNull();
   expect(lastParams?.diagnostics).toBe(false);
 });
 

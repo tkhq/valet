@@ -2,8 +2,10 @@
  * on request. The Activity pane renders it; each stored event reads as an
  * activity sentence (`~/components/presence/activity-row`). The chips are
  * `All`, `Problems`, and one per service (spec 2026-10-16 presence hub,
- * Part F step 2); receipts sit under a disclosure for admins. */
-import { useState, type ReactNode } from "react";
+ * Part F step 2). One Diagnostics disclosure, open state in the caller's
+ * URL, adds the organization's diagnostics to the list and, for admins,
+ * shows the receipts. */
+import type { ReactNode } from "react";
 import type { EventLogItem } from "@valet/api/wire";
 import { useEventLog } from "~/api/events";
 import { useMe } from "~/api/settings";
@@ -42,7 +44,7 @@ export function itemsForFilter(items: readonly EventLogItem[], filter: LogFilter
   return items.filter((item) => item.eventKey?.startsWith(`${filter}.`) ?? false);
 }
 
-export function EventLog({ filter, onFilterChange, query, onQueryChange, place, placeName }: {
+export function EventLog({ filter, onFilterChange, query, onQueryChange, place, placeName, diagnostics = false, onDiagnosticsChange }: {
   filter: LogFilter;
   onFilterChange: (next: LogFilter) => void;
   /** The search text; the server matches it against the stored events. */
@@ -52,12 +54,19 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
   place?: string;
   /** The place's name for the empty state, such as `acme/api`. */
   placeName?: string;
+  /**
+   * True while the Diagnostics disclosure is open: the list adds incoming
+   * events and the organization's problems, and an admin also sees the
+   * intake trail. The caller keeps it in the URL. Without
+   * `onDiagnosticsChange`, the Log has no disclosure.
+   */
+  diagnostics?: boolean;
+  onDiagnosticsChange?: (open: boolean) => void;
 }) {
   const me = useMe();
   const admin = !me.error && me.data?.orgRole === "admin";
   const owner = useListOwner();
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [receiptsOpen, setReceiptsOpen] = useState(false);
+  const showDiagnostics = diagnostics && onDiagnosticsChange !== undefined;
   const log = useEventLog({
     owner, problems: filter === "problems", diagnostics: showDiagnostics, ...(query ? { q: query } : {}), ...(place ? { place } : {}),
   });
@@ -67,7 +76,6 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
 
   return (
     <div className="space-y-4">
-      <label className="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked={showDiagnostics} onChange={event => setShowDiagnostics(event.target.checked)} />Show diagnostics</label>
       <FilterChips label="Show" value={filter} onChange={onFilterChange} options={FILTERS} />
       <SearchInput
         value={query}
@@ -76,11 +84,25 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
         aria-label="Search"
         maxLength={200}
       />
-      {admin && (
-        <details onToggle={(event) => setReceiptsOpen(event.currentTarget.open)} className="text-sm">
-          <summary className="cursor-pointer text-muted hover:text-ink">Diagnostics</summary>
-          {/* The receipts list loads only when the reader opens it. */}
-          {receiptsOpen && <div className="mt-3"><ReceiptsPanel /></div>}
+      {onDiagnosticsChange !== undefined && (
+        <details
+          open={showDiagnostics}
+          onToggle={(event) => {
+            const open = event.currentTarget.open;
+            if (open !== showDiagnostics) onDiagnosticsChange(open);
+          }}
+          className="text-sm"
+        >
+          <summary className="cursor-pointer text-[13px] text-muted">
+            <span className="font-medium hover:text-ink">Diagnostics</span>
+            <span className="ml-2">
+              {admin
+                ? "Adds incoming events and the organization's problems to the list, and shows how each event came in."
+                : "Adds incoming events and the organization's problems to the list."}
+            </span>
+          </summary>
+          {/* The receipts list loads only when an admin opens it. */}
+          {showDiagnostics && admin && <div className="mt-3"><ReceiptsPanel /></div>}
         </details>
       )}
       {first && (
@@ -94,7 +116,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
       {log.isPending && owner !== undefined && <LoadingRow label="Loading the log…" />}
       {log.error && <ErrorRow>{log.error.message || "Could not load the log. Reload the page to try again."}</ErrorRow>}
       {log.data && items.length === 0 && (
-        <EmptyRow>{emptyText({ filter, query, place, placeName, windowDays: first?.windowDays ?? 30 })}</EmptyRow>
+        <EmptyRow>{emptyText({ filter, query, place, placeName, windowDays: first?.windowDays ?? 30, moreToLoad: log.hasNextPage })}</EmptyRow>
       )}
       {items.length > 0 && (
         <WorkList>
@@ -112,18 +134,27 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
   );
 }
 
+/** A service chip's name in the empty text. */
+const SERVICE_LABELS: Readonly<Record<LogService, string>> = { slack: "Slack", github: "GitHub", linear: "Linear" };
+
 /**
- * What the Log says when no row shows. A place alone says nothing happened
- * there; any other filter names how to widen it; no filter says no
- * activity yet.
+ * What the Log says when no row shows. A service chip filters only the
+ * loaded rows, so while more rows wait to load it points to Load more. A
+ * place alone says nothing happened there; any other filter names how to
+ * widen it; no filter says no activity yet.
  */
-export function emptyText({ filter, query, place, placeName, windowDays }: {
+export function emptyText({ filter, query, place, placeName, windowDays, moreToLoad = false }: {
   filter: LogFilter;
   query: string;
   place: string | undefined;
   placeName: string | undefined;
   windowDays: number;
+  /** True while the server has more rows than the Log loaded. */
+  moreToLoad?: boolean;
 }): string {
+  if (moreToLoad && filter !== "all" && filter !== "problems") {
+    return `No ${SERVICE_LABELS[filter]} events in the loaded rows. Load more to look further.`;
+  }
   const otherFilter = query.trim() !== "" || filter !== "all";
   if (place !== undefined && !otherFilter) {
     return `Nothing happened in ${placeName ?? "this place"} in the last ${windowDays} days.`;
@@ -131,7 +162,7 @@ export function emptyText({ filter, query, place, placeName, windowDays }: {
   if (place !== undefined) return "Nothing matches. Choose All or remove the place.";
   if (query.trim() !== "") return "Nothing matches. Choose All or clear Search.";
   if (filter !== "all") return "Nothing matches. Choose All.";
-  return "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, turn on Show diagnostics.";
+  return "No activity yet. To receive events, select Listen for… on a place in Presence. To inspect incoming webhooks, open Diagnostics.";
 }
 
 /** Consecutive problems with the same reason and detail read as one row with a count. */
