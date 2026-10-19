@@ -471,7 +471,7 @@ describe("LineEditor", () => {
     [
       "already off",
       [line("l0", { name: "Old CI", enabled: false })],
-      "Old CI is already off. Turning this on could leave two versions replying. Turn Old CI on first, or delete this proposal.",
+      "Old CI is already off. Turning this on could leave two versions replying. Delete this proposal and ask the assistant for a new one.",
     ],
   ])("offers no Turn on when the replaced line is %s", (_case, rows, text) => {
     subscriptions = rows;

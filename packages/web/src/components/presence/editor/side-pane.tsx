@@ -26,7 +26,7 @@ export type StaleProposal = { kind: "gone" } | { kind: "off"; name: string };
  */
 export function staleProposalText(stale: StaleProposal): string {
   if (stale.kind === "gone") return "The line this proposal replaces is gone. Delete this proposal and make a new line.";
-  return `${stale.name} is already off. Turning this on could leave two versions replying. Turn ${stale.name} on first, or delete this proposal.`;
+  return `${stale.name} is already off. Turning this on could leave two versions replying. Delete this proposal and ask the assistant for a new one.`;
 }
 
 export interface SidePaneProps {

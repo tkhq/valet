@@ -665,7 +665,7 @@ describe("RulePage", () => {
     [
       "off",
       [listener({ id: "R1", name: "Incident replies", enabled: false })],
-      "Incident replies is already off. Turning this on could leave two versions replying. Turn Incident replies on first, or delete this proposal.",
+      "Incident replies is already off. Turning this on could leave two versions replying. Delete this proposal and ask the assistant for a new one.",
     ],
   ])("offers Delete only for a proposal whose replaced line is %s (S6)", async (_state, others, text) => {
     const proposal = listener({

@@ -54,7 +54,7 @@ describe("SidePane", () => {
     [{ kind: "gone" } as const, "The line this proposal replaces is gone. Delete this proposal and make a new line."],
     [
       { kind: "off", name: "Old CI" } as const,
-      "Old CI is already off. Turning this on could leave two versions replying. Turn Old CI on first, or delete this proposal.",
+      "Old CI is already off. Turning this on could leave two versions replying. Delete this proposal and ask the assistant for a new one.",
     ],
   ])("offers no Turn on for a stale proposal (%o)", (stale, text) => {
     render(<SidePane {...props({ saveLabel: "Turn on", review: { stale } })} />);
