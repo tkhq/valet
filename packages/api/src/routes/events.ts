@@ -63,6 +63,7 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
 import { orgSlackCredential, slackEventChannel, storedThreadRef } from "../services/thread-access.js";
 import { loadLineActivity } from "../services/line-activity.js";
+import { slackChannelNames } from "./workspace-channels.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { acceptAppearanceWrite, acceptTargetWrite, readStoredTarget } from "../events/target-names.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog, supersedingDeliveries } from "../services/event-log.js";
@@ -1173,13 +1174,14 @@ eventsRouter.get("/event-subscriptions/:id/activity", async (c) => {
     ? { at: decoded.at, id: decoded.id } : undefined;
   if (rawCursor !== undefined && !before) return c.json({ error: "The page cursor does not match this line. Load its activity again from the top." }, 400);
 
-  const teamId = (await orgSlackCredential(c.var.providers, user.orgId))?.metadata?.teamId;
+  // A credential fault degrades Slack places to their ids, as the places read does.
   const page = await loadLineActivity({ db, plugins }, {
     orgId: user.orgId, line, admin: await isOrgAdminUser(c),
-    slackTeam: typeof teamId === "string" && teamId !== "" ? teamId : null,
+    slackTeam: await orgSlackTeam(c.var.providers, user.orgId),
     ...(before ? { before } : {}), limit,
     channelVisible: channelsVisibleTo(c),
     deliveryLinks: (rows) => deliveriesToWire(c, rows),
+    channelNames: slackChannelNames(c),
   });
   const resp: LineActivityResponse = {
     entries: page.entries,

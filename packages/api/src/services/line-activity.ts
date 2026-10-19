@@ -20,6 +20,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { claimedThreadId } from "../events/destination.js";
 import { sanitizeReceiptSubscriptions } from "../events/receipts.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
+import type { ChannelNames } from "./channels.js";
 import { slackEventChannel } from "./thread-access.js";
 import { supersedingDeliveries } from "./event-log.js";
 import {
@@ -229,6 +230,9 @@ export interface LineActivityQuery {
   channelVisible: (channelKey: string) => Promise<boolean>;
   /** The thread or run each delivery reached, when the viewer may open it. */
   deliveryLinks: (rows: readonly LineDeliveryRow[]) => Promise<ReadonlyArray<Pick<EventDeliveryWire, "thread" | "runId">>>;
+  /** Slack channel names by channel id, as the places read resolves them.
+   * A failed read leaves each unnamed channel as its id. */
+  channelNames?: ChannelNames;
 }
 
 export interface LineActivityPage {
@@ -255,6 +259,24 @@ function receiptPlace(service: string, metadata: unknown, slackTeam: string | nu
   if (!channel || !workspace) return null;
   const key = placeOfSubject(`slack:${workspace}/${channel}`);
   return key ? { key, label: placeLabel(key, new Map()) } : null;
+}
+
+/** The Slack channel id of a channel place key (`slack:T1/C900`), or null. */
+function slackChannelOfPlace(place: string | null): string | null {
+  return place === null ? null : /^slack:[^/]+\/([^/]+)$/.exec(place)?.[1] ?? null;
+}
+
+/**
+ * The entries with each Slack channel's name as its place label (`#incidents`),
+ * as the places read and a page title show it. A channel the names do not
+ * hold keeps the label it has.
+ */
+export function withChannelLabels(entries: readonly LineActivityEntryWire[], names: ReadonlyMap<string, string>): LineActivityEntryWire[] {
+  return entries.map((entry) => {
+    const channel = slackChannelOfPlace(entry.place);
+    if (channel === null || entry.place === null || !names.has(channel)) return entry;
+    return { ...entry, placeLabel: placeLabel(entry.place, names) };
+  });
 }
 
 /** Reads one line's Activity page and its health strip counts. */
@@ -416,8 +438,15 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
   ]);
   const counts = lineActivityCounts(recent.map((row) => Number(row.at)), now);
   const lastActedAt = latest[0]?.at;
+  const page = entries.slice(0, limit);
+  const channels = [...new Set(page.map((entry) => slackChannelOfPlace(entry.place)).filter((id): id is string => id !== null))];
+  const names = channels.length === 0 || !query.channelNames ? new Map<string, string>()
+    : await query.channelNames(channels).catch((err: unknown) => {
+      console.error("[line-activity] reading Slack channel names failed", err);
+      return new Map<string, string>();
+    });
   return {
-    entries: entries.slice(0, limit),
+    entries: withChannelLabels(page, names),
     next,
     lastActedAt: lastActedAt === null || lastActedAt === undefined ? null : Number(lastActedAt),
     ...counts,

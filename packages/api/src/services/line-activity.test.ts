@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { lineNamedPlaces } from "./presence-places.js";
 import {
-  inLinePlaces, lineActivityCounts, mergeLineActivity, type LineDecisionInput, type LineDeliveryInput,
+  inLinePlaces, lineActivityCounts, mergeLineActivity, withChannelLabels, type LineDecisionInput, type LineDeliveryInput,
 } from "./line-activity.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -178,5 +178,20 @@ describe("lineActivityCounts", () => {
     const { perDay } = lineActivityCounts([yesterdayLate], now);
     expect(perDay[28]).toBe(1);
     expect(perDay[29]).toBe(0);
+  });
+});
+
+// Review S1: a Slack place reads as its channel name, as the page title does.
+describe("withChannelLabels", () => {
+  it("names a known channel and keeps every other label", () => {
+    const entries = mergeLineActivity([], [
+      decision("r_known", "disabled", { at: 1, eventKey: "slack.message", place: { key: "slack:T1/C900", label: "C900" } }),
+      decision("r_unknown", "disabled", { at: 2, eventKey: "slack.message", place: { key: "slack:T1/C901", label: "C901" } }),
+      decision("r_repo", "disabled", { at: 3 }),
+    ], { linePlaces: ["slack:T1", "github:*"], admin: false });
+    const labeled = withChannelLabels(entries, new Map([["C900", "incidents"]]));
+    expect(labeled.map((e) => [e.id, e.placeLabel])).toEqual([
+      ["receipt:r_repo", "acme/api"], ["receipt:r_unknown", "C901"], ["receipt:r_known", "#incidents"],
+    ]);
   });
 });

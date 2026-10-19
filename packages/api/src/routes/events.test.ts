@@ -12,9 +12,10 @@ import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { RunHost } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { ingestEvent } from "../events/ingest.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
@@ -875,6 +876,43 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
     expect((await read("sub_web", MEMBER)).entries).toEqual([]);
     // An admin sees the skip outside the line's places.
     expect((await read("sub_web", {})).entries.map((e) => [e.place, e.reasonText])).toEqual([["github:acme/api", "the repository filter"]]);
+  });
+
+  // Review S1 and A11: a Slack place reads as its channel name, and a
+  // credential fault degrades the label to the id instead of failing the page.
+  it("names a Slack channel place, and keeps the id when the credential read fails", async () => {
+    const names: ValetPlugin = { ...slackPlugin, filterOptionResolvers: { "slack.channels": async () => [{ id: "C900", label: "#incidents" }] } };
+    api = await bootTestApi({ plugins: [names, githubPlugin] });
+    const a = api;
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack",
+      { type: "oauth2", accessToken: "xoxb-test", metadata: { teamId: "T1" } });
+    const realFetch = globalThis.fetch;
+    const slackStub = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      return new Response(JSON.stringify({ ok: true, channel: { name: "incidents", is_private: false }, members: [] }),
+        { headers: { "content-type": "application/json" } });
+    });
+    onTestFinished(() => { slackStub.mockRestore(); resetThreadAccessCache(); });
+    await seedSubscriptionRow(a, "sub_line", "local-org", {
+      eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C900" }],
+    });
+    await a.providers.db.insert(eventReceipts).values({
+      id: "r_slack", orgId: "local-org", service: "slack", externalId: null, metadata: { channelId: "C900", workspaceId: "T1" }, stages: [],
+      eventKey: "slack.message", eventId: null, createdAt: 1_000, updatedAt: 1_000,
+      subscriptions: [{ id: "sub_line", ownerType: "user", ownerId: "someone", target: "assistant", outcome: "authorization_denied" }],
+    });
+    const named = await activity(a);
+    expect(named.entries.map((e) => [e.place, e.placeLabel])).toEqual([["slack:T1/C900", "#incidents"]]);
+
+    const get = a.providers.engineCredentials.get.bind(a.providers.engineCredentials);
+    const failing = vi.spyOn(a.providers.engineCredentials, "get").mockImplementation(async (owner, service) => {
+      if (service === "slack") throw new Error("credential store unavailable");
+      return get(owner, service);
+    });
+    onTestFinished(() => failing.mockRestore());
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_line/activity`);
+    expect(res.status, await res.clone().text()).toBe(200);
   });
 
   it("404s a missing line with text that names the fix", async () => {
