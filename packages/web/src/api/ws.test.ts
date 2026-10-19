@@ -293,6 +293,33 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
+  it("shares one socket between views of one session, so streamed text is applied once", () => {
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: PropsWithChildren) => createElement(QueryClientProvider, { client: queryClient }, children);
+    const chat = renderHook(() => useSessionWebSocket("s1"), { wrapper });
+    const panel = renderHook(() => useSessionWebSocket("s1"), { wrapper });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    // The server sends every frame to every open socket of the session.
+    const send = (value: object) => act(() => {
+      for (const socket of FakeWebSocket.instances.filter(socket => !socket.closed)) socket.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, threadId: "t", ...value }) });
+    });
+    send({ type: "message_start", messageId: "m1", role: "assistant", offset: "0000000000000001" });
+    send({ type: "text_delta", messageId: "m1", delta: "Hello" });
+    expect(useStreamStore.getState().bySession.s1?.messages.find(message => message.id === "m1")?.content).toBe("Hello");
+
+    // Closing one view keeps the other live on the same socket.
+    act(() => FakeWebSocket.instances[0]?.onopen?.());
+    chat.unmount();
+    expect(FakeWebSocket.instances[0]?.closed).toBe(false);
+    expect(useStreamStore.getState().bySession.s1?.conn).toBe("open");
+    send({ type: "text_delta", messageId: "m1", delta: " there" });
+    expect(useStreamStore.getState().bySession.s1?.messages.find(message => message.id === "m1")?.content).toBe("Hello there");
+
+    panel.unmount();
+    expect(FakeWebSocket.instances[0]?.closed).toBe(true);
+    expect(useStreamStore.getState().bySession.s1?.conn).toBe("closed");
+  });
+
   it("retries application close codes that are not terminal for the session stream", () => {
     vi.useFakeTimers();
     const { unmount } = renderSocketHook("s1");

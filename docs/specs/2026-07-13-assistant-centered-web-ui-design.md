@@ -161,6 +161,8 @@ On phone widths, the thread summary stays closed until the user opens it. Openin
 
 On phones, Ask Valet and available plugins live inside the navigation menu. The thread summary popover is bounded by the viewport width and available height.
 
+Amended 2026-10-19: the Ask Valet panel docks beside every page, including `/chat`, so it stays open beside the open thread. It is 440 px wide on large screens and covers the page below that width. A workflow page still opens the workflow's own conversation in Threads. A personal helper thread lives in the same session as the person's threads, so two views can show one session. `useSessionWebSocket` shares one socket for each session, counted by mounted views, and closes it when the last view unmounts. `text_delta` frames carry no offset, so a second socket would apply each delta twice.
+
 Amended 2026-10-16: personal and team home dashboards show workspace activity directly. Generated briefings, their loading states, polling, and dismissal actions are removed.
 The briefing API routes, evidence collection, model generation, and refresh leases are removed. Home visits do not start briefing work.
 Questions, approvals, failed workflow runs, conversation updates, active work, and recent results retain their existing behavior. Memory, usage, and team Slack setup remain available.
