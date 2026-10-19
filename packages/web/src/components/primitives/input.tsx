@@ -14,13 +14,12 @@ const FIELD_BASE =
   "rounded border bg-[--bg] text-[--fg] placeholder:text-muted caret-moss selection:bg-moss-wash selection:text-ink " +
   "border-[--border] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 " +
   "focus-visible:border-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed " +
-  "max-sm:rounded-xl max-sm:shadow-sm max-sm:hover:border-muted max-sm:focus-visible:border-moss max-sm:focus-visible:ring-4 max-sm:focus-visible:ring-moss-wash motion-reduce:transition-none";
+  "max-sm:hover:border-muted max-sm:focus-visible:border-moss max-sm:focus-visible:ring-4 max-sm:focus-visible:ring-moss-wash motion-reduce:transition-none";
 
-// A field takes its height from the shared control scale. On a phone, its text
-// is 16px, so iOS does not zoom on focus.
+// A field takes its height and text size from the shared control scale.
 const FIELD_SIZE: Record<ControlSize, string> = {
-  md: `${CONTROL_SIZE.md} px-3 max-sm:text-base`,
-  sm: `${CONTROL_SIZE.sm} px-2.5 max-sm:text-base`,
+  md: `${CONTROL_SIZE.md} px-3`,
+  sm: `${CONTROL_SIZE.sm} px-2.5`,
 };
 
 // The app does not use the native `size` attribute (a width in characters on an
