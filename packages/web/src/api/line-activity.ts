@@ -24,7 +24,7 @@ export const LINE_ACTIVITY_AUTO_FETCHES = 3;
 const POLL_MS = 30_000;
 
 /** The number of empty pages at the end of the loaded pages. */
-export function trailingEmptyPages(pages: readonly Pick<LineActivityResponse, "entries">[]): number {
+export function trailingEmptyPages(pages: readonly { entries: readonly unknown[] }[]): number {
   let n = 0;
   for (let i = pages.length - 1; i >= 0 && pages[i]?.entries.length === 0; i--) n++;
   return n;
@@ -37,7 +37,7 @@ export function trailingEmptyPages(pages: readonly Pick<LineActivityResponse, "e
  * in a row, and after a failed fetch.
  */
 export function shouldFetchPastEmpty(state: {
-  pages: readonly Pick<LineActivityResponse, "entries">[];
+  pages: readonly { entries: readonly unknown[] }[];
   hasNextPage: boolean;
   fetching: boolean;
   failed: boolean;
