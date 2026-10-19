@@ -37,7 +37,7 @@ export function PlacePage({ subject }: { subject: string }) {
       {detail.isError && (
         <ErrorRow>{errorText(detail.error, "Could not load this place. Open Presence and pick the place again.")}</ErrorRow>
       )}
-      {detail.data && <PlaceBody data={detail.data} />}
+      {detail.data && <PlaceBody data={detail.data} onLineAdded={() => { void detail.refetch(); }} />}
     </PresenceDetailPage>
   );
 }
@@ -54,10 +54,17 @@ function knownThreadTitles(threads: PresencePlaceDetailResponse["threads"]): Thr
 /** Recent activity shows this many rows; View all opens the rest (Part C step 7). */
 const RECENT_ROWS = 10;
 
-export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
+/**
+ * The page's sections over the one place read the page holds. The read is
+ * keyed by the URL's subject, which can differ from `place.subject` (a
+ * channel-only Slack key), so the page passes its own refetch down.
+ */
+export function PlaceBody({ data, onLineAdded }: {
+  data: PresencePlaceDetailResponse;
+  /** Refetches the page's read, so the new line shows. */
+  onLineAdded: () => void;
+}) {
   const { place, listeners, threads, activity } = data;
-  // The same query the page reads; a refetch shows a line the editor adds.
-  const detail = usePresencePlace(place.subject);
   const [adding, setAdding] = useState(false);
   const sentence = usePresenceSentenceParts(listeners, knownThreadTitles(threads));
   const appearances = listeners.filter(hasAppearance);
@@ -85,7 +92,7 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
         open={adding}
         onOpenChange={setAdding}
         // The page lists this place's lines; it refetches to show the new one.
-        onSaved={() => { void detail.refetch(); }}
+        onSaved={onLineAdded}
         mode={{ kind: "create", preselected: { place: { subject: place.subject, service: place.service, label: place.label } } }}
       />
 

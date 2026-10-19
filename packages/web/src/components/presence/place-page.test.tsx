@@ -318,6 +318,14 @@ describe("PlacePage", () => {
     expect(following.getByRole("link", { name: /Slack thread/ }).getAttribute("href")).toBe("https://acme.slack.com/archives/C900/p1");
   });
 
+  it("reads the place once when the URL's key differs from the place's key", async () => {
+    getPresencePlace.mockResolvedValue(INCIDENTS);
+    renderPage("slack:C900");
+    expect(await screen.findByRole("heading", { level: 1, name: "#incidents" })).toBeTruthy();
+    await screen.findByRole("button", { name: "Listen for…" });
+    expect(getPresencePlace.mock.calls).toEqual([["user", "slack:C900"]]);
+  });
+
   it("opens the editor on this place from Listen for… (P5)", async () => {
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
