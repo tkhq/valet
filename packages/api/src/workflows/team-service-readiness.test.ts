@@ -855,6 +855,24 @@ describe("teamServiceReadiness: native app identities", () => {
     expect(result.blocked.map((b) => b.service)).toEqual(["linear"]);
   });
 
+  it("a user Slack node is blocked on the org bot row alone, naming the fix", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "user") });
+    expect(result.ready).toEqual([]);
+    expect(result.organizationProvided).toBeUndefined();
+    expect(result.blocked).toEqual([{
+      service: "slack",
+      reason:
+        'This workflow has slack nodes that use the "user" credential, and this team has no slack credential of a person. ' +
+        "The organization slack connection is the app identity, so it does not count. " +
+        "Connect a slack credential for the team, or remove the credential field from those nodes.",
+    }]);
+
+    await credentials.save({ type: "team", id: TEAM }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+    const withTeamRow = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "user") });
+    expect(withTeamRow.ready).toEqual(["slack"]);
+  });
+
   it("a broken Linear share is ready on the app token, with a warning to repair it", async () => {
     await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
     await db.insert(teamMembers).values({ teamId: TEAM, userId: "u-1", role: "member" });

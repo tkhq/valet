@@ -22,7 +22,9 @@
  *      (`services/credential-resolution.ts#resolveTeamCredentialRead`,
  *      stopped at the team row).
  *   3. The service is in `orgProvidedServiceSet` (an org-mode connection
- *      every member already rides).
+ *      every member already rides). For a native service, a node pinned
+ *      `"user"` does not count that org row: it is the app identity, and
+ *      the run refuses the pin without a person's credential.
  *   4. Every tool node naming that service pins `credential: "app"` and
  *      the app identity answers. For github that is an active App
  *      installation: a literal owner must match, and a repository supplied
@@ -338,6 +340,16 @@ async function unpinnedGithubGate(
   return { ready: true };
 }
 
+/** The fix for a native service pinned `"user"` that only the org's app
+ * identity answers. The run refuses it (`plugins/action-invoker.ts`). */
+function userPinnedOrgRowReason(service: string): string {
+  return (
+    `This workflow has ${service} nodes that use the "user" credential, and this team has no ${service} credential of a person. ` +
+    `The organization ${service} connection is the app identity, so it does not count. ` +
+    `Connect a ${service} credential for the team, or remove the credential field from those nodes.`
+  );
+}
+
 export async function teamServiceReadiness(
   deps: TeamServiceReadinessDeps,
   opts: {
@@ -437,8 +449,13 @@ export async function teamServiceReadiness(
     // An unpinned node of a native service with a row-backed app credential
     // ends at the app token when no team credential answers (Part B). A
     // `"user"` pin never reaches it, so it keeps the team-row path.
-    const appTierCovers = appAnswers && appService !== undefined && isAppCredentialRowService(appService)
-      && !forService.some((node) => node.credential === "user");
+    const userPinned = forService.some((node) => node.credential === "user");
+    const appTierCovers = appAnswers && appService !== undefined && isAppCredentialRowService(appService) && !userPinned;
+    // For a native service, an org-provided org row is the app identity
+    // (the Slack bot, the Linear app), not a person's credential. The
+    // invoker reads it only as a 1Password reference for a `"user"` pin
+    // (`plugins/action-invoker.ts`), so it does not arm that pin here.
+    const orgRowAnswers = orgProvided.has(service) && !(appService !== undefined && userPinned);
     if (teamServices.has(service)) {
       const state = await teamRowState(
         { credentials: store, onePassword: deps.onePassword, shares: (teamId, svc) => membersSharing(deps.db, teamId, svc) },
@@ -470,7 +487,7 @@ export async function teamServiceReadiness(
         // answer, or a team's workflows stay disarmed while every run of
         // them succeeds. The broken row is still worth repairing, so it
         // reports as a warning that blocks nothing.
-        if (orgProvided.has(service)) {
+        if (orgRowAnswers) {
           organizationProvided.push(service);
           ready.push(service);
           warnings.push({
@@ -494,7 +511,7 @@ export async function teamServiceReadiness(
         continue;
       }
     }
-    if (orgProvided.has(service)) {
+    if (orgRowAnswers) {
       organizationProvided.push(service);
       ready.push(service);
       continue;
@@ -513,7 +530,6 @@ export async function teamServiceReadiness(
     let needsOrganizationGithub = false;
     if (service === "github") {
       const unpinned = forService.filter((node) => node.credential === undefined || node.credential === "auto");
-      const userPinned = forService.some((node) => node.credential === "user");
       const gate = unpinned.length > 0 ? await unpinnedGithubGate(deps, opts.orgId, unpinned) : { ready: true as const };
       if (gate.ready && !userPinned) {
         organizationProvided.push(service);
@@ -574,7 +590,9 @@ export async function teamServiceReadiness(
     if (needsOrganizationGithub) organizationProvided.push(service);
     blocked.push({
       service,
-      reason: unpinnedReason ?? `Connect ${service} for this team.`,
+      reason: unpinnedReason ?? (appService !== undefined && userPinned && orgProvided.has(service)
+        ? userPinnedOrgRowReason(service)
+        : `Connect ${service} for this team.`),
     });
   }
   return { ready, blocked, unverifiable, warnings, ...(organizationProvided.length > 0 ? { organizationProvided } : {}) };

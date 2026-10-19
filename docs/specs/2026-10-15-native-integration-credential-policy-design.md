@@ -249,8 +249,12 @@ deployment after merge.
    app identity: the Linear app token, or the org Slack bot row. A run
    pinned to `app` with no app connection is refused with the admin fix.
    `user` never reaches the app token, and an org-owned run pinned to
-   `user` is refused, because it has no person to act as. Team readiness
-   gives the same answers (team credentials design, deviation 26).
+   `user` is refused, because it has no person to act as. For a native
+   service, an org-provided org row (the Slack bot row) is the app
+   identity, so a `user` pin does not read it. A team run pinned to `user`
+   with no person's credential is refused before the action runs, even
+   when the org provides the service. Team readiness gives the same
+   answers (team credentials design, deviation 26).
 8. **The Slack bot row reaches an action with its non-secret metadata.**
    The org `slack` row is the Slack app identity, so it is not reduced to
    a bare token. `readOrgRow` in `services/credential-resolution.ts`

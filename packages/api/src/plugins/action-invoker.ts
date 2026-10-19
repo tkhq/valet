@@ -481,7 +481,14 @@ async function computeResult(
   // the authenticated upstream), so for one of those the refusal runs
   // before discovery: discovery would only echo the plugin's own generic
   // "no credential connected" message, which names no fix.
-  const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  //
+  // A native service pinned `"user"` is gated even when the org provides
+  // it: the org row is the app identity, which the pin never reads
+  // (`buildCredentialProvider`), so without a person's credential the
+  // action would run on a null one.
+  const userPinnedNative = selection === "user" && appService !== undefined;
+  const teamGated = ctx.owner.type === "team" && declared !== null && (mode !== "org" || userPinnedNative);
+  const teamRefusal = userPinnedNative ? userPinnedTeamRefusalMessage(credentialService) : teamRefusalMessage(credentialService);
   // An `auto` team read of a native service ends at the app token (Part B),
   // so a team with no person's credential is not refused when it answers.
   const teamAppTier = selection === "auto" && appService && isAppCredentialRowService(appService) ? appService : undefined;
@@ -494,7 +501,7 @@ async function computeResult(
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     if (teamGated) {
-      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService, teamAppTier);
+      const refusal = await refuseTeamRunWithoutCredential(credentials, teamRefusal, teamAppTier);
       if (refusal) return refusal;
     }
     // A credential read can throw a typed refusal (a broken share, a
@@ -513,7 +520,7 @@ async function computeResult(
   if (!action) return unknownAction(req);
 
   if (teamGated) {
-    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService, teamAppTier);
+    const refusal = await refuseTeamRunWithoutCredential(credentials, teamRefusal, teamAppTier);
     if (refusal) return refusal;
   }
 
@@ -621,7 +628,7 @@ function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionRe
  */
 async function refuseTeamRunWithoutCredential(
   credentials: CredentialProvider,
-  service: string,
+  refusal: string,
   appTier?: string,
 ): Promise<WorkflowInvokeActionResult | null> {
   try {
@@ -630,7 +637,18 @@ async function refuseTeamRunWithoutCredential(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return { ok: false, error: teamRefusalMessage(service) };
+  return { ok: false, error: refusal };
+}
+
+/** The refusal for a native service pinned `"user"` in a team run that only
+ * the org's app identity would answer. Readiness reports the same fix
+ * (`workflows/team-service-readiness.ts`). */
+function userPinnedTeamRefusalMessage(service: string): string {
+  return (
+    `This ${service} node uses the "user" credential, and this team has no ${service} credential of a person. ` +
+    `Share one from Integrations, store one for the team in Settings → Organization → Teams, ` +
+    `or remove the credential field from this tool node.`
+  );
 }
 
 /**

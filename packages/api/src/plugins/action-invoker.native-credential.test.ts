@@ -198,6 +198,24 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     expect(await invoke(node("slack", "app"), userCtx)).toMatchObject({ ok: true, result: { token: "xoxb-org" } });
   });
 
+  it("a team Slack node pinned to user refuses before it runs when only the org bot row answers", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "org", id: orgId }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const invoke = invokerFor(appDb, credentials);
+
+    const result = await invoke(node("slack", "user"), teamCtx);
+    expect(result).toEqual({
+      ok: false,
+      error:
+        'This slack node uses the "user" credential, and this team has no slack credential of a person. ' +
+        "Share one from Integrations, store one for the team in Settings → Organization → Teams, " +
+        "or remove the credential field from this tool node.",
+    });
+
+    await credentials.save({ type: "team", id: teamId }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
+    expect(await invoke(node("slack", "user"), teamCtx)).toMatchObject({ ok: true, result: { token: "xoxb-team" } });
+  });
+
   it("INV-P2: a non-native service still refuses an explicit selection", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "org", id: orgId }, "acme-docs", appRow);
