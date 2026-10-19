@@ -10,17 +10,20 @@
  * sentence. Under the row, a pin problem shows `Pick another thread`, which
  * opens the picker; the **Needs attention** banner shows the same picker
  * open. A personal line that a team line paused names the team and offers
- * **Keep both**.
+ * **Keep both**. When the server refuses the switch's turn-on because the
+ * line overlaps another line, the row shows the server's text and **Turn on
+ * anyway**.
  */
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
-import type { EventSubscriptionWire } from "@valet/api/wire";
+import type { EventSubscriptionWire, PatchEventSubscriptionRequest } from "@valet/api/wire";
 import { useDeleteEventSubscription, useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
 import { usePinnedThreadTitle } from "~/api/rule";
 import {
   Badge, Button, ConfirmDialog, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Switch,
 } from "~/components/primitives";
+import { collisionsFromError } from "~/components/events/collision-notice";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { LineEditor } from "./editor/line-editor";
@@ -44,10 +47,12 @@ export function PresenceLine({ sub, sentence }: {
   const [deleting, setDeleting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [collision, setCollision] = useState<string | null>(null);
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
-    patch.mutate({ id: sub.id, body }, { onError: (err) => setError(errorText(err)) });
+    setCollision(null);
+    patch.mutate({ id: sub.id, body }, { onError: switchFailure(body, setError, setCollision) });
   }
 
   const paused = pausedByTeam(sub);
@@ -140,12 +145,60 @@ export function PresenceLine({ sub, sentence }: {
         </div>
       )}
       {error && <p role="alert" className="col-span-full text-sm text-danger-500">{error}</p>}
+      {collision !== null && !sub.enabled && (
+        <TurnOnAnyway
+          className="col-span-full"
+          text={collision}
+          pending={patch.isPending}
+          onTurnOn={() => save({ enabled: true, allowCollision: true })}
+        />
+      )}
       <LineEditor
         open={editing !== null}
         onOpenChange={(open) => { if (!open) setEditing(null); }}
         mode={{ kind: "edit", line: sub, initialSection: editing === "appearance" ? "appears" : undefined }}
       />
       <DeleteLineDialog sub={sub} teams={teams} open={deleting} onOpenChange={setDeleting} />
+    </div>
+  );
+}
+
+/**
+ * The `onError` of a switch write. The server refuses a turn-on that overlaps
+ * another line (409 with `collisions`); that refusal goes to `setCollision`,
+ * so the caller can offer **Turn on anyway**. Any other failure goes to
+ * `setError`.
+ */
+export function switchFailure(
+  body: PatchEventSubscriptionRequest,
+  setError: (text: string) => void,
+  setCollision: (text: string) => void,
+): (err: Error) => void {
+  return (err) => {
+    if (body.enabled === true && body.allowCollision !== true && collisionsFromError(err) !== null) {
+      setCollision(errorText(err));
+      return;
+    }
+    setError(errorText(err));
+  };
+}
+
+/**
+ * The switch's way past an overlap: the server's text, which names the line
+ * this one overlaps, and **Turn on anyway**. Then both lines run.
+ */
+export function TurnOnAnyway({ text, pending, onTurnOn, className }: {
+  text: string;
+  pending: boolean;
+  onTurnOn: () => void;
+  className?: string;
+}) {
+  return (
+    <div role="alert" className={cn("flex flex-wrap items-baseline gap-x-2 gap-y-1", className)}>
+      <p className="text-sm text-danger-500">{text}</p>
+      <Button type="button" size="sm" variant="secondary" disabled={pending} onClick={onTurnOn}>
+        Turn on anyway
+      </Button>
     </div>
   );
 }

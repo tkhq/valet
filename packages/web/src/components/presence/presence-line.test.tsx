@@ -43,6 +43,7 @@ vi.mock("~/api/settings", async () => ({
 }));
 vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
+import { ApiError } from "~/api/client";
 import { PresenceLine } from "./presence-line";
 import { line } from "./test-fixtures";
 
@@ -90,6 +91,24 @@ describe("PresenceLine", () => {
     renderLine(mention({}));
     await userEvent.click(screen.getByRole("switch", { name: "Turn off Incident mentions" }));
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R1", { enabled: false }));
+  });
+
+  it("offers Turn on anyway when the server refuses the switch over an overlap", async () => {
+    const text = 'This line covers everything "Old mentions" already handles on the same events, so both would fire together. Narrow its filters, or turn it on with "Turn on anyway".';
+    patchEventSubscription.mockRejectedValueOnce(new ApiError(409, text, { error: text, collisions: { blocking: [], overlapping: [] } }));
+    renderLine(mention({ enabled: false }));
+    await userEvent.click(screen.getByRole("switch", { name: "Turn on Incident mentions" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(text);
+    await userEvent.click(screen.getByRole("button", { name: "Turn on anyway" }));
+    await waitFor(() => expect(patchEventSubscription).toHaveBeenLastCalledWith("R1", { enabled: true, allowCollision: true }));
+  });
+
+  it("shows any other switch refusal as an error, with no Turn on anyway", async () => {
+    patchEventSubscription.mockRejectedValueOnce(new ApiError(400, "nope", { error: "Connect Linear first." }));
+    renderLine(mention({ enabled: false }));
+    await userEvent.click(screen.getByRole("switch", { name: "Turn on Incident mentions" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Connect Linear first.");
+    expect(screen.queryByRole("button", { name: "Turn on anyway" })).toBeNull();
   });
 
   it("keeps another member's personal line read-only", async () => {

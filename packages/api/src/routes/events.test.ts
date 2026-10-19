@@ -2545,6 +2545,8 @@ describe("subscription collision gate (TKAI-294)", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as EventSubscriptionCollisionErrorWire;
     expect(body.error).toContain("narrow repo rule");
+    // The editor's button for a create is "Create anyway".
+    expect(body.error).toContain('save again with "Create anyway" to take over.');
     expect(body.collisions.blocking).toHaveLength(1);
     expect(body.collisions.blocking[0].subscription.id).toBe("sub_narrow");
     expect(body.collisions.blocking[0].relation).toBe("superset");
@@ -2646,6 +2648,8 @@ describe("subscription collision gate (TKAI-294)", () => {
     expect(blocked.status).toBe(409);
     const blockedBody = (await blocked.json()) as EventSubscriptionCollisionErrorWire;
     expect(blockedBody.collisions.blocking[0].subscription.id).toBe("sub_narrow");
+    // The editor's Save shows "Save anyway" for an edit.
+    expect(blockedBody.error).toContain('save again with "Save anyway".');
     // The refused patch changed nothing.
     const rows = await a.providers.db
       .select()
@@ -2674,6 +2678,9 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ enabled: true }),
     });
     expect(arm.status).toBe(409);
+    // The switch shows this text beside its "Turn on anyway" button.
+    expect(((await arm.json()) as EventSubscriptionCollisionErrorWire).error)
+      .toContain('turn it on with "Turn on anyway".');
 
     // A patch that leaves the rule disabled stays uncheckable — nothing fires.
     const rename = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
@@ -2682,6 +2689,18 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ name: "still parked" }),
     });
     expect(rename.status).toBe(200);
+
+    // "Turn on anyway": the switch's flag arms the line over the collision and
+    // reports what it stepped on, as a create with the flag does.
+    const anyway = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true, allowCollision: true }),
+    });
+    expect(anyway.status).toBe(200);
+    const armed = (await anyway.json()) as PatchEventSubscriptionResponse;
+    expect(armed.enabled).toBe(true);
+    expect(armed.collisions?.blocking.map((b) => b.subscription.id)).toEqual(["sub_narrow"]);
   });
 });
 

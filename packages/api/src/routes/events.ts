@@ -283,13 +283,21 @@ function collisionsToWire(report: CollisionReport<NarrowedSubscriptionRow>): Eve
 }
 
 /** The 409 headline for a blocked write. Names the rules it steps on and the
- * two ways out, since `errorText` may be all a caller renders. */
-function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>): string {
+ * two ways out, since `errorText` may be all a caller renders. `way` names the
+ * write, so the text quotes the button the caller shows for it: a create's
+ * "Create anyway", a switch's "Turn on anyway", an edit's "Save anyway". */
+function collisionBlockMessage(
+  report: CollisionReport<NarrowedSubscriptionRow>,
+  way: "create" | "turn-on" | "save",
+): string {
   const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
+  const out =
+    way === "create" ? `save again with "Create anyway" to take over.`
+    : way === "turn-on" ? `turn it on with "Turn on anyway".`
+    : `save again with "Save anyway".`;
   return (
     `This line covers everything ${names} already ${report.blocking.length === 1 ? "handles" : "handle"} ` +
-    `on the same events, so both would fire together. Narrow its filters, or save again with ` +
-    `"create anyway" to take over.`
+    `on the same events, so both would fire together. Narrow its filters, or ${out}`
   );
 }
 
@@ -969,7 +977,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     });
     if (report.blocking.length > 0 && body.allowCollision !== true) {
       const resp: EventSubscriptionCollisionErrorWire = {
-        error: collisionBlockMessage(report),
+        error: collisionBlockMessage(report, "create"),
         collisions: collisionsToWire(report),
       };
       return c.json(resp, 409);
@@ -1389,7 +1397,9 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     );
     if (report.blocking.length > 0 && body.allowCollision !== true) {
       const resp: EventSubscriptionCollisionErrorWire = {
-        error: collisionBlockMessage(report),
+        // A patch that turns the line on comes from its switch or a proposal's
+        // Turn on; any other comes from the editor's Save.
+        error: collisionBlockMessage(report, arming ? "turn-on" : "save"),
         collisions: collisionsToWire(report),
       };
       return c.json(resp, 409);

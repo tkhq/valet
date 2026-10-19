@@ -34,7 +34,7 @@ import { HealthStrip } from "./health-strip";
 import { HowItWorks, type HowColumn } from "./how-it-works";
 import { ActivityTimeline, type TimelineEntry } from "./line-activity";
 import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
-import { DeleteLineDialog, PausedLine } from "./presence-line";
+import { DeleteLineDialog, PausedLine, TurnOnAnyway, switchFailure } from "./presence-line";
 import { ThreadProblem, isPinProblem, pinProblemText } from "./problem-badge";
 import {
   OwnerBadge, isProposal, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, useLineAccess,
@@ -158,6 +158,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const [editing, setEditing] = useState<{ review: boolean; section?: SectionId } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [collision, setCollision] = useState<string | null>(null);
 
   const workflowNames = workflows.data?.workflows ?? [];
   const sentenceParts = presenceSentenceParts(sub, catalog.data?.catalog, workflowNames, pinTitles, names);
@@ -193,7 +194,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
-    patch.mutate({ id: sub.id, body }, { onError: (err) => setError(errorText(err)) });
+    setCollision(null);
+    patch.mutate({ id: sub.id, body }, { onError: switchFailure(body, setError, setCollision) });
   }
 
   const editorMode: EditorMode = editing?.review === true
@@ -246,6 +248,9 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
           {readOnly && !sub.problem && !proposal && <p className="text-xs text-muted">{readOnlyText}</p>}
           {pausedByTeam(sub) && <PausedLine sub={sub} teams={teams} readOnly={readOnly} />}
           {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
+          {collision !== null && !sub.enabled && (
+            <TurnOnAnyway text={collision} pending={patch.isPending} onTurnOn={() => save({ enabled: true, allowCollision: true })} />
+          )}
 
           {proposal && (
             <section aria-label="Proposal" className="space-y-2 rounded-md border border-line px-3 py-2.5">
