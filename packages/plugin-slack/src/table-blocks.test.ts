@@ -233,11 +233,17 @@ describe('tablesToTableBlocks', () => {
   it.each([
     ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo', 'foo'],
     ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n===', '==='],
-  ])('ends the table at %s after the rows and keeps that line as prose', (_name, source, prose) => {
-    // GFM would read the line as one more row; Slack's markdown block then
-    // showed the whole table as raw pipes.
+  ])('keeps %s after the rows as a one-cell row, as GFM reads it', (_name, source, value) => {
+    expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['table']);
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({ rows: [expect.anything(), expect.anything(), [cell(text(value)), blank]] });
+  });
+
+  it('ends the table at a closing sentence after the rows and keeps it as prose', () => {
+    // A model's closing sentence; Slack's markdown block showed this table
+    // as raw pipes when the sentence counted as a row.
+    const source = '| a | b |\n|-|-|\n| 1 | 2 |\nRelated details are in the thread.';
     expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['table', 'markdown']);
-    expect(tablesToTableBlocks(source, 50)?.[1]).toEqual({ type: 'markdown', text: prose });
+    expect(tablesToTableBlocks(source, 50)?.[1]).toEqual({ type: 'markdown', text: 'Related details are in the thread.' });
   });
 
   it('keeps the Markdown block when the delimiter row is indented code', () => {

@@ -66,6 +66,12 @@ export type MarkdownSegment =
   | { type: 'text'; lines: string[] }
   | { type: 'table'; table: MarkdownTable };
 
+/** Prose, not a cell value: words with a space, ending as a sentence ends. */
+function readsAsSentence(line: string): boolean {
+  const text = line.trim();
+  return /\s/.test(text) && /[.!?]$/.test(text);
+}
+
 /** A line that opens a fence, blockquote, heading, or list item. It never
  * starts a table header and always ends a table body. */
 const BLOCK_START = /^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/;
@@ -129,14 +135,15 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       if (endsBlock(next)) break;
       let cells = tableCells(next);
       if (!cells) {
-        // GFM reads a line without a pipe as a one-cell row. When more rows
-        // follow it, it is one. When it is the last line of the block, a
-        // model that ends a table with a sentence means prose, and Slack's
-        // markdown block showed such a table as raw pipes, so the line ends
-        // the table and stays prose.
+        // GFM reads a line without a pipe as a one-cell row, and it stays
+        // one. The exception is a closing sentence: the last line of the
+        // block that reads as prose. A model ends a table that way and means
+        // prose, and Slack's markdown block showed such a table as raw
+        // pipes, so that line ends the table.
         let later = index + 2;
         while (later < lines.length && !endsBlock(lines[later]) && !tableCells(lines[later])) later += 1;
-        if (later >= lines.length || endsBlock(lines[later])) break;
+        const lastInBlock = later >= lines.length || endsBlock(lines[later]);
+        if (lastInBlock && readsAsSentence(next)) break;
         cells = [next.trim()];
       }
       rows.push(cells);
