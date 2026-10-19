@@ -39,6 +39,10 @@ const SLACK_KEPT = /<(?:https?:\/\/|mailto:|[@#!])[^<>|\s]*(?:\|[^<>]*)?>|&(?:am
 const escapeSlackChars = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+/** Slack stores a URL's `&` as `&amp;`, also inside a span. */
+const escapeSpanAmpersands = (kept: string) =>
+  kept.startsWith("<") ? kept.replace(/&(?!(?:amp|lt|gt);)/g, "&amp;") : kept;
+
 /**
  * The mrkdwn text as Slack stores it. The formatter leaves a `>` and the
  * contents of code spans raw; Slack escapes every `&`, `<` and `>` that is not
@@ -48,11 +52,14 @@ export function slackEscapedText(text: string): string {
   let out = "";
   let last = 0;
   for (const match of text.matchAll(SLACK_KEPT)) {
-    out += escapeSlackChars(text.slice(last, match.index)) + match[0];
+    out += escapeSlackChars(text.slice(last, match.index)) + escapeSpanAmpersands(match[0]);
     last = match.index + match[0].length;
   }
   return out + escapeSlackChars(text.slice(last));
 }
+
+/** A whole span or entity in text from `slackEscapedText`. */
+const SLACK_TOKEN = /<[^<>]*>|&(?:amp|lt|gt);/g;
 
 /**
  * Cuts text from `slackEscapedText` to at most `maxBytes` UTF-8 bytes without
@@ -62,10 +69,10 @@ export function slackEscapedText(text: string): string {
 export function truncateSlackText(text: string, maxBytes: number): string {
   const cut = truncateUtf8(text, maxBytes);
   if (cut === text) return cut;
-  const spanStart = cut.lastIndexOf("<");
-  if (spanStart > cut.lastIndexOf(">")) return cut.slice(0, spanStart);
-  const entityStart = cut.lastIndexOf("&");
-  if (entityStart > cut.lastIndexOf(";")) return cut.slice(0, entityStart);
+  for (const token of text.matchAll(SLACK_TOKEN)) {
+    if (token.index >= cut.length) break;
+    if (token.index + token[0].length > cut.length) return cut.slice(0, token.index);
+  }
   return cut;
 }
 

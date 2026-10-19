@@ -362,4 +362,11 @@ describe("Slack-escaped update text", () => {
     expect(truncateSlackText("ab &amp;&amp;", 10)).toBe("ab &amp;");
     expect(truncateSlackText("short", 10)).toBe("short");
   });
+
+  it("escapes a URL's & and keeps a whole link that contains one", () => {
+    expect(slackEscapedText("<https://e.com/?a=1&b=2|x>")).toBe("<https://e.com/?a=1&amp;b=2|x>");
+    // A cut right after a link must not treat the link's & as an unfinished entity.
+    expect(truncateSlackText("ab <https://e.com/?a=1&b=2|x> tail", 29)).toBe("ab <https://e.com/?a=1&b=2|x>");
+    expect(truncateSlackText("ab <https://e.com/?a=1&b=2|x> tail", 20)).toBe("ab ");
+  });
 });
