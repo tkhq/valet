@@ -552,6 +552,12 @@ artifactsRouter.post("/share", async (c) => {
     if (sourceThreadId !== undefined && !sourceSessionId) {
       return c.json({ error: "Send the source session with the source thread." }, 400);
     }
+    // A workflow step publishes with no source and replaces any earlier one,
+    // so a page it refreshes stops reporting to an unrelated thread.
+    const clearSource = c.req.header("x-valet-source") === "none";
+    if (clearSource && sourceSessionId !== undefined) {
+      return c.json({ error: "Send a source session or x-valet-source: none, not both." }, 400);
+    }
     if (sourceSessionId !== undefined) {
       // Source metadata controls discovery and comment delivery. The verified
       // publishing scope must own it, including calls with an internal token.
@@ -597,6 +603,7 @@ artifactsRouter.post("/share", async (c) => {
         orgId,
         sourceSessionId,
         sourceThreadId,
+        ...(clearSource ? { clearSource: true } : {}),
       });
     }
     const resp: ShareArtifactResponse = {
