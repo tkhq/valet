@@ -615,7 +615,10 @@ output truncated and corrupted an 87 KB page in transit. The page belongs to
 the run owner. A step session has no `agent_sessions` row, so the step sends
 no source session or thread (`toolConfig.publishWithoutSource`), and the page
 has no source to deliver comments to. The step's tool scope still filters the
-tool.
+tool, and it is the grant: like the assistant's own `artifact_publish`, a
+step publish needs no action approval. A step that must not publish leaves
+`artifact_publish` out of a restricted `tools` list. Pick a key per workflow,
+because republishing a key replaces that page.
 
 The tool description states the audience rule verbatim, because the agent
 relays it to the user: a link serves logged-in members of the user's org, and
