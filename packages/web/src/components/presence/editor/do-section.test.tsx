@@ -42,6 +42,17 @@ describe("DoSection", () => {
     expect(screen.getByText("Start a workflow with the event as its input.")).toBeTruthy();
   });
 
+  it("offers Reply only once a mention is picked (E7)", () => {
+    const message: Draft = { ...toggleEvent(newDraft({ timezone: "UTC" }), "slack.message", SERVICES), doKind: "work" };
+    const { unmount } = render(<Harness initial={message} />);
+    expect((screen.getByRole("radio", { name: "Reply" }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText("Reply answers a mention. To reply, pick the mention in When.")).toBeTruthy();
+    unmount();
+    render(<Harness initial={toggleEvent(message, "slack.app_mention", SERVICES)} />);
+    expect((screen.getByRole("radio", { name: "Reply" }) as HTMLInputElement).disabled).toBe(false);
+    expect(screen.queryByText("Reply answers a mention. To reply, pick the mention in When.")).toBeNull();
+  });
+
   it("shows the workflow picker for Run a workflow and hides the instructions", () => {
     render(<Harness initial={github()} />);
     fireEvent.click(screen.getByRole("radio", { name: "Run a workflow" }));

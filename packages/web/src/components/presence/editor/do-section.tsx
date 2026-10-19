@@ -18,6 +18,7 @@ import {
   Textarea,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
+import { selectsSlackMention } from "~/lib/slack-mention";
 import type { WorkflowNames } from "../sentences";
 import { parseRunInput, type AssistantKind, type DoKind, type Draft, type EditorMode } from "./draft";
 
@@ -95,6 +96,10 @@ export function DoSection({
   const runInputBad = parseRunInput(draft.runInput).kind === "bad";
   const assistant = draft.doKind !== "workflow";
   const required = routine && assistant;
+  // Only a mention starts a conversation to reply in (Reply stores `follow`
+  // only for a mention). A Slack line without one offers Work on it.
+  const mention = selectsSlackMention([...draft.events]);
+  const replyNeedsMention = !stored && !routine && draft.service === "slack" && !mention;
 
   function pick(kind: DoKind) {
     if (kind === draft.doKind) return;
@@ -126,8 +131,9 @@ export function DoSection({
     <>
       <div role="radiogroup" aria-label="Do" className="grid gap-2.5 sm:grid-cols-3">
         {cards(routine).map((card) => {
-          const off = stored || (card.kind === "reply" && draft.service !== "slack");
           const on = draft.doKind === card.kind;
+          // A Reply already picked stays open, so the reader can see it and move off it.
+          const off = stored || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
           const lineId = `${id}-line-${card.kind}`;
           return (
             <label
@@ -154,6 +160,9 @@ export function DoSection({
           );
         })}
       </div>
+      {replyNeedsMention && (
+        <p className="text-xs text-muted">Reply answers a mention. To reply, pick the mention in When.</p>
+      )}
       {stored && (
         <p className="text-xs text-muted">
           To change what Valet does, delete this {mode.kind === "edit-routine" ? "routine" : "line"} and make a new one.

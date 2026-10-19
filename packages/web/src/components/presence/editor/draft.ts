@@ -536,21 +536,37 @@ function createLineBody(draft: Draft): CreateEventSubscriptionRequest {
   };
 }
 
+/**
+ * The thread policy a patch sends. A line with a stored policy compares
+ * against it (`buildSubscriptionPatch`). A line with none runs the default
+ * for its keys, so the Where choice compares against the default for the
+ * keys the patch stores: an unchanged default sends nothing, and a Where
+ * that the new keys would not default to is stored as chosen.
+ */
+function patchThread(draft: Draft, sub: EventSubscriptionWire): { thread?: AssistantThreadPolicy; explicit?: AssistantThreadPolicy } {
+  const where = effectiveWhere(draft);
+  if (sub.target.kind !== "assistant" || where === null) return {};
+  if (sub.target.thread !== undefined && sub.target.thread !== null) return { thread: where };
+  const patched = displayThreadPolicy(sub.target, [...draft.events]);
+  return sameThreadPolicy(where, patched) ? {} : { explicit: where };
+}
+
 function patchLineBody(draft: Draft, sub: EventSubscriptionWire, review: boolean): PatchEventSubscriptionRequest {
   const assistant = sub.target.kind === "assistant";
-  const where = effectiveWhere(draft);
-  const body = buildSubscriptionPatch(sub, {
+  const { thread, explicit } = patchThread(draft, sub);
+  const patch = buildSubscriptionPatch(sub, {
     name: draft.name,
     eventKeys: [...draft.events],
     filters: toWireFilters([...draft.conditions]),
     anyChannel: draft.anyChannel,
     prompts: { systemPrompt: draft.instructions, userPromptTemplate: draft.promptTemplates.userPromptTemplate },
     appearance: draft.appearance,
-    ...(assistant && where !== null ? { thread: where } : {}),
+    ...(thread !== undefined ? { thread } : {}),
     ...(sub.ownerType === "user" && assistant
       ? { deliveryPreferences: { deliveryPolicy: draft.deliveryPolicy, pauseOnOverlap: draft.pauseOnOverlap } }
       : {}),
   }) ?? {};
+  const body = explicit !== undefined ? { ...patch, thread: explicit } : patch;
   return review && !sub.enabled ? { ...body, enabled: true } : body;
 }
 
@@ -869,7 +885,9 @@ export function saveBlocker(
     }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";
-    }
+    }    // Only a mention starts a conversation to reply in; a stored Reply on
+    // any other event would come back as Work on it.
+    if (draft.doKind === "reply" && !mention) return "Reply answers a mention. Pick the mention in When, or choose Work on it.";
   }
   if (draft.doKind === "workflow" && draft.workflowId.length === 0) return "Pick a workflow.";
   if (routine && draft.doKind === "workflow" && parseRunInput(draft.runInput).kind === "bad") return "The run input is not valid JSON.";

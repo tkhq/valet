@@ -328,7 +328,7 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
 
   it("refuses an Event message payload variable that no picked event carries", () => {
     let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
-    draft = { ...draft, name: "x", anyChannel: true, promptTemplates: { userPromptTemplate: "From {{payload.user}}" } };
+    draft = { ...draft, name: "x", doKind: "work", anyChannel: true, promptTemplates: { userPromptTemplate: "From {{payload.user}}" } };
     expect(saveBlocker(draft, CREATE, { connected: true, services: SERVICES })).toBeNull();
     draft = toggleEvent(toggleEvent(draft, "slack.app_mention", SERVICES), "slack.message", SERVICES);
     expect(saveBlocker(draft, CREATE, { connected: true, services: SERVICES })).toBe(
@@ -336,5 +336,37 @@ describe("saveBlocker mirrors the api's mention and template refusals (E5, E6)",
     );
     // Before the catalog loads, the check waits.
     expect(saveBlocker(draft, CREATE, { connected: true })).toBeNull();
+  });
+});
+
+describe("Reply and Where follow the events (E7)", () => {
+  it("refuses Reply without a mention", () => {
+    const draft = { ...toggleEvent(newDraft({ timezone: "UTC" }), "slack.message", SERVICES), name: "x" };
+    expect(draft.doKind).toBe("reply");
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe("Reply answers a mention. Pick the mention in When, or choose Work on it.");
+    expect(saveBlocker({ ...draft, doKind: "work" }, CREATE, { connected: true })).toBeNull();
+  });
+
+  it("sends no thread when the Where default for the patched keys holds", () => {
+    // No stored policy: a channel message line runs in a new thread by default.
+    const sub = line("l1", { eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant", assistant: "user" } });
+    const draft = draftFromLine(sub);
+    expect(draft.where).toEqual({ mode: "new" });
+    const body = bodyFromDraft(draft, { kind: "edit", line: sub });
+    expect(body).toEqual({ kind: "patch-line", id: "l1", body: {} });
+  });
+
+  it("stores the Where it shows when the patched keys default to another", () => {
+    // A check line runs in its own thread by default; on a channel message the default is a new thread.
+    const sub = line("l1", { eventKeys: ["github.check_run.completed"], target: { kind: "assistant", assistant: "user" } });
+    let draft = draftFromLine(sub);
+    expect(draft.where).toEqual({ mode: "own" });
+    draft = setService({ ...draft }, "slack");
+    draft = { ...toggleEvent(draft, "slack.message", SERVICES), where: { mode: "own" }, whereChosen: true };
+    const body = bodyFromDraft(draft, { kind: "edit", line: sub });
+    expect(body.kind === "patch-line" ? body.body.thread : undefined).toEqual({ mode: "own" });
+    // The same keys with the Where left on the new default send no thread.
+    const asDefault = bodyFromDraft({ ...draft, where: { mode: "new" } }, { kind: "edit", line: sub });
+    expect(asDefault.kind === "patch-line" ? asDefault.body.thread : "absent").toBeUndefined();
   });
 });
