@@ -418,7 +418,7 @@ Pass criterion: all steps, in one run, from a clean start.
       its leading `Skipped,` removed so the word appears once. `on`
       precedes a GitHub place and `in` a Slack or Linear place. `Show
       earlier` loads the next page. The timeline polls every 30 seconds
-      only while one page is loaded. When a page is empty and a cursor
+      while at most one loaded page holds entries. When a page is empty and a cursor
       follows, the page fetches the next one itself, at most three times,
       then reads `Nothing in the newest entries. To look further back,
       select Show earlier.` A chip that keeps no entry reads

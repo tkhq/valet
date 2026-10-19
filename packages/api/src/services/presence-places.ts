@@ -254,16 +254,23 @@ function isMidGrain(place: string): boolean {
  */
 export function listenerRowPlace(rule: { eventKeys: unknown; filters: unknown }, slackTeam: string): string | null {
   const services = listenerServices(rule);
-  const first = SERVICES.find((service) => services.includes(service));
-  if (first === undefined) return null;
-  let place = listenerPlaces(rule, slackTeam)[services.indexOf(first)];
-  if (place === undefined) return null;
-  while (!isServiceRoot(place) && !isMidGrain(place)) {
-    const parent = parentPlace(place);
-    if (parent === null) break;
-    place = parent;
-  }
-  return place;
+  const places = listenerPlaces(rule, slackTeam);
+  // Each service's row, in the fixed order slack, github, linear. A service
+  // whose filters name a concrete place wins over one that names only its
+  // root, so a Slack+GitHub line with a repo filter lists at the repository.
+  const rows = SERVICES.filter((service) => services.includes(service))
+    .map((service) => places[services.indexOf(service)])
+    .filter((place): place is string => place !== undefined)
+    .map((place) => {
+      let row = place;
+      while (!isServiceRoot(row) && !isMidGrain(row)) {
+        const parent = parentPlace(row);
+        if (parent === null) break;
+        row = parent;
+      }
+      return row;
+    });
+  return rows.find((row) => !isServiceRoot(row)) ?? rows[0] ?? null;
 }
 
 /** The one name of each service-wide place: its label, its scope label,

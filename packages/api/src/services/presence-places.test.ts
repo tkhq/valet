@@ -96,11 +96,14 @@ describe("listenerRowPlace", () => {
     ]), "T1")).toBe("linear:*");
   });
 
-  // Final review G4: the row follows the fixed service order, not key order.
-  it("takes the row of the first service in Slack, GitHub, Linear order, and none for a service with no places", () => {
+  // Final review G4: the row follows the fixed service order, not key order,
+  // and a service that names a concrete place wins over one at its root.
+  it("takes the first concrete row in Slack, GitHub, Linear order, and none for a service with no places", () => {
     const filters = [{ field: "repo", op: "eq", value: "acme/web" }];
-    expect(listenerRowPlace(rule(["github.push", "slack.message"], filters), "T1")).toBe("slack:T1");
-    expect(listenerRowPlace(rule(["slack.message", "github.push"], filters), "T1")).toBe("slack:T1");
+    expect(listenerRowPlace(rule(["github.push", "slack.message"], filters), "T1")).toBe("github:acme/web");
+    expect(listenerRowPlace(rule(["slack.message", "github.push"], filters), "T1")).toBe("github:acme/web");
+    expect(listenerRowPlace(rule(["github.push", "slack.message"], [...filters, { field: "channel", op: "eq", value: "C1" }]), "T1")).toBe("slack:T1/C1");
+    expect(listenerRowPlace(rule(["github.push", "slack.message"], []), "T1")).toBe("slack:T1");
     expect(listenerRowPlace(rule(["linear.Issue.update", "github.push"], filters), "T1")).toBe("github:acme/web");
     expect(listenerRowPlace(rule(["github.push", "linear.Issue.update"], filters), "T1")).toBe("github:acme/web");
     expect(listenerRowPlace(rule(["telegram.message"], []), "T1")).toBeNull();
