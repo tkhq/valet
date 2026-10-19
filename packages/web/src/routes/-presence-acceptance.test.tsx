@@ -978,7 +978,8 @@ describe("Presence hub acceptance (P1 to P20)", () => {
     }
     await userEvent.keyboard("{Escape}");
 
-    await userEvent.click(within(incidents).getByRole("link", { name: "When someone mentions Valet, reply in a new thread." }));
+    // The row's other line appears as Valet, so this sentence keeps its own `as` clause (L3).
+    await userEvent.click(within(incidents).getByRole("link", { name: /^When someone mentions Valet, reply in a new thread, as Ops Bot/ }));
     const line = within(await screen.findByRole("region", { name: "Incident mentions" }));
     expect(line.getByText("Team")).toBeTruthy();
     expect(line.getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true);
