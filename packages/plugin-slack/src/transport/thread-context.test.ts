@@ -57,7 +57,7 @@ describe("fetchThreadTranscript", () => {
   it("treats a post under a team's custom name, which carries only bot_id, as the bot's own", async () => {
     const api = fakeApi([
       { user: "U1", text: "<@UBOT> brainstorm with me", ts: "1.0" },
-      { bot_id: "BBOT", username: "XORS Eng Team", text: "Here is a plan", ts: "1.5" },
+      { bot_id: "BBOT", username: "Acme Eng Team", text: "Here is a plan", ts: "1.5" },
       { user: "U1", text: "where would sharing come in?", ts: "1.8" },
     ], { U1: "Xiangan" });
     // The gap window drops it, so a follow-up does not look like a third participant.
