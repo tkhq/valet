@@ -74,4 +74,9 @@ describe("WhereSection", () => {
     expect(screen.queryByRole("radio", { name: /One thread per/ })).toBeNull();
     expect(screen.getByText("Every run starts fresh.")).toBeTruthy();
   });
+
+  it("sums up a routine's own thread in the side pane's words (L8)", () => {
+    const routine = newDraft({ preselected: { schedule: true }, timezone: "UTC" });
+    expect(partsText(whereSummaryParts({ ...routine, where: { mode: "own" }, whereChosen: true }))).toBe("in its own thread");
+  });
 });

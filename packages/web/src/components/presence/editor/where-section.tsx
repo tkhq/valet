@@ -29,7 +29,8 @@ export function whereSummaryParts(draft: Draft): SentencePart[] {
     case "subject":
       return [text(`in ${subjectOptionLabel(draftSubjectKind(draft)).toLowerCase()}`)];
     case "own":
-      return [text(draft.service === "schedule" ? "in this routine's thread" : "in its own thread")];
+      // The side pane's sentence reads `work in its own thread` for a routine too.
+      return [text("in its own thread")];
     case "existing": {
       const title = draft.whereTitle?.trim();
       if (title === undefined || title.length === 0) return [text("in the thread you picked")];

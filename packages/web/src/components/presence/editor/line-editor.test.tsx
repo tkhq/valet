@@ -507,6 +507,9 @@ describe("LineEditor", () => {
     act(() => createSubscription.mock.calls[0]?.[1].onError(new ApiError(409, "collision", { error: "collides", collisions })));
     const aside = screen.getByRole("complementary", { name: "Preview" });
     expect(aside.textContent).toContain("Review follow-up also acts on completed checks for acme/api. Both will run.");
+    // One phrase for the way out: the button's own label (L8).
+    expect(aside.textContent).toContain("or select Create anyway. Then both lines run.");
+    expect(aside.textContent).not.toContain("keep both");
     fireEvent.click(screen.getByRole("button", { name: "Create anyway" }));
     expect(createSubscription.mock.calls[1]?.[0]).toMatchObject({ allowCollision: true });
   });

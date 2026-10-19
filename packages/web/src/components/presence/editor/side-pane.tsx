@@ -201,7 +201,7 @@ export function SidePaneRest(props: SidePaneProps) {
           })}
           {blocking && (
             <p className="text-[13px] text-muted">
-              Not saved yet. Narrow the conditions so they stay apart, or select {anyway} to keep both.
+              Not saved yet. Narrow the conditions so they stay apart, or select {anyway}. Then both lines run.
             </p>
           )}
           {committed && <p className="text-[13px] text-muted">Saved.</p>}
