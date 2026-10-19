@@ -150,7 +150,7 @@ const INCIDENTS: PresencePlaceDetailResponse = {
     listener("M", {
       ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
-      target: { kind: "assistant", assistant: "team", teamId: "sre", appearance: { displayName: "SRE Bot" }, thread: { mode: "new" } },
+      target: { kind: "assistant", follow: true, assistant: "team", teamId: "sre", appearance: { displayName: "SRE Bot" }, thread: { mode: "new" } },
     }),
     listener("P", {
       ownerType: "team", ownerId: "sre", eventKeys: ["slack.message"],

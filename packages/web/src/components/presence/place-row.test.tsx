@@ -261,9 +261,9 @@ describe("PlaceRow", () => {
       name: "Two rooms",
       eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "in", value: ["C1", "C2"], labels: ["#a", "#b"] }],
-      target: { kind: "assistant", thread: { mode: "new" } },
+      target: { kind: "assistant", follow: true, thread: { mode: "new" } },
     });
-    const anywhere = line("A", { name: "Anywhere", eventKeys: ["slack.app_mention"], target: { kind: "assistant", thread: { mode: "new" } } });
+    const anywhere = line("A", { name: "Anywhere", eventKeys: ["slack.app_mention"], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
     renderRow(block({
       subject: "slack:*", label: "Everywhere in Slack", service: "slack", serviceWide: true,
       lines: [anywhere, twoChannels], activeThreadCount: 0, lastActivityAt: null,

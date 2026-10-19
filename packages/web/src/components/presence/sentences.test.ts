@@ -31,6 +31,7 @@ import {
   eventLabel,
   hasEventWords,
   partsText,
+  presenceAction,
   presenceSentence,
   presenceSentenceParts,
   routineSentence,
@@ -82,21 +83,32 @@ const acmeApi = { field: "repo", op: "eq" as const, value: "acme/api" };
 
 describe("presenceSentence <do>", () => {
   it("assistant, conversational keys, new: reply in a new thread", () => {
-    const s = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "new" } } });
+    const s = sub({ filters: [incidents], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
     expect(presenceSentence(s, catalog, workflows, threads)).toBe(
       "When you mention Valet in #incidents, reply in a new thread.",
     );
   });
 
-  it("treats pull request comment keys as conversational", () => {
-    const s = sub({
+  it("reads the stored action, not the keys: only Reply reads reply (E7)", () => {
+    const comment = sub({
       eventKeys: ["github.issue_comment.created"],
       filters: [acmeApi],
       target: { kind: "assistant", thread: { mode: "new" } },
     });
-    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
-      "When someone comments on acme/api, reply in a new thread.",
+    expect(presenceSentence(comment, catalog, workflows, threads)).toBe(
+      "When someone comments on acme/api, work in a new thread each time.",
     );
+    // Work on it on a mention stores no follow.
+    const work = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "new" } } });
+    expect(presenceSentence(work, catalog, workflows, threads)).toBe(
+      "When you mention Valet in #incidents, work in a new thread each time.",
+    );
+    expect(presenceAction(work, workflows)).toBe("work on it");
+    const reply = sub({ filters: [incidents], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
+    expect(presenceSentence(reply, catalog, workflows, threads)).toBe(
+      "When you mention Valet in #incidents, reply in a new thread.",
+    );
+    expect(presenceAction(reply, workflows)).toBe("reply");
   });
 
   it("assistant, other keys, new: work in a new thread each time", () => {
@@ -207,13 +219,14 @@ describe("presenceSentence <do>", () => {
   });
 
   it("absent policy, conversational keys: reply in a new thread", () => {
-    const s = sub({ filters: [incidents], target: { kind: "assistant" } });
+    const s = sub({ filters: [incidents], target: { kind: "assistant", follow: true } });
     expect(presenceSentence(s, catalog, workflows, threads)).toBe(
       "When you mention Valet in #incidents, reply in a new thread.",
     );
+    // A comment line's absent policy runs in its own thread, as the api does.
     const comment = sub({ eventKeys: ["github.issue_comment.created"], filters: [acmeApi], target: { kind: "assistant" } });
     expect(presenceSentence(comment, catalog, workflows, threads)).toBe(
-      "When someone comments on acme/api, reply in a new thread.",
+      "When someone comments on acme/api, work in its own thread.",
     );
   });
 
@@ -351,14 +364,14 @@ describe("presenceSentence parts", () => {
   it("skips the creator scope the server adds to a mention rule, and keeps a labeled sender", () => {
     const scoped = sub({
       filters: [incidents, { field: "user", op: "eq", value: "U0ABC" }],
-      target: { kind: "assistant", thread: { mode: "new" } },
+      target: { kind: "assistant", follow: true, thread: { mode: "new" } },
     });
     expect(presenceSentence(scoped, catalog, workflows, threads)).toBe(
       "When you mention Valet in #incidents, reply in a new thread.",
     );
     const labeled = sub({
       filters: [incidents, { field: "user", op: "eq", value: "U0ABC", label: "Alice" }],
-      target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "new" } },
+      target: { kind: "assistant", follow: true, assistant: "team", teamId: "sre", thread: { mode: "new" } },
     });
     expect(presenceSentence(labeled, catalog, workflows, threads)).toBe(
       "When Alice mentions Valet in #incidents, reply in a new thread.",
@@ -368,7 +381,7 @@ describe("presenceSentence parts", () => {
   it("adds the appearance when one is set", () => {
     const s = sub({
       filters: [incidents],
-      target: { kind: "assistant", thread: { mode: "new" }, appearance: { displayName: "Incident bot" } },
+      target: { kind: "assistant", follow: true, thread: { mode: "new" }, appearance: { displayName: "Incident bot" } },
     });
     expect(presenceSentence(s, catalog, workflows, threads)).toBe(
       "When you mention Valet in #incidents, reply in a new thread, as Incident bot.",
@@ -382,7 +395,7 @@ describe("presenceSentence without the place clause (spec Part B step 5)", () =>
   it("omits <in|on> <place> and keeps the events, the sender, the do, and the appearance", () => {
     const slack = sub({
       filters: [incidents, { field: "user", op: "eq", value: "U1", label: "Alice" }],
-      target: { kind: "assistant", assistant: "team", teamId: "sre", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
+      target: { kind: "assistant", follow: true, assistant: "team", teamId: "sre", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
     });
     expect(presenceSentence(slack, catalog, workflows, threads, {}, noPlace)).toBe(
       "When Alice mentions Valet, reply in a new thread, as Ops Bot.",
@@ -403,7 +416,7 @@ describe("presenceSentence without the place clause (spec Part B step 5)", () =>
   it("omits , as <appearance> when the place's Appears as line names it", () => {
     const slack = sub({
       filters: [incidents],
-      target: { kind: "assistant", thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
+      target: { kind: "assistant", follow: true, thread: { mode: "new" }, appearance: { displayName: "Ops Bot" } },
     });
     expect(presenceSentence(slack, catalog, workflows, threads, {}, { place: false, appearance: false })).toBe(
       "When you mention Valet, reply in a new thread.",
@@ -411,7 +424,7 @@ describe("presenceSentence without the place clause (spec Part B step 5)", () =>
   });
 
   it("omits the service-wide place too", () => {
-    const anywhere = sub({ filters: [], target: { kind: "assistant", thread: { mode: "new" } } });
+    const anywhere = sub({ filters: [], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
     expect(presenceSentence(anywhere, catalog, workflows, threads, {}, noPlace)).toBe(
       "When you mention Valet, reply in a new thread.",
     );
@@ -657,31 +670,31 @@ describe("who a mention line listens to", () => {
   const names = { members: { "u-002": "Jack" }, me: "u-001" };
 
   it("a personal line reads you", () => {
-    const s = sub({ filters: [incidents, scope], target: { kind: "assistant", assistant: "user", thread: { mode: "new" } } });
+    const s = sub({ filters: [incidents, scope], target: { kind: "assistant", follow: true, assistant: "user", thread: { mode: "new" } } });
     expect(presenceSentence(s, catalog, workflows, threads, names)).toBe("When you mention Valet in #incidents, reply in a new thread.");
   });
 
   it("an org or workflow line with the creator scope names its creator", () => {
-    const org = sub({ createdBy: "u-002", filters: [incidents, scope], target: { kind: "assistant", assistant: "org", thread: { mode: "new" } } });
+    const org = sub({ createdBy: "u-002", filters: [incidents, scope], target: { kind: "assistant", follow: true, assistant: "org", thread: { mode: "new" } } });
     expect(presenceSentence(org, catalog, workflows, threads, names)).toBe("When Jack mentions Valet in #incidents, reply in a new thread.");
     const flow = sub({ createdBy: "u-002", filters: [incidents, scope], target: { kind: "workflow", workflowId: "wf-1" } });
     expect(presenceSentence(flow, catalog, workflows, threads, names)).toBe("When Jack mentions Valet in #incidents, run Triage failures.");
   });
 
   it("an org line the viewer created reads you", () => {
-    const org = sub({ createdBy: "u-001", filters: [incidents, scope], target: { kind: "assistant", assistant: "org" } });
+    const org = sub({ createdBy: "u-001", filters: [incidents, scope], target: { kind: "assistant", follow: true, assistant: "org" } });
     expect(presenceSentence(org, catalog, workflows, threads, names)).toBe("When you mention Valet in #incidents, reply in a new thread.");
   });
 
   it("falls back to the person who set this up when the creator has no known name", () => {
-    const org = sub({ createdBy: "u-gone", filters: [incidents, scope], target: { kind: "assistant", assistant: "org" } });
+    const org = sub({ createdBy: "u-gone", filters: [incidents, scope], target: { kind: "assistant", follow: true, assistant: "org" } });
     expect(presenceSentence(org, catalog, workflows, threads, names)).toBe(
       "When the person who set this up mentions Valet in #incidents, reply in a new thread.",
     );
   });
 
   it("a team line, or a line with no creator scope, reads someone", () => {
-    const team = sub({ filters: [incidents], target: { kind: "assistant", assistant: "team", teamId: "sre" } });
+    const team = sub({ filters: [incidents], target: { kind: "assistant", follow: true, assistant: "team", teamId: "sre" } });
     expect(presenceSentence(team, catalog, workflows, threads, names)).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
     const flow = sub({ createdBy: "u-002", filters: [incidents], target: { kind: "workflow", workflowId: "wf-1" } });
     expect(presenceSentence(flow, catalog, workflows, threads, names)).toBe("When someone mentions Valet in #incidents, run Triage failures.");
@@ -908,7 +921,10 @@ describe("How it works explanations (Part D step 1.6)", () => {
     // The default name is plain text; only a custom display name is a person token.
     expect(doParts(check, [])).toEqual([{ kind: "text", text: "work on it as Valet" }]);
     expect(doExplanation(check, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
-    const mention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const, appearance: { displayName: "Ops Bot" } } };
+    const mention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const, follow: true, appearance: { displayName: "Ops Bot" } } };
+    const workOnMention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const } };
+    expect(partsText(doParts(workOnMention, []))).toBe("work on it as Valet");
+    expect(doExplanation(workOnMention, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
     expect(partsText(doParts(mention, []))).toBe("reply as Ops Bot");
     expect(doParts(mention, [])[1]).toEqual({ kind: "person", text: "Ops Bot" });
     expect(doExplanation(mention, [])).toBe("Valet reads the message and replies. It appears as Ops Bot.");

@@ -66,7 +66,7 @@ const SLACK_ROOT: PresencePlaceWire = {
 const SUB_1: EventSubscriptionWire = {
   id: "sub-1", name: "Incident intake", ownerType: "user", ownerId: "u-001", eventKeys: ["slack.app_mention"],
   filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
-  target: { kind: "assistant" }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1,
+  target: { kind: "assistant", follow: true }, enabled: true, createdBy: "u-001", createdAt: 1, updatedAt: 1,
 };
 
 const S1: WorkflowTriggerItem = {

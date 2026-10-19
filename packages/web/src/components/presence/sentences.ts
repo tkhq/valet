@@ -602,19 +602,23 @@ function workflowParts(workflows: WorkflowNames, workflowId: string | undefined)
   return [text("run "), { kind: "workflow", text: name, id: workflowId }];
 }
 
+/**
+ * True when a line replies: its stored action is Reply, which the editor
+ * stores as `follow: true` on a mention line. Work on it stores no
+ * `follow`, so a mention line that works on it reads `work`, not `reply`.
+ */
+export function replies(sub: Pick<EventSubscriptionWire, "target">): boolean {
+  return sub.target.kind === "assistant" && sub.target.follow === true;
+}
+
 /** The `<do>` of a line (spec Part C step 2) as parts. */
 export function presenceDoesParts(sub: EventSubscriptionWire, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   const target = sub.target;
   if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
-  // An absent policy on conversational keys replies in a new thread per
-  // delivery (delivery threads spec Part A).
-  if ((target.thread === undefined || target.thread === null) && isConversational(sub.eventKeys)) {
-    return [text("reply in a new thread")];
-  }
   const policy = displayThreadPolicy(target, sub.eventKeys);
   switch (policy.mode) {
     case "new":
-      return [text(isConversational(sub.eventKeys) ? "reply in a new thread" : "work in a new thread each time")];
+      return [text(replies(sub) ? "reply in a new thread" : "work in a new thread each time")];
     case "subject":
       return [text(`work in one thread per ${subjectKindForKeys(sub.eventKeys) ?? "place"}`)];
     case "own":
@@ -626,12 +630,12 @@ export function presenceDoesParts(sub: EventSubscriptionWire, workflows: Workflo
 
 /**
  * What a line does, without where it runs, for the fact strip's Do: `reply`
- * for a conversation, `work on it` for other events, `run <workflow>` for a
- * workflow. The Where names the thread.
+ * for a line whose stored action is Reply, `work on it` for any other
+ * assistant line, `run <workflow>` for a workflow. The Where names the thread.
  */
 export function presenceAction(sub: EventSubscriptionWire, workflows: WorkflowNames): string {
   if (sub.target.kind === "workflow") return partsText(workflowParts(workflows, sub.target.workflowId));
-  return isConversational(sub.eventKeys) ? "reply" : "work on it";
+  return replies(sub) ? "reply" : "work on it";
 }
 
 /** The `<do>` of a line (spec Part C step 2), such as `reply in a new thread`. */
@@ -1146,7 +1150,7 @@ function appearsAs(appearance: Appearance | undefined): string {
 export function doParts(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): SentencePart[] {
   const target = sub.target;
   if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
-  const action = isConversational(sub.eventKeys) ? "reply" : "work on it";
+  const action = replies(sub) ? "reply" : "work on it";
   const custom = target.appearance?.displayName;
   return hasText(custom) ? [text(`${action} as `), { kind: "person", text: custom }] : [text(`${action} as Valet`)];
 }
@@ -1167,7 +1171,7 @@ export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "event
       : `Valet starts the ${name} workflow with the event as its input.`;
   }
   const appears = `It appears as ${appearsAs(target.appearance)}.`;
-  return isConversational(sub.eventKeys)
+  return replies(sub)
     ? `Valet reads the message and replies. ${appears}`
     : `Valet reads the event and acts in the thread. ${appears}`;
 }

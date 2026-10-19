@@ -328,7 +328,7 @@ describe("RulePage", () => {
       subscriptions: [listener({
         eventKeys: ["slack.app_mention"],
         filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
-        target: { kind: "assistant", appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
+        target: { kind: "assistant", follow: true, appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
       })],
     });
     renderPage();

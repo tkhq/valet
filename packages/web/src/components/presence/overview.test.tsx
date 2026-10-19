@@ -84,7 +84,7 @@ const R4 = line("R4", {
   problem: PIN_UNAVAILABLE,
 });
 const ANYWHERE = line("A", {
-  name: "Mentions anywhere", eventKeys: ["slack.app_mention"], target: { kind: "assistant", thread: { mode: "new" } },
+  name: "Mentions anywhere", eventKeys: ["slack.app_mention"], target: { kind: "assistant", follow: true, thread: { mode: "new" } },
 });
 const ENG_LINE = line("L", {
   name: "New ENG issues", eventKeys: ["linear.issue.create"], filters: [{ field: "team", op: "eq", value: "ENG" }],

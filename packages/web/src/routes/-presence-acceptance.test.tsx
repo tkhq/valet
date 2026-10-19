@@ -155,7 +155,7 @@ const R4_BROKEN = line("R4", {
 });
 const M = line("M", {
   name: "Incident mentions", ownerType: "team", ownerId: "sre", eventKeys: ["slack.app_mention"], filters: INCIDENTS_CHANNEL,
-  target: { kind: "assistant", assistant: "team", teamId: "sre", appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
+  target: { kind: "assistant", follow: true, assistant: "team", teamId: "sre", appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
 });
 /** The assistant's proposal to replace R1 (Part D step 1): off, with `replaces`. */
 const PROPOSAL = line("proposal-1", {
