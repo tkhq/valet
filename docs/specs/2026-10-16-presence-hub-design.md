@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18.
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18; review fixes 2026-10-19.
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -219,8 +219,10 @@ Pass criterion: all steps, in one run, from a clean start.
    or a fault with no picker, sees the fix text directly. A paused line
    reads `Paused: <team name> already listens for this.` with **Keep both**
    under the row.
-   When any line of the place sets an appearance, one `Appears as <name>`
-   line with the avatar follows the sentences. The sentence column ends
+   When every line of the place shares one appearance, one `Appears as
+   <name>` line with the avatar follows the sentences and the sentences
+   drop their `as <appearance>` clause. When the lines differ, each
+   sentence keeps its own clause and no row line shows. The sentence column ends
    with a quiet `+ Listen for…` that opens the editor fixed on that place.
 6. The `On a schedule` group uses the same grid: the schedule in words in
    the place column (`Every weekday at 9:00`, then the timezone's long
@@ -245,7 +247,9 @@ Pass criterion: all steps, in one run, from a clean start.
    too, connect Slack, GitHub, or Linear and Add again.` with `Slack`,
    `GitHub`, and `Linear` as links to Integrations. The header keeps
    **Add** and drops **Activity**. A schedule MUST be creatable with no
-   integration connected.
+   integration connected. The overview and Activity use one emptiness
+   rule: no line, no routine, and no place; a place that only threads or
+   events touched does not count as presence.
 10. Reads: `GET /api/presence/places` (every grain; the overview keeps the
     mid grain and the service roots), `GET /api/event-subscriptions` (the
     sentences), and the workspace's schedules, refreshed on every write the
@@ -282,15 +286,23 @@ Pass criterion: all steps, in one run, from a clean start.
 
    | Target and policy | `<do>` |
    |---|---|
-   | assistant, conversational keys, `new` | `reply in a new thread` |
-   | assistant, other keys, `new` | `work in a new thread each time` |
+   | assistant, Reply (`follow: true`), `new` | `reply in a new thread` |
+   | assistant, Work on it, `new` | `work in a new thread each time` |
    | assistant, `subject` | `work in one thread per <pull request \| issue \| channel>` |
    | assistant, `own` | `work in its own thread` |
    | assistant, `existing` | `work in the <title> thread` |
    | workflow | `run <workflow name>` |
 
-   Conversational keys are Slack mentions, Slack messages, and GitHub
-   comment keys (a key-level approximation; see Deviations).
+   `reply` appears only for a Reply line (`follow: true`); every other
+   assistant line reads `work`, in the sentence, in How it works, and in
+   the line's Activity. A wildcard key reads in words: `slack.*` as
+   `anything happens in Slack`, `github.pull_request.*` as `a pull request
+   changes`. A place field with an operator other than `is` or `in` names
+   no place; it reads as a condition (`on a repository that starts with
+   acme/`). When the api scopes a line to its creator, that actor applies
+   to every clause whose key carries `user` (`When you mention Valet or you
+   post a message in #incidents`). A labeled sender on a mention line is
+   the actor (`When Alice mentions Valet`).
 
    For a Slack mention, `<event in words>` names who mentions Valet. The
    api scopes a personal, org, or workflow mention line to its creator
@@ -313,14 +325,18 @@ Pass criterion: all steps, in one run, from a clean start.
    archived pin, the row shows the danger mark and **Pick another thread**,
    which opens `<thread title> is archived. Pick another thread:` with the
    thread picker; the **Needs attention** banner shows the picker open. A
-   pick patches the line and clears the problem. A paused personal line
+   pick patches the line and clears the problem. When the switch's turn-on
+   (or **Keep both**) returns a 409 because another line covers the same
+   events, the row shows the server's text with **Turn on anyway**, which
+   patches `{ enabled: true, allowCollision: true }`. A paused personal line
    reads `Paused: <team name> already listens for this.` (`the team` when
    the viewer's lines name no single team) with **Keep both**, which patches
    `{ pauseOnOverlap: false, enabled: true }`. A team or org line carries a
    `Team` or `Org` mark, and its Delete confirm names the owner. A proposal
    reads `Proposed` in place of `Off`. A viewer outside the line's owner
    reads who may change it: `Only members of <team name> can change this.`
-   or `Only its owner can change this.` The web mirrors the server's gate:
+   or `Only its owner can change this.` That text accompanies every
+   problem, with or without a picker. The web mirrors the server's gate:
    the owner of a personal line, the members of a team line, and any org
    member for an org line.
 4. The **Listen for…** button opens the editor (Part H) fixed on this place.
@@ -328,11 +344,15 @@ Pass criterion: all steps, in one run, from a clean start.
    threads bound here), and for a repository or team `One thread per pull
    request` or `One thread per issue` listing the subject threads; each a
    link.
-6. **Appears as**: shown when any line here sets one.
-7. **Recent activity**: the last ten rows for this place (Part F grammar)
+6. **Appears as**: shown when every line here shares one appearance
+   (Part B step 5).
+7. The page lists its own lines and every line whose `placeKey` row is
+   this place, so a pull request line appears on its repository's page
+   and keeps its own page.
+8. **Recent activity**: the last ten rows for this place (Part F grammar)
    and `View all`, which opens Activity with `place=<place key>` (Part F
    step 2).
-8. Empty state: a place that exists only because events or threads touched
+9. Empty state: a place that exists only because events or threads touched
    it reads `Nothing is set up here yet.` with **Listen for…**.
 
 ## Part D: One line of presence
@@ -362,7 +382,10 @@ Pass criterion: all steps, in one run, from a clean start.
       column shows its value in words with tokens, one explanation sentence
       of the behavior, and a `Change` link that opens the editor on that
       section. The explanations: When reads the filters in words (`Any
-      branch, any author.`, `Only the main branch.`); Do reads what Valet
+      branch, any author.` for push and pull-request keys, `Any issue.`,
+      `Any release.`, `Any message, in a thread or not.` for message keys,
+      `No other conditions.` for every other key, `Only the main branch.`,
+      `Only when the repository starts with acme/.`); Do reads what Valet
       does and as whom (`Valet reads the event and acts in the thread. It
       appears as Ops Bot.`, `Valet reads the message and replies. It
       appears as Valet.`, `Valet starts the <workflow> workflow with the
@@ -380,15 +403,22 @@ Pass criterion: all steps, in one run, from a clean start.
       and reads `<event in words> on|in <place token> → <outcome>` with the
       outcomes `worked in <thread>`, `replied in <thread>`, `started
       <workflow> run`, `could not reach <thread>, it is archived`, `gave
-      up: <reason>`, `waiting for the first attempt`, and `failed, Valet
-      tries again`. The right column reads the time it took (`40 s`, `2
-      min`), or `gave up` in danger color for a dead entry. A **skipped**
+      up after <n> tries`, `waiting for the first attempt`, and `failed,
+      Valet tries again`. `replied in` appears only for a Reply line. The
+      right column reads the time it took (`40 s`, `2 min`), or for a dead
+      entry `gave up` in danger color, with the api's error and fix text
+      once under it. A Slack place reads its channel name. A **skipped**
       entry carries a hollow mark and reads `<event in words> on|in <place
       token> → skipped, <reason>` with the reasons `not for this line: <the
       filter in words>`, `the sender is not allowed`, `the line was off`,
-      `another line claimed it`, or the skip text the api recorded. `on`
+      `another line claimed it`, or the skip text the api recorded, with
+      its leading `Skipped,` removed so the word appears once. `on`
       precedes a GitHub place and `in` a Slack or Linear place. `Show
-      earlier` loads the next page. A chip that keeps no entry reads
+      earlier` loads the next page. The timeline polls every 30 seconds
+      only while one page is loaded. When a page is empty and a cursor
+      follows, the page fetches the next one itself, at most three times,
+      then reads `Nothing in the newest entries. To look further back,
+      select Show earlier.` A chip that keeps no entry reads
       `Nothing skipped here yet. Choose All to see every entry.` or its
       `acted` form.
    8. **Diagnostics** (organization admins only): a closed disclosure that
@@ -400,17 +430,26 @@ Pass criterion: all steps, in one run, from a clean start.
    shows, above the health strip, `Proposed by the assistant.`, then
    `Turning it on turns off <name>.` when it replaces a line, with **Turn
    on** (the editor in review mode, Part H step 10) and **Delete** in
-   place of the switch. **Edit** opens the editor in edit mode.
+   place of the switch. **Edit** opens the editor in edit mode. When the
+   replaced line is gone or already off, the notice reads `The line this
+   proposal replaces is gone. Delete this proposal and make a new line.`
+   and only **Delete** is offered.
 3. The page follows the Part C step 3 gate: for a viewer who may not
    change the line, the switch, **Edit**, **Delete**, and the `Change`
-   links are disabled, the picker is hidden, and the status line reads
+   links are disabled, the picker is hidden, every problem carries the
+   who-may-change text, and the status line reads
    `Only members of <team name> can change this.` or `Only its owner can
    change this.`
 4. Api: `GET /api/event-subscriptions/:id/activity?before=<cursor>` returns
    the line's timeline: its deliveries as acted entries (with `tookMs` when
    known), and the receipt decisions that skipped it as skipped entries.
    A skipped entry for an event whose place the line does not name is
-   returned only to an organization admin. The response carries the
+   returned only to an organization admin; the gate reads the exact set
+   of places the line names, never their common parent, and falls back
+   to the whole service only for a line that names no place. Each acted
+   entry carries `attempts`. Slack channels read their names. A cursor
+   whose time is not a whole number is refused with a 400 that reads
+   `Reload Activity and try again.` The response carries the
    counts the health strip shows (`actedLast30Days`, `lastActedAt`,
    `perDay`). The counts read the same rows the timeline lists as acted:
    every delivery that is not skipped and that no later delivery settled,
@@ -418,7 +457,10 @@ Pass criterion: all steps, in one run, from a clean start.
    day it was created when it has not landed. `GET /api/event-subscriptions/:id/deliveries` stays for
    callers that want deliveries alone. `EventSubscriptionWire` carries
    `problem?: string` as before, on the list route and on a place page's
-   listeners.
+   listeners. `PATCH /api/event-subscriptions/:id` accepts `allowCollision`
+   with `enabled: true` as POST does. The 409 text names the button for
+   the write: `Create anyway` for a POST, `Turn on anyway` for a PATCH that
+   turns the line on, `Save anyway` for any other PATCH.
 
 ## Part E: Routines
 
@@ -438,15 +480,17 @@ Pass criterion: all steps, in one run, from a clean start.
    title with the clock mark, the status line (name, `set up by <owner>`
    for a personal routine, the switch, `Next: <time>` while on, **Fire
    now**, **Edit**, the overflow menu with Delete), the health strip
-   (`last fired`, `times in 30 days`, the fault, the pulse), the problem
-   line from `disabledReason` (a reason with no picker carries **Edit the
-   routine**), **How it works** with When (the schedule in words and `The
+   (`last fired`, `times in 30 days` as the sum of the pulse's bars, the
+   fault, the pulse), the problem line from `disabledReason` (a reason
+   with no picker carries **Edit the routine**; after a re-pin that clears
+   the pin reason while the routine stays off, the line reads `Pinned.
+   Turn the routine on to resume.` beside the switch), **How it works** with When (the schedule in words and `The
    times are in <zone>.`), Do, and Where, and **Activity** as its firings
    without chips (each `Fired → worked in <thread>` or `Fired → started
    <workflow> run`). A workflow routine's firings are the runs it started
-   among the workflow's last 50 runs, each with the time it took. Edit
-   opens the editor (Part H) and its Where lists the routine owner's
-   threads.
+   among the workflow's last 50 runs, each with the time it took; **Fire
+   now** refreshes them. Edit opens the editor (Part H) and its Where
+   lists the routine owner's threads.
 3. A routine is created through **Add** → `On a schedule`, or `+ New
    routine` on the group, both of which open the editor (Part H) with
    **When** set to `On a schedule`.
@@ -459,7 +503,8 @@ Pass criterion: all steps, in one run, from a clean start.
    or `Its schedule does not parse. Edit the routine and fix
    the schedule.` An enable clears any reason. An edit of the field a
    reason names also clears it: the schedule or its timezone for the
-   schedule reason, and the prompt for the prompt reason. A thread change
+   schedule reason (through the editor or a repository sync), and the
+   prompt for the prompt reason. A thread change
    clears the pin reason. A PATCH cannot change a routine's workflow, so
    the workflow reason clears only on enable.
 
@@ -489,9 +534,15 @@ Pass criterion: all steps, in one run, from a clean start.
    dead delivery in **Needs attention** renders through the same parts.
    **Diagnostics** (the intake trail, stage by stage, with each line's
    decision) sits under one disclosure for organization admins, above the
-   list. It replaces the `Receipts` disclosure of earlier revisions. The
-   `Show diagnostics` checkbox stays for every reader: it adds incoming
-   events and the organization's problems to the list. The event page
+   list. It replaces the `Receipts` disclosure of earlier revisions and
+   the `Show diagnostics` checkbox: every reader sees the disclosure,
+   which adds incoming events and the organization's problems to the
+   list, and an admin also sees the intake trail. Its open state is
+   `diagnostics=1` in the URL. When a service chip leaves no loaded row
+   and more pages exist, the list reads `No <service> events in the loaded
+   rows. Load more to look further.` and keeps **Load more**. When the
+   place filter's scan reaches its limit with no row, the api returns the
+   cursor at that point so **Show more** continues. The event page
    keeps payload and redeliver, and lists the intake trail under `Intake
    stages`. Its title is `<event in words>
    in <place>`, with the event's summary as a muted line under it, and each
@@ -519,7 +570,11 @@ Pass criterion: all steps, in one run, from a clean start.
    `/workflows/runs/$runId` are unchanged.
 2. The editor's panel lists this workflow's presence lines and routines
    with the Part C and Part E sentences, each linking to its page. Its
-   **Add** opens the editor fixed on the workflow.
+   **Add** opens the editor fixed on the workflow (`fixedWorkflowId`): Do
+   is locked on `Run a workflow` and the picker is read-only. The editor's
+   **More** menu has **Delete**, with the list's confirm. `GET
+   /api/workflows/:id/webhook` answers `200 { webhook: null }` when no
+   webhook exists.
 
 ## Part H: The editor
 
@@ -531,6 +586,13 @@ Pass criterion: all steps, in one run, from a clean start.
    pane** on the right (five twelfths). On a phone the panes stack, the
    side pane's sentence first as a sticky header. The sheet closes on Esc
    and on Cancel; a draft with changes asks `Discard your changes?` first.
+   Esc and a click outside do nothing while a request is pending. On
+   close, focus returns to the control that opened the sheet. The form
+   reads the line or routine once, at open, and the patch diffs against
+   that copy, so a refresh while the sheet is open never reverts another
+   person's change. After a save that stores the line but reports
+   overlaps, the form freezes, the overlap notice stays, and the footer
+   offers one **Done**, which closes the sheet.
 2. The form is a list of **sections**, each one row: its name in a fixed
    left column (`When`, `Do`, `Where`, `Appears as`, `Name`), its summary
    in words, and `Change` (or `Close` when open). A section opens in place
@@ -563,9 +625,10 @@ Pass criterion: all steps, in one run, from a clean start.
    follow stores `slack.message` with `channel` and `thread_ts`
    conditions, and its Where defaults to `Its own thread`. For `On a
    schedule`, this section holds the day and time control (step 7).
-4. **Do**: three cards, `Reply` (Slack only), `Work on it`, `Run a
-   workflow`, each with one explanation line; `Run a workflow` shows the
-   workflow picker. A routine offers `Work on it` and `Run a workflow`.
+4. **Do**: three cards, `Reply` (Slack only, enabled once a mention is
+   picked, with `Reply answers a mention. To reply, pick the mention in
+   When.` until then), `Work on it`, `Run a workflow`, each with one
+   explanation line; `Run a workflow` shows the workflow picker. A routine offers `Work on it` and `Run a workflow`.
    Under the cards, **Instructions (optional)** as a multi-line field with
    the hint `Plain words. Valet also receives the event itself.` The
    instructions take no inserts. Under `Advanced`, **Event message
@@ -610,7 +673,12 @@ Pass criterion: all steps, in one run, from a clean start.
    permissions note `Uses this workspace's existing access. Saving grants
    nothing new.`; and the footer with `Edited <time ago>` or nothing,
    **Cancel**, and **Create** or **Save**. Create and Save are disabled
-   with the reason beside them until the draft is valid.
+   with the reason beside them until the draft is valid. The client
+   refuses what the api refuses, in UI words: a mention mixed with another
+   Slack event, a `user` condition on a personal mention line, a variable
+   other than `{{event.key}}` in Instructions, an Event message variable
+   whose event is not picked, `Any channel` with a channel condition, Reply
+   without a mention, and run input that is not JSON.
 9. The sentence in the side pane equals the stored sentence (INV-H7 holds
    for the draft). After Create, the overview MUST show the new row and
    SHOULD scroll to and highlight it. After Save from a line's page, the
@@ -618,7 +686,10 @@ Pass criterion: all steps, in one run, from a clean start.
 10. Review mode (a proposal's **Turn on**): the editor opens with every
     section summarized, a notice `Proposed by the assistant. Turning it on
     turns off <name>.` (or `It stays off until you turn it on.`) in the
-    side pane, and **Turn on** in place of Save.
+    side pane, and **Turn on** in place of Save. When the replaced line is
+    gone or already off, the notice reads `The line this proposal replaces
+    is gone. Delete this proposal and make a new line.` and there is no
+    **Turn on**.
 11. A preselected place condition stays through event changes; a condition
     the reader removed stays removed.
 
@@ -819,8 +890,6 @@ Revision 1 deviations that still hold, with the revision 3 part numbers:
   filter on a check's conclusion, so the sentence cannot say `fails`.
 - **`One thread per team` does not appear (Part C step 2).** The web
   derives the subject kind from the event keys; a Linear key gives `issue`.
-- **Conversational keys are a key-level approximation (Part C step 2).** A
-  `slack.message` that no one addressed to Valet still reads `reply in`.
 - **Cron in words covers common forms (Part E step 1).** Other expressions
   read `On the schedule <expr>`.
 - **A preselected place's filter follows the events (Part H step 11).** An
@@ -1121,6 +1190,44 @@ Revision 4 deviations:
   text, so a launch point's test asserts the mode without the editor's
   reads. It lives in `src`, so the copy lint and `tsc` read it. The
   acceptance test mounts the real editor.
+
+Review-fix deviations (2026-10-19):
+
+- **Scheduled run ids hash the whole routine id (Part E).** `wfrun_sch_`
+  takes a 14-character hash of the full schedule id from
+  `packages/shared/src/schedule-run-id.ts`, on the api and the web. The
+  old 8-character cut collided for proposal and repository routines. The
+  format changed for every routine: firings before this change no longer
+  match a routine's page, and a fire in flight at deploy can run once
+  more.
+- **Receipt stages say handoff (Part D step 1.8).** The stage marker
+  `delivery X:` became `handoff X:`. A retried delivery of an event
+  received before the change may add its stage once more.
+- **The health strip counts attempts, not successes (Part D step 1.4).**
+  The strip, the pulse, and `lastActedAt` count every acted entry the
+  timeline lists (any delivery status, not skipped, not superseded), so
+  the strip and the Acted chip agree.
+- **The filter-options cache keeps its reason (Part H step 3).** A
+  no-credential answer reads `Connect the integration on the Integrations
+  page to choose from a list. Type the value instead.` on a cache hit
+  too, so the free-text field stays available.
+- **A Create hidden by the filter keeps its mark (Part B step 8).** The
+  highlight is computed from the rows the filter shows; a row the filter
+  hides keeps its store entry and shows nothing until the filter reveals
+  it.
+- **The sentence's glued punctuation carries a label (Part K).** A token
+  and its punctuation sit in one span with `aria-label` so the
+  accessible name reads `Ops Bot.` with no space. ARIA 1.2 discourages a
+  name on a generic element; a plain period node still reads with a
+  space because the token is its own layout box. Moving the label to the
+  row's link is a follow-up.
+- **The delivered body heading reads `Instructions for this line:`.** The
+  copy lint reads every api string with a space, so the heading the model
+  receives uses Presence words too.
+- **The Log's rows still choose `replied in` by event key (Part F step
+  1).** The line page's Activity follows the line's stored action; the
+  workspace Log has no line in hand for every row and keeps the key-level
+  rule. This replaces the retired `Conversational keys` deviation.
 
 Deviations that revision 4 retires: the wizard's Review step and its
 preview (the side pane replaces both), the team Slack setup's three steps
