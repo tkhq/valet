@@ -132,9 +132,11 @@ export function Overview() {
 }
 
 /**
- * Marks what a Create added. The mark waits until the lists hold the new
- * id, so it lands after the refetch. Each mark is a new object, so a second
- * Create in the same place restarts the two seconds.
+ * Marks what a Create added. The mark waits until the shown groups hold the
+ * new id, so it lands after the refetch. A new line on a row the filter
+ * hides stays in the store, unmarked, until the row shows or the next
+ * Create replaces it. Each mark is a new object, so a second Create in the
+ * same place restarts the two seconds.
  */
 function useCreatedHighlight(groups: readonly OverviewGroup[], routines: readonly Routine[]) {
   const created = useCreatedTarget();
@@ -166,11 +168,12 @@ function OverviewBody({ groups, routines }: {
   routines: Routine[];
 }) {
   const [filter, setFilter] = useState("");
-  const { highlighted, rootRef } = useCreatedHighlight(groups, routines);
-  if (groups.length === 0 && routines.length === 0) return <Onboarding />;
   const placeCount = groups.reduce((sum, group) => sum + group.blocks.length, 0);
   const collapsing = placeCount > COLLAPSE_THRESHOLD;
   const shown = collapsing ? filterGroups(groups, filter) : groups;
+  // The mark reads the shown rows, so it never marks a row the filter hides.
+  const { highlighted, rootRef } = useCreatedHighlight(shown, routines);
+  if (groups.length === 0 && routines.length === 0) return <Onboarding />;
   const filtering = collapsing && filter.trim() !== "";
   return (
     <div ref={rootRef} className="space-y-9">

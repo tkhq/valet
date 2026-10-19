@@ -58,6 +58,7 @@ vi.mock("~/components/layout/workspace-assistant", async (importOriginal) => {
 
 import { routeTree } from "../../routeTree.gen";
 import { announceCreated, clearCreated } from "./created-highlight";
+import { HIGHLIGHT_MS } from "./overview";
 import { PIN_UNAVAILABLE } from "./problem-badge";
 import { PLATFORM_CI, PLATFORM_OPS, line, place } from "./test-fixtures";
 
@@ -531,6 +532,26 @@ describe("Presence overview", () => {
     await waitFor(() => expect(scrolled).toContain(schedule));
     await waitFor(() => expect(schedule.getAttribute("data-highlight")).toBeNull(), { timeout: 3_000 });
     expect(schedule.className).not.toContain("bg-moss-wash");
+  });
+
+  it("keeps a Create on a row the filter hides unmarked until the row shows", async () => {
+    const channels = Array.from({ length: 11 }, (_unused, index) => place(`slack:T1/C${index}`, `#chan-${index}`, "slack", "slack:T1", RECENT));
+    places = [SLACK_ROOT, ...channels];
+    rules = channels.map((_channel, index) => line(`M${index}`, {
+      name: `Mentions ${index}`, eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: `C${index}` }],
+    }));
+    mountOverview();
+    const filter = await screen.findByRole("searchbox", { name: "Filter places" });
+    await userEvent.type(filter, "chan-3");
+    await screen.findByRole("region", { name: "#chan-3" });
+    act(() => announceCreated({ kind: "line", id: "M5" }));
+    // #chan-5 holds M5 but the filter hides it: nothing is marked, and the
+    // Create waits past the two seconds a mark would have lasted.
+    expect(document.querySelector('[data-highlight="true"]')).toBeNull();
+    await act(() => new Promise((resolve) => setTimeout(resolve, HIGHLIGHT_MS + 200)));
+    await userEvent.clear(filter);
+    const chan5 = await screen.findByRole("region", { name: "#chan-5" });
+    await waitFor(() => expect(chan5.getAttribute("data-highlight")).toBe("true"));
   });
 
   it("marks a new line's place only once the refetched list holds it", async () => {
