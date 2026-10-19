@@ -56,15 +56,28 @@ export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** A download that `file_attach` created (`services/generated-files.ts`). */
-const GENERATED_FILE_PATH = /^\/api\/sessions\/[^/]+\/threads\/[^/]+\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A download that `file_attach` created (`services/generated-files.ts`).
+ * The path names the session and thread that own the file. */
+const GENERATED_FILE_PATH = /^\/api\/sessions\/([^/]+)\/threads\/([^/]+)\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A generated download, moved to the hostname of this page. A deployment
- * can serve the app on more than one hostname, and the tool links its
- * configured public one. A sign-in belongs to one hostname, so a person
- * signed in on another one got a 401 from the link. Other links keep their
- * href. Exported for tests. */
-export function localDownloadHref(href: string | undefined, origin = window.location.origin): string | undefined {
+/** The conversation a chat message belongs to. Its own generated downloads
+ * open on the hostname of this page. */
+export interface FileScope { sessionId: string; threadId: string }
+
+function decoded(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+/** A generated download from this conversation, moved to the hostname of
+ * this page. A deployment can serve the app on more than one hostname, and
+ * the tool links its configured public one. A sign-in belongs to one
+ * hostname, so a person signed in on another one got a 401 from the link.
+ * A link to any other file or site keeps its href. Exported for tests. */
+export function localDownloadHref(href: string | undefined, scope: FileScope, origin = window.location.origin): string | undefined {
   if (!href) return href;
   let url: URL;
   try {
@@ -73,7 +86,8 @@ export function localDownloadHref(href: string | undefined, origin = window.loca
     return href;
   }
   if (url.origin === origin || !["https:", "http:"].includes(url.protocol) || url.search || url.hash) return href;
-  return GENERATED_FILE_PATH.test(url.pathname) ? url.pathname : href;
+  const match = GENERATED_FILE_PATH.exec(url.pathname);
+  return match && decoded(match[1]) === scope.sessionId && decoded(match[2]) === scope.threadId ? url.pathname : href;
 }
 
 /** True for a click the browser would handle as a plain same-tab
@@ -99,10 +113,13 @@ export function Markdown({
   children,
   className,
   memoryLinks,
+  fileScope,
 }: {
   children: string;
   className?: string;
   memoryLinks?: MemoryLinkHandling;
+  /** A chat message's conversation. Only chat passes it. */
+  fileScope?: FileScope;
 }) {
   return (
     <div
@@ -184,7 +201,7 @@ export function Markdown({
               );
             }
             return (
-              <a href={localDownloadHref(href)} target="_blank" rel="noopener noreferrer" {...rest}>
+              <a href={fileScope ? localDownloadHref(href, fileScope) : href} target="_blank" rel="noopener noreferrer" {...rest}>
                 {children}
               </a>
             );

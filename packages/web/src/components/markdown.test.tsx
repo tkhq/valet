@@ -198,18 +198,27 @@ describe("Markdown", () => {
       expect(anchor("sibling").target).toBe("_blank");
     });
 
-    it("opens a generated download on this page's hostname, and leaves other links alone", () => {
+    it("opens a chat message's own generated download on this page's hostname, and leaves other links alone", () => {
+      const scope = { sessionId: "assistant:asst_1", threadId: "th-1" };
       const file = "/api/sessions/assistant%3Aasst_1/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
       const here = "https://valet.example.dev";
-      expect(localDownloadHref(`https://valet.example.com${file}`, here)).toBe(file);
-      expect(localDownloadHref(`${here}${file}`, here)).toBe(`${here}${file}`);
-      expect(localDownloadHref(file, here)).toBe(file);
-      expect(localDownloadHref(`https://valet.example.com${file}?x=1`, here)).toBe(`https://valet.example.com${file}?x=1`);
-      expect(localDownloadHref("https://valet.example.com/api/sessions/s/messages", here)).toBe("https://valet.example.com/api/sessions/s/messages");
-      expect(localDownloadHref("https://example.com/x", here)).toBe("https://example.com/x");
+      expect(localDownloadHref(`https://valet.example.com${file}`, scope, here)).toBe(file);
+      expect(localDownloadHref(`${here}${file}`, scope, here)).toBe(`${here}${file}`);
+      expect(localDownloadHref(`https://valet.example.com${file}?x=1`, scope, here)).toBe(`https://valet.example.com${file}?x=1`);
+      expect(localDownloadHref("https://example.com/x", scope, here)).toBe("https://example.com/x");
+      // Another conversation's file, or another deployment's, keeps its own host.
+      const other = "https://other-valet.example/api/sessions/s/threads/t/files/e9339072-c505-4142-a1e0-b568a2356986";
+      expect(localDownloadHref(other, scope, here)).toBe(other);
 
-      render(<Markdown>{`[Form.docx](https://valet.example.com${file})`}</Markdown>);
+      render(<Markdown fileScope={scope}>{`[Form.docx](https://valet.example.com${file}) and [Other.docx](${other})`}</Markdown>);
       expect(anchor("Form.docx").getAttribute("href")).toBe(file);
+      expect(anchor("Other.docx").getAttribute("href")).toBe(other);
+    });
+
+    it("keeps every href outside chat, where no conversation is given", () => {
+      const link = "https://valet.example.com/api/sessions/assistant%3Aasst_1/threads/th-1/files/e9339072-c505-4142-a1e0-b568a2356986";
+      render(<Markdown>{`[Report.pdf](${link})`}</Markdown>);
+      expect(anchor("Report.pdf").getAttribute("href")).toBe(link);
     });
 
     it("routes a memory cross-reference in place instead of opening a tab", () => {
