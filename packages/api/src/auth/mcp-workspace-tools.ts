@@ -116,6 +116,7 @@ function runView(deps: McpToolDeps, detail: GetWorkflowRunResponse): RunView {
           ...(g.riskLevel ? { risk_level: g.riskLevel } : {}),
         })) }
       : {}),
+    ...(detail.provenance ? { provenance: provenanceView(detail.provenance) } : {}),
     url: `${deps.origin}/workflows/runs/${encodeURIComponent(r.runId)}`,
   };
 }

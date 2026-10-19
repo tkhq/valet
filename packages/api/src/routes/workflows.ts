@@ -682,9 +682,8 @@ workflowsRouter.get("/:id/runs", async (c) => {
 
 workflowsRouter.get("/:id/permissions", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const nodes = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
-  if (nodes === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
-  const resp: GetWorkflowPermissionsResponse = { nodes };
+  const resp: GetWorkflowPermissionsResponse | null = await analyzeWorkflowPermissions(deps, owner, c.req.param("id"));
+  if (resp === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
   return c.json(resp);
 });
 
@@ -731,9 +730,12 @@ workflowsRouter.post("/:id/permissions/allow", async (c) => {
     }
   }
 
-  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds);
+  if (typeof body.definitionToken !== "string" || !/^[a-f0-9]{64}$/.test(body.definitionToken)) {
+    return c.json({ error: "definitionToken must identify the reviewed workflow. Refresh the permissions review, then try again." }, 400);
+  }
+  const outcome = await allowWorkflowPermissions(deps, owner, c.req.param("id"), body.actionIds, body.definitionToken);
   if (outcome === null) return c.json({ error: WORKFLOW_NOT_FOUND }, 404);
-  if (!outcome.ok) return c.json({ error: outcome.badRequest }, 400);
+  if (!outcome.ok) return c.json({ error: outcome.badRequest }, outcome.stale ? 409 : 400);
 
   const resp: AllowWorkflowPermissionsResponse = outcome.result;
   return c.json(resp);

@@ -6,11 +6,12 @@ import type {
 } from "@valet/api/wire";
 import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
 import { MoreHorizontal } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
   useRevokeWorkflowPermissions,
+  useRevokeOwnWorkflowAccounts,
   useCopyWorkflow,
   useRunDetail,
   useStartRun,
@@ -43,6 +44,7 @@ import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
 import type { TriggerKind } from "~/components/workflows/triggers-drawer";
+import { useSendPrompt } from "~/api/queries";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import { blobUrl } from "~/lib/blob-url";
@@ -61,19 +63,42 @@ import { prefillComposerDraft } from "~/stores/composer-drafts";
 export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
   // `newTrigger` comes from the new-workflow dialog: the workflow was just
-  // created to run on a schedule or an event, so the wizard opens next.
-  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind } => ({
+  // created to run on a schedule or an event, so the editor opens next.
+  // `explainRun` + `explainStep` come from a failed run's "Explain this
+  // failure": the editor's assistant gets the question once.
+  validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind; explainRun?: string; explainStep?: string; explainIteration?: number } => ({
     newTrigger: search.newTrigger === "schedule" || search.newTrigger === "event" ? search.newTrigger : undefined,
+    explainRun: typeof search.explainRun === "string" && search.explainRun ? search.explainRun : undefined,
+    explainStep: typeof search.explainStep === "string" && search.explainStep ? search.explainStep : undefined,
+    explainIteration: typeof search.explainIteration === "number" && search.explainIteration > 0 ? search.explainIteration : undefined,
   }),
 });
 
 export function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
-  const { newTrigger } = Route.useSearch();
-  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} />;
+  const { newTrigger, explainRun, explainStep, explainIteration } = Route.useSearch();
+  const explain = explainRun && explainStep ? { runId: explainRun, nodeId: explainStep, iteration: explainIteration } : undefined;
+  return <WorkflowEditorPage workflowId={workflowId} newTrigger={newTrigger} explain={explain} />;
 }
 
-export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: string; newTrigger?: TriggerKind }) {
+/** A failed step the person asked the assistant to explain. */
+export interface ExplainFailureRequest {
+  runId: string;
+  nodeId: string;
+  /** A foreach item, counted from 0. */
+  iteration?: number;
+}
+
+/** What "Explain this failure" asks. The editor conversation's guidance
+ * (`editor-thread-context.ts`) says how to investigate a failed run. */
+export function explainFailurePrompt({ runId, nodeId, iteration }: ExplainFailureRequest): string {
+  const step = iteration !== undefined ? `"${nodeId}" (item ${iteration + 1})` : `"${nodeId}"`;
+  return `Explain why run ${runId} failed at step ${step}. Say what went wrong in plain words, ` +
+    "whether a Valet update or a workflow edit since the run changes the answer, and the smallest fix. " +
+    "Do not change the workflow or start a run until I agree.";
+}
+
+export function WorkflowEditorPage({ workflowId, newTrigger, explain }: { workflowId: string; newTrigger?: TriggerKind; explain?: ExplainFailureRequest }) {
   const { data, isLoading, error } = useWorkflow(workflowId);
   useAdoptWorkspaceScope(data ? { type: data.ownerType, id: data.ownerId } : undefined);
   const update = useUpdateWorkflow(workflowId);
@@ -123,6 +148,7 @@ export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: str
       allowPermissions={allowPermissions}
       navigate={navigate}
       newTrigger={newTrigger}
+      explain={explain}
     />
   );
 }
@@ -156,10 +182,13 @@ function WorkflowEditorPane({
   allowPermissions,
   navigate,
   newTrigger,
+  explain,
 }: {
   /** Open the listeners and routines drawer, and its wizard on this kind
    * (from the create dialog). */
   newTrigger?: TriggerKind;
+  /** Ask the assistant to explain this failed step, once. */
+  explain?: ExplainFailureRequest;
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
@@ -189,6 +218,7 @@ function WorkflowEditorPane({
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
   const revokePermissions = useRevokeWorkflowPermissions(workflowId);
+  const revokeAccounts = useRevokeOwnWorkflowAccounts(workflowId);
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
   const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
@@ -196,6 +226,21 @@ function WorkflowEditorPane({
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
+
+  // "Explain this failure" is one click: send the question as soon as the
+  // conversation opens, then drop the request from the URL so a reload does
+  // not ask again. Queued behind a running turn, never in place of it.
+  const sendPrompt = useSendPrompt(assistant.sessionId ?? "");
+  const explainSent = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!explain || !assistant.sessionId || !assistant.threadId) return;
+    const key = `${explain.runId}:${explain.nodeId}:${explain.iteration ?? 0}`;
+    if (explainSent.current === key) return;
+    explainSent.current = key;
+    sendPrompt.mutate({ text: explainFailurePrompt(explain), threadId: assistant.threadId, queueMode: "followup" });
+    editorRef.current?.showAssistant();
+    void navigate({ to: "/workflows/$workflowId", params: { workflowId }, search: {}, replace: true });
+  }, [explain, assistant.sessionId, assistant.threadId, sendPrompt, navigate, workflowId]);
 
   // The rename control (review fix 1): name state lives here, at the page
   // level, rather than in `Editor` — `Editor` only needs to know whether
@@ -210,6 +255,8 @@ function WorkflowEditorPane({
   const [runOpen, setRunOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
+  const [reviewedAccountConsent, setReviewedAccountConsent] = useState<GetWorkflowPermissionsResponse["accountConsent"]>();
+  const [reviewedDefinitionToken, setReviewedDefinitionToken] = useState<string | undefined>();
   const [reviewedActions, setReviewedActions] = useState<WorkflowNodePermissionWire[]>([]);
   // The last pre-approval's leftovers: gating actions an org policy keeps
   // gated, which only an org admin can change. Shown until the next attempt.
@@ -247,6 +294,7 @@ function WorkflowEditorPane({
     }
     return [...seen.values()];
   }, [permissions]);
+  const pendingAccounts = permissions?.accountConsent?.pending ?? [];
 
   // Unsaved work is only in memory: the rename lives here and the definition
   // draft lives in `Editor`, so any navigation away drops both. `useBlocker`
@@ -307,13 +355,22 @@ function WorkflowEditorPane({
     // Reopening starts a fresh attempt: drop the previous attempt's blocked
     // notice, or it reads as this attempt's result. Clearing on CLOSE would
     // never show the notice at all — a confirm sets it and then closes.
-    if (open) { setBlockedActions([]); setReviewedActions(gatingActions); }
+    if (open) {
+      setBlockedActions([]);
+      setReviewedActions(gatingActions);
+      setReviewedDefinitionToken(permissions?.definitionToken);
+      setReviewedAccountConsent(permissions?.accountConsent ? { ...permissions.accountConsent, services: [...permissions.accountConsent.services] } : undefined);
+    }
   }
 
-  async function handlePreapprove() {
+  async function handlePreapprove(accountsOnly = false) {
+    if (!reviewedDefinitionToken) return;
     let result;
     try {
-      result = await allowPermissions.mutateAsync(reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []));
+      result = await allowPermissions.mutateAsync({
+        actionIds: accountsOnly ? [] : reviewedActions.flatMap((action) => action.actionId ? [action.actionId] : []),
+        definitionToken: reviewedDefinitionToken,
+      });
     } catch {
       // `allowPermissions.error` renders the message inside the dialog.
       return;
@@ -431,15 +488,29 @@ function WorkflowEditorPane({
               <span className="break-all font-mono">{node.actionId ?? `${node.service}.${node.action}`}</span>
               <span className="shrink-0">{node.mode === "deny" ? "Blocked by policy" : node.mode === "unknown" ? "Checked at runtime" : node.mode === "require_approval" ? "Needs approval" : node.provenance === "workflow_grant" ? "Allowed for this workflow" : "Allowed"}</span>
             </li>)}</ul>
+            <p>A save allows nothing. Allow these steps once here, or approve the assistant's card. Any step change asks again. Other members approve their own accounts.</p>
             <p>New or dynamic actions may still request permission. Human review steps always wait for a decision.</p>
             <div className="flex flex-wrap gap-2">
-              {gatingActions.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {permissions.nodes.length > 0 && <Button size="sm" data-testid="workflow-gate-badge" onClick={() => setPreapproveDialog(true)}>Review permissions</Button>}
+              {ownerType === "team" && <Button size="sm" variant="ghost" disabled={revokeAccounts.isPending} onClick={() => revokeAccounts.mutate()}>Remove my account permission</Button>}
               <Button size="sm" variant="ghost" disabled={revokePermissions.isPending} onClick={() => revokePermissions.mutate()}>Reset saved permissions</Button>
             </div>
+            {revokeAccounts.isSuccess && <p role="status">Your saved workflow account permission was removed. Existing run and team permissions still apply.</p>}
+            {revokeAccounts.error && <p role="alert">{revokeAccounts.error.message}</p>}
             {revokePermissions.error && <p role="alert">{revokePermissions.error.message}</p>}
           </>}
         </div>
       </details>
+
+      {/* The build-time confirmation: until a person allows them, runs stop
+          at these steps. Shown open, not inside the Permissions row. */}
+      {!mirrored && !definitionDirty && (gatingActions.length > 0 || pendingAccounts.length > 0) && (
+        <div role="status" data-testid="approval-needed-banner"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-warning-wash px-3 py-2 text-sm text-ink lg:px-6">
+          <span>{approvalNeededText(gatingActions.length, pendingAccounts)} Runs stop at these steps until you allow them.</span>
+          <Button size="sm" onClick={() => setPreapproveDialog(true)}>Review and allow</Button>
+        </div>
+      )}
 
       {mirrored && (
         <div
@@ -489,7 +560,8 @@ function WorkflowEditorPane({
         <DialogContent
           title="Pre-approve actions"
           description={
-            "Allow these actions for future runs of this workflow. Other workflows and chats keep their permissions. " +
+            "Allow these actions for every run of the current steps. A change to the steps asks again. Other workflows and chats keep their permissions. " +
+            (reviewedAccountConsent ? "Also allow direct tool steps to use your accounts already shared with this team, excluding GitHub. Other members approve their own accounts. " : "") +
             "Explicit organization, team, and personal policy restrictions still apply. You can reset saved permissions here."
           }
         >
@@ -501,25 +573,37 @@ function WorkflowEditorPane({
               </li>
             ))}
           </ul>
+          {reviewedAccountConsent && <section className="space-y-1 py-2">
+            <p className="text-sm font-medium">Accounts shared with {reviewedAccountConsent.teamName}</p>
+            <p className="text-xs text-muted">This workflow may use your shared accounts for these services in direct tool steps.</p>
+            <ul data-testid="preapprove-account-services" className="space-y-1 text-xs">
+              {reviewedAccountConsent.services.map(service => <li key={service} className="font-mono">{service}</li>)}
+            </ul>
+          </section>}
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setPreapproveDialog(false)}>
               Cancel
             </Button>
+            {reviewedAccountConsent && reviewedActions.length > 0 && <Button type="button" variant="secondary" disabled={allowPermissions.isPending || !reviewedDefinitionToken} onClick={() => void handlePreapprove(true)}>
+              Allow my shared accounts
+            </Button>}
             <Button
               type="button"
               data-testid="preapprove-confirm"
-              disabled={allowPermissions.isPending}
+              disabled={allowPermissions.isPending || !reviewedDefinitionToken}
               onClick={() => void handlePreapprove()}
             >
               {allowPermissions.isPending
                 ? "Pre-approving…"
+                : reviewedActions.length === 0
+                  ? "Save workflow permissions"
                 : reviewedActions.length === 1
                   ? "Pre-approve 1 action"
                   : `Pre-approve ${reviewedActions.length} actions`}
             </Button>
           </DialogFooter>
           {allowPermissions.error != null && (
-            <p className="text-xs text-danger-500">{allowPermissions.error.message}</p>
+            <p className="text-xs text-danger-500">{errorText(allowPermissions.error)}</p>
           )}
         </DialogContent>
       </Dialog>
@@ -803,4 +887,14 @@ function HistoryDrawer({
       )}
     </DrawerShell>
   );
+}
+
+/** What the approval banner names: the actions, then the viewer's own shared accounts. */
+export function approvalNeededText(actions: number, accounts: readonly string[]): string {
+  const parts = [
+    ...(actions > 0 ? [`${actions} ${actions === 1 ? "action needs" : "actions need"} your approval`] : []),
+    ...(accounts.length > 0 ? [`${actions > 0 ? "your" : "Your"} shared ${accounts.join(", ")} ${accounts.length === 1 ? "account needs" : "accounts need"} your permission`] : []),
+  ];
+  const text = parts.join(", and ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 }

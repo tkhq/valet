@@ -2,7 +2,7 @@ import { RunWorkspace } from "~/components/workflows/run-workspace";
 import { textParam } from "~/lib/search-params";
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type { WorkflowRunDetail } from "@valet/api/wire";
+import type { WorkflowRunDetail, WorkflowRunProvenance } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
 import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { ApprovalCard } from "~/components/workflows/approval-card";
@@ -20,6 +20,8 @@ import {
 import { RunResultPanel } from "~/components/workflows/run-detail-result";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowPreview } from "~/components/workflows/preview";
+import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
+import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
@@ -53,6 +55,13 @@ export function RunDetailPage() {
   const cancelRun = useCancelRun(runId);
   const retryRun = useRetryRun(runId);
   const navigate = useNavigate();
+  const [retryInputOpen, setRetryInputOpen] = useState(false);
+  // A retry from the start can change the trigger inputs, for example a
+  // shorter date range. The server checks them against the saved workflow.
+  const schema = data && isWorkflowDefinitionShape(data.run.definition)
+    ? visibleTriggerFields(triggerDataSchema(data.run.definition))
+    : {};
+  const goToRun = (newRunId: string) => void navigate({ to: "/workflows/runs/$runId", params: { runId: newRunId } });
 
   if (isLoading) {
     return (
@@ -79,17 +88,41 @@ export function RunDetailPage() {
         data={data}
         onCancel={() => cancelRun.mutate()}
         cancelPending={cancelRun.isPending}
-        onRetry={() =>
-          retryRun.mutate(undefined, {
-            onSuccess: ({ runId: newRunId }) =>
-              navigate({ to: "/workflows/runs/$runId", params: { runId: newRunId } }),
-          })
-        }
+        onRetry={(from) => {
+          if (from === "start" && Object.keys(schema).length > 0) {
+            setRetryInputOpen(true);
+            return;
+          }
+          retryRun.mutate({ from }, { onSuccess: ({ runId: newRunId }) => goToRun(newRunId) });
+        }}
         retryPending={retryRun.isPending}
+        onExplainFailure={(nodeId, iteration) => void navigate({
+          to: "/workflows/$workflowId",
+          params: { workflowId: data.run.workflowId },
+          search: { explainRun: runId, explainStep: nodeId, ...(iteration > 0 ? { explainIteration: iteration } : {}) },
+        })}
       />
       </RunWorkspace>
+      {Object.keys(schema).length > 0 && (
+        <RunWorkflowDialog
+          workflowId={data.run.workflowId}
+          workflowName={runLabel(data.run)}
+          schema={schema}
+          open={retryInputOpen}
+          onOpenChange={setRetryInputOpen}
+          onStarted={goToRun}
+          retryOf={{ runId, input: runInputData(data.run.params) }}
+        />
+      )}
     </div>
   );
+}
+
+/** The trigger input values a run started with. */
+function runInputData(params: unknown): Record<string, unknown> {
+  const input = params && typeof params === "object" ? (params as { input?: unknown }).input : undefined;
+  const data = input && typeof input === "object" ? (input as { data?: unknown }).data : undefined;
+  return data && typeof data === "object" && !Array.isArray(data) ? { ...(data as Record<string, unknown>) } : {};
 }
 
 /** Why the run page has no run: gone (404), or a load that failed. Each names what to do. */
@@ -113,8 +146,10 @@ export interface RunDetailBodyProps {
   data: WorkflowRunDetail;
   onCancel: () => void;
   cancelPending: boolean;
-  onRetry: () => void;
+  onRetry: (from: "failed_step" | "start") => void;
   retryPending: boolean;
+  /** Opens the workflow editor and asks its assistant why this step failed. */
+  onExplainFailure?: (nodeId: string, iteration: number) => void;
 }
 
 /**
@@ -130,6 +165,7 @@ export function RunDetailBody({
   cancelPending,
   onRetry,
   retryPending,
+  onExplainFailure,
 }: RunDetailBodyProps) {
   // Cancel stops a run part-way and cannot be undone, so it asks first.
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -142,6 +178,8 @@ export function RunDetailBody({
   const nonTerminal = run.status !== "settled";
   const retryable =
     run.status === "settled" && (run.outcome === "failed" || run.outcome === "cancelled");
+  // Only worth offering when a finished step can be reused.
+  const stepRetryable = retryable && run.outcome === "failed" && checkpoints.some((cp) => cp.status === "completed");
   const definition = isWorkflowDefinitionShape(run.definition) ? run.definition : undefined;
   const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
@@ -151,6 +189,8 @@ export function RunDetailBody({
   // The answer the person came for. Present only once the run has settled.
   const result = deriveRunResult(run, checkpoints);
   const duration = formatRunDuration(run.createdAt, run.updatedAt);
+  const provenance = data.provenance;
+  const changedSince = run.status === "settled" ? changesSinceRun(provenance) : [];
 
   // Legacy signal-based approval: still resolve the prompt for approval-kind
   // gates that come via the old waitingOn path (fallback for older runs).
@@ -188,9 +228,15 @@ export function RunDetailBody({
               {cancelPending ? "Cancelling…" : "Cancel run"}
             </Button>
           )}
+          {stepRetryable && (
+            <Button size="sm" onClick={() => onRetry("failed_step")} disabled={retryPending}
+              title="Reuses the finished steps before the failure. A step edited since this run runs again.">
+              {retryPending ? "Retrying…" : "Retry failed step"}
+            </Button>
+          )}
           {retryable && (
-            <Button size="sm" onClick={onRetry} disabled={retryPending}>
-              {retryPending ? "Retrying…" : "Retry run"}
+            <Button size="sm" variant={stepRetryable ? "secondary" : "primary"} onClick={() => onRetry("start")} disabled={retryPending}>
+              {stepRetryable ? "Retry from start" : retryPending ? "Retrying…" : "Retry run"}
             </Button>
           )}
         </div>
@@ -220,6 +266,14 @@ export function RunDetailBody({
           </p>
         )}
 
+        {/* A failure often has a fix that shipped or an edit made after the
+            run. Say so before the person starts debugging the old run. */}
+        {changedSince.length > 0 && run.outcome !== "completed" && (
+          <p role="status" className="rounded border border-line bg-warning-wash px-3 py-2 text-sm text-ink">
+            Since this run, {changedSince.join(" and ")}. A retry uses the current versions.
+          </p>
+        )}
+
         {/* The settled answer comes first. Everything below it explains how
             the run reached that answer. */}
         {result && <RunResultPanel result={result} />}
@@ -232,6 +286,8 @@ export function RunDetailBody({
               true duration only after the run stops writing. */}
           {run.status === "settled" && duration && ` · Ran for ${duration}`}
           {` · ${checkpoints.length} ${checkpoints.length === 1 ? "step" : "steps"}`}
+          {provenance?.workflowVersion !== undefined && ` · Workflow version ${provenance.workflowVersion}`}
+          {provenance?.build && ` · Valet build ${shortSha(provenance.build)}`}
         </p>
 
         {nonTerminal && activeSteps.length > 0 && (
@@ -253,7 +309,7 @@ export function RunDetailBody({
               iteration={gate.iteration}
             />
           ) : (
-            <PolicyGateCard key={`${gate.nodeId}:${gate.iteration ?? 0}`} runId={runId} gate={gate} />
+            <PolicyGateCard key={gate.gateId ?? `${gate.nodeId}:${gate.iteration ?? 0}`} runId={runId} gate={gate} />
           ),
         )}
 
@@ -273,7 +329,8 @@ export function RunDetailBody({
               </span>
             )}
           </h2>
-          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} modelChanges={modelChanges} />
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} modelChanges={modelChanges}
+            onExplainFailure={run.status === "settled" ? onExplainFailure : undefined} />
         </div>
         {definition && (
           <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>
@@ -288,3 +345,20 @@ export function RunDetailBody({
   );
 }
 
+function shortSha(sha: string): string {
+  return sha.slice(0, 9);
+}
+
+/** What changed between the run and now: the server build, the saved workflow, or both. */
+export function changesSinceRun(provenance: WorkflowRunProvenance | undefined): string[] {
+  if (!provenance) return [];
+  const changes: string[] = [];
+  if (provenance.build && provenance.serverBuild && provenance.build !== provenance.serverBuild) {
+    changes.push(`Valet was updated (build ${shortSha(provenance.build)} to ${shortSha(provenance.serverBuild)})`);
+  }
+  if (provenance.workflowVersion !== undefined && provenance.latestWorkflowVersion !== undefined
+    && provenance.latestWorkflowVersion > provenance.workflowVersion) {
+    changes.push(`the workflow was edited (version ${provenance.workflowVersion} to ${provenance.latestWorkflowVersion})`);
+  }
+  return changes;
+}
