@@ -72,17 +72,7 @@ vi.mock("~/api/events", async (importOriginal) => ({
   usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false, error: null }),
   useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),
 }));
-vi.mock("./automation-wizard", () => ({
-  AutomationWizard: ({
-    replyTeam,
-  }: {
-    replyTeam: { id: string; name: string };
-  }) => (
-    <div role="dialog">
-      Reply setup for {replyTeam.name} ({replyTeam.id})
-    </div>
-  ),
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 import { ListenButton, TeamSlackSetupCard } from "./team-slack-setup";
 
 beforeEach(() =>
@@ -144,7 +134,7 @@ describe("team homepage Slack setup", () => {
   it("keeps the full reply setup behind Advanced setup", () => {
     open();
     fireEvent.click(screen.getByRole("button", { name: "Advanced setup" }));
-    expect(screen.getByRole("dialog").textContent).toBe("Reply setup for Alpha (a)");
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create team Alpha (a)");
   });
   it("links missing bot setup to organization Slack settings", () => {
     state.connected = false;
@@ -154,7 +144,7 @@ describe("team homepage Slack setup", () => {
         .getByRole("link", { name: "Organization Settings → Slack" })
         .getAttribute("href"),
     ).toBe("/settings/organization/slack");
-    expect(screen.queryByText(/Reply setup for/)).toBeNull();
+    expect(screen.queryByTestId("line-editor")).toBeNull();
   });
   it("does not send a non-admin into restricted organization settings", () => {
     state.connected = false;

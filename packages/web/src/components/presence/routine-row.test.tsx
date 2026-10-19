@@ -41,9 +41,7 @@ vi.mock("~/api/settings", async () => ({
   ...(await import("./test-fixtures")).memberSettings,
   useTeams: () => ({ data: { teams: [{ id: "team-sre", name: "SRE", callerRole: "member" }] } }),
 }));
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ editing, workspace }: { editing?: { name: string }; workspace?: string }) => <p>Editing {editing?.name} in {workspace}</p>,
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 vi.mock("./thread-picker", () => ({
   ThreadPicker: ({ workspace }: { workspace: string }) => <button type="button">Pick from {workspace}</button>,
 }));
@@ -149,13 +147,13 @@ describe("RoutineRosterRow", () => {
     expect(within(row).queryByRole("button", { name: "Pick another thread" })).toBeNull();
   });
 
-  it("marks a team routine Team, scopes Edit to its team, and names the team in Delete", async () => {
+  it("marks a team routine Team, opens Edit on it, and names the team in Delete", async () => {
     renderRow(weekdayRoutine({ ownerType: "team", ownerId: "team-sre" }));
     const row = screen.getByRole("region", { name: "Morning summary" });
     expect(within(row).getByText("Team")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
-    expect(screen.getByText("Editing Morning summary in team-sre")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
     await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(screen.getByText("This is SRE's routine. Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();

@@ -108,7 +108,7 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
       </div>
 
       <details onToggle={(toggle) => setReceiptsOpen(toggle.currentTarget.open)}>
-        <summary className="cursor-pointer text-sm font-medium text-ink">Receipt stages</summary>
+        <summary className="cursor-pointer text-sm font-medium text-ink">Intake stages</summary>
         <div className="mt-2">
           <EventReceiptStages eventId={event.id} open={receiptsOpen} />
         </div>

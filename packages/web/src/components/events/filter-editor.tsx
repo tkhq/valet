@@ -1,8 +1,8 @@
 /**
- * FilterEditor — the field/operator/value rows that build an event
- * subscription's filters. Shared by the workflow TriggerDialog and the event
- * AutomationWizard, which post the same `{field, op, value}` shape to the same
- * `validateSubscription` on the server.
+ * FilterEditor: the field, operator, and value rows that build a line's
+ * filters, and the helpers that turn them into the `{field, op, value}`
+ * shape the server's `validateSubscription` reads. The editor's When
+ * section uses the value picker and the helpers.
  *
  * A row's `value` is held as the raw text the user typed. The `in` operator
  * splits it into a list at submit (`toWireFilters`), so the form never needs

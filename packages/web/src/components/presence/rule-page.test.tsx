@@ -74,13 +74,9 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams } }),
 }));
 
-/** The dialog is its own suite's (its Where and review copy are tested
- * there); here it records the line it opened on and how. */
-vi.mock("~/components/events/edit-subscription-dialog", () => ({
-  EditSubscriptionDialog: ({ sub, review, replacesNote, focus }: { sub: EventSubscriptionWire; review?: boolean; replacesNote?: string; focus?: string }) => (
-    <p>{review ? `Reviewing ${sub.name}${replacesNote ? `, replaces ${replacesNote}` : ""}` : `Editing ${sub.name}${focus ? ` at ${focus}` : ""}`}</p>
-  ),
-}));
+/** The editor is its own suite's (its Where and review copy are tested
+ * there); here it records the mode it opened on. */
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 /** The picker lists real threads in its own suite; here one pick stands in. */
 vi.mock("./thread-picker", () => ({
@@ -202,11 +198,11 @@ describe("RulePage", () => {
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", { enabled: true }));
   });
 
-  it("opens the edit dialog on this listener", async () => {
+  it("opens the editor on this line from Edit", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
-    expect(screen.getByText("Editing Failed checks")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks");
   });
 
   it("shows the place breadcrumb and the sentence as the title with tokens (P7)", async () => {
@@ -259,7 +255,7 @@ describe("RulePage", () => {
     await userEvent.click(within(status).getByRole("button", { name: "More for Failed checks" }));
     expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Appears as", "Delete"]);
     await userEvent.click(screen.getByRole("menuitem", { name: "Appears as" }));
-    expect(screen.getByText("Editing Failed checks at appearance")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks at appears");
   });
 
   it("names someone as the creator the directory does not hold", async () => {
@@ -307,7 +303,17 @@ describe("RulePage", () => {
       "Wherein one thread per pull requestEach pull request gets its own thread; every event for it lands there.Change",
     ]);
     fireEvent.click(within(how).getByRole("button", { name: "Change Where" }));
-    expect(screen.getByText("Editing Failed checks")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks at where");
+  });
+
+  it("opens the editor on the section each Change names", async () => {
+    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
+    renderPage();
+    const how = await screen.findByRole("region", { name: "How it works" });
+    for (const section of ["When", "Do", "Where"]) {
+      fireEvent.click(within(how).getByRole("button", { name: `Change ${section}` }));
+      expect(screen.getByTestId("line-editor").textContent).toBe(`Editor: edit Failed checks at ${section.toLowerCase()}`);
+    }
   });
 
   it("explains a pinned thread as one place for the history", async () => {
@@ -327,8 +333,8 @@ describe("RulePage", () => {
     });
     renderPage();
     const how = await screen.findByRole("region", { name: "How it works" });
-    expect(within(how).getByText("Valet replies where it was mentioned. It appears as Ops Bot.")).toBeTruthy();
-    expect(within(how).getByText("Every event starts a fresh thread.")).toBeTruthy();
+    expect(within(how).getByText("Valet reads the message and replies. It appears as Ops Bot.")).toBeTruthy();
+    expect(within(how).getByText("Valet replies where it was mentioned. Every event starts a fresh thread.")).toBeTruthy();
   });
 
   it("explains a workflow line's Where as a run", async () => {
@@ -576,7 +582,7 @@ describe("RulePage", () => {
     expect(section.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("switch")).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Turn on" }));
-    expect(screen.getByText("Reviewing Incident replies v2, replaces Incident replies")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: review Incident replies v2 replaces Incident replies");
     fireEvent.click(within(section).getByRole("button", { name: "Delete" }));
     fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("proposal-abc"));

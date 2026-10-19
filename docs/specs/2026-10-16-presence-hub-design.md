@@ -792,9 +792,17 @@ Revision 1 deviations that still hold, with the revision 3 part numbers:
   event key starts with `<service>.`, so a page can show fewer rows than it
   loaded. The `Search` box sends `q`, which the server matches; the place
   filter is the server's `place` param (Part F step 2).
-- **Receipts leave the chips (Part F step 2).** Admins open receipts under
-  a `Receipts` disclosure beside the list. The old `status=receipts` value
-  and the `/events?tab=receipts` redirect open the whole Log.
+- **Receipts leave the chips (Part F step 2).** Admins open the intake
+  trail under a `Diagnostics` disclosure beside the list. The disclosure
+  was `Receipts` until the copy lint banned "receipt" and "delivery"
+  (INV-H2); the stage list now reads `Intake stages`. The old
+  `status=receipts` value and the `/events?tab=receipts` redirect open the
+  whole Log.
+- **The editor opens on a named section (Part D step 1.6).** `EditorMode`
+  carries `initialSection`. A `Change` link opens that section, and
+  `Appears as` in an overflow menu opens `Appears as`. The team Slack
+  setup opens the editor on a Slack mention line for that team
+  (`preselected.team`).
 
 Revision 2 deviations that still hold:
 

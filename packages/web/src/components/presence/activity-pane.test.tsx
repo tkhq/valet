@@ -52,9 +52,7 @@ vi.mock("~/api/workflows", () => ({
 vi.mock("~/api/presence", () => ({
   usePresencePlaces: () => (places === undefined ? { isSuccess: false, data: undefined } : { isSuccess: true, data: { places } }),
 }));
-vi.mock("~/components/events/automation-wizard", () => ({
-  AutomationWizard: ({ startOn }: { startOn?: string }) => <p>{startOn === "routine" ? "New routine dialog" : "Other dialog"}</p>,
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgId: "org-1", orgRole: role }, error: null, isError: false }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => ({ ownerType: "user", ownerId: "u1" }) }));
 vi.mock("~/components/events/receipts-panel", async (importOriginal) => {
@@ -156,7 +154,7 @@ describe("ActivityPane rows", () => {
   it("keeps the deliveries and the receipt stages under a disclosure", () => {
     items = [eventItem("ev-mention", "slack.app_mention", "#incidents", [delivery({ thread: tInc })])];
     renderTab();
-    const disclosure = screen.getByText("Deliveries and receipt stages").closest("details")!;
+    const disclosure = screen.getByText("Attempts and intake stages").closest("details")!;
     expect(disclosure.open).toBe(false);
     expect(within(disclosure).queryByText("Incidents")).toBeNull();
     expect(receiptsQuery).not.toHaveBeenCalled();
@@ -172,10 +170,10 @@ describe("ActivityPane rows", () => {
     role = "member";
     items = [eventItem("ev-mention", "slack.app_mention", "#incidents", [delivery({ thread: tInc })])];
     renderTab();
-    const disclosure = screen.getByText("Deliveries and receipt stages").closest("details")!;
+    const disclosure = screen.getByText("Attempts and intake stages").closest("details")!;
     disclosure.open = true;
     fireEvent(disclosure, new Event("toggle"));
-    expect(within(disclosure).getByText("Receipt stages are available to organization administrators.")).toBeTruthy();
+    expect(within(disclosure).getByText("Intake stages are available to organization administrators.")).toBeTruthy();
   });
 
   it("names its window in the Terminology words", () => {
@@ -292,7 +290,7 @@ describe("ActivityPane place filter (spec Part C step 7)", () => {
 describe("ActivityPane receipts", () => {
   it("shows receipts under a disclosure for an admin", () => {
     renderTab();
-    const disclosure = screen.getByText("Receipts", { selector: "summary" }).closest("details")!;
+    const disclosure = screen.getByText("Diagnostics", { selector: "summary" }).closest("details")!;
     expect(disclosure.open).toBe(false);
     expect(within(disclosure).queryByText("Receipts list")).toBeNull();
     disclosure.open = true;
@@ -303,7 +301,7 @@ describe("ActivityPane receipts", () => {
   it("has no receipts disclosure for a member", () => {
     role = "member";
     renderTab();
-    expect(screen.queryByText("Receipts", { selector: "summary" })).toBeNull();
+    expect(screen.queryByText("Diagnostics", { selector: "summary" })).toBeNull();
   });
 });
 
@@ -325,9 +323,9 @@ describe("ActivityPane with no place and no routine", () => {
     renderTab();
     expect(screen.queryByText("Valet is not present anywhere yet.")).toBeNull();
     expect(screen.getByRole("group", { name: "Show" })).toBeTruthy();
-    expect(screen.queryByText("Other dialog")).toBeNull();
+    expect(screen.queryByTestId("line-editor")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    expect(screen.getByText("Other dialog")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create");
   });
 
   it("offers no Add with a place (Review Focus 1)", () => {

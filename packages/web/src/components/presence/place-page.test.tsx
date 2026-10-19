@@ -65,12 +65,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
 
 /** The wizard is its own suite's; here it records the place it opened on. */
 const wizardProps = vi.fn();
-vi.mock("~/components/events/automation-wizard", () => ({
-  AutomationWizard: (props: { preselectedPlace?: { subject: string; service: string; label: string } }) => {
-    wizardProps(props);
-    return <p>Wizard for {props.preselectedPlace?.label}</p>;
-  },
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 let meId = "u-001";
 vi.mock("~/api/settings", () => ({
@@ -79,12 +74,6 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] } }),
 }));
 
-/** The dialog is its own suite's; here it records the line and the field it opened on. */
-vi.mock("~/components/events/edit-subscription-dialog", () => ({
-  EditSubscriptionDialog: ({ sub, focus }: { sub: EventSubscriptionWire; focus?: string }) => (
-    <p>Editing {sub.name}{focus ? ` at ${focus}` : ""}</p>
-  ),
-}));
 
 /** The picker lists real threads in its own suite; here one pick stands in. */
 vi.mock("./thread-picker", () => ({
@@ -186,7 +175,6 @@ beforeEach(() => {
   scopeTeamId = undefined;
   getPresencePlace.mockReset();
   listThreads.mockReset();
-  wizardProps.mockReset();
   patchEventSubscription.mockReset();
   deleteEventSubscription.mockReset();
   meId = "u-001";
@@ -330,15 +318,11 @@ describe("PlacePage", () => {
     expect(following.getByRole("link", { name: /Slack thread/ }).getAttribute("href")).toBe("https://acme.slack.com/archives/C900/p1");
   });
 
-  it("opens the wizard on this place from Listen for… (P5)", async () => {
+  it("opens the editor on this place from Listen for… (P5)", async () => {
     getPresencePlace.mockResolvedValue(INCIDENTS);
     renderPage("slack:T1/C900");
     fireEvent.click(await screen.findByRole("button", { name: "Listen for…" }));
-    expect(screen.getByText("Wizard for #incidents")).toBeTruthy();
-    expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      open: true,
-      preselectedPlace: { subject: "slack:T1/C900", service: "slack", label: "#incidents" },
-    }));
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create place slack:T1/C900");
   });
 
   it("turns a line off and on from its switch", async () => {
@@ -357,17 +341,17 @@ describe("PlacePage", () => {
 
     await user.click(await screen.findByRole("button", { name: "More for Failed checks" }));
     await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    expect(screen.getByText("Editing Failed checks")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks");
   });
 
-  it("opens the edit dialog on its appearance field from Appears as", async () => {
+  it("opens the editor on Appears as from Appears as", async () => {
     const user = userEvent.setup();
     getPresencePlace.mockResolvedValue(ACME_API);
     renderPage("github:acme/api");
 
     await user.click(await screen.findByRole("button", { name: "More for Failed checks" }));
     await user.click(await screen.findByRole("menuitem", { name: "Appears as" }));
-    expect(screen.getByText("Editing Failed checks at appearance")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks at appears");
   });
 
   it("asks before Delete, then deletes the line", async () => {

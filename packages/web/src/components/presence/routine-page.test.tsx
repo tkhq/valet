@@ -76,13 +76,8 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
   useWorkspaceScope: () => ({ key: "user", teamId: undefined, available: ["user"], setKey: () => {} }),
 }));
 
-/** The dialog is its own suite's; here it records what it opened on and
- * whose threads its Runs in lists. */
-vi.mock("~/components/workflows/trigger-dialog", () => ({
-  TriggerDialog: ({ editing, workspace }: { editing?: WorkflowTriggerItem; workspace?: string }) => (
-    <p>{editing ? `Editing ${editing.name}${workspace ? ` in ${workspace}` : ""}` : "New routine dialog"}</p>
-  ),
-}));
+/** The editor is its own suite's; here it records the mode it opened on. */
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 vi.mock("./thread-picker", () => ({
   ThreadPicker: ({ workspace, onPick }: {
@@ -159,7 +154,7 @@ describe("RoutinePage", () => {
     await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
     expect(await screen.findByText("Fired. The routine runs now.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
     fireEvent.click(screen.getByRole("switch", { name: "Turn off Morning summary" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", { enabled: false }));
   });
@@ -217,10 +212,10 @@ describe("RoutinePage", () => {
     ]));
   });
 
-  it("opens the editor from a Change", async () => {
+  it("opens the editor on the section a Change names", async () => {
     wrap(<RoutinePage id="S1" />);
     fireEvent.click(await screen.findByRole("button", { name: "Change When" }));
-    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary at when");
   });
 
   it("names a pinned thread from the archived list", async () => {
@@ -280,12 +275,12 @@ describe("RoutinePage", () => {
     expect(screen.getByRole("menuitem", { name: "Delete" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("scopes Edit's Runs in to a team routine's team and marks the routine Team", async () => {
+  it("opens Edit on a team routine and marks the routine Team", async () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByText("Team")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByText("Editing Morning summary in team-sre")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
   });
 
   it("deletes the routine after the confirm, then opens Presence", async () => {
@@ -314,7 +309,7 @@ describe("RoutinePage", () => {
     const problem = await screen.findByRole("region", { name: "Problem" });
     expect(within(problem).getByText(reason)).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Edit the routine" }));
-    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
   });
 
   it("reads a routine as read-only until the viewer and the teams load", () => {

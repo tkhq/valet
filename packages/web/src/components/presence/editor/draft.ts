@@ -2,8 +2,7 @@
  * The editor's draft (docs/specs/2026-10-16-presence-hub-design.md Part H).
  * One state type holds a line or a routine while the reader edits it. Pure
  * functions fill it from a stored line or routine, change it, and turn it
- * into the exact create or patch body that the old wizard and edit dialogs
- * sent. The side pane reads its sentence from that body, so the sentence
+ * into the create or patch body that Create or Save sends. The side pane reads its sentence from that body, so the sentence
  * equals the stored sentence (INV-H7).
  */
 import { type Appearance, type AssistantThreadPolicy, validateAppearance } from "@valet/shared";
@@ -25,6 +24,7 @@ import { unionFilterFields, type CatalogService } from "~/components/events/subs
 import type { WhenService } from "~/components/events/wizard-preview";
 import { SLACK_APP_MENTION, selectsSlackMention, hasChannelScopeFilter, storedAnyChannel } from "~/lib/slack-mention";
 import { placeFilter, type PreselectedPlace } from "../place-filter";
+import type { SectionId } from "./section";
 import type { Routine } from "../routine-helpers";
 import {
   isCreatorScopeFilter,
@@ -49,12 +49,20 @@ export type DoKind = "reply" | "work" | "workflow";
 /** Which assistant acts. */
 export type AssistantKind = "user" | "team" | "org";
 
-/** What the editor opens on. */
-export type EditorMode =
-  | { kind: "create"; preselected?: { place?: PreselectedPlace; workflowId?: string; schedule?: boolean } }
+/**
+ * What the editor opens on. `initialSection` opens that section at once,
+ * such as a page's `Change` link under Where (spec Part D step 1.6).
+ */
+export type EditorMode = (
+  | {
+    kind: "create";
+    /** `team` starts a Slack mention line that the team's assistant answers (the team Slack setup). */
+    preselected?: { place?: PreselectedPlace; workflowId?: string; schedule?: boolean; team?: { id: string; name: string } };
+  }
   | { kind: "edit"; line: EventSubscriptionWire }
   | { kind: "edit-routine"; routine: Routine }
-  | { kind: "review"; line: EventSubscriptionWire; replaces?: { id: string; name: string } };
+  | { kind: "review"; line: EventSubscriptionWire; replaces?: { id: string; name: string } }
+) & { initialSection?: SectionId };
 
 /** Days of the week, a time, and a zone make the cron, unless a typed cron overrides them. */
 export interface ScheduleDraft {
@@ -163,7 +171,9 @@ export function newDraft(options: {
   teamId?: string;
   timezone: string;
 }): Draft {
-  const { preselected, teamId, timezone } = options;
+  const { preselected, timezone } = options;
+  const team = preselected?.team;
+  const teamId = team?.id ?? options.teamId;
   const place = preselected?.place;
   const placeRow = placeRowFor(place);
   const service: EditorService = preselected?.schedule ? "schedule" : place !== undefined && isWhen(place.service) ? place.service : "slack";
@@ -171,7 +181,7 @@ export function newDraft(options: {
   return {
     service,
     schedule: defaultSchedule(timezone),
-    events: new Set(),
+    events: team !== undefined && service === "slack" ? new Set([SLACK_APP_MENTION]) : new Set(),
     conditions: placeRow !== null ? [placeRow] : [],
     creatorScopeId: null,
     placeRow,
@@ -194,7 +204,7 @@ export function newDraft(options: {
   };
 }
 
-/** The stored creator scope row of a mention line (see the edit dialog). */
+/** The stored creator scope row of a mention line. */
 function creatorScopeId(sub: EventSubscriptionWire, rows: readonly UiFilterRow[]): string | null {
   const team = sub.target.kind === "assistant" && sub.target.assistant === "team";
   if (team || !selectsSlackMention(sub.eventKeys)) return null;

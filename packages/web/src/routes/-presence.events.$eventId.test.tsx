@@ -182,7 +182,7 @@ describe("EventDetailBody", () => {
 
     expect(redeliverMutate).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("status").textContent).toBe(
-      "Queued 2 deliveries. The result appears in this list.",
+      "Queued the event for 2 lines. The result appears in this list.",
     );
   });
 
@@ -203,7 +203,7 @@ describe("EventDetailBody", () => {
   it("keeps the receipt stages under a disclosure and loads them when it opens", () => {
     receiptsQuery.mockClear();
     render(<EventDetailBody data={detailData} />);
-    const disclosure = screen.getByText("Receipt stages").closest("details")!;
+    const disclosure = screen.getByText("Intake stages").closest("details")!;
     expect(disclosure.open).toBe(false);
     expect(receiptsQuery).toHaveBeenLastCalledWith("org-1", { q: "evt_1", limit: 5 }, false);
     expect(screen.queryByText("Event stored")).toBeNull();

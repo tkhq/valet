@@ -39,7 +39,11 @@ function localDay(at: number): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-/** A day heading: `Today`, `Yesterday`, or the date. `now` pins the day in tests. */
+/**
+ * A day heading: `Today`, `Yesterday`, or the date. `now` pins the day in
+ * tests. Days here are the viewer's local days. The health strip's pulse
+ * counts UTC days, as the api does (`perDayCounts` in health-strip.tsx).
+ */
 export function dayHeading(at: number, now: number = Date.now()): string {
   const days = Math.round((localDay(now) - localDay(at)) / DAY_MS);
   if (days === 0) return "Today";

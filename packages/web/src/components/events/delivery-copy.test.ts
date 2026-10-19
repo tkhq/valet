@@ -121,7 +121,7 @@ describe("scheduledRetryCount", () => {
 describe("redeliverConfirmDescription", () => {
   it("names how many subscriptions and runs the press starts", () => {
     expect(redeliverConfirmDescription(2, 0)).toBe(
-      "This event matches up to 2 lines in Presence that are on. Each match creates one delivery, so this can start up to 2 runs.",
+      "This event matches up to 2 lines in Presence that are on. Each match can start one run, so this can start up to 2 runs.",
     );
   });
 
@@ -139,7 +139,7 @@ describe("redeliverResultText", () => {
   it("reports a zero-created redelivery as a real outcome", () => {
     expect(redeliverResultText(0)).toContain("Nothing was queued");
     expect(redeliverResultText(0)).toContain("Turn on or edit what should match in Presence");
-    expect(redeliverResultText(2)).toBe("Queued 2 deliveries. The result appears in this list.");
-    expect(redeliverResultText(1)).toBe("Queued 1 delivery. The result appears in this list.");
+    expect(redeliverResultText(2)).toBe("Queued the event for 2 lines. The result appears in this list.");
+    expect(redeliverResultText(1)).toBe("Queued the event for 1 line. The result appears in this list.");
   });
 });

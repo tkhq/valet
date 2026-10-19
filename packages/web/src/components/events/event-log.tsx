@@ -78,7 +78,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
       />
       {admin && (
         <details onToggle={(event) => setReceiptsOpen(event.currentTarget.open)} className="text-sm">
-          <summary className="cursor-pointer text-muted hover:text-ink">Receipts</summary>
+          <summary className="cursor-pointer text-muted hover:text-ink">Diagnostics</summary>
           {/* The receipts list loads only when the reader opens it. */}
           {receiptsOpen && <div className="mt-3"><ReceiptsPanel /></div>}
         </details>

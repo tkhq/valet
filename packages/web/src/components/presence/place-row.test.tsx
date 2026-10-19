@@ -45,16 +45,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 vi.mock("~/api/settings", async () => (await import("./test-fixtures")).memberSettings);
 
-const wizardProps = vi.fn();
-vi.mock("~/components/events/automation-wizard", () => ({
-  AutomationWizard: (props: { preselectedPlace?: { subject: string; service: string; label: string } }) => {
-    wizardProps(props);
-    return <p>Wizard for {props.preselectedPlace?.label}</p>;
-  },
-}));
-vi.mock("~/components/events/edit-subscription-dialog", () => ({
-  EditSubscriptionDialog: ({ sub, focus }: { sub: EventSubscriptionWire; focus?: string }) => <p>Editing {sub.name}{focus ? ` at ${focus}` : ""}</p>,
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 vi.mock("~/components/events/team-slack-setup", () => ({
   TeamSlackSetupModal: ({ teamId }: { teamId: string }) => <p>Channel dialog for {teamId}</p>,
 }));
@@ -133,7 +124,6 @@ function isCard(element: Element): boolean {
 beforeEach(() => {
   listThreads.mockReset();
   patchEventSubscription.mockReset();
-  wizardProps.mockReset();
   listThreads.mockImplementation(async (_sessionId, opts) => ({
     threads: opts?.archived ? [PLATFORM_CI] : [],
   }));
@@ -232,16 +222,13 @@ describe("PlaceRow", () => {
     expect(screen.queryByText(/^Appears as/)).toBeNull();
   });
 
-  it("opens the wizard fixed on the place from a quiet + Listen for…", () => {
+  it("opens the editor fixed on the place from a quiet + Listen for…", () => {
     renderRow(block({}));
     const add = screen.getByRole("button", { name: "+ Listen for…" });
     expect(add.className).toContain("text-xs");
     expect(add.className).toContain("text-muted");
     fireEvent.click(add);
-    expect(screen.getByText("Wizard for acme/api")).toBeTruthy();
-    expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      preselectedPlace: { subject: "github:acme/api", service: "github", label: "acme/api" },
-    }));
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create place github:acme/api");
   });
 
   it("names a Slack service place with no Slack row as text, and keeps a named channel list", () => {
@@ -265,9 +252,7 @@ describe("PlaceRow", () => {
       "When you mention Valet in #a or #b, reply in a new thread.",
     ]);
     fireEvent.click(screen.getByRole("button", { name: "+ Listen for…" }));
-    expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      preselectedPlace: { subject: "slack:*", service: "slack", label: "Slack" },
-    }));
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create place slack:*");
   });
 });
 

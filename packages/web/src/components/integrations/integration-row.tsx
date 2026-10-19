@@ -77,8 +77,8 @@ export function isVisibleService(service: PluginServiceSummary): boolean {
 }
 
 /** True when the caller connected the service or the organization's
- * credential provides it. The Integrations groups and the wizard's When
- * step read the same rule. */
+ * credential provides it. The Integrations groups and the editor's When
+ * section read the same rule. */
 export function isConnected(service: PluginServiceSummary): boolean {
   return service.connected || service.connect === "org";
 }

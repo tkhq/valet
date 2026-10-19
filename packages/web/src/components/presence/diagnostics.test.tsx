@@ -37,7 +37,7 @@ describe("Diagnostics", () => {
   it("reads a record as the event and this line's decision, and its last stage in words", () => {
     expect(receiptLine(RECEIPT, "R4")).toBe("Completed check · excluded by its filters");
     expect(receiptLine(RECEIPT, "other")).toBe("Completed check");
-    expect(lastStageInWords(RECEIPT)).toBe("Delivery queue: Delivery queued");
+    expect(lastStageInWords(RECEIPT)).toBe("Send queue: Queued to send");
   });
 
   it("lists the records under a closed disclosure with its muted line", async () => {

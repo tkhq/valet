@@ -100,7 +100,7 @@ function ReceiptDisclosure({ eventId, deliveries }: { eventId: string; deliverie
   const [open, setOpen] = useState(false);
   return (
     <details className="px-4 pb-3 text-sm sm:pl-5" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary className="cursor-pointer text-xs text-muted hover:text-ink">Deliveries and receipt stages</summary>
+      <summary className="cursor-pointer text-xs text-muted hover:text-ink">Attempts and intake stages</summary>
       {open && (
         <div className="mt-2 space-y-3">
           <DeliveryList deliveries={deliveries} />

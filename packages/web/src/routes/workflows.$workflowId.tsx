@@ -41,7 +41,7 @@ import { WorkflowPreview } from "~/components/workflows/preview";
 import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
-import type { TriggerKind } from "~/components/workflows/trigger-dialog";
+import type { TriggerKind } from "~/components/workflows/triggers-drawer";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
 import { blobUrl } from "~/lib/blob-url";

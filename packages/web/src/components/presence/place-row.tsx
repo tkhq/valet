@@ -7,7 +7,7 @@
  * row's overflow menu offers `Choose channels`, which opens the team's
  * channel dialog (`TeamSlackSetupModal`, the dialog `ListenButton` opens). The sentence column holds one sentence row per
  * line of presence, one `Appears as` line when a line sets an appearance,
- * and a quiet `+ Listen for…` that opens the wizard fixed on the place. At
+ * and a quiet `+ Listen for…` that opens the editor fixed on the place. At
  * phone width the place column stacks above the sentence column. The row
  * names the place, so a sentence leaves out its `<in|on> <place>` clause.
  */
@@ -15,7 +15,6 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import type { EventSubscriptionWire } from "@valet/api/wire";
-import { AutomationWizard } from "~/components/events/automation-wizard";
 import { TeamSlackSetupModal } from "~/components/events/team-slack-setup";
 import {
   Avatar, AvatarFallback, AvatarImage, Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -24,6 +23,7 @@ import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { announceCreated } from "./created-highlight";
+import { LineEditor } from "./editor/line-editor";
 import type { PlaceBlockData } from "./overview-groups";
 import { PresenceLine } from "./presence-line";
 import { appearanceName, hasAppearance, usePresenceSentenceParts } from "./presence-rows";
@@ -80,7 +80,7 @@ export function PlaceRow({ block, highlighted = false }: {
   const choosesChannels = teamId !== undefined && block.service === "slack";
   const sentence = usePresenceSentenceParts(block.lines);
   const active = activeThreadsText(block.activeThreadCount);
-  const wizardLabel = block.serviceWide ? SERVICE_NAMES[block.service] : block.label;
+  const placeLabel = block.serviceWide ? SERVICE_NAMES[block.service] : block.label;
   const appearing = block.lines.find(hasAppearance);
   return (
     <section
@@ -136,14 +136,12 @@ export function PlaceRow({ block, highlighted = false }: {
         </Button>
       </div>
       {choosing && teamId !== undefined && <TeamSlackSetupModal key={teamId} teamId={teamId} onOpenChange={setChoosing} />}
-      {adding && (
-        <AutomationWizard
-          open
-          onOpenChange={setAdding}
-          onCreated={announceCreated}
-          preselectedPlace={{ subject: block.subject, service: block.service, label: wizardLabel }}
-        />
-      )}
+      <LineEditor
+        open={adding}
+        onOpenChange={setAdding}
+        onSaved={announceCreated}
+        mode={{ kind: "create", preselected: { place: { subject: block.subject, service: block.service, label: placeLabel } } }}
+      />
     </section>
   );
 }

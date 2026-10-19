@@ -19,6 +19,9 @@ const BAR_MIN = 2;
 /**
  * Counts per UTC day for the last 30 days, oldest first, today last, as the
  * api counts a line's `perDay`. A time outside the window does not count.
+ * The Activity timeline groups its days in the viewer's zone instead
+ * (`dayHeading` in line-activity.tsx), so near midnight one event can sit
+ * on a different day in each.
  */
 export function perDayCounts(times: readonly number[], now: number = Date.now()): number[] {
   const today = Math.floor(now / DAY_MS);

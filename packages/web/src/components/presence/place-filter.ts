@@ -1,5 +1,5 @@
 /**
- * The filter that names one place, read from its key. The wizard uses it to
+ * The filter that names one place, read from its key. The editor uses it to
  * open on a place: **Add** on a place page preselects the place's service and
  * this filter (docs/specs/2026-10-16-presence-hub-design.md Part B step 3).
  *
@@ -9,7 +9,7 @@
  */
 import type { PresencePlaceService } from "@valet/api/wire";
 
-/** The place a wizard opens on. `label` is the concrete name, such as `#incidents`. */
+/** The place the editor opens on. `label` is the concrete name, such as `#incidents`. */
 export interface PreselectedPlace {
   subject: string;
   service: PresencePlaceService;

@@ -48,7 +48,7 @@ export function PresenceDetailPage({
       <Breadcrumb crumbs={crumbs} />
       {mark !== undefined
         ? (
-          <div className="mt-2 flex items-center gap-2.5">
+          <div className="mt-2 flex items-start gap-2.5">
             {mark}
             <h1 aria-label={titleContent !== undefined ? title : undefined} className="min-w-0 break-words font-display text-2xl text-ink">{titleContent ?? title}</h1>
           </div>

@@ -3,44 +3,47 @@ import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { useEventSubscriptions } from "~/api/events";
 import { useWorkflowTriggers } from "~/api/workflows";
-import { AutomationWizard } from "~/components/events/automation-wizard";
+import { announceCreated } from "~/components/presence/created-highlight";
+import { LineEditor } from "~/components/presence/editor/line-editor";
 import { PresenceRow, usePresenceSentence } from "~/components/presence/presence-rows";
 import { ProblemBadge } from "~/components/presence/problem-badge";
 import { isRoutine, routineWhen, useRoutineSentence } from "~/components/presence/routine-helpers";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { WebhookSection } from "./webhook-section";
-import type { TriggerKind } from "./trigger-dialog";
+
+/** What a new workflow was made to run on: a schedule or an event. */
+export type TriggerKind = "schedule" | "event";
 
 /**
  * What starts one workflow, in the editor's side panel
  * (docs/specs/2026-10-16-presence-hub-design.md Part F step 2): the webhook
- * URL, then each listener and routine that runs it, as its Part C or Part D
- * sentence. A row opens the listener or routine page, where it is edited.
- * **Add** opens the wizard with this workflow as the target.
+ * URL, then each line and routine that runs it, as its Part C or Part D
+ * sentence. A row opens the line's or the routine's page, where it is edited.
+ * **Add** opens the editor with this workflow as the target.
  *
  * `startNew` comes from the new-workflow dialog: the workflow was just
- * created to run on a schedule or on an event, so the wizard opens at once.
+ * created to run on a schedule or on an event, so the editor opens at once.
  */
 export function TriggersPanel({ workflowId, startNew }: { workflowId: string; startNew?: TriggerKind }) {
   const triggersQ = useWorkflowTriggers(workflowId);
   const routines = (triggersQ.data?.triggers ?? []).filter(isRoutine);
-  // A listener is an event rule whose target is this workflow. The rules
+  // A line here is one whose target is this workflow. The rules
   // list carries the filters and the target the sentence reads.
   const subscriptionsQ = useEventSubscriptions();
-  const listeners = (subscriptionsQ.data?.subscriptions ?? []).filter(
+  const lines = (subscriptionsQ.data?.subscriptions ?? []).filter(
     (sub) => sub.target.kind === "workflow" && sub.target.workflowId === workflowId,
   );
-  const presenceSentence = usePresenceSentence(listeners);
+  const presenceSentence = usePresenceSentence(lines);
   const routineSentence = useRoutineSentence(routines);
-  // The flow the open wizard starts on, or null while it is closed.
+  // What the open editor starts on, or null while it is closed.
   const [adding, setAdding] = useState<"event" | "routine" | null>(
     startNew === "schedule" ? "routine" : startNew === "event" ? "event" : null,
   );
 
   const pending = triggersQ.isPending || subscriptionsQ.isPending;
   const failed = triggersQ.error ?? subscriptionsQ.error;
-  const empty = !pending && failed == null && listeners.length === 0 && routines.length === 0;
+  const empty = !pending && failed == null && lines.length === 0 && routines.length === 0;
 
   return (
     <div className="space-y-6 px-4 py-3">
@@ -63,7 +66,7 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
             Nothing starts this workflow yet. Select Add to run it when something happens or at a set time.
           </EmptyRow>
         )}
-        {listeners.map((sub) => <PresenceRow key={sub.id} sub={sub} sentence={presenceSentence(sub)} />)}
+        {lines.map((sub) => <PresenceRow key={sub.id} sub={sub} sentence={presenceSentence(sub)} />)}
         {routines.map((routine) => (
           <WorkRow
             key={routine.id}
@@ -78,14 +81,12 @@ export function TriggersPanel({ workflowId, startNew }: { workflowId: string; st
           />
         ))}
       </WorkSection>
-      {adding !== null && (
-        <AutomationWizard
-          open
-          onOpenChange={(open) => { if (!open) setAdding(null); }}
-          preselectedWorkflowId={workflowId}
-          startOn={adding}
-        />
-      )}
+      <LineEditor
+        open={adding !== null}
+        onOpenChange={(open) => { if (!open) setAdding(null); }}
+        mode={{ kind: "create", preselected: { workflowId, ...(adding === "routine" ? { schedule: true } : {}) } }}
+        onSaved={announceCreated}
+      />
     </div>
   );
 }

@@ -25,6 +25,8 @@
  * routine the scheduler turned off, or no connected service. P15 seeds the
  * routine's `disabledReason`; the api suite covers the scheduler that sets it.
  */
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
@@ -687,55 +689,49 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(following.getByRole("link", { name: /Slack thread/ })).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Recent activity" })).getByRole("link", { name: "Mention in #incidents" })).toBeTruthy();
 
-    // P5: + Listen for… on the overview's #incidents row opens the wizard
-    // fixed on the place. The When step offers only Slack, and the preview
-    // reads the default line. Create stores the policy `{ mode: "new" }`, and
-    // the row shows the new line.
+    // P5: + Listen for… on the overview's #incidents row opens the editor
+    // fixed on the place. When offers only Slack, and the side pane reads
+    // the line. Create stores the policy `{ mode: "new" }`, and the row
+    // shows the new line.
     await crumbToOverview(router);
     const incidentsRow = await screen.findByRole("region", { name: "#incidents" });
     await userEvent.click(within(incidentsRow).getByRole("button", { name: "+ Listen for…" }));
-    const wizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
-    expect(within(wizard.getByRole("group", { name: "When" })).getAllByRole("radio").map((r) => r.parentElement?.textContent))
-      .toEqual(["Something happens in Slack"]);
-    const preview = wizard.getByTestId("wizard-preview");
-    expect(preview.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
-    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
-    expect(wizard.getByRole("button", { name: "Remove #incidents" })).toBeTruthy();
-    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
-    // A reply has four steps like every flow: Runs in has its own.
-    expect(wizard.getByText("Step 3 of 4: Runs in")).toBeTruthy();
-    await userEvent.click(wizard.getByRole("button", { name: "Next" }));
-    await userEvent.type(wizard.getByLabelText("Name"), "Incident replies");
-    await userEvent.click(wizard.getByRole("button", { name: "Create" }));
+    const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    expect(within(editor.getByRole("group", { name: "Service" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Slack"]);
+    await userEvent.click(editor.getByLabelText("Someone mentions Valet"));
+    expect(editor.getByRole("button", { name: /^Remove .*#incidents/ })).toBeTruthy();
+    expect(editor.getAllByTestId("editor-sentence")[0]!.textContent).toBe("When someone mentions Valet in #incidents, reply in a new thread.");
+    await userEvent.click(editor.getByRole("button", { name: "Change Name" }));
+    await userEvent.clear(editor.getByRole("textbox", { name: "Name" }));
+    await userEvent.type(editor.getByRole("textbox", { name: "Name" }), "Incident replies");
+    await userEvent.click(editor.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(created).toHaveLength(1));
     expect(created[0]!.eventKeys).toEqual(["slack.app_mention"]);
     expect(created[0]!.filters).toEqual([{ field: "channel", op: "eq", value: "C900", label: "#incidents" }]);
     expect(created[0]!.target).toMatchObject({ kind: "assistant", thread: { mode: "new" } });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Listen for…" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Incident replies" })).toBeNull());
     expect(await within(incidentsRow).findByText("Incident replies")).toBeTruthy();
     expect(sentences(incidentsRow)).toContain("When someone mentions Valet, reply in a new thread.");
 
-    // P6: Add, then On a schedule. The When step offers all four choices,
-    // the preview reads the Part E sentence, and the new row shows Next and
-    // Fire now under On a schedule.
+    // P6: Add, then On a schedule. When offers every service, the side
+    // pane reads the Part E sentence, and the new row shows Next and Fire
+    // now under On a schedule.
     await switchWorkspace("SRE", "Personal");
     await screen.findByRole("region", { name: "acme/api" });
     await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
-    const routineWizard = within(await screen.findByRole("dialog"));
-    const when = within(routineWizard.getByRole("group", { name: "When" }));
-    expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
-      "Something happens in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
+    const routineWizard = within(await screen.findByRole("dialog", { name: "New" }));
+    expect(within(routineWizard.getByRole("group", { name: "Service" })).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Slack", "GitHub", "Linear", "On a schedule",
     ]);
-    await userEvent.click(when.getByLabelText("On a schedule"));
-    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
-    // The day and time control opens on weekdays at 9:00; the cron stays under Advanced.
-    expect((routineWizard.getByLabelText("Cron") as HTMLInputElement).value).toBe("0 9 * * 1-5");
+    await userEvent.click(routineWizard.getByRole("button", { name: "On a schedule" }));
+    // The day and time control opens on weekdays at 9:00.
     await userEvent.selectOptions(routineWizard.getByLabelText("Timezone"), "UTC");
-    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
-    await userEvent.type(routineWizard.getByLabelText("Prompt"), "Summarize open incidents.");
-    await userEvent.click(routineWizard.getByRole("button", { name: "Next" }));
-    await userEvent.type(routineWizard.getByLabelText("Routine name"), "Incident digest");
-    expect(routineWizard.getByTestId("wizard-preview").textContent).toBe("Every weekday at 9:00, Incident digest: work in its own thread.");
+    await userEvent.click(routineWizard.getByRole("button", { name: "Change Do" }));
+    await userEvent.type(routineWizard.getByLabelText("Instructions (required)"), "Summarize open incidents.");
+    await userEvent.click(routineWizard.getByRole("button", { name: "Change Name" }));
+    await userEvent.clear(routineWizard.getByRole("textbox", { name: "Name" }));
+    await userEvent.type(routineWizard.getByRole("textbox", { name: "Name" }), "Incident digest");
+    expect(routineWizard.getAllByTestId("editor-sentence")[0]!.textContent).toBe("Every weekday at 9:00, Incident digest: work in its own thread.");
     await userEvent.click(routineWizard.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(createdRoutines).toHaveLength(1));
     expect(createdRoutines[0]).toMatchObject({ name: "Incident digest", cron: "0 9 * * 1-5", timezone: "UTC" });
@@ -805,7 +801,7 @@ describe("Presence hub acceptance (P1 to P17)", () => {
 
     // P10: Workflows has the list and a Runs view at its own URL. The
     // editor's panel lists the workflow's lines and routines as sentences,
-    // and its Add opens the wizard fixed on the workflow.
+    // and its Add opens the editor fixed on the workflow.
     await switchWorkspace("SRE", "Personal");
     await userEvent.click(within(nav).getByRole("link", { name: "Workflows" }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/workflows"));
@@ -819,11 +815,11 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(await panel.findByRole("link", { name: "When a check completes on acme/api, run Triage failures." })).toBeTruthy();
     expect(panel.getByRole("link", { name: "Every day at 2:00, Nightly triage: run Triage failures." })).toBeTruthy();
     await userEvent.click(panel.getByRole("button", { name: "Add" }));
-    const addWizard = within(await screen.findByRole("dialog", { name: "Listen for…" }));
-    const doChoices = within(addWizard.getByRole("group", { name: "Do" })).getAllByRole("radio");
-    const enabled = doChoices.filter((radio) => !(radio instanceof HTMLInputElement && radio.disabled));
-    expect(enabled.map((radio) => radio.parentElement?.textContent)).toEqual(["Run a workflow"]);
-    expect(enabled[0]).toHaveProperty("checked", true);
+    const addEditor = within(await screen.findByRole("dialog", { name: "New" }));
+    await userEvent.click(addEditor.getByRole("button", { name: "Change Do" }));
+    const doChoices = within(addEditor.getByRole("radiogroup", { name: "Do" }));
+    expect(doChoices.getByRole("radio", { name: "Run a workflow" })).toHaveProperty("checked", true);
+    expect(addEditor.getByLabelText("Workflow")).toHaveProperty("value", "wf-1");
     await userEvent.keyboard("{Escape}");
 
     // P12: each old URL redirects, and none returns a 404.
@@ -889,11 +885,12 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(screen.queryByRole("switch", { name: "Turn on Checks only" })).toBeNull();
 
     await userEvent.click(proposal.getByRole("button", { name: "Turn on" }));
-    const review = within(await screen.findByRole("dialog", { name: "Review Checks only" }));
-    await userEvent.click(review.getByRole("button", { name: "Turn on Checks only" }));
+    const review = within(await screen.findByRole("dialog", { name: "Checks only" }));
+    expect(review.getByText(/Proposed by the assistant/)).toBeTruthy();
+    await userEvent.click(review.getByRole("button", { name: "Turn on" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toMatchObject({ id: "proposal-1", body: { enabled: true } });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Review Checks only" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Checks only" })).toBeNull());
     await waitFor(() => expect(screen.queryByRole("region", { name: "Proposal" })).toBeNull());
     expect(await screen.findByRole("switch", { name: "Turn off Checks only" })).toBeTruthy();
 
@@ -956,18 +953,62 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     mountApp("/presence");
     await screen.findByRole("region", { name: "acme/api" });
     await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
-    const when = within(within(await screen.findByRole("dialog")).getByRole("group", { name: "When" }));
-    await waitFor(() => expect(when.getByLabelText("On a schedule")).toHaveProperty("checked", true));
-    for (const [choice, service] of [
-      ["Something happens in Slack", "Slack"],
-      ["Something happens on GitHub", "GitHub"],
-      ["Something happens in Linear", "Linear"],
-    ] as const) {
-      const radio = when.getByLabelText(choice);
-      expect(radio).toHaveProperty("disabled", true);
-      const choiceRow = radio.closest("label")?.parentElement;
-      if (choiceRow == null) throw new Error(`${choice} has no row.`);
-      expect(within(choiceRow).getByRole("link", { name: `Connect ${service} first` }).getAttribute("href")).toBe("/integrations");
+    const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    const service = within(editor.getByRole("group", { name: "Service" }));
+    await waitFor(() => expect(service.getByRole("button", { name: "On a schedule" }).getAttribute("aria-pressed")).toBe("true"));
+    for (const name of ["Slack", "GitHub", "Linear"]) {
+      const button = service.getByRole("button", { name: new RegExp(`^${name}`) });
+      expect(button).toHaveProperty("disabled", true);
+      expect(button.textContent).toContain("Connect first");
+    }
+    expect(service.getByRole("link", { name: "Integrations" }).getAttribute("href")).toBe("/integrations");
+  });
+
+  it("INV-H8: Add, a place row, a line's Edit, a proposal's Turn on, and a workflow open one editor", { timeout: 60_000 }, async () => {
+    rules.user = [R1, R4_BROKEN, PROPOSAL];
+    const router = mountApp("/presence");
+    const SECTIONS = ["When", "Do", "Where", "Appears as", "Name"];
+    /** The section names of the open editor, then Esc closes it. */
+    async function editorSections(name: string): Promise<string[]> {
+      const editor = await screen.findByRole("dialog", { name });
+      const names = [...editor.querySelectorAll("[data-section] h2")].map((heading) => heading.textContent ?? "");
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name })).toBeNull());
+      return names;
+    }
+
+    await screen.findByRole("region", { name: "acme/api" });
+    await userEvent.click(within(overviewHeader()).getByRole("button", { name: "Add" }));
+    expect(await editorSections("New")).toEqual(SECTIONS);
+
+    const acme = screen.getByRole("region", { name: "acme/api" });
+    await userEvent.click(within(acme).getByRole("button", { name: "+ Listen for…" }));
+    expect(await editorSections("New")).toEqual(SECTIONS);
+
+    await userEvent.click(within(acme).getByRole("button", { name: "More for Reviews and checks" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(await editorSections("Reviews and checks")).toEqual(SECTIONS);
+
+    await act(async () => { await router.navigate({ to: "/presence/rules/$id", params: { id: "proposal-1" } }); });
+    await userEvent.click(within(await screen.findByRole("region", { name: "Proposal" })).getByRole("button", { name: "Turn on" }));
+    expect(await editorSections("Checks only")).toEqual(SECTIONS);
+
+    await act(async () => { await router.navigate({ to: "/workflows/$workflowId", params: { workflowId: "wf-1" } }); });
+    await userEvent.click(await screen.findByRole("button", { name: "What starts it" }));
+    await userEvent.click(within(await screen.findByRole("region", { name: "What starts it" })).getByRole("button", { name: "Add" }));
+    expect(await editorSections("New")).toEqual(SECTIONS);
+  });
+
+  it("INV-H8: the wizard and the edit dialogs are gone", () => {
+    const root = resolve(__dirname, "..");
+    for (const file of [
+      "components/events/automation-wizard.tsx",
+      "components/events/automation-review.tsx",
+      "components/events/edit-subscription-dialog.tsx",
+      "components/workflows/trigger-dialog.tsx",
+      "components/presence/runs-in-field.tsx",
+    ]) {
+      expect(existsSync(resolve(root, file)), file).toBe(false);
     }
   });
 

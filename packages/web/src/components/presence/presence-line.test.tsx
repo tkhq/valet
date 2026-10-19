@@ -41,9 +41,7 @@ vi.mock("~/api/settings", async () => ({
   ...(await import("./test-fixtures")).memberSettings,
   useTeams: () => ({ data: { teams } }),
 }));
-vi.mock("~/components/events/edit-subscription-dialog", () => ({
-  EditSubscriptionDialog: ({ sub }: { sub: EventSubscriptionWire }) => <p>Editing {sub.name}</p>,
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 import { PresenceLine } from "./presence-line";
 import { line } from "./test-fixtures";

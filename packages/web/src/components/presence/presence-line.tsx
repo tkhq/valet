@@ -18,39 +18,32 @@ import { MoreHorizontal } from "lucide-react";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import { useDeleteEventSubscription, useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
 import { usePinnedThreadTitle } from "~/api/rule";
-import { useWorkflows } from "~/api/workflows";
-import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import {
   Badge, Button, ConfirmDialog, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Switch,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
+import { LineEditor } from "./editor/line-editor";
 import { ThreadProblem, isPinProblem } from "./problem-badge";
 import {
   OwnerBadge, deleteLineDescription, isProposal, lineWorkspace, pausedByTeam, pausedByTeamText, pausingTeamId,
-  pinnedTitle, storedPolicy, targetLabel, teamName, useLineAccess, type TeamLike,
+  pinnedTitle, storedPolicy, teamName, useLineAccess, type TeamLike,
 } from "./presence-rows";
 import { Sentence } from "./sentence";
 import { partsText, type SentencePart } from "./sentences";
-import { useSentenceNames } from "./use-sentence-names";
 
 export function PresenceLine({ sub, sentence }: {
   sub: EventSubscriptionWire;
   /** The line's sentence. As parts, its places, threads, workflows, and people read as tokens. */
   sentence: string | readonly SentencePart[];
 }) {
-  const workflows = useWorkflows();
   const patch = usePatchEventSubscription();
   const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
-  const names = useSentenceNames();
   const { readOnly, readOnlyText, teams } = useLineAccess(sub);
   const [editing, setEditing] = useState<"line" | "appearance" | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const workflowNames = workflows.data?.workflows ?? [];
-  const workflowId = sub.target.kind === "workflow" ? sub.target.workflowId : undefined;
-  const workflowName = workflowNames.find((w) => w.id === workflowId)?.name;
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
@@ -147,18 +140,11 @@ export function PresenceLine({ sub, sentence }: {
         </div>
       )}
       {error && <p role="alert" className="col-span-full text-sm text-danger-500">{error}</p>}
-      {editing !== null && (
-        <EditSubscriptionDialog
-          open
-          onOpenChange={(open) => { if (!open) setEditing(null); }}
-          sub={sub}
-          targetLabel={targetLabel(sub, workflowName)}
-          focus={editing === "appearance" ? "appearance" : undefined}
-          names={names}
-          threadTitles={pinTitles}
-          workflows={workflowNames}
-        />
-      )}
+      <LineEditor
+        open={editing !== null}
+        onOpenChange={(open) => { if (!open) setEditing(null); }}
+        mode={{ kind: "edit", line: sub, initialSection: editing === "appearance" ? "appears" : undefined }}
+      />
       <DeleteLineDialog sub={sub} teams={teams} open={deleting} onOpenChange={setDeleting} />
     </div>
   );

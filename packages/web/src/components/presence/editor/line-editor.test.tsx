@@ -225,6 +225,19 @@ describe("LineEditor", () => {
     expect(shown).toBe("When a check completes on acme/api, work in the Platform CI thread.");
   });
 
+  it("opens the section a launcher names, and only that one", () => {
+    renderEditor({ kind: "edit", line: CHECK_LINE, initialSection: "where" });
+    expect(openSections()).toEqual(["where"]);
+  });
+
+  it("starts a Slack mention line for a preselected team (the team Slack setup)", () => {
+    renderEditor({ kind: "create", preselected: { team: { id: "t_platform", name: "Platform" } } });
+    expect(screen.getByRole("button", { name: "Slack" }).getAttribute("aria-pressed")).toBe("true");
+    expect(summary("when")).toContain("mentions Valet");
+    fireEvent.click(screen.getByRole("button", { name: "Change Do" }));
+    expect((screen.getByRole("radio", { name: "Platform's assistant" }) as HTMLInputElement).checked).toBe(true);
+  });
+
   it("fixes the service when launched from a place", () => {
     renderEditor({ kind: "create", preselected: { place: INCIDENTS } });
     expect(sentence()).toContain("#incidents");

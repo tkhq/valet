@@ -13,10 +13,11 @@ import { useState } from "react";
 import { Plus, X } from "lucide-react";
 import type { PresencePlaceWire } from "@valet/api/wire";
 import { usePresencePlaces } from "~/api/presence";
-import { AutomationWizard } from "~/components/events/automation-wizard";
 import { EventLog, type LogFilter, type LogService } from "~/components/events/event-log";
 import { Button } from "~/components/primitives";
 import { textParam } from "~/lib/search-params";
+import { announceCreated } from "./created-highlight";
+import { LineEditor } from "./editor/line-editor";
 import { useNotPresentAnywhere } from "./onboarding";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { isServiceRoot, SERVICE_NAMES } from "./places";
@@ -117,7 +118,7 @@ export function ActivityPane({ search, onSearchChange }: {
           ? { place: search.place, placeName: placeName(search.place, places.data?.places ?? []) }
           : {})}
       />
-      {adding && <AutomationWizard open onOpenChange={setAdding} />}
+      <LineEditor open={adding} onOpenChange={setAdding} mode={{ kind: "create" }} onSaved={announceCreated} />
     </PresenceDetailPage>
   );
 }

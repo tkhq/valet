@@ -8,7 +8,7 @@ import { Button, type ButtonProps, Dialog, DialogContent, DialogFooter, Input } 
 import { errorText } from "~/lib/error-text";
 import { listenerFor, slackChannelListeners, teamListening } from "~/lib/slack-listeners";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
-import { AutomationWizard } from "./automation-wizard";
+import { LineEditor } from "~/components/presence/editor/line-editor";
 
 /**
  * The dashboard's setup prompt, shown only until the team listens somewhere.
@@ -61,7 +61,7 @@ export function ListenButton({ teamId, children, ...props }: { teamId: string; c
           onOpenChange={changeOpen}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            // Loading and the wizard use separate dialog contents. Only
+            // Loading and the editor use separate dialog contents. Only
             // restore the trigger when setup closes, not between those states.
             if (closing.current) trigger.current?.focus();
           }}
@@ -73,7 +73,7 @@ export function ListenButton({ teamId, children, ...props }: { teamId: string; c
 
 /**
  * The team's Slack channel dialog: setup notices, the channel picker, or
- * the advanced wizard. `ListenButton` and a Presence Slack row's `Choose
+ * the editor for the full reply setup. `ListenButton` and a Presence Slack row's `Choose
  * channels` both open it.
  */
 export function TeamSlackSetupModal({
@@ -131,11 +131,11 @@ export function TeamSlackSetupModal({
     );
   } else if (advanced) {
     return (
-      <AutomationWizard
+      <LineEditor
         key={teamId}
         open
         onOpenChange={onOpenChange}
-        replyTeam={{ id: team.id, name: team.name }}
+        mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }}
         onCloseAutoFocus={onCloseAutoFocus}
       />
     );

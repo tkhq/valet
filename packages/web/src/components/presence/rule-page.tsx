@@ -8,7 +8,7 @@
  * Diagnostics.
  *
  * A line the assistant proposed shows its review above the health strip:
- * what turning it on turns off, **Turn on** (the edit dialog in review
+ * what turning it on turns off, **Turn on** (the editor in review
  * mode) and **Delete**. A viewer who may not change the line reads who may.
  */
 import { useState } from "react";
@@ -21,13 +21,15 @@ import { placeOfSubject, usePlaceSubject } from "~/api/presence";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe } from "~/api/settings";
 import { useTriggerCatalog, useWorkflows } from "~/api/workflows";
-import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import {
   Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, ErrorRow, LoadingRow, Switch,
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
+import { selectsSlackMention } from "~/lib/slack-mention";
 import { Diagnostics } from "./diagnostics";
+import { LineEditor, type EditorMode } from "./editor/line-editor";
+import type { SectionId } from "./editor/section";
 import { HealthStrip } from "./health-strip";
 import { HowItWorks, type HowColumn } from "./how-it-works";
 import { ActivityTimeline, type TimelineEntry } from "./line-activity";
@@ -35,7 +37,7 @@ import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } f
 import { DeleteLineDialog, PausedLine } from "./presence-line";
 import { ThreadProblem, isPinProblem, pinProblemText } from "./problem-badge";
 import {
-  OwnerBadge, isProposal, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, targetLabel, useLineAccess,
+  OwnerBadge, isProposal, lineWorkspace, pausedByTeam, pinnedTitle, storedPolicy, useLineAccess,
 } from "./presence-rows";
 import { Ref } from "./ref";
 import { Sentence } from "./sentence";
@@ -110,7 +112,7 @@ export function lineColumns(
     ? { section: "where", value: [{ kind: "text", text: "in a workflow run" }], explanation: "A workflow run has no thread. Open the run from Activity to follow it." }
     : (() => {
       const policy = displayThreadPolicy(sub.target, sub.eventKeys);
-      return { section: "where", value: whereParts(policy, subjectKind, threads), explanation: whereExplanation(policy, subjectKind) };
+      return { section: "where", value: whereParts(policy, subjectKind, threads), explanation: whereExplanation(policy, subjectKind, "presence", { mention: selectsSlackMention(sub.eventKeys) }) };
     })();
   return [
     { section: "when", value: whenParts, explanation: whenExplanation(sub.filters, sub.eventKeys) },
@@ -152,7 +154,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const place = linePlace(sub);
   const placeKey = usePlaceSubject(place?.key ?? "");
   const { readOnly, readOnlyText, teams } = useLineAccess(sub);
-  const [editing, setEditing] = useState<"edit" | "review" | "appearance" | null>(null);
+  // What the editor opens on, or null while it is closed.
+  const [editing, setEditing] = useState<{ review: boolean; section?: SectionId } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -193,6 +196,10 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
     patch.mutate({ id: sub.id, body }, { onError: (err) => setError(errorText(err)) });
   }
 
+  const editorMode: EditorMode = editing?.review === true
+    ? { kind: "review", line: sub, ...(replaced !== undefined ? { replaces: { id: replaced.id, name: replaced.name } } : {}) }
+    : { kind: "edit", line: sub, ...(editing?.section !== undefined ? { initialSection: editing.section } : {}) };
+
   return (
     <PresenceDetailPage
       crumbs={crumbs}
@@ -218,7 +225,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
               </label>
             )}
             <span className="ml-auto flex items-center gap-2">
-              <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing("edit")}>Edit</Button>
+              <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing({ review: false })}>Edit</Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button type="button" variant="ghost" size="icon" aria-label={`More for ${sub.name}`}>
@@ -226,7 +233,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem disabled={readOnly} onSelect={() => setEditing("appearance")}>Appears as</DropdownMenuItem>
+                  <DropdownMenuItem disabled={readOnly} onSelect={() => setEditing({ review: false, section: "appears" })}>Appears as</DropdownMenuItem>
                   {!proposal && (
                     <DropdownMenuItem disabled={readOnly} className="text-danger-500" onSelect={() => setDeleting(true)}>
                       Delete
@@ -253,7 +260,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
                 ? <p className="text-xs text-muted">{readOnlyText}</p>
                 : (
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" onClick={() => setEditing("review")}>Turn on</Button>
+                    <Button size="sm" onClick={() => setEditing({ review: true })}>Turn on</Button>
                     <Button size="sm" variant="secondary" onClick={() => setDeleting(true)}>Delete</Button>
                   </div>
                 )}
@@ -283,7 +290,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
           )}
         </section>
 
-        <HowItWorks columns={columns} readOnly={readOnly} onChange={() => setEditing("edit")} />
+        <HowItWorks columns={columns} readOnly={readOnly} onChange={(section) => setEditing({ review: false, section })} />
 
         <ActivityTimeline
           entries={entries}
@@ -298,20 +305,14 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
 
         {me.data?.orgRole === "admin" && <Diagnostics id={sub.id} name={sub.name} />}
 
-        {editing !== null && (
-          <EditSubscriptionDialog
-            open
-            onOpenChange={(open) => { if (!open) setEditing(null); }}
-            sub={sub}
-            targetLabel={targetLabel(sub, workflowName)}
-            review={editing === "review"}
-            replacesNote={editing === "review" ? replaced?.name : undefined}
-            focus={editing === "appearance" ? "appearance" : undefined}
-            names={names}
-            threadTitles={pinTitles}
-            workflows={workflowNames}
-          />
-        )}
+        <LineEditor
+          open={editing !== null}
+          onOpenChange={(open) => { if (!open) setEditing(null); }}
+          mode={editorMode}
+          // The line itself refetches with the subscription list; the
+          // Activity refetches here so the change reads at once.
+          onSaved={() => { void activityQ.refetch(); }}
+        />
         <DeleteLineDialog
           sub={sub}
           teams={teams}

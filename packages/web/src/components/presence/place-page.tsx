@@ -13,8 +13,9 @@ import { usePresencePlace } from "~/api/presence";
 import {
   Avatar, AvatarFallback, AvatarImage, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection, textLinkClass,
 } from "~/components/primitives";
-import { AutomationWizard } from "~/components/events/automation-wizard";
 import { errorText } from "~/lib/error-text";
+import { announceCreated } from "./created-highlight";
+import { LineEditor } from "./editor/line-editor";
 import { PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { PresenceLine } from "./presence-line";
 import { appearanceName, hasAppearance, usePresenceSentenceParts } from "./presence-rows";
@@ -79,13 +80,12 @@ export function PlaceBody({ data }: { data: PresencePlaceDetailResponse }) {
           </div>
         )}
       </WorkSection>
-      {adding && (
-        <AutomationWizard
-          open
-          onOpenChange={setAdding}
-          preselectedPlace={{ subject: place.subject, service: place.service, label: place.label }}
-        />
-      )}
+      <LineEditor
+        open={adding}
+        onOpenChange={setAdding}
+        onSaved={announceCreated}
+        mode={{ kind: "create", preselected: { place: { subject: place.subject, service: place.service, label: place.label } } }}
+      />
 
       <PlaceThreads threads={threads} service={place.service} label={place.label} />
 

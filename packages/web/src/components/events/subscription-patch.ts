@@ -1,13 +1,12 @@
 import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
 import { displayThreadPolicy, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
-import type { DeliveryPreferencesValue } from "./delivery-preferences";
 /**
- * The pure diff behind the edit-subscription dialog: compare the form state
- * against the stored row and build the PATCH body of only the changed
- * fields. Kept apart from the dialog so the rules are testable without a
- * render — the same split the trigger dialog's edit branch encodes inline.
+ * The pure diff behind the editor's Save: compare the draft against the
+ * stored line and build the PATCH body of only the changed fields. Kept
+ * apart from the editor so the rules are testable without a render.
  */
 import type {
+  EventDeliveryPolicy,
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
   PatchEventSubscriptionRequest,
@@ -15,6 +14,9 @@ import type {
 import { selectsSlackMention, storedAnyChannel } from "~/lib/slack-mention";
 import { sameWireFilters } from "./filter-editor";
 import type { PromptFieldsValue } from "./prompt-fields";
+
+/** A personal line's choice when a team line also matches the event. */
+export type DeliveryPreferencesValue = { deliveryPolicy: EventDeliveryPolicy; pauseOnOverlap: boolean };
 
 function sameKeySet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;

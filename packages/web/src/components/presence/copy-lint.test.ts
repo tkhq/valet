@@ -16,13 +16,7 @@ const SRC = resolve(__dirname, "../..");
 /** Dialogs outside components/presence that the hub opens. Their copy is
  * Presence copy too. */
 const HUB_DIALOGS = [
-  "components/workflows/trigger-dialog.tsx",
   "components/workflows/triggers-drawer.tsx",
-  "components/events/edit-subscription-dialog.tsx",
-  "components/events/delivery-preferences.tsx",
-  "components/events/event-match-step.tsx",
-  "components/events/automation-review.tsx",
-  "components/events/automation-wizard.tsx",
   "components/events/wizard-preview.ts",
   "components/events/delivery-list.tsx",
   "components/events/delivery-copy.ts",
@@ -31,7 +25,6 @@ const HUB_DIALOGS = [
   "components/events/team-slack-setup.tsx",
   "components/events/collision-notice.tsx",
   "components/events/filter-editor.tsx",
-  "components/events/prompt-fields.tsx",
   "components/events/redeliver-button.tsx",
   "routes/workflows.index.tsx",
   "routes/workflows.$workflowId.tsx",
@@ -40,7 +33,7 @@ const HUB_DIALOGS = [
   "components/settings/teams-panel.tsx",
   "components/session/background-work.tsx",
 ] as const;
-const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter"] as const;
+const BANNED = ["listener", "automation", "subscription", "trigger", "subject", "rule", "event waiter", "delivery", "receipt", "Runs in"] as const;
 const BANNED_RE = new RegExp(`\\b(${BANNED.join("|")})`, "gi");
 const ALLOW_RE = /\/\/\s*copy-lint:\s*allow\s+([a-z ]+?)\s*$/i;
 
@@ -151,7 +144,7 @@ function lintCopy(file: string, source: string): CopyHit[] {
       // A template's text parts count as copy only when the template is not
       // in a code position; check against the whole template expression.
       const template = node.parent && ts.isTemplateSpan(node.parent) ? node.parent.parent : node.parent;
-      if (template && !isNonCopyPosition(template) && !/^[/~?]/.test(node.text)) {
+      if (template && !isNonCopyPosition(template) && !/^[/~?]/.test(node.text) && !looksLikeCodeValue(node.text.trim())) {
         for (const match of node.text.matchAll(BANNED_RE)) {
           const word = match[1].toLowerCase();
           const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line;
@@ -181,6 +174,8 @@ describe("Presence copy lint (INV-H2)", () => {
         'const d = "Pick a subject";',
         'const e = `${n} triggers fired`;',
         'const f = { mode: "subject" as const, label: `One thread per ${kind ?? "subject"}` };',
+        'const g = <p>Runs in a new thread</p>;',
+        'const h = "No delivery receipt yet";',
       ].join("\n"),
     );
     expect(hits.map((hit) => [hit.line, hit.word])).toEqual([
@@ -188,10 +183,13 @@ describe("Presence copy lint (INV-H2)", () => {
       [6, "automation"],
       [9, "trigger"],
       [10, "subject"],
+      [11, "runs in"],
+      [12, "delivery"],
+      [12, "receipt"],
     ]);
   });
 
-  it("reads the overview, its rows, the banner, onboarding, and the routine page", () => {
+  it("reads the overview, its rows, the banner, onboarding, the routine page, and the editor", () => {
     const read = new Set(sourceFiles().map((file) => file.slice(SRC.length + 1)));
     for (const file of [
       "components/presence/overview.tsx",
@@ -205,7 +203,8 @@ describe("Presence copy lint (INV-H2)", () => {
       "components/session/background-work.tsx",
       "components/events/team-slack-setup.tsx",
       "components/settings/teams-panel.tsx",
-      "components/events/delivery-preferences.tsx",
+      "components/presence/editor/line-editor.tsx",
+      "components/presence/editor/where-section.tsx",
     ]) {
       expect(read.has(file), file).toBe(true);
     }

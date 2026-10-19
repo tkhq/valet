@@ -174,11 +174,7 @@ vi.mock("~/api/settings", () => ({
 }));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
 
-/** The wizard has its own suite. A stub names the flow it opened on. */
-vi.mock("~/components/events/automation-wizard", () => ({
-  AutomationWizard: ({ open, startOn }: { open: boolean; startOn?: string }) =>
-    open ? <div role="dialog" aria-label={startOn === "routine" ? "New routine" : "Listen for…"} /> : null,
-}));
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 /** The assistant has a stable conversation address. SessionView renders its
  * header through a stub, so page tests do not need the chat transport. */
@@ -385,11 +381,11 @@ describe("WorkflowEditorPage", () => {
     expect(screen.queryByText(/Triggers/)).toBeNull();
   });
 
-  it("opens the wizard on a listener for this workflow when created from the new-workflow dialog", async () => {
+  it("opens the editor on a line for this workflow when created from the new-workflow dialog", async () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
-    expect(await screen.findByRole("dialog", { name: "Listen for…" })).toBeTruthy();
+    expect((await screen.findByTestId("line-editor")).textContent).toBe("Editor: create workflow wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

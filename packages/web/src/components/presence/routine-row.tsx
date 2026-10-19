@@ -19,9 +19,9 @@ import { useDeleteSchedule } from "~/api/workflows";
 import {
   Button, ConfirmDialog, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Switch,
 } from "~/components/primitives";
-import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
+import { LineEditor } from "./editor/line-editor";
 import { PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
 import { ThreadProblem, isPinProblem } from "./problem-badge";
 import { OwnerBadge, type TeamLike } from "./presence-rows";
@@ -151,7 +151,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
         </div>
         {children}
       </div>
-      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly workspace={workspace} />}
+      <LineEditor open={editing} onOpenChange={setEditing} mode={{ kind: "edit-routine", routine }} />
       <DeleteRoutineDialog routine={routine} teams={teams.data?.teams} open={deleting} onOpenChange={setDeleting} />
     </section>
   );

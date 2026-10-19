@@ -1,6 +1,6 @@
 /**
  * ThreadPicker: a searchable list of a workspace's open assistant threads,
- * newest first, each with its title and last activity. The **Runs in**
+ * newest first, each with its title and last activity. The **Where**
  * control uses it for the `existing` policy (docs/specs/2026-10-16-presence-hub-design.md
  * Part C step 2).
  *

@@ -495,14 +495,13 @@ describe("Presence overview", () => {
     expect(sentences(screen.getByRole("region", { name: "acme/api" }))).toContain("When a check completes, work in the Platform Ops thread.");
   });
 
-  it("opens the wizard on When with all four choices from Add", async () => {
+  it("opens the editor on When with every service from Add", async () => {
     mountOverview();
     await screen.findByRole("heading", { level: 2, name: "On a schedule" });
     await userEvent.click(screen.getByRole("button", { name: "Add" }));
-    const when = within(await screen.findByRole("group", { name: "When" }));
-    expect(when.getAllByRole("radio").map((radio) => radio.parentElement?.textContent)).toEqual([
-      "Something happens in Slack", "Something happens on GitHub", "Something happens in Linear", "On a schedule",
-    ]);
+    const editor = await screen.findByRole("dialog", { name: "New" });
+    const service = within(within(editor).getByRole("group", { name: "Service" }));
+    expect(service.getAllByRole("button").map((button) => button.textContent)).toEqual(["Slack", "GitHub", "Linear", "On a schedule"]);
   });
 
   it("anchors the On a schedule group at #schedule for the routine page's crumb", async () => {
@@ -516,14 +515,14 @@ describe("Presence overview", () => {
     mountOverview();
     await screen.findByRole("heading", { level: 2, name: "On a schedule" });
     await userEvent.click(screen.getByRole("button", { name: "Add" }));
-    await userEvent.click(within(await screen.findByRole("group", { name: "When" })).getByLabelText("On a schedule"));
-    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
-    await userEvent.type(screen.getByLabelText("Cron"), "0 9 * * 1-5");
-    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
-    await userEvent.type(screen.getByLabelText("Prompt"), "Daily digest");
-    await userEvent.click(screen.getByRole("button", { name: /^Next$/ }));
-    await userEvent.type(screen.getByLabelText("Routine name"), "Evening digest");
-    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    const editor = within(await screen.findByRole("dialog", { name: "New" }));
+    await userEvent.click(editor.getByRole("button", { name: "On a schedule" }));
+    await userEvent.click(editor.getByRole("button", { name: "Change Do" }));
+    await userEvent.type(editor.getByLabelText("Instructions (required)"), "Daily digest");
+    await userEvent.click(editor.getByRole("button", { name: "Change Name" }));
+    await userEvent.clear(editor.getByRole("textbox", { name: "Name" }));
+    await userEvent.type(editor.getByRole("textbox", { name: "Name" }), "Evening digest");
+    await userEvent.click(editor.getByRole("button", { name: "Create" }));
 
     const schedule = screen.getByRole("region", { name: "On a schedule" });
     await waitFor(() => expect(within(schedule).getByRole("region", { name: "Evening digest" })).toBeTruthy());

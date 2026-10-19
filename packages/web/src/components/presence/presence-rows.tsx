@@ -185,14 +185,6 @@ export function appearanceName(sub: EventSubscriptionWire): string {
   return sub.target.appearance?.displayName?.trim() || "Valet";
 }
 
-/** What a workflow target or an assistant target does, for the edit dialog's read-only line. */
-export function targetLabel(sub: EventSubscriptionWire, workflowName: string | undefined): string {
-  if (sub.target.kind === "workflow") return `Runs ${workflowName ?? "a workflow"}`;
-  if (sub.target.assistant === "org") return "The organization's assistant";
-  if (sub.target.assistant === "team") return "The team's assistant";
-  return "Your assistant";
-}
-
 /** A paused line says so beside its sentence. */
 export function PausedBadge({ sub }: { sub: EventSubscriptionWire }) {
   if (sub.enabled) return null;

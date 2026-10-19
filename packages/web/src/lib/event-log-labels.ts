@@ -14,10 +14,10 @@ const REASON_LABEL: Record<string, string> = {
   unlinked_sender: "Unlinked sender",
   channel_reply_failed: "Reply not posted",
   child_reply_failed: "Delegated reply not posted",
-  duplicate: "Duplicate delivery",
+  duplicate: "Duplicate event",
   unsupported_kind: "Unsupported message",
   unsupported_event: "Unhandled event type",
-  stale_delivery: "Delivery too old",
+  stale_delivery: "Event too old",
   verify_failed: "Verification failed",
   malformed_callback: "Malformed callback",
   unauthorized: "Not authorized",
@@ -33,8 +33,8 @@ export function problemStage(reason: string): string {
   if (reason === "filter_excluded") return "Filters";
   if (reason === "no_subscription_match") return "Match";
   if (reason.startsWith("workflow_")) return "Workflow routing";
-  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Receipt and verification";
-  return "Delivery and authorization";
+  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Intake and verification";
+  return "Sending and authorization";
 }
 
 /** A reason's label, or the raw reason when it has none, so nothing hides. */

@@ -80,6 +80,8 @@ export function LineEditor(props: {
   onOpenChange(open: boolean): void;
   mode: EditorMode;
   onSaved?(result: EditorSaved): void;
+  /** Where focus goes when the sheet closes, for a launcher that restores it itself. */
+  onCloseAutoFocus?(event: Event): void;
 }) {
   if (!props.open) return null;
   return <EditorSheet {...props} />;
@@ -130,10 +132,11 @@ function overlapTeamName(
   return other === undefined ? undefined : teamName(teams, other.ownerId);
 }
 
-function EditorSheet({ onOpenChange, mode, onSaved }: {
+function EditorSheet({ onOpenChange, mode, onSaved, onCloseAutoFocus }: {
   onOpenChange(open: boolean): void;
   mode: EditorMode;
   onSaved?(result: EditorSaved): void;
+  onCloseAutoFocus?(event: Event): void;
 }) {
   const phone = useIsPhone();
   const catalogQ = useEventCatalog();
@@ -152,7 +155,9 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
   const patchLine = usePatchEventSubscription();
   const createRoutine = useCreateSchedule();
   const updateRoutine = useUpdateSchedule();
-  const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
+  // A preselected team (the team Slack setup) wins over the active workspace.
+  const fixedTeam = mode.kind === "create" ? mode.preselected?.team : undefined;
+  const scopedTeam = fixedTeam ?? (ws?.kind === "team" ? ws.team : undefined);
 
   const storedPolicy = mode.kind === "edit" || mode.kind === "review"
     ? (mode.line.target.kind === "assistant" ? mode.line.target.thread : undefined)
@@ -163,8 +168,17 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
   const [draft, setDraft] = useState<Draft>(() => draftForMode(mode, { teamId: scopedTeam?.id, timezone: browserTimeZone() }));
   const [baseline, setBaseline] = useState(() => draftKey(draft));
   const dirty = draftKey(draft) !== baseline;
-  const [openSection, setOpenSection] = useState<SectionId | null>(mode.kind === "create" ? "when" : null);
+  const [openSection, setOpenSection] = useState<SectionId | null>(mode.initialSection ?? (mode.kind === "create" ? "when" : null));
   const [confirming, setConfirming] = useState(false);
+  // A section named at open time scrolls into view, so a `Change` link
+  // under Where lands on Where and not on the top of the form.
+  const initialSection = mode.initialSection;
+  const formRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (initialSection === undefined) return;
+    const el = formRef.current?.querySelector(`[data-section="${initialSection}"]`);
+    if (el instanceof HTMLElement && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "start" });
+  }, [initialSection]);
   const [error, setError] = useState<string | null>(null);
   const [collisions, setCollisions] = useState<{ report: EventSubscriptionCollisionsWire; committed: boolean } | null>(null);
 
@@ -179,7 +193,9 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
   // step 2). The connected services load after mount, so the default
   // applies once they arrive, unless a place, a schedule, or the reader
   // already chose.
-  const serviceTouched = useRef(mode.kind !== "create" || mode.preselected?.place !== undefined || mode.preselected?.schedule === true);
+  const serviceTouched = useRef(
+    mode.kind !== "create" || mode.preselected?.place !== undefined || mode.preselected?.schedule === true || fixedTeam !== undefined,
+  );
   useEffect(() => {
     if (connected === null || serviceTouched.current) return;
     serviceTouched.current = true;
@@ -190,7 +206,7 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
 
   // A new line starts on the active workspace's assistant and follows a
   // workspace switch until the reader picks one (CLAUDE.md: mount-time state).
-  const assistantTouched = useRef(mode.kind !== "create");
+  const assistantTouched = useRef(mode.kind !== "create" || fixedTeam !== undefined);
   const scopedTeamId = scopedTeam?.id;
   useEffect(() => {
     if (assistantTouched.current) return;
@@ -361,7 +377,7 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
       <DialogDescription className="sr-only">
         Choose when Valet acts, what it does, and where. The side pane reads the result.
       </DialogDescription>
-      <div>
+      <div ref={formRef}>
         <Section
           id="when"
           name="When"
@@ -441,6 +457,7 @@ function EditorSheet({ onOpenChange, mode, onSaved }: {
     <Dialog open onOpenChange={(next) => { if (!next) requestClose(); }}>
       <DialogContent
         hideClose
+        onCloseAutoFocus={onCloseAutoFocus}
         data-layout={phone ? "phone" : "wide"}
         className={cn(
           "h-[100dvh] max-h-[100dvh] w-full max-w-[1180px] gap-0 overflow-hidden p-0",

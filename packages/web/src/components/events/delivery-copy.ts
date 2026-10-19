@@ -39,7 +39,7 @@ export function deliveryStatusLine(delivery: EventDeliveryWire, now: number): st
     // A row without `claimedBy` comes from a viewer who may not open the
     // claiming thread. An older server still sends that thread's id.
     if (!delivery.claimedBy && delivery.lastError?.startsWith("Skipped, claimed by thread ")) return "Skipped, claimed by another thread.";
-    return delivery.lastError ?? "Skipped by delivery preferences";
+    return delivery.lastError ?? "Skipped because a team line also matches";
   }
   const attempts = `${delivery.attempts} ${plural(delivery.attempts, "attempt", "attempts")}`;
   switch (delivery.status) {
@@ -99,11 +99,11 @@ export function redeliverConfirmDescription(matchCount: number, scheduledCount: 
         ]
       : [
           `This event matches up to ${matchCount} ${plural(matchCount, "line", "lines")} in Presence that ${plural(matchCount, "is", "are")} on.`,
-          `Each match creates one delivery, so this can start up to ${matchCount} ${plural(matchCount, "run", "runs")}.`,
+          `Each match can start one run, so this can start up to ${matchCount} ${plural(matchCount, "run", "runs")}.`,
         ];
   if (scheduledCount > 0) {
     lines.push(
-      `${scheduledCount} earlier ${plural(scheduledCount, "delivery", "deliveries")} ${plural(scheduledCount, "is", "are")} still scheduled to retry.`,
+      `${scheduledCount} earlier ${plural(scheduledCount, "attempt", "attempts")} ${plural(scheduledCount, "is", "are")} still scheduled to retry.`,
       "Redelivery now can run the same work twice.",
     );
   }
@@ -116,5 +116,5 @@ export function redeliverResultText(created: number): string {
   if (created === 0) {
     return "Nothing was queued. Nothing in Presence that is on matches this event. Turn on or edit what should match in Presence, then redeliver.";
   }
-  return `Queued ${created} ${plural(created, "delivery", "deliveries")}. The result appears in this list.`;
+  return `Queued the event for ${created} ${plural(created, "line", "lines")}. The result appears in this list.`;
 }

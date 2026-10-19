@@ -23,8 +23,9 @@ import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTrigg
 import {
   Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, ErrorRow, LoadingRow, Switch,
 } from "~/components/primitives";
-import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
+import { LineEditor } from "./editor/line-editor";
+import type { SectionId } from "./editor/section";
 import { HealthStrip, perDayCounts } from "./health-strip";
 import { HowItWorks, type HowColumn } from "./how-it-works";
 import { ActivityTimeline, type TimelineEntry } from "./line-activity";
@@ -126,7 +127,8 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const workspace = routineWorkspace(routine);
   const workflowRoutine = routine.detail.targetKind === "workflow" && routine.workflowId !== undefined;
   const runsQ = useWorkflowRuns(workflowRoutine ? routine.workflowId ?? "" : "", { limit: 50 });
-  const [editing, setEditing] = useState(false);
+  // The section the editor opens on, "form" for none, or null while it is closed.
+  const [editing, setEditing] = useState<SectionId | "form" | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const workflowNames = workflows.data?.workflows ?? [];
@@ -179,7 +181,7 @@ function RoutineBody({ routine }: { routine: Routine }) {
           {routine.enabled && <span>{routineWhen(routine, ": ")}</span>}
           <span className="ml-auto flex items-center gap-2">
             <Button size="sm" variant="secondary" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
-            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing("form")}>Edit</Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button type="button" variant="ghost" size="icon" aria-label={`More for ${routine.name}`}>
@@ -220,14 +222,14 @@ function RoutineBody({ routine }: { routine: Routine }) {
             readOnlyText={readOnlyText}
             onPick={(thread) => save({ thread, enabled: true })}
             action={readOnly ? undefined : (
-              <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>Edit the routine</Button>
+              <Button size="sm" variant="secondary" onClick={() => setEditing("form")}>Edit the routine</Button>
             )}
             pending={update.isPending}
           />
         )}
       </section>
 
-      <HowItWorks columns={routineColumns(routine, workflowNames, pinTitles)} readOnly={readOnly} onChange={() => setEditing(true)} />
+      <HowItWorks columns={routineColumns(routine, workflowNames, pinTitles)} readOnly={readOnly} onChange={(section) => setEditing(section)} />
 
       <ActivityTimeline
         entries={firings}
@@ -241,7 +243,11 @@ function RoutineBody({ routine }: { routine: Routine }) {
           : "Nothing yet. Activity appears here when the routine fires."}
       />
 
-      {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly workspace={workspace} />}
+      <LineEditor
+        open={editing !== null}
+        onOpenChange={(open) => { if (!open) setEditing(null); }}
+        mode={{ kind: "edit-routine", routine, ...(editing !== null && editing !== "form" ? { initialSection: editing } : {}) }}
+      />
       <DeleteRoutineDialog
         routine={routine}
         teams={teams.data?.teams}

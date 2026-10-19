@@ -1,4 +1,4 @@
-import { AutomationWizard } from "~/components/events/automation-wizard";
+import { LineEditor } from "~/components/presence/editor/line-editor";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
@@ -747,7 +747,7 @@ function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean 
         <Link to="/presence" search={{ workspace: team.id }} className={textLinkClass}>Open Presence</Link>
         <Link to="/settings/notifications" className={textLinkClass}>My DM preferences</Link>
       </div>
-      {replySetup && <AutomationWizard key={team.id} open onOpenChange={setReplySetup} replyTeam={{ id: team.id, name: team.name }} />}
+      <LineEditor key={team.id} open={replySetup} onOpenChange={setReplySetup} mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }} />
     </SubSection>
   );
 }

@@ -111,7 +111,7 @@ export function ThreadProblem({
       {pin && readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (
-        <p className="text-xs text-muted">Select Edit, then choose another option under Runs in.</p>
+        <p className="text-xs text-muted">Select Edit, then choose another option under Where.</p>
       )}
       {!pin && action}
       {pending && <p className="text-xs text-muted">Saving…</p>}

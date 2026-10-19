@@ -60,12 +60,12 @@ describe("ThreadProblem", () => {
     expect(screen.getByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
     expect(screen.getByText("Only its owner can change this.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
-    expect(screen.queryByText("Select Edit, then choose another option under Runs in.")).toBeNull();
+    expect(screen.queryByText("Select Edit, then choose another option under Where.")).toBeNull();
   });
 
   it("names the edit path when no workspace lists threads", () => {
     render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} onPick={vi.fn()} />);
-    expect(screen.getByText("Select Edit, then choose another option under Runs in.")).toBeTruthy();
+    expect(screen.getByText("Select Edit, then choose another option under Where.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
   });
 

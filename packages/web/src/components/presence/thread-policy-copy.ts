@@ -1,5 +1,5 @@
 /**
- * Copy and defaults for a rule's thread policy, the **Runs in** control
+ * Copy and defaults for a rule's thread policy, the **Where** section
  * (docs/specs/2026-10-16-presence-hub-design.md Part C steps 2 and 3, and
  * docs/specs/2026-10-16-delivery-threads-and-claims-design.md Part A).
  * Pure, so the rules are tested without a render.
@@ -12,7 +12,7 @@ export type SubjectKind = "channel" | "pull request" | "issue" | "repository";
 /** What the policy belongs to: a line of presence (an event subscription) or a routine (a schedule). */
 export type RuleKind = "presence" | "routine";
 
-/** The wizard's outcomes, as far as the default policy cares. */
+/** What a new line does, as far as the default policy cares. */
 export type WizardOutcome = "reply" | "workflow" | "notify" | "advanced" | "schedule" | "thread";
 
 const GITHUB_PULL_REQUEST = /(^|[._])(pr|pull|pull_request|review|check|check_run|check_suite|status)([._]|$)/;
@@ -77,11 +77,11 @@ export function displayThreadPolicy(
   return { mode: "own" };
 }
 
-/** The note under Runs in when one thread would hold several Slack conversations. */
+/** The note under Where when one thread would hold several Slack conversations. */
 export const SHARED_SLACK_THREAD_NOTE = "Messages from several Slack conversations will share this thread.";
 
 /**
- * The wizard's starting policy: a mention rule replies in a new thread; a
+ * A new line's starting policy: a mention rule replies in a new thread; a
  * notification or a workflow event whose keys name a subject groups by that
  * subject; everything else uses the rule's own thread.
  */

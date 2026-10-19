@@ -94,15 +94,9 @@ vi.mock("~/api/events", () => ({
   }),
 }));
 
-/** The wizard is its own suite. Here the panel only has to open it with the
- * right preselection, so a stub records the props it was given. */
-const wizardProps = vi.fn();
-vi.mock("~/components/events/automation-wizard", () => ({
-  AutomationWizard: (props: { open: boolean; preselectedWorkflowId?: string; startOn?: string }) => {
-    wizardProps(props);
-    return props.open ? <div role="dialog" aria-label="Wizard" /> : null;
-  },
-}));
+/** The editor is its own suite. Here the panel only has to open it with the
+ * right preselection, so a stub reads the mode it was given. */
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 
 import { TriggersPanel } from "./triggers-drawer";
 
@@ -116,7 +110,6 @@ beforeEach(() => {
   mintMutate.mockClear();
   deleteWebhookMutate.mockClear();
   triggersFor.mockClear();
-  wizardProps.mockClear();
   webhookData = null;
   triggers = [nightly];
   subscriptions = [listener("sub_1", "wf_1"), listener("sub_other", "wf_2")];
@@ -176,25 +169,20 @@ describe("TriggersPanel: listeners and routines", () => {
     expect(container.textContent ?? "").not.toMatch(/trigger|subscription|automation/i);
   });
 
-  it("opens the wizard with this workflow preselected on Add", () => {
+  it("opens the editor with this workflow preselected on Add", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" />);
-    expect(screen.queryByRole("dialog", { name: "Wizard" })).toBeNull();
+    expect(screen.queryByTestId("line-editor")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    expect(screen.getByRole("dialog", { name: "Wizard" })).toBeTruthy();
-    expect(wizardProps).toHaveBeenLastCalledWith(expect.objectContaining({ open: true, preselectedWorkflowId: "wf_1" }));
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1");
   });
 
-  it("opens the wizard on a routine when the new-workflow dialog asked for a schedule", () => {
+  it("opens the editor on a routine when the new-workflow dialog asked for a schedule", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" startNew="schedule" />);
-    expect(wizardProps).toHaveBeenLastCalledWith(
-      expect.objectContaining({ open: true, preselectedWorkflowId: "wf_1", startOn: "routine" }),
-    );
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1 schedule");
   });
 
-  it("opens the wizard on a listener when the new-workflow dialog asked for an event", () => {
+  it("opens the editor on a line when the new-workflow dialog asked for an event", () => {
     renderPanel(<TriggersPanel workflowId="wf_1" startNew="event" />);
-    expect(wizardProps).toHaveBeenLastCalledWith(
-      expect.objectContaining({ open: true, preselectedWorkflowId: "wf_1", startOn: "event" }),
-    );
+    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: create workflow wf_1");
   });
 });

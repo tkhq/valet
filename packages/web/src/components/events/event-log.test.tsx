@@ -106,12 +106,12 @@ describe("EventLog", () => {
 
   it("offers receipts to admins only, under a disclosure beside the list", () => {
     renderLog();
-    expect(screen.queryByText("Receipts", { selector: "summary" })).toBeNull();
+    expect(screen.queryByText("Diagnostics", { selector: "summary" })).toBeNull();
     cleanup();
     role = "admin";
     items = [event];
     renderLog();
-    const disclosure = screen.getByText("Receipts", { selector: "summary" }).closest("details")!;
+    const disclosure = screen.getByText("Diagnostics", { selector: "summary" }).closest("details")!;
     expect(screen.queryByText("Receipts list")).toBeNull();
     disclosure.open = true;
     fireEvent(disclosure, new Event("toggle"));

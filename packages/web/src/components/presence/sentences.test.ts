@@ -34,7 +34,7 @@ import {
   presenceSentenceParts,
   routineSentence,
   routineSentenceParts,
-  runsInLabel,
+  whereLabel,
   scheduleZone,
   type RoutineLike,
 } from "./sentences";
@@ -587,18 +587,18 @@ describe("activitySentenceParts", () => {
   });
 });
 
-describe("runsInLabel", () => {
+describe("whereLabel", () => {
   it("labels each mode", () => {
-    expect(runsInLabel({ mode: "new" }, "channel", "presence")).toBe("A new thread each time");
-    expect(runsInLabel({ mode: "subject" }, "pull request", "presence")).toBe("One thread per pull request");
-    expect(runsInLabel({ mode: "own" }, null, "presence")).toBe("Its own thread");
-    expect(runsInLabel({ mode: "own" }, null, "routine")).toBe("This routine's thread");
-    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "routine", "Deploys"))
+    expect(whereLabel({ mode: "new" }, "channel", "presence")).toBe("A new thread each time");
+    expect(whereLabel({ mode: "subject" }, "pull request", "presence")).toBe("One thread per pull request");
+    expect(whereLabel({ mode: "own" }, null, "presence")).toBe("Its own thread");
+    expect(whereLabel({ mode: "own" }, null, "routine")).toBe("This routine's thread");
+    expect(whereLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "routine", "Deploys"))
       .toBe("The thread Deploys");
   });
 
   it("falls back when the picked thread has no known title", () => {
-    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "presence"))
+    expect(whereLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "presence"))
       .toBe("The thread you picked");
   });
 });
@@ -807,11 +807,16 @@ describe("How it works explanations (Part D step 1.6)", () => {
   it("reads Do as what Valet does and as whom", () => {
     const check = { eventKeys: ["github.check_run.completed"], target: { kind: "assistant" as const } };
     expect(partsText(doParts(check, []))).toBe("work on it as Valet");
+    // The default name is plain text; only a custom display name is a person token.
+    expect(doParts(check, [])).toEqual([{ kind: "text", text: "work on it as Valet" }]);
     expect(doExplanation(check, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
     const mention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const, appearance: { displayName: "Ops Bot" } } };
     expect(partsText(doParts(mention, []))).toBe("reply as Ops Bot");
     expect(doParts(mention, [])[1]).toEqual({ kind: "person", text: "Ops Bot" });
-    expect(doExplanation(mention, [])).toBe("Valet replies where it was mentioned. It appears as Ops Bot.");
+    expect(doExplanation(mention, [])).toBe("Valet reads the message and replies. It appears as Ops Bot.");
+    expect(whereExplanation({ mode: "new" }, "channel", "presence", { mention: true })).toBe(
+      "Valet replies where it was mentioned. Every event starts a fresh thread.",
+    );
     const workflow = { eventKeys: ["github.push"], target: { kind: "workflow" as const, workflowId: "wf-1" } };
     expect(partsText(doParts(workflow, [{ id: "wf-1", name: "Triage" }]))).toBe("run Triage");
     expect(doExplanation(workflow, [{ id: "wf-1", name: "Triage" }])).toBe("Valet starts the Triage workflow with the event as its input.");

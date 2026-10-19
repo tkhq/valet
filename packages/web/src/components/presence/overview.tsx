@@ -12,7 +12,7 @@
  * collapses to its heading and count. A group with a fault stays open, and
  * so does every place group while the filter has text.
  *
- * After a Create in one of the overview's wizards, the overview waits until
+ * After a Create in the editor, the overview waits until
  * its lists hold the new id, then scrolls the new line's place row, or the
  * `On a schedule` group for a routine, into view and marks it for two
  * seconds (spec Part H step 9).
@@ -21,16 +21,15 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import type { EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
-import type { CreatedTarget } from "~/components/events/automation-wizard";
 import { useEventSubscriptions } from "~/api/events";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
-import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Button, Input } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useListOwner } from "~/lib/use-list-owner";
 import { AttentionBanner } from "./attention-banner";
-import { announceCreated, clearCreated, useCreatedTarget } from "./created-highlight";
+import { announceCreated, clearCreated, useCreatedTarget, type CreatedTarget } from "./created-highlight";
+import { LineEditor } from "./editor/line-editor";
 import { Onboarding } from "./onboarding";
 import { COLLAPSE_THRESHOLD, countText, overviewGroups, type OverviewGroup } from "./overview-groups";
 import { CREATED_HIGHLIGHT_CLASS, PlaceRow, QUIET_ADD_CLASS } from "./place-row";
@@ -99,7 +98,7 @@ function useOverviewReads() {
 /**
  * The header's action pair (spec Part B step 1): **Activity**, a secondary
  * button that links to `/presence/activity`, and **Add**, the primary
- * button, which opens the wizard on When. The empty state keeps only Add.
+ * button, which opens the editor on When. The empty state keeps only Add.
  */
 export function OverviewActions() {
   const { data } = useOverviewReads();
@@ -116,7 +115,7 @@ export function OverviewActions() {
         <Plus aria-hidden className="h-3.5 w-3.5" />
         Add
       </Button>
-      {adding && <AutomationWizard open onOpenChange={setAdding} onCreated={announceCreated} />}
+      <LineEditor open={adding} onOpenChange={setAdding} mode={{ kind: "create" }} onSaved={announceCreated} />
     </div>
   );
 }
@@ -307,7 +306,7 @@ function ScheduleRows({ routines }: { routines: Routine[] }) {
           )}
         </RoutineRosterRow>
       ))}
-      {creating && <AutomationWizard open onOpenChange={setCreating} startOn="routine" onCreated={announceCreated} />}
+      <LineEditor open={creating} onOpenChange={setCreating} mode={{ kind: "create", preselected: { schedule: true } }} onSaved={announceCreated} />
     </>
   );
 }

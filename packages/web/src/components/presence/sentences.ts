@@ -39,11 +39,11 @@ type Catalog = GetWorkflowTriggerCatalogResponse["catalog"];
 type EventDescriptions = ReadonlyArray<{ entries: ReadonlyArray<{ key: string; description?: string }> }>;
 
 /**
- * Where a line's or a routine's deliveries land, as one phrase for the **Runs in** control.
+ * Where a line's or a routine's deliveries land, as one phrase for the editor's **Where**.
  * `threadTitle` names an `existing` thread; without it the phrase falls back
  * to a generic name.
  */
-export function runsInLabel(
+export function whereLabel(
   policy: AssistantThreadPolicy,
   subjectKind: SubjectKind | null,
   ruleKind: RuleKind,
@@ -335,8 +335,8 @@ function isMentionKey(key: string): boolean {
 /**
  * True for the creator scope filter the server adds to a personal, org, or
  * workflow mention line (api events/mention-scope.ts): an unlabeled `user`
- * filter with one value, as `eq` or a one-value `in`. The edit dialog uses
- * the same test to keep the filter out of its editor.
+ * filter with one value, as `eq` or a one-value `in`. The editor uses the
+ * same test to keep the filter out of its conditions.
  */
 export function isCreatorScopeFilter(filter: EventSubscriptionFilterWire): boolean {
   if (filter.field !== "user") return false;
@@ -563,7 +563,7 @@ export function presenceDoesParts(sub: EventSubscriptionWire, workflows: Workflo
 /**
  * What a line does, without where it runs, for the fact strip's Do: `reply`
  * for a conversation, `work on it` for other events, `run <workflow>` for a
- * workflow. The strip's Runs in names the thread.
+ * workflow. The Where names the thread.
  */
 export function presenceAction(sub: EventSubscriptionWire, workflows: WorkflowNames): string {
   if (sub.target.kind === "workflow") return partsText(workflowParts(workflows, sub.target.workflowId));
@@ -581,8 +581,8 @@ function appearanceParts(appearance: Appearance | undefined): SentencePart[] {
 
 /**
  * True when a line follows one Slack thread: every key is a Slack message
- * and a `thread_ts` filter names the thread (the wizard's `Follow a Slack
- * thread` outcome).
+ * and a `thread_ts` filter names the thread (a line that follows a Slack
+ * thread).
  */
 export function followsSlackThread(sub: Pick<EventSubscriptionWire, "eventKeys" | "filters">): boolean {
   return (
@@ -855,7 +855,7 @@ function skipReason(delivery: EventDeliveryWire): string {
   // Reuse the delivery list's wording, without its leading "Skipped" and
   // the dash that older skip text carries after it.
   const line = deliveryStatusLine(delivery, 0).replace(/^skipped(,| by)?\s*(\u2014\s*)?/i, "");
-  return asTail(line.length > 0 ? line : "delivery preferences");
+  return asTail(line.length > 0 ? line : "a team line also matches");
 }
 
 function activityThread(ref: EventDeliveryThreadRef, threads: ThreadTitles): ActivityThread {
@@ -1053,20 +1053,24 @@ function appearsAs(appearance: Appearance | undefined): string {
 
 /**
  * How it works, **Do**, as parts: what Valet does and as whom (`work on it
- * as Valet`, `reply as Ops Bot`), or `run <workflow>` for a workflow.
+ * as Valet`, `reply as Ops Bot`), or `run <workflow>` for a workflow. Only
+ * a custom display name reads as a person token; the default `Valet` is
+ * plain text.
  */
 export function doParts(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): SentencePart[] {
   const target = sub.target;
   if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
   const action = isConversational(sub.eventKeys) ? "reply" : "work on it";
-  return [text(`${action} as `), { kind: "person", text: appearsAs(target.appearance) }];
+  const custom = target.appearance?.displayName;
+  return hasText(custom) ? [text(`${action} as `), { kind: "person", text: custom }] : [text(`${action} as Valet`)];
 }
 
 /**
  * How it works, **Do**: one sentence of behavior (spec Part D step 1.6).
  * `Valet reads the event and acts in the thread. It appears as Ops Bot.`,
- * `Valet replies where it was mentioned.`, or `Valet starts the <workflow>
- * workflow with the event as its input.`
+ * `Valet reads the message and replies.`, or `Valet starts the <workflow>
+ * workflow with the event as its input.` Where the reply goes belongs to
+ * **Where** (`whereExplanation`).
  */
 export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): string {
   const target = sub.target;
@@ -1078,7 +1082,7 @@ export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "event
   }
   const appears = `It appears as ${appearsAs(target.appearance)}.`;
   return isConversational(sub.eventKeys)
-    ? `Valet replies where it was mentioned. ${appears}`
+    ? `Valet reads the message and replies. ${appears}`
     : `Valet reads the event and acts in the thread. ${appears}`;
 }
 
@@ -1103,12 +1107,20 @@ export function whereParts(
 /**
  * How it works, **Where**: the thread policy as behavior (spec Part D step
  * 1.6). A routine fires where an event arrives, so its words name a firing.
+ * A mention line also replies in the conversation it was mentioned in, so
+ * its words say that first.
  */
 export function whereExplanation(
   policy: AssistantThreadPolicy,
   subjectKind: SubjectKind | null,
   ruleKind: RuleKind = "presence",
+  options: { mention?: boolean } = {},
 ): string {
+  const policyWords = wherePolicyWords(policy, subjectKind, ruleKind);
+  return options.mention === true ? `Valet replies where it was mentioned. ${policyWords}` : policyWords;
+}
+
+function wherePolicyWords(policy: AssistantThreadPolicy, subjectKind: SubjectKind | null, ruleKind: RuleKind): string {
   const each = ruleKind === "routine" ? "firing" : "event";
   switch (policy.mode) {
     case "new":

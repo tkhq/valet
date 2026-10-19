@@ -1,6 +1,6 @@
 /**
  * The mark of a service on a tile tinted with the service's hue, for the
- * wizard's When choices, group headings, and the event picker. GitHub and
+ * editor's When choices, group headings, and the event picker. GitHub and
  * Linear use the `simple-icons` path that `ServiceIcon` already imports.
  * `simple-icons` has no Slack mark, so Slack gets a drawn four-bar hash. A
  * schedule gets a clock on the ink wash.

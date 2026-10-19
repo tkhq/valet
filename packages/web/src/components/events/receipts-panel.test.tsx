@@ -24,7 +24,7 @@ beforeEach(() => { role = "admin"; pending = false; error = null; data = fixture
 
 it("shows readable receipt details, ordered stages, decisions, and matched-event link", () => {
   render(<ReceiptsPanel />);
-  expect(screen.getByText(/Retained for up to 7 days or 10,000 receipts/)).toBeTruthy();
+  expect(screen.getByText(/Kept for up to 7 days or 10,000 incoming events/)).toBeTruthy();
   const details = screen.getByText(/Slack ·/).closest("details")!;
   fireEvent.click(within(details).getByText(/Slack ·/));
   expect(within(details).getByText("Channel")).toBeTruthy();
@@ -52,7 +52,7 @@ it("shows loading and empty states", () => {
   expect(screen.getByText("Loading incoming events…")).toBeTruthy();
   pending = false; data = { ...fixture, receipts: [], nextCursor: null };
   view.rerender(<ReceiptsPanel />);
-  expect(screen.getByText(/No receipts recorded in the last 7 days/)).toBeTruthy();
+  expect(screen.getByText(/No incoming events recorded in the last 7 days/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
 });
 
@@ -108,9 +108,9 @@ it("shows one event's receipt stages to an admin once the disclosure opens", () 
 
 it("keeps another event's receipt out, and tells a member who reads receipts", () => {
   render(<EventReceiptStages eventId="event-2" open />);
-  expect(screen.getByText(/No receipt recorded for this event/)).toBeTruthy();
+  expect(screen.getByText(/No intake record for this event/)).toBeTruthy();
   role = "member";
   render(<EventReceiptStages eventId="event-1" open />);
   expect(query).toHaveBeenLastCalledWith("org-1", { q: "event-1", limit: 5 }, false);
-  expect(screen.getByText("Receipt stages are available to organization administrators.")).toBeTruthy();
+  expect(screen.getByText("Intake stages are available to organization administrators.")).toBeTruthy();
 });
