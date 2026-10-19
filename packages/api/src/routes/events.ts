@@ -292,7 +292,7 @@ function collisionBlockMessage(
 ): string {
   const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
   const out =
-    way === "create" ? `save again with "Create anyway" to take over.`
+    way === "create" ? `choose "Create anyway" to keep both.`
     : way === "turn-on" ? `turn it on with "Turn on anyway".`
     : `save again with "Save anyway".`;
   return (

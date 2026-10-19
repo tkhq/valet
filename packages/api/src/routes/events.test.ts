@@ -2574,7 +2574,8 @@ describe("subscription collision gate (TKAI-294)", () => {
     const body = (await res.json()) as EventSubscriptionCollisionErrorWire;
     expect(body.error).toContain("narrow repo rule");
     // The editor's button for a create is "Create anyway".
-    expect(body.error).toContain('save again with "Create anyway" to take over.');
+    // Create anyway keeps both lines, so the text says that.
+    expect(body.error).toContain('Narrow its filters, or choose "Create anyway" to keep both.');
     expect(body.collisions.blocking).toHaveLength(1);
     expect(body.collisions.blocking[0].subscription.id).toBe("sub_narrow");
     expect(body.collisions.blocking[0].relation).toBe("superset");
