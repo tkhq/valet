@@ -660,9 +660,13 @@ describe("RulePage", () => {
   });
 
   it.each([
-    ["deleted", [] as EventSubscriptionWire[]],
-    ["off", [listener({ id: "R1", name: "Incident replies", enabled: false })]],
-  ])("offers Delete only for a proposal whose replaced line is %s (S6)", async (_state, others) => {
+    ["deleted", [] as EventSubscriptionWire[], "The line this proposal replaces is gone. Delete this proposal and make a new line."],
+    [
+      "off",
+      [listener({ id: "R1", name: "Incident replies", enabled: false })],
+      "Incident replies is already off. Turning this on could leave two versions replying. Turn Incident replies on first, or delete this proposal.",
+    ],
+  ])("offers Delete only for a proposal whose replaced line is %s (S6)", async (_state, others, text) => {
     const proposal = listener({
       id: "proposal-abc", name: "Incident replies v2", enabled: false,
       target: { kind: "assistant", thread: { mode: "new" }, replaces: "R1" },
@@ -670,7 +674,7 @@ describe("RulePage", () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [...others, proposal] });
     renderPage("proposal-abc");
     const section = await screen.findByRole("region", { name: "Proposal" });
-    expect(section.textContent).toContain("The line this proposal replaces is gone. Delete this proposal and make a new line.");
+    expect(section.textContent).toContain(text);
     expect(section.textContent).not.toContain("Turning it on turns off");
     expect(within(section).queryByRole("button", { name: "Turn on" })).toBeNull();
     expect(within(section).getByRole("button", { name: "Delete" })).toBeTruthy();

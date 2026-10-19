@@ -50,11 +50,15 @@ describe("SidePane", () => {
     expect(screen.getByRole("button", { name: "Turn on" })).toBeTruthy();
   });
 
-  it("offers no Turn on for a stale proposal", () => {
-    render(<SidePane {...props({ saveLabel: "Turn on", review: { stale: true } })} />);
-    expect(screen.getByRole("note").textContent).toBe(
-      "Proposed by the assistant. The line this proposal replaces is gone. Delete this proposal and make a new line.",
-    );
+  it.each([
+    [{ kind: "gone" } as const, "The line this proposal replaces is gone. Delete this proposal and make a new line."],
+    [
+      { kind: "off", name: "Old CI" } as const,
+      "Old CI is already off. Turning this on could leave two versions replying. Turn Old CI on first, or delete this proposal.",
+    ],
+  ])("offers no Turn on for a stale proposal (%o)", (stale, text) => {
+    render(<SidePane {...props({ saveLabel: "Turn on", review: { stale } })} />);
+    expect(screen.getByRole("note").textContent).toBe(`Proposed by the assistant. ${text}`);
     expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
   });
 

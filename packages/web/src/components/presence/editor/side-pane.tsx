@@ -13,6 +13,22 @@ import { Ref } from "../ref";
 import { Sentence } from "../sentence";
 import { eventInWords, SENTENCE_PLACE_FIELD_SET, type SentencePart } from "../sentences";
 
+/** Why a proposal cannot turn on: the line it replaces is gone, or that
+ * line is already off. */
+export type StaleProposal = { kind: "gone" } | { kind: "off"; name: string };
+
+/**
+ * The review text for a stale proposal. The rule page and the editor's
+ * review mode both show it. It follows the api's refusal
+ * (`staleReplacement` in packages/api/src/routes/events.ts): turning the
+ * proposal on while the replaced line is off could leave two versions
+ * replying.
+ */
+export function staleProposalText(stale: StaleProposal): string {
+  if (stale.kind === "gone") return "The line this proposal replaces is gone. Delete this proposal and make a new line.";
+  return `${stale.name} is already off. Turning this on could leave two versions replying. Turn ${stale.name} on first, or delete this proposal.`;
+}
+
 export interface SidePaneProps {
   title: string;
   sentence: readonly SentencePart[];
@@ -23,9 +39,9 @@ export interface SidePaneProps {
   notConnected?: string;
   /** What the draft still lacks, as warnings: a missing event or name. */
   missing?: readonly string[];
-  /** Review mode. `stale` is true when the line the proposal replaces is
+  /** Review mode. `stale` is set when the line the proposal replaces is
    * gone or already off: the server refuses Turn on (409), so none shows. */
-  review?: { replaces?: { id: string; name: string }; stale?: boolean };
+  review?: { replaces?: { id: string; name: string }; stale?: StaleProposal };
   editedAt?: number;
   /** Why Create or Save is off, or null when the draft is ready. */
   blocker: string | null;
@@ -105,7 +121,7 @@ export function SidePaneRest(props: SidePaneProps) {
   }, [props.confirmingDiscard]);
   const committed = collisions?.committed === true;
   const blocking = collisions !== null && collisions !== undefined && !collisions.committed && collisions.report.blocking.length > 0;
-  const stale = review?.stale === true;
+  const stale = review?.stale !== undefined;
   const anyway = props.saveLabel === "Create" ? "Create anyway" : props.saveLabel === "Turn on" ? "Turn on anyway" : "Save anyway";
 
   let footer: ReactNode;
@@ -170,8 +186,8 @@ export function SidePaneRest(props: SidePaneProps) {
       {review !== undefined && (
         <p role="note" className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">
           Proposed by the assistant.{" "}
-          {stale
-            ? "The line this proposal replaces is gone. Delete this proposal and make a new line."
+          {review.stale !== undefined
+            ? staleProposalText(review.stale)
             : review.replaces !== undefined
               ? <>Turning it on turns off <Ref kind="line" text={review.replaces.name} />.</>
               : "It stays off until you turn it on."}

@@ -64,7 +64,7 @@ import {
 } from "./draft";
 import { NameSection } from "./name-section";
 import { Section, type SectionId } from "./section";
-import { SentenceCard, SidePane, SidePaneRest, type SidePaneProps } from "./side-pane";
+import { SentenceCard, SidePane, SidePaneRest, type SidePaneProps, type StaleProposal } from "./side-pane";
 import { useIsPhone } from "./use-is-phone";
 import { WhenSection } from "./when-section";
 import { WhereSection, whereSummaryParts } from "./where-section";
@@ -310,7 +310,9 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     ? (mode.line.target.kind === "assistant" ? mode.line.target.replaces : undefined) ?? mode.replaces?.id
     : undefined;
   const replacedRow = replacesId === undefined ? undefined : subsQ.data?.subscriptions.find((sub) => sub.id === replacesId);
-  const staleProposal = replacesId !== undefined && subsQ.data !== undefined && replacedRow?.enabled !== true;
+  const staleProposal: StaleProposal | undefined = replacesId === undefined || subsQ.data === undefined || replacedRow?.enabled === true
+    ? undefined
+    : replacedRow === undefined ? { kind: "gone" } : { kind: "off", name: replacedRow.name };
   const pending = createLine.isPending || patchLine.isPending || createRoutine.isPending || updateRoutine.isPending;
 
   const assistants: AssistantOption[] = [
@@ -345,7 +347,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   }
 
   function save(allowCollision = false) {
-    if (blocker !== null || pending || frozen || staleProposal) return;
+    if (blocker !== null || pending || frozen || staleProposal !== undefined) return;
     if (isEmptyBody(body)) {
       close();
       return;

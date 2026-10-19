@@ -467,18 +467,20 @@ describe("LineEditor", () => {
   });
 
   it.each([
-    ["deleted", [] as EventSubscriptionWire[]],
-    ["already off", [line("l0", { name: "Old CI", enabled: false })]],
-  ])("offers no Turn on when the replaced line is %s", (_case, rows) => {
+    ["deleted", [] as EventSubscriptionWire[], "The line this proposal replaces is gone. Delete this proposal and make a new line."],
+    [
+      "already off",
+      [line("l0", { name: "Old CI", enabled: false })],
+      "Old CI is already off. Turning this on could leave two versions replying. Turn Old CI on first, or delete this proposal.",
+    ],
+  ])("offers no Turn on when the replaced line is %s", (_case, rows, text) => {
     subscriptions = rows;
     const proposal = line("proposal-2", {
       name: "New CI", enabled: false, eventKeys: ["github.check_run.completed"],
       target: { kind: "assistant", assistant: "user", thread: { mode: "own" }, replaces: "l0" },
     });
     renderEditor({ kind: "review", line: proposal, ...(rows.length > 0 ? { replaces: { id: "l0", name: "Old CI" } } : {}) });
-    expect(screen.getByRole("note").textContent).toBe(
-      "Proposed by the assistant. The line this proposal replaces is gone. Delete this proposal and make a new line.",
-    );
+    expect(screen.getByRole("note").textContent).toBe(`Proposed by the assistant. ${text}`);
     expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
   });
