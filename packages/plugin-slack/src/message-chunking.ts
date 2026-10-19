@@ -26,10 +26,55 @@ export const SLACK_TEXT_LIMIT = 4000;
 
 /**
  * Max UTF-8 bytes in chat.update's `text` field. chat.postMessage truncates a
- * long text, but chat.update rejects one over 4,000 bytes with msg_too_long,
- * so a 4,000-character slice with any multi-byte character fails the edit.
+ * long text, but chat.update rejects one over 4,000 bytes with msg_too_long.
+ * Slack measures the text after it escapes it (see `slackEscapedText`), so a
+ * 4,000-character slice with a multi-byte character, a raw `>`, or a code
+ * span's `<id>` fails the edit.
  */
 export const SLACK_UPDATE_TEXT_BYTES = 4000;
+
+/** A Slack span (link, mention, channel, special command) or an entity Slack keeps as is. */
+const SLACK_KEPT = /<(?:https?:\/\/|mailto:|[@#!])[^<>|\s]*(?:\|[^<>]*)?>|&(?:amp|lt|gt);/g;
+
+const escapeSlackChars = (text: string) =>
+  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Slack stores a URL's `&` as `&amp;`, also inside a span. */
+const escapeSpanAmpersands = (kept: string) =>
+  kept.startsWith("<") ? kept.replace(/&(?!(?:amp|lt|gt);)/g, "&amp;") : kept;
+
+/**
+ * The mrkdwn text as Slack stores it. The formatter leaves a `>` and the
+ * contents of code spans raw; Slack escapes every `&`, `<` and `>` that is not
+ * part of a span or an entity, which makes the stored text longer.
+ */
+export function slackEscapedText(text: string): string {
+  let out = "";
+  let last = 0;
+  for (const match of text.matchAll(SLACK_KEPT)) {
+    out += escapeSlackChars(text.slice(last, match.index)) + escapeSpanAmpersands(match[0]);
+    last = match.index + match[0].length;
+  }
+  return out + escapeSlackChars(text.slice(last));
+}
+
+/** A whole span or entity in text from `slackEscapedText`. */
+const SLACK_TOKEN = /<[^<>]*>|&(?:amp|lt|gt);/g;
+
+/**
+ * Cuts text from `slackEscapedText` to at most `maxBytes` UTF-8 bytes without
+ * ending inside a span or an entity. Slack escapes a cut-off `<https://...`
+ * again, so a mid-span cut grows past the limit.
+ */
+export function truncateSlackText(text: string, maxBytes: number): string {
+  const cut = truncateUtf8(text, maxBytes);
+  if (cut === text) return cut;
+  for (const token of text.matchAll(SLACK_TOKEN)) {
+    if (token.index >= cut.length) break;
+    if (token.index + token[0].length > cut.length) return cut.slice(0, token.index);
+  }
+  return cut;
+}
 
 const utf8 = new TextEncoder();
 

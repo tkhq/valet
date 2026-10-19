@@ -23,7 +23,7 @@ import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, hasTableBlock, needsContentBlocks, splitTableMessage, truncateUtf8, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, SLACK_UPDATE_TEXT_BYTES } from "../message-chunking.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, slackEscapedText, splitTableMessage, truncateSlackText, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, SLACK_UPDATE_TEXT_BYTES } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
@@ -140,9 +140,15 @@ function markdownFallbackBlocks(
   return buildContentBlocks(text, formattedText, maxBlocks, { preserveSlackNativeSpans: true, nativeTables: false });
 }
 
-/** Build a descriptive error from a Slack API response. */
-async function slackError(res: Response, data?: { ok: boolean; error?: string }): Promise<PluginActionResult> {
-  if (data && !data.ok) return { success: false, error: `Slack API error: ${data.error || 'unknown'}` };
+/** Build a descriptive error from a Slack API response, with Slack's own detail messages when it sends them. */
+async function slackError(
+  res: Response,
+  data?: { ok: boolean; error?: string; response_metadata?: { messages?: string[]; next_cursor?: string } },
+): Promise<PluginActionResult> {
+  if (data && !data.ok) {
+    const detail = data.response_metadata?.messages?.join('; ');
+    return { success: false, error: `Slack API error: ${data.error || 'unknown'}${detail ? ` (${detail})` : ''}` };
+  }
   return { success: false, error: `Slack API ${res.status}: ${res.statusText}` };
 }
 
@@ -1454,10 +1460,12 @@ const updateMessage = action(Type.Object({
     // keeps a message's existing blocks unless the field is sent, so always send
     // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
     // previously block-formatted (long) message down to short text must not leave
-    // the stale blocks rendering. chat.update counts the text limit in UTF-8
-    // bytes, so the fallback text is cut by bytes, not characters.
+    // the stale blocks rendering. chat.update measures its text limit in UTF-8
+    // bytes of the text as Slack escapes it, so the limit check and the cut
+    // fallback both use that escaped form.
     const formattedText = markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true });
-    const fallbackText = truncateUtf8(formattedText, SLACK_UPDATE_TEXT_BYTES);
+    const escapedText = slackEscapedText(formattedText);
+    const fallbackText = truncateSlackText(escapedText, SLACK_UPDATE_TEXT_BYTES);
     const body: Record<string, unknown> = {
       channel: args.channel,
       ts: args.ts,
@@ -1465,7 +1473,7 @@ const updateMessage = action(Type.Object({
       parse: 'none',
     };
     let fallbackBlocks: Record<string, unknown>[] | undefined;
-    if (needsContentBlocks(args.text) || fallbackText !== formattedText) {
+    if (needsContentBlocks(args.text) || fallbackText !== escapedText) {
       body.blocks = buildContentBlocks(args.text, formattedText, SLACK_MAX_BLOCKS, { preserveSlackNativeSpans: true });
       body.text = fallbackText;
       fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], args.text, formattedText, SLACK_MAX_BLOCKS);
@@ -1475,7 +1483,7 @@ const updateMessage = action(Type.Object({
 
     const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
     if (mentionError) return mentionError;
-    type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+    type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string; response_metadata?: { messages?: string[] } };
     let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);
     let data = (await res.json()) as UpdateData;
