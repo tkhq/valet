@@ -572,7 +572,7 @@ Pass criterion: all steps, in one run, from a clean start.
    each time` (`Every event starts fresh.`), `Its own thread` (`One running
    thread for this line.`), and `The <title> thread` (`An existing thread
    you pick. If it is archived, this line stops until you pick another.`)
-   with the thread picker inline (`A thread you pick` until one is
+   with the thread picker inline (`Pick a thread` until one is
    picked). A routine reads `Every run starts fresh.` and `This routine's
    thread`. The default follows the thread policy spec. For a personal
    line that a team line may also cover, a sub-option `When <team> also

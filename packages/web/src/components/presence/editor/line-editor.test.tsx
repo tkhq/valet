@@ -213,7 +213,7 @@ describe("LineEditor", () => {
   it("saves only the thread when Where moves to a pinned thread (Review Focus 3)", () => {
     renderEditor({ kind: "edit", line: CHECK_LINE });
     fireEvent.click(screen.getByRole("button", { name: "Change Where" }));
-    fireEvent.click(screen.getByRole("radio", { name: "A thread you pick" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Pick a thread" }));
     fireEvent.click(screen.getByRole("button", { name: "Pick Platform CI" }));
     expect(summary("where")).toBe("in the Platform CI thread");
     const shown = sentence();

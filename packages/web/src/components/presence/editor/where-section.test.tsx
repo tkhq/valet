@@ -36,18 +36,18 @@ describe("WhereSection", () => {
   it("lists the policies as cards with one explanation each, the default picked", () => {
     render(<Harness initial={checks()} />);
     expect(screen.getAllByRole("radio").map((r) => r.getAttribute("aria-label"))).toEqual([
-      "One thread per pull request", "A new thread each time", "Its own thread", "A thread you pick",
+      "One thread per pull request", "A new thread each time", "Its own thread", "Pick a thread",
     ]);
     expect((screen.getByRole("radio", { name: "One thread per pull request" }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText("Each pull request gets its own thread; every event for it lands there.")).toBeTruthy();
     expect(screen.getByText("Every event starts fresh.")).toBeTruthy();
     expect(screen.getByText("One running thread for this line.")).toBeTruthy();
-    expect(screen.getByText("An existing thread you pick. If it is archived, this line stops until you pick another.")).toBeTruthy();
+    expect(screen.getByText("Pick an existing thread. If it is archived, this line stops until you pick another.")).toBeTruthy();
   });
 
   it("holds the thread picker inline and names the pick", () => {
     render(<Harness initial={checks()} />);
-    fireEvent.click(screen.getByRole("radio", { name: "A thread you pick" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Pick a thread" }));
     expect(latest?.where).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Pick Platform CI from user" }));
     expect(latest?.where).toEqual({ mode: "existing", sessionId: "s-u", threadId: "t-ci" });

@@ -1092,7 +1092,7 @@ describe("Presence hub acceptance (P1 to P20)", () => {
       ["One thread per pull request", "Each pull request gets its own thread; every event for it lands there."],
       ["A new thread each time", "Every event starts fresh."],
       ["Its own thread", "One running thread for this line."],
-      ["The Platform CI thread", "An existing thread you pick. If it is archived, this line stops until you pick another."],
+      ["The Platform CI thread", "Pick an existing thread. If it is archived, this line stops until you pick another."],
     ]);
     await userEvent.click(where.getByRole("radio", { name: "Its own thread" }));
     expect(preview.getByTestId("editor-sentence").textContent).toBe("When a check completes on acme/api, work in its own thread.");

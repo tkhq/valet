@@ -69,8 +69,8 @@ export function WhereSection({
     ...(workspace !== undefined || mode === "existing"
       ? [{
           mode: "existing" as const,
-          title: pinTitle !== undefined && pinTitle.length > 0 ? `The ${pinTitle} thread` : "A thread you pick",
-          line: `An existing thread you pick. If it is archived, this ${unit} stops until you pick another.`,
+          title: pinTitle !== undefined && pinTitle.length > 0 ? `The ${pinTitle} thread` : "Pick a thread",
+          line: `Pick an existing thread. If it is archived, this ${unit} stops until you pick another.`,
         }]
       : []),
   ];
