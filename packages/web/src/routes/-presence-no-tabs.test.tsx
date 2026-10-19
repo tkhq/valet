@@ -177,4 +177,18 @@ describe("INV-H5: no navigation under the top nav except the breadcrumb", () => 
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/sub-1"));
     expect(await screen.findByRole("heading", { level: 1, name: "When you mention Valet in #incidents, reply in a new thread." })).toBeTruthy();
   });
+
+  it("says a path under /presence that matches no page does not exist, and links back (L7)", async () => {
+    mountApp("/presence/bogus");
+    expect(await screen.findByText("This page does not exist.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to Presence" }).getAttribute("href")).toBe("/presence");
+    expect(screen.queryByText("Not Found")).toBeNull();
+  });
+
+  it("says a missing event was not found, and links to Activity (L7)", async () => {
+    mountApp("/presence/events/ev-gone");
+    expect(await screen.findByText("This event was not found. It may be older than the log keeps.")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Back to Activity" }).getAttribute("href")).toBe("/presence/activity");
+    expect(screen.queryByText(/Reload the page/)).toBeNull();
+  });
 });

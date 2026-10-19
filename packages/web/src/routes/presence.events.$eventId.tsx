@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import type { GetEventResponse } from "@valet/api/wire";
 import { useEvent } from "~/api/events";
 import { DeliveryList } from "~/components/events/delivery-list";
@@ -10,6 +10,7 @@ import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "~/compon
 import { activityLead, activitySentenceParts, eventInWords } from "~/components/presence/sentences";
 import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
+import { isNotFound, retryUnlessNotFound } from "~/lib/not-found";
 
 /**
  * `/presence/events/$eventId`: one event at its own URL. It replaces
@@ -45,17 +46,29 @@ export function eventHeading(event: GetEventResponse["event"] | undefined): { ti
 
 export function PresenceEventPage() {
   const { eventId } = Route.useParams();
-  const { data, isLoading, error } = useEvent(eventId);
+  // A missing event stays missing: a 404 shows its text at once, with no retries.
+  const { data, isLoading, error } = useEvent(eventId, { retry: retryUnlessNotFound });
   const heading = eventHeading(data?.event);
   return (
     <PresenceDetailPage crumbs={eventCrumbs(data?.event.eventKey)} title={heading.title} subtitle={heading.subtitle}>
       {isLoading && <LoadingRow label="Loading event…" />}
-      {(error != null || (!isLoading && !data)) && (
-        <ErrorRow>Could not load this event. Reload the page. If it still fails, open Activity and find the event again.</ErrorRow>
-      )}
+      {(error != null || (!isLoading && !data)) && <EventLoadError error={error} />}
       {data && <EventDetailBody data={data} />}
     </PresenceDetailPage>
   );
+}
+
+/** Why the event page has no event: gone (404), or a load that failed. Each names what to do. */
+export function EventLoadError({ error }: { error: unknown }) {
+  if (isNotFound(error)) {
+    return (
+      <div>
+        <ErrorRow className="pb-1">This event was not found. It may be older than the log keeps.</ErrorRow>
+        <Link to="/presence/activity" className="text-sm text-accent-600 hover:underline">Back to Activity</Link>
+      </div>
+    );
+  }
+  return <ErrorRow>Could not load this event. Reload the page. If it still fails, open Activity and find the event again.</ErrorRow>;
 }
 
 /**

@@ -24,6 +24,8 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 import { formatUsdPrecise } from "~/lib/format-usage";
+import { errorText } from "~/lib/error-text";
+import { isNotFound, retryUnlessNotFound } from "~/lib/not-found";
 
 /**
  * `/workflows/runs/$runId` (spec Part G step 1): the settled run's result
@@ -42,7 +44,8 @@ export const Route = createFileRoute("/workflows/runs/$runId")({
 export function RunDetailPage() {
   const { runId } = Route.useParams();
   const search = Route.useSearch();
-  const { data, isLoading, error } = useRunDetail(runId);
+  // A missing run stays missing: a 404 shows its text at once, with no retries.
+  const { data, isLoading, error } = useRunDetail(runId, { retry: retryUnlessNotFound });
   // Arriving from a run notification for a team's run: move the switcher to
   // the run's workspace so the nav matches the page instead of showing
   // Personal. `data` is undefined while loading; adoption waits for it.
@@ -59,7 +62,7 @@ export function RunDetailPage() {
     );
   }
   if (error || !data) {
-    return <div className="flex-1 p-6 text-sm text-danger-500">Failed to load run.</div>;
+    return <RunLoadError error={error} />;
   }
 
   return (
@@ -85,6 +88,22 @@ export function RunDetailPage() {
         retryPending={retryRun.isPending}
       />
       </RunWorkspace>
+    </div>
+  );
+}
+
+/** Why the run page has no run: gone (404), or a load that failed. Each names what to do. */
+export function RunLoadError({ error }: { error: unknown }) {
+  return (
+    <div className="flex-1 space-y-2 p-6 text-sm">
+      <p role="alert" className="text-danger-500">
+        {isNotFound(error)
+          ? "This run was not found. It may have been deleted."
+          : errorText(error, "Could not load this run. Reload the page to try again.")}
+      </p>
+      <Link to="/workflows/runs" className="inline-flex min-h-11 items-center text-accent-600 hover:underline sm:min-h-0">
+        Back to Runs
+      </Link>
     </div>
   );
 }

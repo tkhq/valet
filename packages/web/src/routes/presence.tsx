@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, useMatch } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useMatch } from "@tanstack/react-router";
 import { OverviewActions } from "~/components/presence/overview";
 import { pageClass } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
@@ -11,11 +11,23 @@ import { WorkspaceClause } from "~/components/workspace-clause";
  * page is a drill-in: it renders its own breadcrumb, whose first crumb is
  * `Presence`, and its own title (`PresenceDetailPage`), so the layout adds
  * no title above it (spec Part A step 2). Workflows and Runs have their own
- * top-nav entry at `/workflows` (spec Part G).
+ * top-nav entry at `/workflows` (spec Part G). A path under `/presence` that
+ * matches no page renders `PresenceNotFound` in the layout's outlet.
  */
 export const Route = createFileRoute("/presence")({
   component: PresenceLayout,
+  notFoundComponent: PresenceNotFound,
 });
+
+/** A path under `/presence` that matches no page. */
+export function PresenceNotFound() {
+  return (
+    <div className="space-y-2 py-4 text-sm">
+      <p className="text-ink">This page does not exist.</p>
+      <Link to="/presence" className="text-accent-600 hover:underline">Back to Presence</Link>
+    </div>
+  );
+}
 
 export function PresenceLayout() {
   const onOverview = useMatch({ from: "/presence/", shouldThrow: false }) !== undefined;
