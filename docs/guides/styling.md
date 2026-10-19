@@ -95,7 +95,8 @@ Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUn
 
 Use these primitives instead of hand-written classes:
 
-- `Select` is a native `<select>` with the field surface and focus ring of `Input`. Use `size="sm"` in a compact filter row. It has no default width, so pass `w-full` for a form field.
+- `Button`, `Input`, `Select`, and `FilterChips` take their height from `CONTROL_SIZE` (`primitives/control.ts`). `sm` is 32px with `text-xs`. Use it in toolbars, filter rows, and row actions. `md` is 36px with `text-sm`. Use it in forms and dialogs. Give every control in one row the same `size`. Do not set `h-*`, `py-*`, or a text size in a control's `className`. `control.test.ts` fails on that, and on a raw `<select>` or text `<input>` outside `primitives/`.
+- `Select` is a native `<select>` with the field surface and focus ring of `Input`. It has no default width, so pass `w-full` for a form field.
 - `Callout` is a tinted notice box. Set `tone` to `neutral`, `warning`, `danger`, or `success`. If the notice can appear after the first paint, add `role="alert"` or `role="status"`. Use `asChild` to put its classes on a `label` or a `ul`.
 - `PageHeader` is the top of a page: the `h1` title, an optional `clause` such as `WorkspaceClause`, the `actions` on the right, and an optional `description`. Pass one element as `actions`, and wrap two or more actions in a `div`.
 - `BackLink` is a "← label" link to the parent page. It takes the props of `Link`, so the route and its params stay typed. Pass it to `PageHeader` as `back`, or use it alone in a toolbar.
