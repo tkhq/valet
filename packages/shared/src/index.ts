@@ -7,6 +7,7 @@ export * from './artifact-page.js';
 export * from './errors.js';
 export * from './format-bytes.js';
 export * from './scope-key.js';
+export * from './schedule-run-id.js';
 export * from './resource-quantity.js';
 export * from './search-query.js';
 export * from './sandbox-resources.js';

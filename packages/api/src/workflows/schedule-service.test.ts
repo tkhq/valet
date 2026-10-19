@@ -63,7 +63,15 @@ describe("scheduledRunId", () => {
     const a = scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000);
     expect(a).toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000));
     expect(a).not.toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 2000));
-    expect(a).toMatch(/^wfrun_sch_[a-z0-9]{8}_1000$/);
+    expect(a).toMatch(/^wfrun_sch_[0-9a-f]{14}_1000$/);
+  });
+
+  // Review S5: the run id hashes the whole schedule id, so two proposal
+  // routines never share a run id for one slot.
+  it("gives two proposal routines distinct run ids, as the web prefix reads them", () => {
+    expect(scheduledRunId("proposal-aaa", 1000)).not.toBe(scheduledRunId("proposal-bbb", 1000));
+    // The same example routine-page.test.tsx asserts for scheduleRunPrefix.
+    expect(scheduledRunId("proposal-aaa", 1000)).toBe("wfrun_sch_1a2834f7313832_1000");
   });
 });
 

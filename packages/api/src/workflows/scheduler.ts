@@ -5,7 +5,8 @@
  *
  * Semantics:
  *   - Idempotent fires: the runId is DERIVED from (scheduleId, slot) —
- *     `wfrun_sch_{id8}_{nextFireAt}` — so a crash between run-start and the
+ *     `wfrun_sch_{hash}_{nextFireAt}` (`scheduledRunId` in @valet/shared) —
+ *     so a crash between run-start and the
  *     next_fire_at advance can't double-start on the next tick.
  *   - Catch-up collapses: next_fire_at advances from `now`, not from the
  *     missed slot, so downtime produces at most ONE catch-up run rather
@@ -17,6 +18,7 @@
  * `start()`/`stop()` from main.ts.
  */
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
+import { scheduledRunId } from "@valet/shared";
 import { and, eq, lte } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
 import { PinUnavailableError } from "../events/assistant-delivery.js";
@@ -61,10 +63,10 @@ export interface WorkflowSchedulerDeps {
   recordDestination?: DestinationRecorder;
 }
 
-/** Pure: the derived, idempotent run id for one (schedule, slot) fire. */
-export function scheduledRunId(scheduleId: string, slotMs: number): string {
-  return `wfrun_sch_${scheduleId.replace(/-/g, "").slice(0, 8)}_${slotMs}`;
-}
+/** Pure: the derived, idempotent run id for one (schedule, slot) fire. The
+ * routine page finds a routine's runs by the same prefix, so both read it
+ * from @valet/shared. */
+export { scheduledRunId };
 
 export class WorkflowScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;

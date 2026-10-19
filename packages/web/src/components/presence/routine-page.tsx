@@ -17,6 +17,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import type { WorkflowRunSummary } from "@valet/api/wire";
+import { scheduleRunPrefix } from "@valet/shared";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
@@ -45,11 +46,9 @@ import {
 import { ServiceMark } from "./service-mark";
 import { useSentenceNames } from "./use-sentence-names";
 
-/** The run id prefix the scheduler gives a schedule's runs
- * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
-export function scheduleRunPrefix(scheduleId: string): string {
-  return `wfrun_sch_${scheduleId.replace(/-/g, "").slice(0, 8)}_`;
-}
+/** The run id prefix the scheduler gives a routine's runs. The scheduler
+ * mints its run ids from the same function (`scheduledRunId`). */
+export { scheduleRunPrefix };
 
 export { routineReadOnly } from "./routine-helpers";
 

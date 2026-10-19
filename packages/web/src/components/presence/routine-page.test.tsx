@@ -91,7 +91,7 @@ vi.mock("./thread-picker", () => ({
 }));
 
 import { routineWhen } from "./routine-helpers";
-import { RoutinePage, routineReadOnly } from "./routine-page";
+import { RoutinePage, routineReadOnly, scheduleRunPrefix } from "./routine-page";
 import { routine } from "./test-fixtures";
 import { zoneLongName } from "~/lib/time-zones";
 
@@ -145,6 +145,16 @@ async function pickDelete() {
   await userEvent.click(await screen.findByRole("button", { name: "More for Morning summary" }));
   await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
 }
+
+// Review S5: the page finds a routine's runs by a prefix that hashes the
+// whole id, so two proposal routines never read each other's runs.
+describe("scheduleRunPrefix", () => {
+  it("gives two proposal routines distinct prefixes, and agrees with the api's example", () => {
+    expect(scheduleRunPrefix("proposal-aaa")).not.toBe(scheduleRunPrefix("proposal-bbb"));
+    // The same example schedule-service.test.ts asserts for scheduledRunId.
+    expect(scheduleRunPrefix("proposal-aaa")).toBe("wfrun_sch_1a2834f7313832_");
+  });
+});
 
 describe("RoutinePage", () => {
   it("shows the sentence and offers fire now, edit, and disable", async () => {
@@ -348,9 +358,9 @@ describe("RoutinePage", () => {
     const now = Date.now();
     listWorkflowRuns.mockResolvedValue({
       runs: [
-        { runId: "wfrun_sch_S3_100", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: now - 3_600_000, updatedAt: now - 3_600_000 + 40_000 },
+        { runId: `${scheduleRunPrefix("S3")}100`, workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: now - 3_600_000, updatedAt: now - 3_600_000 + 40_000 },
         { runId: "wfrun_manual_1", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: now - 7_200_000, updatedAt: now - 7_100_000 },
-        { runId: "wfrun_sch_S3_090", workflowId: "wf-1", status: "running", createdAt: now - 40 * 86_400_000, updatedAt: now - 40 * 86_400_000 },
+        { runId: `${scheduleRunPrefix("S3")}090`, workflowId: "wf-1", status: "running", createdAt: now - 40 * 86_400_000, updatedAt: now - 40 * 86_400_000 },
       ],
     });
     wrap(<RoutinePage id="S3" />);
