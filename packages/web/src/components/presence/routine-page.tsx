@@ -1,32 +1,48 @@
 /**
  * One routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
- * step 2): the sentence as the title, the fact strip (When, Do, Runs in),
- * edit, delete, fire now, enable or disable, and the run or delivery
- * history. Edit's **Runs in** lists the routine owner's threads. A
- * routine the scheduler turned off for an archived thread shows its problem
- * with the thread picker inline. A pick repins the routine and turns it on
- * again.
+ * step 2). It follows the line page's anatomy: the breadcrumb, the sentence
+ * as the title with the clock mark, the status line (name, who set it up,
+ * the switch, when it fires next, **Fire now**, **Edit**, and the overflow
+ * menu with Delete), the health strip, the problem, How it works, and
+ * Activity as its firings.
+ *
+ * A routine that runs a workflow reads its firings from the workflow's runs
+ * this routine started. An assistant routine records only when it last
+ * fired, so its Activity holds that one firing and its strip shows no
+ * count. A routine the scheduler turned off for an archived thread shows its
+ * problem with the thread picker inline; a pick repins the routine and
+ * turns it on again. Edit's **Where** lists the routine owner's threads.
  */
 import { useState } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
+import { MoreHorizontal } from "lucide-react";
 import type { WorkflowRunSummary } from "@valet/api/wire";
 import { usePinnedThreadTitle } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
 import { useRunScheduleNow, useUpdateSchedule, useWorkflowRuns, useWorkflowTriggers, useWorkflows } from "~/api/workflows";
-import { Button, EmptyRow, ErrorRow, LoadingRow, Switch, WorkRow, WorkSection } from "~/components/primitives";
-import { RunStatusChip } from "~/components/workflows/run-status-chip";
+import {
+  Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, ErrorRow, LoadingRow, Switch,
+} from "~/components/primitives";
 import { TriggerDialog } from "~/components/workflows/trigger-dialog";
 import { errorText } from "~/lib/error-text";
-import { relativeTime } from "~/lib/relative-time";
+import { HealthStrip, perDayCounts } from "./health-strip";
+import { HowItWorks, type HowColumn } from "./how-it-works";
+import { ActivityTimeline, type TimelineEntry } from "./line-activity";
 import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { OwnerBadge } from "./presence-rows";
-import { ProblemBadge, ThreadProblem } from "./problem-badge";
+import { ThreadProblem, isPinProblem, pinProblemText } from "./problem-badge";
+import { Ref } from "./ref";
 import {
   isRoutine, routineReadOnly, routineReadOnlyText, routineWhen, routineWorkspace, useRoutineSentenceParts, type Routine,
 } from "./routine-helpers";
 import { DeleteRoutineDialog } from "./routine-row";
 import { Sentence } from "./sentence";
-import { partsText, routineAction, runsInLabel, scheduleInWords, type WorkflowNames } from "./sentences";
+import {
+  firingParts, partsText, routineDoExplanation, routineDoParts, scheduleExplanation, scheduleInWords, text, tookInWords,
+  whereExplanation, whereParts, type ThreadTitles, type WorkflowNames,
+} from "./sentences";
+import { ServiceMark } from "./service-mark";
+import { useSentenceNames } from "./use-sentence-names";
 
 /** The run id prefix the scheduler gives a schedule's runs
  * (`scheduleRunId` in packages/api/src/workflows/scheduler.ts). */
@@ -35,6 +51,8 @@ export function scheduleRunPrefix(scheduleId: string): string {
 }
 
 export { routineReadOnly } from "./routine-helpers";
+
+const MONTH_MS = 30 * 86_400_000;
 
 export function RoutinePage({ id }: { id: string }) {
   // Unscoped, so a routine of another workspace the caller can reach still opens.
@@ -46,7 +64,9 @@ export function RoutinePage({ id }: { id: string }) {
     <PresenceDetailPage
       crumbs={[PRESENCE_CRUMB, { label: "On a schedule", to: "/presence", hash: "schedule" }, { label: name }]}
       title={routine === undefined ? name : partsText(sentenceFor(routine))}
-      {...(routine !== undefined ? { titleContent: <Sentence parts={sentenceFor(routine)} /> } : {})}
+      {...(routine !== undefined
+        ? { titleContent: <Sentence parts={sentenceFor(routine)} />, mark: <ServiceMark service="schedule" size="lg" /> }
+        : {})}
     >
       {triggersQ.isPending && <LoadingRow />}
       {triggersQ.isError && (
@@ -58,22 +78,36 @@ export function RoutinePage({ id }: { id: string }) {
   );
 }
 
-/** The fact strip's values (spec Part E step 2). Do names the action and
- * Runs in names the thread, so the strip says each fact once. A workflow
- * routine starts a run, not a thread, so it has no Runs in. */
-export function routineFacts(
-  routine: Routine,
-  workflows: WorkflowNames,
-  pinTitle: string | undefined,
-): readonly { term: string; value: string }[] {
-  const facts = [
-    { term: "When", value: scheduleInWords(routine.detail.cron, routine.detail.timezone) },
-    { term: "Do", value: routineAction(routine, workflows) },
+/** How it works for a routine: When (the schedule and its zone), Do, and Where (spec Part E step 2). */
+export function routineColumns(routine: Routine, workflows: WorkflowNames, threads: ThreadTitles): HowColumn[] {
+  const policy = routine.detail.thread ?? { mode: "own" };
+  const where: HowColumn = routine.detail.targetKind === "workflow"
+    ? { section: "where", value: [text("in a workflow run")], explanation: "A workflow run has no thread. Open the run from Activity to follow it." }
+    : { section: "where", value: whereParts(policy, null, threads), explanation: whereExplanation(policy, null, "routine") };
+  return [
+    { section: "when", value: [text(scheduleInWords(routine.detail.cron, routine.detail.timezone))], explanation: scheduleExplanation(routine.detail.timezone) },
+    { section: "do", value: routineDoParts(routine, workflows), explanation: routineDoExplanation(routine, workflows) },
+    where,
   ];
-  if (routine.detail.targetKind === "assistant") {
-    facts.push({ term: "Runs in", value: runsInLabel(routine.detail.thread ?? { mode: "own" }, null, "routine", pinTitle) });
-  }
-  return facts;
+}
+
+/** A run this routine started, as a firing on its Activity. A settled run shows the time it took. */
+export function runFiring(run: WorkflowRunSummary, routine: Routine, workflows: WorkflowNames, threads: ThreadTitles): TimelineEntry {
+  const settled = run.status === "settled" && run.updatedAt >= run.createdAt;
+  return {
+    id: run.runId,
+    kind: "acted",
+    at: run.createdAt,
+    parts: firingParts(routine, workflows, threads),
+    ...(settled ? { took: tookInWords(run.updatedAt - run.createdAt) } : {}),
+  };
+}
+
+/** The fault the health strip names: the archived pin, or the scheduler's reason as written. */
+function routineFault(reason: string | undefined, pinTitle: string | undefined): { title: string; detail: string } | undefined {
+  if (reason === undefined || reason.length === 0) return undefined;
+  const detail = isPinProblem(reason) ? pinProblemText(pinTitle).replace(/ Pick another thread:$/, "").replace(/\.$/, "") : reason;
+  return { title: "Needs attention", detail };
 }
 
 function RoutineBody({ routine }: { routine: Routine }) {
@@ -85,13 +119,33 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const update = useUpdateSchedule();
   const me = useMe();
   const teams = useTeams();
+  const names = useSentenceNames();
   const navigate = useNavigate();
   const readOnly = routineReadOnly(routine, me.data, teams.data?.teams);
   const readOnlyText = routineReadOnlyText(routine, teams.data?.teams);
   const workspace = routineWorkspace(routine);
+  const workflowRoutine = routine.detail.targetKind === "workflow" && routine.workflowId !== undefined;
+  const runsQ = useWorkflowRuns(workflowRoutine ? routine.workflowId ?? "" : "", { limit: 50 });
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const workflowNames = workflows.data?.workflows ?? [];
+  // A personal routine's owner set it up. The api records no creator for a team routine.
+  const owner = routine.detail.ownerType === "user" ? names.members?.[routine.detail.ownerId] ?? "someone" : undefined;
+
+  const prefix = scheduleRunPrefix(routine.id);
+  const runs = workflowRoutine ? (runsQ.data?.runs ?? []).filter((run) => run.runId.startsWith(prefix)) : [];
+  const lastFired = routine.detail.lastFiredAt;
+  const firings: TimelineEntry[] = workflowRoutine
+    ? runs.map((run) => runFiring(run, routine, workflowNames, pinTitles))
+    : lastFired === null
+      ? []
+      : [{ id: `fired:${lastFired}`, kind: "acted", at: lastFired, parts: firingParts(routine, workflowNames, pinTitles) }];
+  const now = Date.now();
+  const times = workflowRoutine ? runs.map((run) => run.createdAt) : lastFired === null ? [] : [lastFired];
+  const newestRun = runs.reduce<number | null>((max, run) => (max === null || run.createdAt > max ? run.createdAt : max), null);
+  const lastAt = lastFired !== null && (newestRun === null || lastFired > newestRun) ? lastFired : newestRun;
+  const fault = routineFault(routine.detail.disabledReason, pinThreadTitle);
 
   function fireNow() {
     setMessage(null);
@@ -108,25 +162,12 @@ function RoutineBody({ routine }: { routine: Routine }) {
 
   return (
     <div className="space-y-8">
-      <section aria-label="Routine" className="space-y-3">
-        <div className="flex flex-wrap items-start gap-3">
-          <dl aria-label="Facts" className="grid min-w-0 flex-1 grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
-            {routineFacts(routine, workflows.data?.workflows ?? [], pinThreadTitle).map((fact) => (
-              <div key={fact.term} className="contents">
-                <dt className="text-muted">{fact.term}</dt>
-                <dd className="text-ink [overflow-wrap:anywhere]">{fact.value}</dd>
-              </div>
-            ))}
-          </dl>
+      <section aria-label={routine.name} className="space-y-5">
+        <div className="-mt-3.5 flex flex-wrap items-center gap-x-3.5 gap-y-2 text-sm text-muted">
+          <span className="font-medium text-ink">{routine.name}</span>
           <OwnerBadge ownerType={routine.detail.ownerType} />
-          <ProblemBadge problem={routine.detail.disabledReason} />
-        </div>
-        <p className="text-sm text-muted">{routineWhen(routine, ": ")}</p>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
-          <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setDeleting(true)}>Delete</Button>
-          <Button size="sm" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
-          <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink sm:min-h-0">
+          {owner !== undefined && <span>set up by <Ref kind="person" text={owner} /></span>}
+          <label className="inline-flex min-h-11 items-center gap-2 text-ink sm:min-h-0">
             <Switch
               checked={routine.enabled}
               disabled={readOnly || update.isPending}
@@ -135,6 +176,23 @@ function RoutineBody({ routine }: { routine: Routine }) {
             />
             {routine.enabled ? "On" : "Off"}
           </label>
+          {routine.enabled && <span>{routineWhen(routine, ": ")}</span>}
+          <span className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="secondary" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
+            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing(true)}>Edit</Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="icon" aria-label={`More for ${routine.name}`}>
+                  <MoreHorizontal className="h-4 w-4" aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={readOnly} className="text-danger-500" onSelect={() => setDeleting(true)}>
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </span>
         </div>
         {readOnly && !routine.detail.disabledReason && <p className="text-xs text-muted">{readOnlyText}</p>}
         {message && (
@@ -142,6 +200,17 @@ function RoutineBody({ routine }: { routine: Routine }) {
             {message.text}
           </p>
         )}
+
+        {(!workflowRoutine || runsQ.isSuccess) && (
+          <HealthStrip
+            lastAt={lastAt}
+            count={workflowRoutine ? runs.filter((run) => now - run.createdAt < MONTH_MS).length : null}
+            perDay={perDayCounts(times, now)}
+            {...(fault !== undefined ? { fault } : {})}
+            labels={{ last: "last fired" }}
+          />
+        )}
+
         {routine.detail.disabledReason && (
           <ThreadProblem
             problem={routine.detail.disabledReason}
@@ -158,9 +227,19 @@ function RoutineBody({ routine }: { routine: Routine }) {
         )}
       </section>
 
-      {routine.detail.targetKind === "workflow" && routine.workflowId !== undefined
-        ? <RoutineRuns routine={routine} workflowId={routine.workflowId} />
-        : <RoutineDeliveries routine={routine} />}
+      <HowItWorks columns={routineColumns(routine, workflowNames, pinTitles)} readOnly={readOnly} onChange={() => setEditing(true)} />
+
+      <ActivityTimeline
+        entries={firings}
+        chips={false}
+        pending={workflowRoutine && runsQ.isPending}
+        {...(workflowRoutine && runsQ.isError
+          ? { error: errorText(runsQ.error, "Could not load the runs. Reload the page to try again.") }
+          : {})}
+        empty={workflowRoutine
+          ? "Nothing yet. This routine has not started a run in the workflow's last 50 runs."
+          : "Nothing yet. Activity appears here when the routine fires."}
+      />
 
       {editing && <TriggerDialog open onOpenChange={setEditing} editing={routine} schedulesOnly workspace={workspace} />}
       <DeleteRoutineDialog
@@ -171,55 +250,5 @@ function RoutineBody({ routine }: { routine: Routine }) {
         onDeleted={() => { void navigate({ to: "/presence" }); }}
       />
     </div>
-  );
-}
-
-/** A workflow routine's history: the workflow's recent runs this routine started. */
-function RoutineRuns({ routine, workflowId }: { routine: Routine; workflowId: string }) {
-  const runsQ = useWorkflowRuns(workflowId, { limit: 50 });
-  const prefix = scheduleRunPrefix(routine.id);
-  const runs = (runsQ.data?.runs ?? []).filter((run) => run.runId.startsWith(prefix));
-  return (
-    <WorkSection title="History" count={runsQ.isSuccess ? runs.length : undefined}>
-      {runsQ.isPending && <LoadingRow className="px-4" />}
-      {runsQ.isError && (
-        <ErrorRow className="px-4">{errorText(runsQ.error, "Could not load the runs. Reload the page to try again.")}</ErrorRow>
-      )}
-      {runsQ.isSuccess && runs.length === 0 && (
-        <EmptyRow className="px-4 py-3">This routine has not started a run in the workflow's last 50 runs.</EmptyRow>
-      )}
-      {runs.map((run) => <RunRow key={run.runId} run={run} />)}
-    </WorkSection>
-  );
-}
-
-function RunRow({ run }: { run: WorkflowRunSummary }) {
-  return (
-    <WorkRow
-      title={<Link to="/workflows/runs/$runId" params={{ runId: run.runId }}>Run {run.runId}</Link>}
-      badge={<RunStatusChip status={run.status} outcome={run.outcome} needsApproval={run.needsApproval ?? false} />}
-      time={run.createdAt}
-    />
-  );
-}
-
-/** An assistant routine's history: when it last fired, and where its prompts land. */
-function RoutineDeliveries({ routine }: { routine: Routine }) {
-  const policy = routine.detail.thread;
-  const pin = policy?.mode === "existing" ? policy : undefined;
-  const titles = usePinnedThreadTitle(pin);
-  const pinTitle = pin ? titles[pin.threadId]?.title ?? "the thread you picked" : undefined;
-  const lastFired = routine.detail.lastFiredAt;
-  return (
-    <WorkSection title="History">
-      <WorkRow
-        title={lastFired === null ? "Has not fired yet" : `Last fired ${relativeTime(lastFired)}`}
-        detail={pin
-          ? <>Each firing goes to <Link to="/threads/$threadId" params={{ threadId: pin.threadId }} className="hover:underline">{pinTitle}</Link>.</>
-          : policy?.mode === "new"
-            ? "Each firing starts a new thread."
-            : "Each firing goes to this routine's thread."}
-      />
-    </WorkSection>
   );
 }

@@ -40,6 +40,7 @@ import type {
   EventSummaryWire,
   GetEventCatalogResponse,
   GetWorkflowTriggerCatalogResponse,
+  LineActivityResponse,
   ListAllWorkflowRunsResponse,
   ListEventSubscriptionsResponse,
   ListIdentityLinksResponse,
@@ -274,6 +275,18 @@ const DEAD_ROW = logEvent("ev-14", "github", "github.check_run.completed", "acme
   delivery({ id: "d-14", subscriptionId: "R4", subscriptionName: "CI failures", status: "dead", attempts: 3, lastError: PIN_UNAVAILABLE, deliveredAt: null }),
 ], "failed");
 
+/** R4's Activity: the check that could not reach the archived Platform CI (P7). */
+const R4_ACTIVITY: LineActivityResponse = {
+  entries: [{
+    id: "d-14", kind: "acted", at: NOW - 60_000, eventId: "ev-14", eventKey: "github.check_run.completed",
+    place: "github:acme/api#14", placeLabel: "acme/api#14", outcome: { status: "dead", deadText: PIN_UNAVAILABLE },
+  }],
+  lastActedAt: null,
+  actedLast30Days: 0,
+  perDay: Array.from({ length: 30 }, () => 0),
+};
+const NO_ACTIVITY: LineActivityResponse = { ...R4_ACTIVITY, entries: [] };
+
 /** The personal Log: a check in acme/api#15 and one in acme/web, which P17's place filter drops. */
 const API_ROW = logEvent("ev-15", "github", "github.check_run.completed", "acme/api#15", [
   delivery({ id: "d-15", subscriptionId: "R1", subscriptionName: "Reviews and checks" }),
@@ -464,6 +477,8 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
     return json(response);
   }
   if (/^\/api\/event-subscriptions\/[^/]+\/deliveries$/.test(path)) return json({ deliveries: [] });
+  const lineActivity = /^\/api\/event-subscriptions\/([^/]+)\/activity$/.exec(path);
+  if (lineActivity) return json(lineActivity[1] === "R4" ? R4_ACTIVITY : NO_ACTIVITY);
   if (path === "/api/events/log") {
     if (scopeOf(q) !== "sre") {
       if (q.get("problems") === "1") return json(logPage([]));
@@ -731,7 +746,8 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(digest.getByRole("button", { name: "Fire Incident digest now" })).toBeTruthy();
 
     // P7: R4's page shows the breadcrumb, the sentence as the title, the
-    // fact strip with Edit, and the problem line with the picker.
+    // status line with Edit, the health strip, the problem line with the
+    // picker, How it works, and Activity with the dead check and its chips.
     await userEvent.click(within(screen.getByRole("region", { name: "acme/api" })).getByRole("link", { name: "When a check completes, work in the Platform CI thread." }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/presence/rules/R4"));
     const crumbs = await screen.findByRole("navigation", { name: "Breadcrumb" });
@@ -739,12 +755,22 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(within(crumbs).getByRole("link", { name: "acme/api" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi");
     expect(within(crumbs).getByText("CI failures").getAttribute("aria-current")).toBe("page");
     expect(await screen.findByRole("heading", { level: 1, name: "When a check completes on acme/api, work in the Platform CI thread." })).toBeTruthy();
-    const facts = screen.getByLabelText("Facts");
-    expect([...facts.querySelectorAll("dt")].map((term) => term.textContent)).toEqual(["When", "Do", "Runs in", "Appears as"]);
+    expect((await screen.findByText("set up by", { exact: false })).textContent).toMatch(/^set up by U One /);
     expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    const health = within(await screen.findByRole("region", { name: "Health" }));
+    expect(health.getByText("last acted")).toBeTruthy();
+    expect(health.getByText("times in 30 days")).toBeTruthy();
+    expect(health.getByText("Needs attention")).toBeTruthy();
+    expect(health.getByRole("img", { name: "Activity over the last 30 days" })).toBeTruthy();
     const problem = within(screen.getByRole("region", { name: "Problem" }));
     expect(problem.getByRole("alert").textContent).toBe("Platform CI is archived. Pick another thread:");
-    expect(screen.getByRole("region", { name: "Deliveries" })).toBeTruthy();
+    const how = screen.getByRole("region", { name: "How it works" });
+    expect([...how.querySelectorAll<HTMLElement>("[data-section]")].map((column) => column.dataset.section)).toEqual(["when", "do", "where"]);
+    expect(within(how).getAllByRole("button", { name: /^Change / })).toHaveLength(3);
+    const timeline = within(screen.getByRole("region", { name: "Activity" }));
+    expect((await timeline.findByText(/could not reach/)).closest("li")?.textContent)
+      .toContain("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+    expect(within(timeline.getByRole("group", { name: "Show" })).getAllByRole("button").map((chip) => chip.textContent)).toEqual(["All", "Acted", "Skipped"]);
 
     // P8: a pick patches the pin; the problem line goes and the title names
     // the new thread. Back on /presence, the row's sentence ends with the new
@@ -901,13 +927,19 @@ describe("Presence hub acceptance (P1 to P17)", () => {
     expect(line.getByText("Team")).toBeTruthy();
     expect(line.getByRole("switch", { name: "Turn off Incident mentions" })).toHaveProperty("disabled", true);
     expect(line.getByRole("button", { name: "Edit" })).toHaveProperty("disabled", true);
-    expect(line.getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
+    for (const name of ["Change When", "Change Do", "Change Where"]) {
+      expect(screen.getByRole("button", { name })).toHaveProperty("disabled", true);
+    }
     expect(line.getAllByText("Only members of SRE can change this.").length).toBeGreaterThan(0);
     // The problem reads, and the thread picker is hidden from a viewer who may not change the line.
     expect(line.getByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
     expect(line.queryByRole("combobox")).toBeNull();
     expect(line.queryByRole("listbox")).toBeNull();
     expect(line.queryByRole("button", { name: "Pick another thread" })).toBeNull();
+    // Delete sits in the status line's menu, disabled like the rest.
+    await userEvent.click(line.getByRole("button", { name: "More for Incident mentions" }));
+    const pageMenu = within(await screen.findByRole("menu"));
+    expect(pageMenu.getByRole("menuitem", { name: "Delete" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("P15: a routine turned off for a deleted workflow reads its reason and its fix in Needs attention", async () => {

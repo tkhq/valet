@@ -14,6 +14,7 @@ import type {
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
   GetWorkflowTriggerCatalogResponse,
+  LineActivityEntryWire,
 } from "@valet/api/wire";
 import { deliveryStatusLine } from "~/components/events/delivery-copy";
 import { zoneLongName } from "~/lib/time-zones";
@@ -993,4 +994,278 @@ export function activitySentenceParts(
 export function activityPartsText(sentence: ActivitySentenceParts): string {
   const outcomes = sentence.outcomes.map((o) => partsText(o.parts)).join(", ");
   return outcomes.length > 0 ? `${partsText(sentence.lead)} → ${outcomes}` : partsText(sentence.lead);
+}
+
+// ── How it works ────────────────────────────────────────────────────────
+
+/** Filter fields that name a branch. */
+const BRANCH_FIELDS: ReadonlySet<string> = new Set(["branch", "ref", "head_branch", "base_branch"]);
+/** Filter fields that name a label. */
+const LABEL_FIELDS: ReadonlySet<string> = new Set(["label", "labels"]);
+
+/** What a line hears when no filter other than its place narrows it, per service. */
+const ANY_EVENT: Readonly<Record<SentenceService, string>> = {
+  slack: "Any message, in a thread or not.",
+  github: "Any branch, any author.",
+  linear: "Any issue, any author.",
+};
+
+function opWords(op: EventSubscriptionFilterWire["op"]): string {
+  switch (op) {
+    case "prefix": return "starts with";
+    case "contains": return "contains";
+    case "regex": return "matches";
+    default: return "is";
+  }
+}
+
+/** One filter that is not the place as a phrase after `Only`: `the main branch`, `from alice`. */
+function conditionInWords(filter: EventSubscriptionFilterWire): string {
+  const values = filterEntries(filter).map((entry) => entry.label).join(" or ");
+  if (BRANCH_FIELDS.has(filter.field) && (filter.op === "eq" || filter.op === "in")) return `the ${values} branch`;
+  if (SENDER_FIELDS.includes(filter.field) || filter.field === "author" || filter.field === "actor") return `from ${values}`;
+  if (LABEL_FIELDS.has(filter.field)) return `with the label ${values}`;
+  return `when the ${filter.field.replace(/_/g, " ")} ${opWords(filter.op)} ${values}`;
+}
+
+/**
+ * How it works, **When**: the line's conditions in words (spec Part D step
+ * 1.6). A line that names only a place reads what it hears there (`Any
+ * branch, any author.`). Otherwise each condition reads after `Only` (`Only
+ * the main branch.`). The place filters, the creator scope the server adds,
+ * and a followed Slack thread are not conditions here: the title says them.
+ */
+export function whenExplanation(filters: readonly EventSubscriptionFilterWire[], keys: readonly string[]): string {
+  const conditions = filters.filter(
+    (f) => !SENTENCE_PLACE_FIELD_SET.has(f.field) && !isCreatorScopeFilter(f) && f.field !== "thread_ts",
+  );
+  if (conditions.length === 0) {
+    const service = serviceOf(keys);
+    return service === null ? "No other conditions." : ANY_EVENT[service];
+  }
+  return `Only ${joinAnd(conditions.map(conditionInWords))}.`;
+}
+
+/** The name a line appears as. A line that sets only an avatar appears as Valet. */
+function appearsAs(appearance: Appearance | undefined): string {
+  return hasText(appearance?.displayName) ? appearance.displayName : "Valet";
+}
+
+/**
+ * How it works, **Do**, as parts: what Valet does and as whom (`work on it
+ * as Valet`, `reply as Ops Bot`), or `run <workflow>` for a workflow.
+ */
+export function doParts(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): SentencePart[] {
+  const target = sub.target;
+  if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
+  const action = isConversational(sub.eventKeys) ? "reply" : "work on it";
+  return [text(`${action} as `), { kind: "person", text: appearsAs(target.appearance) }];
+}
+
+/**
+ * How it works, **Do**: one sentence of behavior (spec Part D step 1.6).
+ * `Valet reads the event and acts in the thread. It appears as Ops Bot.`,
+ * `Valet replies where it was mentioned.`, or `Valet starts the <workflow>
+ * workflow with the event as its input.`
+ */
+export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): string {
+  const target = sub.target;
+  if (target.kind === "workflow") {
+    const name = workflowName(workflows, target.workflowId);
+    return name === undefined
+      ? "Valet starts the workflow with the event as its input."
+      : `Valet starts the ${name} workflow with the event as its input.`;
+  }
+  const appears = `It appears as ${appearsAs(target.appearance)}.`;
+  return isConversational(sub.eventKeys)
+    ? `Valet replies where it was mentioned. ${appears}`
+    : `Valet reads the event and acts in the thread. ${appears}`;
+}
+
+/** How it works, **Where**, as parts: the thread phrase with the thread as a token. */
+export function whereParts(
+  policy: AssistantThreadPolicy,
+  subjectKind: SubjectKind | null,
+  threads: ThreadTitles,
+): SentencePart[] {
+  switch (policy.mode) {
+    case "new":
+      return [text("in a new thread each time")];
+    case "subject":
+      return [text(`in one thread per ${subjectKind ?? "place"}`)];
+    case "own":
+      return [text("in its own thread")];
+    case "existing":
+      return [text("in "), ...pinnedThreadParts(threads, policy)];
+  }
+}
+
+/**
+ * How it works, **Where**: the thread policy as behavior (spec Part D step
+ * 1.6). A routine fires where an event arrives, so its words name a firing.
+ */
+export function whereExplanation(
+  policy: AssistantThreadPolicy,
+  subjectKind: SubjectKind | null,
+  ruleKind: RuleKind = "presence",
+): string {
+  const each = ruleKind === "routine" ? "firing" : "event";
+  switch (policy.mode) {
+    case "new":
+      return `Every ${each} starts a fresh thread.`;
+    case "subject":
+      return `Each ${subjectKind ?? "place"} gets its own thread; every event for it lands there.`;
+    case "own":
+      return ruleKind === "routine"
+        ? "Every firing lands in this routine's own thread, so the history stays in one place."
+        : "Every event lands in this line's own thread, so the history stays in one place.";
+    case "existing":
+      return `Every ${each} lands in this one thread, so the history stays in one place.`;
+  }
+}
+
+// ── A line's Activity ───────────────────────────────────────────────────
+
+/** What a line's Activity entry reads beyond the entry itself. */
+export interface LineEntryNames {
+  /** The workflow a workflow line starts, as a token. */
+  workflow?: { id: string; name: string };
+  /** The line's pinned thread, for a dead entry that names no thread. */
+  pinTitle?: string;
+  /** True for the dead-letter text the api stores for an archived pin. */
+  isPinText?: (text: string) => boolean;
+}
+
+/** An entry's place as a token, or as words when its key names no service. */
+function entryPlaceParts(entry: Pick<LineActivityEntryWire, "place" | "placeLabel">): SentencePart[] | null {
+  const label = entry.placeLabel ?? entry.place;
+  if (!hasText(label)) return null;
+  const service = entry.place === null ? null : placeKeyService(entry.place);
+  if (service === null || entry.place === null) return [text(label)];
+  return [{ kind: "place", text: label, service, subject: entry.place }];
+}
+
+/** A thread an entry names, as a token. An archived thread keeps its name and drops its id. */
+function entryThread(ref: EventDeliveryThreadRef): SentencePart {
+  const label = hasText(ref.title) ? ref.title : "a thread";
+  return ref.archived
+    ? { kind: "thread", text: label }
+    : { kind: "thread", text: label, sessionId: ref.sessionId, threadId: ref.threadId };
+}
+
+function startedRun(names: LineEntryNames): SentencePart[] {
+  return names.workflow === undefined
+    ? [text("started a workflow run")]
+    : [text("started "), { kind: "workflow", text: names.workflow.name, id: names.workflow.id }, text(" run")];
+}
+
+const SKIP_WORDS: Readonly<Record<Exclude<NonNullable<LineActivityEntryWire["reason"]>, "filters" | "other">, string>> = {
+  sender: "the sender is not allowed",
+  off: "the line was off",
+  claimed: "another line claimed it",
+};
+
+/** What an acted entry reached, as parts after the arrow. */
+function actedOutcomeParts(entry: LineActivityEntryWire, names: LineEntryNames): SentencePart[] {
+  const outcome = entry.outcome;
+  if (outcome === undefined) return [text("acted")];
+  if (outcome.runId !== undefined) return startedRun(names);
+  switch (outcome.status) {
+    case "delivered":
+      if (outcome.thread !== undefined) {
+        return [text(isConversational([entry.eventKey]) ? "replied in " : "worked in "), entryThread(outcome.thread)];
+      }
+      return names.workflow !== undefined ? startedRun(names) : [text("worked on it")];
+    case "dead": {
+      const dead = outcome.deadText ?? "";
+      if (names.isPinText?.(dead) === true) {
+        const title = outcome.thread?.title ?? names.pinTitle;
+        return [text("could not reach "), hasText(title) ? { kind: "thread", text: title } : text("the pinned thread"), text(", it is archived")];
+      }
+      return [text(hasText(dead) ? `gave up: ${asTail(dead)}` : "gave up")];
+    }
+    case "pending":
+      return [text("waiting for the first attempt")];
+    case "failed":
+      return [text("failed, Valet tries again")];
+    case "skipped":
+      return [text("skipped")];
+  }
+}
+
+/** Why a skipped entry skipped, as words after `skipped, `. */
+function skipInWords(entry: LineActivityEntryWire): string {
+  switch (entry.reason) {
+    case "filters":
+      return `not for this line: ${hasText(entry.reasonText) ? entry.reasonText : "its filters"}`;
+    case "sender":
+    case "off":
+    case "claimed":
+      return SKIP_WORDS[entry.reason];
+    default:
+      return hasText(entry.reasonText) ? asTail(entry.reasonText) : "for another reason";
+  }
+}
+
+/**
+ * One entry of a line's Activity as parts (spec Part D step 1.7):
+ * `<event in words> on|in <place> → <outcome>` for an acted entry and
+ * `<event in words> on|in <place> → skipped, <reason>` for a skipped one.
+ * `on` for GitHub, `in` for Slack and Linear.
+ */
+export function lineEntryParts(entry: LineActivityEntryWire, names: LineEntryNames = {}): SentencePart[] {
+  const place = entryPlaceParts(entry);
+  const preposition = entry.place !== null && placeKeyService(entry.place) === "github" ? "on" : "in";
+  const lead = place === null ? [text(eventInWords(entry.eventKey))] : [text(`${eventInWords(entry.eventKey)} ${preposition} `), ...place];
+  const outcome = entry.kind === "skipped" ? [text(`skipped, ${skipInWords(entry)}`)] : actedOutcomeParts(entry, names);
+  return tidy([...lead, text(" → "), ...outcome]);
+}
+
+/** A duration as the Activity's right column reads it: `40 s`, `2 min`, `3 h`. */
+export function tookInWords(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.round(minutes / 60)} h`;
+}
+
+// ── A routine's page ────────────────────────────────────────────────────
+
+/** How it works, **When**, for a routine: the zone its times read in. */
+export function scheduleExplanation(timezone: string | undefined): string {
+  const zone = scheduleZone(timezone);
+  return `The times are in ${zone ?? "UTC"}.`;
+}
+
+/** How it works, **Do**, for a routine, as parts: `work on its prompt`, or `run <workflow>`. */
+export function routineDoParts(routine: RoutineLike, workflows: WorkflowNames): SentencePart[] {
+  return routine.detail.targetKind === "workflow" ? workflowParts(workflows, routine.workflowId) : [text("work on its prompt")];
+}
+
+/** How it works, **Do**, for a routine: one sentence of behavior. */
+export function routineDoExplanation(routine: RoutineLike, workflows: WorkflowNames): string {
+  if (routine.detail.targetKind === "assistant") return "Valet reads the prompt and acts in the thread.";
+  const name = workflowName(workflows, routine.workflowId);
+  return name === undefined ? "Valet starts the workflow." : `Valet starts the ${name} workflow.`;
+}
+
+/**
+ * One firing of a routine on its Activity (spec Part E step 2): `Fired →
+ * worked in <thread>` for an assistant routine, `Fired → started <workflow>
+ * run` for a workflow routine.
+ */
+export function firingParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
+  if (routine.detail.targetKind === "workflow") {
+    const name = workflowName(workflows, routine.workflowId);
+    const run: SentencePart[] = name === undefined || routine.workflowId === undefined
+      ? [text("started a workflow run")]
+      : [text("started "), { kind: "workflow", text: name, id: routine.workflowId }, text(" run")];
+    return tidy([text("Fired → "), ...run]);
+  }
+  const policy = routine.detail.thread ?? { mode: "own" };
+  const where = policy.mode === "existing"
+    ? pinnedThreadParts(threads, policy)
+    : [text(policy.mode === "new" ? "a new thread" : "its own thread")];
+  return tidy([text("Fired → worked in "), ...where]);
 }

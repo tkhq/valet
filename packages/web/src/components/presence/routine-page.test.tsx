@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 /**
  * A routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
- * step 2): the sentence as the title, the fact strip, fire now, edit, enable
- * or disable, the history, and the problem with the picker inline.
+ * step 2): the line page's anatomy. The sentence as the title with the
+ * clock mark, the status line with fire now, edit, and enable or disable,
+ * the health strip, the problem with the picker inline, How it works, and
+ * Activity as the routine's firings.
  *
  * The api client is mocked at the transport, so the real query hooks run.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type {
   ListThreadsResponse,
   ListWorkflowRunsResponse,
@@ -65,6 +68,7 @@ let teamsData: { teams: { id: string; name?: string; callerRole: "admin" | "memb
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-001", orgId: "acme", orgRole: "member" } }),
   useTeams: () => ({ data: teamsData }),
+  useOrgDirectory: () => ({ data: { users: [{ userId: "u-001", email: "c@acme.test", name: "Conner", avatarUrl: null }] } }),
 }));
 
 vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
@@ -130,9 +134,21 @@ beforeEach(() => {
   listThreads.mockResolvedValue({ threads: [] });
 });
 
-/** The fact strip as [term, value] pairs. */
-function factsOf(strip: HTMLElement): string[][] {
-  return Array.from(strip.querySelectorAll("dt")).map((dt) => [dt.textContent ?? "", dt.nextElementSibling?.textContent ?? ""]);
+/** How it works as the text of each column, When, Do, Where. */
+async function columns(): Promise<string[]> {
+  const how = await screen.findByRole("region", { name: "How it works" });
+  return Array.from(how.querySelectorAll<HTMLElement>("[data-section]")).map((column) => column.textContent ?? "");
+}
+
+/** The timeline's rows as their text, newest first. */
+function activityRows(): string[] {
+  return Array.from(screen.getByRole("region", { name: "Activity" }).querySelectorAll("li")).map((row) => row.textContent ?? "");
+}
+
+/** Opens the status line's overflow menu and picks Delete. */
+async function pickDelete() {
+  await userEvent.click(await screen.findByRole("button", { name: "More for Morning summary" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
 }
 
 describe("RoutinePage", () => {
@@ -159,23 +175,52 @@ describe("RoutinePage", () => {
     expect(within(crumbs).getByText("Morning summary").getAttribute("aria-current")).toBe("page");
   });
 
-  it("shows When, Do, and Runs in for an assistant routine, with the timezone when not UTC", async () => {
+  it("follows the line page's anatomy: clock mark, status line, health strip, How it works, Activity", async () => {
+    wrap(<RoutinePage id="S1" />);
+    const setUp = await screen.findByText("set up by", { exact: false });
+    expect(setUp.textContent).toBe("set up by Conner");
+    const title = screen.getByRole("heading", { level: 1 });
+    expect(title.parentElement?.querySelector('[data-service="schedule"][data-size="lg"]')).not.toBeNull();
+    const strip = screen.getByRole("region", { name: "Health" });
+    const how = screen.getByRole("region", { name: "How it works" });
+    const timeline = screen.getByRole("region", { name: "Activity" });
+    const order = [title, setUp, strip, how, timeline];
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(within(strip).getByText("never")).toBeTruthy();
+    expect(within(strip).getByText("last fired")).toBeTruthy();
+    expect(within(strip).getAllByRole("img", { name: "Activity over the last 30 days" })[0]!.querySelectorAll("span")).toHaveLength(30);
+    // A routine has no skipped entries, so its Activity has no chips.
+    expect(within(timeline).queryByRole("group", { name: "Show" })).toBeNull();
+    expect(within(timeline).getByText("Nothing yet. Activity appears here when the routine fires.")).toBeTruthy();
+    expect(screen.queryByLabelText("Facts")).toBeNull();
+    expect(screen.queryByText("Runs in")).toBeNull();
+  });
+
+  it("shows When with the timezone, Do, and Where for an assistant routine", async () => {
     wrap(<RoutinePage id="S2" />);
-    const strip = await screen.findByLabelText("Facts");
-    expect(factsOf(strip)).toEqual([
-      ["When", `Every weekday at 8:30 (${zoneLongName("America/Denver")})`],
-      ["Do", "work on it"],
-      ["Runs in", "A new thread each time"],
+    const zone = zoneLongName("America/Denver");
+    expect(await columns()).toEqual([
+      `WhenEvery weekday at 8:30 (${zone})The times are in ${zone}.Change`,
+      "Dowork on its promptValet reads the prompt and acts in the thread.Change",
+      "Wherein a new thread each timeEvery firing starts a fresh thread.Change",
     ]);
   });
 
-  it("shows When and Do, and no Runs in, for a workflow routine", async () => {
+  it("shows When, Do, and a run for Where on a workflow routine", async () => {
     wrap(<RoutinePage id="S3" />);
-    const strip = await screen.findByLabelText("Facts");
-    await waitFor(() => expect(factsOf(strip)).toEqual([
-      ["When", "Every day at 2:00"],
-      ["Do", "run Build"],
+    await waitFor(async () => expect(await columns()).toEqual([
+      "WhenEvery day at 2:00The times are in UTC.Change",
+      "Dorun BuildValet starts the Build workflow.Change",
+      "Wherein a workflow runA workflow run has no thread. Open the run from Activity to follow it.Change",
     ]));
+  });
+
+  it("opens the editor from a Change", async () => {
+    wrap(<RoutinePage id="S1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Change When" }));
+    expect(screen.getByText("Editing Morning summary in user")).toBeTruthy();
   });
 
   it("names a pinned thread from the archived list", async () => {
@@ -196,7 +241,9 @@ describe("RoutinePage", () => {
     wrap(<RoutinePage id="S1" />);
     const problem = await screen.findByRole("region", { name: "Problem" });
     expect(await within(problem).findByText("The pinned thread is archived. Pick another thread:")).toBeTruthy();
-    expect(screen.getByText("Thread archived")).toBeTruthy();
+    const strip = screen.getByRole("region", { name: "Health" });
+    expect(within(strip).getByText("Needs attention")).toBeTruthy();
+    expect(within(strip).getByText("The pinned thread is archived")).toBeTruthy();
     fireEvent.click(within(problem).getByRole("button", { name: "Pick Platform Ops from user" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", {
       thread: { mode: "existing", sessionId: "s-ws", threadId: "t-ops" },
@@ -220,6 +267,7 @@ describe("RoutinePage", () => {
     expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Fire now" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("switch", { name: "Turn off Morning summary" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Change When" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("keeps a team routine read-only for a viewer outside the team", async () => {
@@ -228,7 +276,8 @@ describe("RoutinePage", () => {
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByText("Only members of SRE can change this.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Delete" }).hasAttribute("disabled")).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
+    expect(screen.getByRole("menuitem", { name: "Delete" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("scopes Edit's Runs in to a team routine's team and marks the routine Team", async () => {
@@ -241,7 +290,7 @@ describe("RoutinePage", () => {
 
   it("deletes the routine after the confirm, then opens Presence", async () => {
     wrap(<RoutinePage id="S1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await pickDelete();
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
@@ -252,7 +301,7 @@ describe("RoutinePage", () => {
   it("names a team routine's team in the Delete confirm", async () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
     wrap(<RoutinePage id="S1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await pickDelete();
     expect(await screen.findByText("This is SRE's routine. Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
   });
 
@@ -300,25 +349,35 @@ describe("RoutinePage", () => {
     expect(line.textContent).not.toMatch(/\d:\d\d:\d\d/);
   });
 
-  it("lists a workflow routine's runs", async () => {
+  it("lists a workflow routine's runs as firings, with the strip's count and the time each took", async () => {
+    const now = Date.now();
     listWorkflowRuns.mockResolvedValue({
       runs: [
-        { runId: "wfrun_sch_S3_100", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: 100, updatedAt: 100 },
-        { runId: "wfrun_manual_1", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: 90, updatedAt: 90 },
+        { runId: "wfrun_sch_S3_100", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: now - 3_600_000, updatedAt: now - 3_600_000 + 40_000 },
+        { runId: "wfrun_manual_1", workflowId: "wf-1", status: "settled", outcome: "completed", createdAt: now - 7_200_000, updatedAt: now - 7_100_000 },
+        { runId: "wfrun_sch_S3_090", workflowId: "wf-1", status: "running", createdAt: now - 40 * 86_400_000, updatedAt: now - 40 * 86_400_000 },
       ],
     });
     wrap(<RoutinePage id="S3" />);
-    const history = await screen.findByRole("region", { name: "History" });
-    expect((await within(history).findByRole("link", { name: /wfrun_sch_S3_100/ })).getAttribute("href")).toBe("/workflows/runs/wfrun_sch_S3_100");
-    expect(within(history).queryByText(/wfrun_manual_1/)).toBeNull();
+    await waitFor(() => expect(activityRows()).toHaveLength(2));
+    expect(activityRows()[0]).toContain("Fired → started Build run40 s");
+    expect(activityRows()[1]).toContain("Fired → started Build run");
+    expect(within(screen.getByRole("region", { name: "Activity" })).getAllByRole("link", { name: "Build" })[0]!.getAttribute("href")).toBe("/workflows/wf-1");
+    const strip = screen.getByRole("region", { name: "Health" });
+    // One firing in 30 days; the manual run is not this routine's.
+    expect(within(strip).getByText("1")).toBeTruthy();
+    expect(within(strip).getByText("1h ago")).toBeTruthy();
     expect(listWorkflowRuns).toHaveBeenCalledWith("wf-1");
   });
 
-  it("says when an assistant routine last fired", async () => {
+  it("shows an assistant routine's last firing, and no count it does not record", async () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 2 * 3_600_000 } })] });
     wrap(<RoutinePage id="S1" />);
-    const history = await screen.findByRole("region", { name: "History" });
-    expect(within(history).getByText(/^Last fired/)).toBeTruthy();
+    const strip = await screen.findByRole("region", { name: "Health" });
+    expect(within(strip).getByText("2h ago")).toBeTruthy();
+    expect(within(strip).queryByText("times in 30 days")).toBeNull();
+    expect(activityRows()).toEqual([expect.stringContaining("Fired → worked in its own thread")]);
+    expect(listWorkflowRuns).not.toHaveBeenCalled();
   });
 
   it("names the fix for a routine that is not in the list", async () => {

@@ -7,6 +7,7 @@ import type {
   EventSubscriptionTargetWire,
   EventSubscriptionWire,
   GetWorkflowTriggerCatalogResponse,
+  LineActivityEntryWire,
 } from "@valet/api/wire";
 import {
   activityLeadParts,
@@ -15,7 +16,17 @@ import {
   activitySentenceParts,
   cronInWords,
   derivedClause,
+  doExplanation,
+  doParts,
   eventInWords,
+  firingParts,
+  lineEntryParts,
+  routineDoExplanation,
+  scheduleExplanation,
+  tookInWords,
+  whenExplanation,
+  whereExplanation,
+  whereParts,
   eventLabel,
   hasEventWords,
   partsText,
@@ -766,5 +777,139 @@ describe("every catalog key reads as words", () => {
         expect(said, key).not.toMatch(/happens/);
       }
     }
+  });
+});
+
+describe("How it works explanations (Part D step 1.6)", () => {
+  const ACME = { field: "repo", op: "eq" as const, value: "acme/api" };
+
+  it("reads a line that names only its place as what it hears there", () => {
+    expect(whenExplanation([ACME], ["github.check_run.completed"])).toBe("Any branch, any author.");
+    expect(whenExplanation([], ["linear.issue.create"])).toBe("Any issue, any author.");
+    expect(whenExplanation([{ field: "channel", op: "eq", value: "C1" }], ["slack.message"])).toBe("Any message, in a thread or not.");
+    expect(whenExplanation([], [])).toBe("No other conditions.");
+  });
+
+  it("lists every other condition after Only, and skips the creator scope", () => {
+    expect(whenExplanation([ACME, { field: "branch", op: "eq", value: "main" }], ["github.push"])).toBe("Only the main branch.");
+    expect(whenExplanation(
+      [{ field: "branch", op: "in", value: ["main", "release"] }, { field: "sender", op: "eq", value: "U1", label: "Alice" }],
+      ["github.push"],
+    )).toBe("Only the main or release branch and from Alice.");
+    expect(whenExplanation(
+      [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U-me" }],
+      ["slack.app_mention"],
+    )).toBe("Any message, in a thread or not.");
+    expect(whenExplanation([{ field: "title", op: "contains", value: "deploy" }], ["github.issues.opened"]))
+      .toBe("Only when the title contains deploy.");
+  });
+
+  it("reads Do as what Valet does and as whom", () => {
+    const check = { eventKeys: ["github.check_run.completed"], target: { kind: "assistant" as const } };
+    expect(partsText(doParts(check, []))).toBe("work on it as Valet");
+    expect(doExplanation(check, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
+    const mention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const, appearance: { displayName: "Ops Bot" } } };
+    expect(partsText(doParts(mention, []))).toBe("reply as Ops Bot");
+    expect(doParts(mention, [])[1]).toEqual({ kind: "person", text: "Ops Bot" });
+    expect(doExplanation(mention, [])).toBe("Valet replies where it was mentioned. It appears as Ops Bot.");
+    const workflow = { eventKeys: ["github.push"], target: { kind: "workflow" as const, workflowId: "wf-1" } };
+    expect(partsText(doParts(workflow, [{ id: "wf-1", name: "Triage" }]))).toBe("run Triage");
+    expect(doExplanation(workflow, [{ id: "wf-1", name: "Triage" }])).toBe("Valet starts the Triage workflow with the event as its input.");
+  });
+
+  it("reads each Where policy as behavior", () => {
+    expect(whereExplanation({ mode: "subject" }, "pull request")).toBe("Each pull request gets its own thread; every event for it lands there.");
+    expect(whereExplanation({ mode: "existing", sessionId: "s", threadId: "t" }, null)).toBe("Every event lands in this one thread, so the history stays in one place.");
+    expect(whereExplanation({ mode: "new" }, "channel")).toBe("Every event starts a fresh thread.");
+    expect(whereExplanation({ mode: "own" }, null)).toBe("Every event lands in this line's own thread, so the history stays in one place.");
+    expect(whereExplanation({ mode: "own" }, null, "routine")).toBe("Every firing lands in this routine's own thread, so the history stays in one place.");
+    expect(whereExplanation({ mode: "new" }, null, "routine")).toBe("Every firing starts a fresh thread.");
+  });
+
+  it("reads Where's value with the pinned thread as a token", () => {
+    const parts = whereParts({ mode: "existing", sessionId: "s", threadId: "t-ci" }, null, { "t-ci": { title: "Platform CI" } });
+    expect(partsText(parts)).toBe("in the Platform CI thread");
+    expect(parts).toContainEqual({ kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" });
+    expect(partsText(whereParts({ mode: "subject" }, "pull request", {}))).toBe("in one thread per pull request");
+    expect(partsText(whereParts({ mode: "new" }, null, {}))).toBe("in a new thread each time");
+  });
+
+  it("reads a routine's zone and Do", () => {
+    expect(scheduleExplanation("UTC")).toBe("The times are in UTC.");
+    expect(scheduleExplanation("America/Denver")).toBe(`The times are in ${zoneLongName("America/Denver")}.`);
+    const routine: RoutineLike = { name: "Nightly", workflowId: "wf-1", detail: { cron: "0 2 * * *", targetKind: "workflow" } };
+    expect(routineDoExplanation(routine, [{ id: "wf-1", name: "Build" }])).toBe("Valet starts the Build workflow.");
+    expect(routineDoExplanation({ name: "M", detail: { cron: "0 9 * * *", targetKind: "assistant" } }, [])).toBe("Valet reads the prompt and acts in the thread.");
+  });
+});
+
+describe("lineEntryParts (Part D step 1.7)", () => {
+  function entry(over: Partial<LineActivityEntryWire>): LineActivityEntryWire {
+    return {
+      id: "d-1", kind: "acted", at: 1, eventId: "ev-1", eventKey: "github.check_run.completed",
+      place: "github:acme/api#14", placeLabel: "acme/api#14", ...over,
+    };
+  }
+  const PIN = "Pick another thread in Presence.";
+  const isPinText = (text: string) => text === PIN;
+
+  it("reads a delivered entry as worked in its thread, with the place as a token", () => {
+    const parts = lineEntryParts(entry({ outcome: { status: "delivered", thread: { sessionId: "s", threadId: "t-ci", title: "Platform CI" } } }));
+    expect(partsText(parts)).toBe("Completed check on acme/api#14 → worked in Platform CI");
+    expect(parts).toContainEqual({ kind: "place", text: "acme/api#14", service: "github", subject: "github:acme/api#14" });
+    expect(parts).toContainEqual({ kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" });
+  });
+
+  it("reads a mention as replied in, in its channel", () => {
+    const parts = lineEntryParts(entry({
+      eventKey: "slack.app_mention", place: "slack:T1/C900", placeLabel: "#incidents",
+      outcome: { status: "delivered", thread: { sessionId: "s", threadId: "t-inc", title: "t-inc" } },
+    }));
+    expect(partsText(parts)).toBe("Mention in #incidents → replied in t-inc");
+  });
+
+  it("reads a run as started <workflow> run", () => {
+    const parts = lineEntryParts(entry({ outcome: { status: "delivered", runId: "run-1" } }), { workflow: { id: "wf-1", name: "Triage" } });
+    expect(partsText(parts)).toBe("Completed check on acme/api#14 → started Triage run");
+    expect(parts).toContainEqual({ kind: "workflow", text: "Triage", id: "wf-1" });
+  });
+
+  it("reads a dead pin as could not reach the thread, and other dead text as gave up", () => {
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: PIN } }), { pinTitle: "Platform CI", isPinText })))
+      .toBe("Completed check on acme/api#14 → could not reach Platform CI, it is archived");
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "dead", deadText: "The thread is gone." } }), { isPinText })))
+      .toBe("Completed check on acme/api#14 → gave up: the thread is gone");
+    expect(partsText(lineEntryParts(entry({ outcome: { status: "pending" } }))))
+      .toBe("Completed check on acme/api#14 → waiting for the first attempt");
+  });
+
+  it("reads each skipped reason in words", () => {
+    const skipped = (over: Partial<LineActivityEntryWire>) =>
+      partsText(lineEntryParts(entry({ kind: "skipped", place: "github:acme/web#8", placeLabel: "acme/web#8", ...over })));
+    expect(skipped({ reason: "filters", reasonText: "the repository filter" })).toBe("Completed check on acme/web#8 → skipped, not for this line: the repository filter");
+    expect(skipped({ reason: "sender" })).toBe("Completed check on acme/web#8 → skipped, the sender is not allowed");
+    expect(skipped({ reason: "off" })).toBe("Completed check on acme/web#8 → skipped, the line was off");
+    expect(skipped({ reason: "claimed" })).toBe("Completed check on acme/web#8 → skipped, another line claimed it");
+    expect(skipped({ reason: "other", reasonText: "Muted by the owner." })).toBe("Completed check on acme/web#8 → skipped, muted by the owner");
+  });
+
+  it("reads an entry with no place by its event alone", () => {
+    expect(partsText(lineEntryParts(entry({ kind: "skipped", place: null, placeLabel: null, reason: "off" }))))
+      .toBe("Completed check → skipped, the line was off");
+  });
+
+  it("reads the time it took", () => {
+    expect(tookInWords(40_000)).toBe("40 s");
+    expect(tookInWords(120_000)).toBe("2 min");
+    expect(tookInWords(200)).toBe("1 s");
+    expect(tookInWords(3 * 3_600_000)).toBe("3 h");
+  });
+
+  it("reads a routine's firing", () => {
+    const pinned: RoutineLike = { name: "M", detail: { cron: "0 9 * * *", targetKind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } };
+    expect(partsText(firingParts(pinned, [], { t: { title: "Ops" } }))).toBe("Fired → worked in the Ops thread");
+    expect(partsText(firingParts({ name: "M", detail: { cron: "0 9 * * *", targetKind: "assistant" } }, [], {}))).toBe("Fired → worked in its own thread");
+    const wf: RoutineLike = { name: "N", workflowId: "wf-1", detail: { cron: "0 2 * * *", targetKind: "workflow" } };
+    expect(partsText(firingParts(wf, [{ id: "wf-1", name: "Build" }], {}))).toBe("Fired → started Build run");
   });
 });

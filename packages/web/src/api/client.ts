@@ -208,6 +208,7 @@ import type {
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   ListSubscriptionDeliveriesResponse,
+  LineActivityResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
@@ -1146,6 +1147,16 @@ export const api = {
       "GET",
       `/event-subscriptions/${encodeURIComponent(id)}/deliveries${limit !== undefined ? `?limit=${limit}` : ""}`,
     ),
+  /** One line's Activity, newest first, with the health strip's counts. `before` is the previous page's `nextCursor`. */
+  getLineActivity: (id: string, params: { before?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.before !== undefined) qs.set("before", params.before);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<LineActivityResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/activity${qs.size ? `?${qs}` : ""}`,
+    );
+  },
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
