@@ -32,9 +32,9 @@ For source-less requests and `use_defaults` source requests, the host resolves t
 
 `assistant default -> personal default -> team default -> host default -> s`
 
-A shared team assistant omits the actor's personal default, as it does during session creation. Reasoning uses the parallel assistant, personal, team, and organization cascade.
+A shared team assistant omits the actor's personal default, as it does during session creation. Reasoning uses the parallel assistant, personal, team, and organization cascade. If no layer sets a level, the host uses the Valet default `medium` (`VALET_DEFAULT_REASONING`), clamped to the organization max.
 
-The new thread persists the selected model spec. A tier selection persists its tier token, not the current concrete target. This keeps tier remapping effective at run time. The new thread persists an explicit reasoning level only when the effective source or default supplies one.
+The new thread persists the selected model spec. A tier selection persists its tier token, not the current concrete target. This keeps tier remapping effective at run time. A fresh-default thread always persists a concrete reasoning level. A `keep_current` thread persists the source's effective level when one exists.
 
 ### Channel thread defaults
 
@@ -42,7 +42,7 @@ Direct channel messages, mentions, and followed messages use fresh defaults when
 
 The host persists model and reasoning before prompt submission. Concurrent channel and event deliveries share one creation operation per session and thread key. Failed creation remains retryable.
 
-Existing threads retain their pins after preference changes and session restore. Shared assistants keep owner-scoped defaults. Cleared reasoning persists as `off`.
+Existing threads retain their pins after preference changes and session restore. Shared assistants keep owner-scoped defaults. A cleared reasoning pin persists as unset, and the thread follows the session default.
 
 ### Selected model labels
 
@@ -127,6 +127,6 @@ The engine has an awaited thread factory. It writes initial settings before it e
 
 The API resolves fresh defaults without the persisted session row. It rejects an approved list that omits a configured tier target.
 
-An explicit fresh default with no reasoning uses the engine's persisted `off` sentinel so it cannot inherit a historical session reasoning level after creation or restore.
+Fresh defaults always resolve a reasoning level, so a new thread never inherits a historical session reasoning level. Older builds persisted an `off` sentinel when no default resolved. The engine reads a legacy `off` row as no pin, and `GET /api/sessions/:id/threads` lists it with the session default.
 
 The web app resolves closed labels and thread pins from the first active catalog target. A restricted picker renders approved options without a catalog reveal.

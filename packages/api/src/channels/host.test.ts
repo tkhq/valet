@@ -302,9 +302,9 @@ describe("ChannelHost.handleUpdate", () => {
 
     const thread = await session.threadByKey("fake:99");
     expect(thread?.modelId()).toBe(model ?? "s");
-    expect(thread?.reasoning()).toBeUndefined();
+    expect(thread?.reasoning()).toBe("medium");
     if (!thread) throw new Error("Expected the channel thread to exist");
-    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: model ?? "s", reasoning: "off" });
+    expect(await engineStore.getThread(session.id, thread.id)).toMatchObject({ model: model ?? "s", reasoning: "medium" });
     expect(oldThread.modelId()).toBe("claude-opus-4-5");
     expect(session.options.modelSpec).toBe("claude-opus-4-5");
     await testDb.appDb.update(users).set({ defaultModel: "l" }).where(eq(users.id, USER_ID));

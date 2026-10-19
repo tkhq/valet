@@ -26,7 +26,6 @@ import {
   isReasoningLevel,
   parseReasoningLevel,
   REASONING_LEVELS,
-  THREAD_REASONING_DISABLED,
   type ReasoningLevel,
 } from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
@@ -218,7 +217,7 @@ export interface EmitOptions {
 /** Settings pinned when an API caller creates a new thread. */
 export interface ThreadInitialSettings {
   model?: string;
-  reasoning?: ReasoningLevel | null;
+  reasoning?: ReasoningLevel;
 }
 
 export class Session {
@@ -836,8 +835,7 @@ export class Session {
       // default/channel/workflow threads all funnel through here; rehydrate
       // constructs Thread from persisted data and never re-stamps.
       model: initial?.model ?? this.options.modelSpec ?? this.options.model.id,
-      reasoning:
-        initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
+      reasoning: initial?.reasoning,
       // Stamped with `createdAt` and never rewritten: a later timezone change
       // must not alter this thread's prompt (TKAI-584).
       metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,

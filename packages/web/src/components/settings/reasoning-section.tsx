@@ -3,16 +3,18 @@ import { Label, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useOrgReasoning, usePatchOrgReasoning } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
-import { levelsUpTo, REASONING_LABELS, REASONING_LEVELS } from "~/lib/reasoning";
+import { VALET_DEFAULT_REASONING } from "@valet/api/wire";
+import { levelsUpTo, REASONING_LABELS, REASONING_LEVELS, reasoningLabelFor } from "~/lib/reasoning";
 
 const SELECT_CLASS = "mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base text-[--fg] sm:h-9 sm:text-sm";
 
 /**
  * Organization · Models — default and max reasoning levels
  * (model-selector-overhaul, Task 13). `GET`/`PATCH /api/org/reasoning`
- * stores each field as an explicit level or unset (inherit / no cap). A
- * default above the chosen max is disabled in the picker rather than
- * silently clamped, per `levelsUpTo`.
+ * stores each field as an explicit level or unset (Valet default / no cap).
+ * A default above the chosen max is disabled in the picker rather than
+ * silently clamped, per `levelsUpTo`. The unset option names the level new
+ * threads get: `VALET_DEFAULT_REASONING`, clamped to the max like the api.
  */
 export function ReasoningSection() {
   const reasoningQ = useOrgReasoning();
@@ -23,6 +25,7 @@ export function ReasoningSection() {
   const defaultLevel = data?.default ?? "";
   const maxLevel = data?.max ?? "";
   const allowedDefaults = new Set(levelsUpTo(maxLevel || undefined));
+  const builtInDefault = allowedDefaults.has(VALET_DEFAULT_REASONING) ? VALET_DEFAULT_REASONING : maxLevel;
 
   function setDefault(value: string) {
     setError(null);
@@ -65,7 +68,7 @@ export function ReasoningSection() {
                 onChange={(e) => setDefault(e.target.value)}
                 className={SELECT_CLASS}
               >
-                <option value="">Inherit</option>
+                <option value="">Valet default ({reasoningLabelFor(builtInDefault)})</option>
                 {REASONING_LEVELS.map((level) => (
                   <option key={level} value={level} disabled={!allowedDefaults.has(level)}>
                     {REASONING_LABELS[level]}

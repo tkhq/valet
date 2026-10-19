@@ -29,9 +29,6 @@ export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "m
 /** One of the six reasoning levels. Structurally pi-ai's `ThinkingLevel`. */
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
-/** Persisted per-thread sentinel for explicitly bypassing a session default. */
-export const THREAD_REASONING_DISABLED = "off" as const;
-
 const REASONING_SET: ReadonlySet<string> = new Set<string>(REASONING_LEVELS);
 
 /** True when `value` is one of the six levels. */
@@ -41,7 +38,8 @@ export function isReasoningLevel(value: unknown): value is ReasoningLevel {
 
 /**
  * Read a persisted reasoning token. An absent, null, or unrecognized value
- * resolves to `undefined` (provider default) rather than throwing.
+ * resolves to `undefined` (unset) rather than throwing. A legacy thread row
+ * that stored `"off"` therefore has no pin and follows the session default.
  */
 export function parseReasoningLevel(value: string | null | undefined): ReasoningLevel | undefined {
   return isReasoningLevel(value) ? value : undefined;

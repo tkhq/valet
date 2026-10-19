@@ -313,7 +313,7 @@ describe("engine: model switching", () => {
     expect(await session.threadByKey("web:configured")).toBe(thread);
   });
 
-  it("createThread persists an explicit no-reasoning setting across restore", async () => {
+  it("restores a legacy \"off\" reasoning row as no pin", async () => {
     const { engine, newEngine, store, baseModel } = setup();
     const session = await engine.createSession({
       userId: "u1",
@@ -323,19 +323,18 @@ describe("engine: model switching", () => {
       model: baseModel,
       sampling: { reasoning: "high" },
     });
-
-    const thread = await session.createThread("web:no-reasoning", {
-      model: "s",
-      reasoning: null,
-    });
-    expect(thread.reasoning()).toBeUndefined();
-    expect((await store.getThread(session.id, thread.id))?.reasoning).toBe("off");
+    const thread = await session.createThread("web:legacy-off", { model: "s" });
+    // Older builds wrote "off" for a new thread with no resolved default.
+    await store.saveThread(session.id, { ...thread.toThreadData(), reasoning: "off" });
 
     const restored = await newEngine().restoreSession({
       sessionId: session.id,
       options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
     });
-    expect(restored.threadById(thread.id)?.toThreadData().reasoning).toBe("off");
+    const legacy = restored.threadById(thread.id);
+    expect(legacy?.reasoning()).toBeUndefined();
+    expect(legacy?.toThreadData().reasoning).toBeUndefined();
+    expect(restored.options.sampling?.reasoning).toBe("high");
   });
 
   it("createThread does not expose a thread when persistence fails", async () => {

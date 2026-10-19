@@ -457,6 +457,17 @@ describe("ModelPicker — reasoning row", () => {
     expect(onSelectReasoning).toHaveBeenCalledWith(null);
   });
 
+  it("labels a new thread's level and presses its chip instead of Default", async () => {
+    const user = userEvent.setup();
+    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "medium" });
+
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ });
+    expect(trigger.textContent).toContain("· Medium");
+    await user.click(trigger);
+    expect(screen.getByRole("button", { name: "Medium reasoning" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Default reasoning" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("disables a level absent from the current model's thinkingLevels", async () => {
     modelsData = {
       models: [

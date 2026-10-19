@@ -141,7 +141,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       dispatchId: "model-next", mismatchReason: "event_target_mismatch",
     });
     expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
-    expect((await restored.threadByKey("slack:C1:next"))?.toThreadData().reasoning).toBe("off");
+    expect((await restored.threadByKey("slack:C1:next"))?.reasoning()).toBe("medium");
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
   });
 

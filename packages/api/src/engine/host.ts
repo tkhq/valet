@@ -59,7 +59,7 @@ import {
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
-import type { RepoBinding } from "../wire/types.js";
+import { VALET_DEFAULT_REASONING, type RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
 import {
@@ -1235,7 +1235,7 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             resolveFallbackModel,
-            ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+            sampling: { reasoning },
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1267,7 +1267,7 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           resolveFallbackModel,
-          ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+          sampling: { reasoning },
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -2822,7 +2822,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(meta.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       ...(execution ? { parentSessionId: assistant.sessionId, parentThreadId: execution.governingThreadId } : {}),
       ...(principal.type === "team" && !execution && !legacyRuntime ? {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
@@ -3573,10 +3573,15 @@ export class EngineHost {
    * on shutdown). So on restore (`existing` present), the *persisted* value
    * always wins outright over every cascade tier. Only on create does the
    * preference cascade apply:
-   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
-   * — most-specific wins — and the resolved level (if any) is clamped to the
-   * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
-   * level (a stale/invalid column) is treated as unset rather than thrown.
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ??
+   * VALET_DEFAULT_REASONING` — most-specific wins — and the resolved level is
+   * clamped to the org's cap (`clampToMax`). A value that isn't a known level
+   * (a stale/invalid column) is treated as unset rather than thrown, so every
+   * build and every new thread gets a concrete level. A restore that finds no
+   * stored level (a session from before the Valet default) stores the
+   * resolved one, so the store, the thread list, and later rebuilds agree
+   * with the runtime. A restore also stores the resolved level on each legacy
+   * `"off"` thread, so that thread never inherits a historical session level.
    *
    * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
    * site already uses for `resolveModelForBuild` — see that method's doc
@@ -3586,18 +3591,32 @@ export class EngineHost {
     existing: SessionData | null,
     orgId: string,
     prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
-  ): Promise<ReasoningLevel | undefined> {
-    if (existing?.reasoning) {
-      return isReasoningLevel(existing.reasoning) ? existing.reasoning : undefined;
-    }
+  ): Promise<ReasoningLevel> {
+    const stored = isReasoningLevel(existing?.reasoning) ? existing.reasoning : undefined;
+    // Older builds stored "off" on a new thread when no default resolved.
+    const legacyOff = existing
+      ? (await this.opts.engineStore.listThreads(existing.id)).filter((thread) => thread.reasoning === "off")
+      : [];
+    if (stored && legacyOff.length === 0) return stored;
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
       prefs.assistantDefault ??
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
-    if (!isReasoningLevel(level)) return undefined;
-    return clampToMax(level, settings.max);
+    const resolved = clampToMax(isReasoningLevel(level) ? level : VALET_DEFAULT_REASONING, settings.max);
+    if (existing) {
+      // saveSession writes the whole row: re-read it so the write changes only the level.
+      const current = await this.opts.engineStore.getSession(existing.id);
+      if (current && !isReasoningLevel(current.reasoning)) {
+        await this.opts.engineStore.saveSession({ ...current, reasoning: resolved });
+      }
+      // A legacy "off" thread gets what a new thread gets now, not a historical session level.
+      for (const thread of legacyOff) {
+        await this.opts.engineStore.saveThread(existing.id, { ...thread, reasoning: resolved });
+      }
+    }
+    return stored ?? resolved;
   }
 
   /**
@@ -3635,7 +3654,40 @@ export class EngineHost {
     sessionId: string,
     meta: SessionMeta,
     actorUserId = meta.userId,
-  ): Promise<{ model: string; reasoning: ReasoningLevel | null }> {
+  ): Promise<{ model: string; reasoning: ReasoningLevel }> {
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: legacy.model,
+    });
+    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: legacy.reasoning,
+    });
+    return { model: spec, reasoning };
+  }
+
+  /**
+   * The reasoning half of `resolveFreshThreadSettings`. It skips the model
+   * cascade, so an unavailable default model cannot block a reasoning reset.
+   */
+  async resolveFreshThreadReasoning(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+  ): Promise<ReasoningLevel> {
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    return this.resolveReasoningForBuild(null, meta.orgId, { userId, ownerTeamId, assistantDefault: legacy.reasoning });
+  }
+
+  /** Whose defaults a new thread uses: an assistant's owner, else the actor and the session's team. */
+  private async freshThreadPrefs(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId: string,
+  ): Promise<{ userId?: string; ownerTeamId?: string; legacy: { model?: string; reasoning?: string } }> {
     const assistant = this.opts.db
       ? await loadAssistantBySessionId(this.opts.db, sessionId)
       : undefined;
@@ -3645,21 +3697,8 @@ export class EngineHost {
     const ownerTeamId = assistant
       ? (isTeamAssistant ? assistant.ownerId : undefined)
       : meta.ownerTeamId;
-    const legacyModel = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
-    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
-      userId,
-      ownerTeamId,
-      assistantDefault: legacyModel.model,
-    });
-    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
-      userId,
-      ownerTeamId,
-      assistantDefault: legacyModel.reasoning,
-    });
-    return {
-      model: spec,
-      reasoning: reasoning ?? null,
-    };
+    const legacy = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
+    return { userId, ownerTeamId, legacy };
   }
 
   /** Resolve an existing startup image before child creation mutates state. */
@@ -3951,7 +3990,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -4137,7 +4176,7 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
-      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
+      sampling: { reasoning },
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,

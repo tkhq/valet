@@ -117,9 +117,9 @@ export interface ThreadData {
   paused?: boolean;
   model?: string;
   /**
-   * Per-thread reasoning-level pin (one of `REASONING_LEVELS`). The internal
-   * `off` sentinel explicitly bypasses the session default; unset follows it. Mutated by
-   * `Thread.setReasoning`, read back on rehydrate.
+   * Per-thread reasoning-level pin (one of `REASONING_LEVELS`). Unset follows
+   * the session default. Mutated by `Thread.setReasoning`, read back on
+   * rehydrate.
    */
   reasoning?: string;
   summary?: string;

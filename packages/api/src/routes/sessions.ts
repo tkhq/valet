@@ -981,7 +981,7 @@ sessionsRouter.patch("/:id", async (c) => {
     const err = await assertModelSelectable(db, row.orgId, isAdmin, body.model as string);
     if (err) return c.json({ error: err }, 400);
   }
-  // `reasoning: null` clears the override and always passes.
+  // `reasoning: null` resets to the current default and always passes.
   if (wantsReasoning && body.reasoning !== null) {
     if (typeof body.reasoning !== "string") {
       return c.json(
@@ -1107,7 +1107,8 @@ sessionsRouter.patch("/:id", async (c) => {
   let model: string | undefined;
   let reasoning: string | null | undefined;
   if ((wantsModel && typeof body.model === "string") || wantsReasoning) {
-    const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    const meta = await loadSessionMeta(db, row);
+    const engineSession = await engineHost.sessionFor(id, meta);
     if (wantsModel && typeof body.model === "string") {
       try {
         await engineSession.setModel(body.model);
@@ -1117,8 +1118,13 @@ sessionsRouter.patch("/:id", async (c) => {
     }
     if (wantsReasoning) {
       try {
+        // Clearing sets the level a new thread gets now, so the session
+        // never runs at the provider default. The session's own user
+        // resolves it, not the member who clicks reset.
         await engineSession.setReasoning(
-          typeof body.reasoning === "string" ? body.reasoning.trim().toLowerCase() : null,
+          typeof body.reasoning === "string"
+            ? body.reasoning.trim().toLowerCase()
+            : await engineHost.resolveFreshThreadReasoning(id, meta),
         );
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400);

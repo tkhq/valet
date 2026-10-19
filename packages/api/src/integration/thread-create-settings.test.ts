@@ -6,6 +6,7 @@ import type {
   CreateSessionResponse,
   CreateThreadResponse,
   ListThreadsResponse,
+  PatchSessionResponse,
   PatchThreadResponse,
 } from "../wire/types.js";
 
@@ -130,7 +131,7 @@ describe("POST /api/sessions/:id/threads settings", () => {
     });
   }, 30_000);
 
-  it("does not inherit historical session reasoning when fresh defaults clear it", async () => {
+  it("uses the Valet default instead of historical session reasoning when no default is set", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
     const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
@@ -148,10 +149,73 @@ describe("POST /api/sessions/:id/threads settings", () => {
     const response = await createThread(api.baseUrl, sessionId, source.id);
     expect(response.status).toBe(201);
     const created = (await response.json()) as CreateThreadResponse;
-    expect(created.reasoning).toBeNull();
+    expect(created.reasoning).toBe("medium");
     expect((await api.providers.engineStore.getThread(sessionId, created.id))?.reasoning).toBe(
-      "off",
+      "medium",
     );
+  }, 30_000);
+
+  it("lists a legacy \"off\" thread in a session with no stored level as the Valet default", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
+    // Older builds stored no session level and "off" on a new thread.
+    const { engineHost, engineStore } = api.providers;
+    const session = (await engineStore.getSession(sessionId))!;
+    await engineStore.saveSession({ ...session, reasoning: undefined });
+    const stored = (await engineStore.getThread(sessionId, source.id))!;
+    await engineStore.saveThread(sessionId, { ...stored, reasoning: "off" });
+    engineHost.evictCache(sessionId);
+
+    const listed = (await listThreads(api.baseUrl, sessionId)).threads.find((thread) => thread.id === source.id);
+    expect(listed?.reasoning).toBe("medium");
+    expect((await engineStore.getSession(sessionId))?.reasoning).toBe("medium");
+  }, 30_000);
+
+  it("gives a legacy \"off\" thread the fresh default, not a historical session level", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
+    const sessionPatch = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: "max" }),
+    });
+    expect(sessionPatch.status).toBe(200);
+    // Older builds wrote "off" for a new thread with no resolved default.
+    const { engineHost, engineStore } = api.providers;
+    const stored = (await engineStore.getThread(sessionId, source.id))!;
+    await engineStore.saveThread(sessionId, { ...stored, reasoning: "off" });
+    engineHost.evictCache(sessionId);
+
+    const listed = (await listThreads(api.baseUrl, sessionId)).threads.find((thread) => thread.id === source.id);
+    expect(listed?.reasoning).toBe("medium");
+    expect((await engineStore.getThread(sessionId, source.id))?.reasoning).toBe("medium");
+    expect((await engineStore.getSession(sessionId))?.reasoning).toBe("max");
+  }, 30_000);
+
+  it("resets session reasoning when the default model is unavailable", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    await listThreads(api.baseUrl, sessionId); // Build the live session on a usable model.
+    // The session's own model still works; only the fresh default names a removed provider.
+    await api.providers.db
+      .update(users)
+      .set({ defaultModel: "prov_gone/m1", defaultReasoning: "low" })
+      .where(eq(users.id, "local-user"));
+    const patchSession = (body: object) => fetch(`${api!.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const reset = await patchSession({ reasoning: null });
+    expect(reset.status).toBe(200);
+    expect(((await reset.json()) as PatchSessionResponse).reasoning).toBe("low");
+
+    const combined = await patchSession({ model: "m", reasoning: null });
+    expect(combined.status).toBe(200);
+    expect((await combined.json()) as PatchSessionResponse).toMatchObject({ model: "m", reasoning: "low" });
   }, 30_000);
 
   it("rejects a missing or cross-session source without creating a thread", async () => {

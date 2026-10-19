@@ -210,7 +210,7 @@ describe("team-owned session lifecycle routes", () => {
     expect(adminRes.status).toBe(200);
   });
 
-  it("400s a session reasoning level exceeding the org cap; null always clears", async () => {
+  it("400s a session reasoning level exceeding the org cap; null resets to the default", async () => {
     api = await bootTestApi();
     await seedTeam(api, "admin");
     const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
@@ -228,12 +228,12 @@ describe("team-owned session lifecycle routes", () => {
     const withinCap = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
       method: "PATCH",
       headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
-      body: JSON.stringify({ reasoning: "Medium" }),
+      body: JSON.stringify({ reasoning: "Low" }),
     });
     expect(withinCap.status).toBe(200);
     // Applied (Task 11), not just validated: the response echoes the
     // normalized session-default reasoning that was actually set.
-    expect(((await withinCap.json()) as PatchSessionResponse).reasoning).toBe("medium");
+    expect(((await withinCap.json()) as PatchSessionResponse).reasoning).toBe("low");
 
     const cleared = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
       method: "PATCH",
@@ -241,7 +241,8 @@ describe("team-owned session lifecycle routes", () => {
       body: JSON.stringify({ reasoning: null }),
     });
     expect(cleared.status).toBe(200);
-    expect(((await cleared.json()) as PatchSessionResponse).reasoning).toBeNull();
+    // No team, user, or org default is set, so the Valet default applies.
+    expect(((await cleared.json()) as PatchSessionResponse).reasoning).toBe("medium");
   });
 
   it("lets an org admin reach the model picker of a session stamped with another member's id", async () => {
