@@ -290,6 +290,12 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
       .limit(take);
   };
 
+  // Cost: receipts have no index on a line, so each batch walks the org's
+  // receipts newest first and filters each row's `subscriptions` jsonb in a
+  // LATERAL subquery. A page reads at most MAX_SCAN_BATCHES (20) batches.
+  // Retention caps the table at 10,000 receipts or 7 days per organization
+  // (events/receipts.ts), which bounds the worst case. If the cap grows,
+  // index the decisions instead of raising the batch count.
   const receiptBatch = async (before: { at: number; id: string } | undefined) => {
     const cursor = before ? sql`AND (r.created_at, 'receipt:' || r.id) < (${before.at}, ${before.id})` : sql``;
     const result = await db.execute(sql`

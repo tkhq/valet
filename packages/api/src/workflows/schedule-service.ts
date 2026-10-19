@@ -355,9 +355,10 @@ export async function accessibleScheduleRow(
 }
 
 /** The reasons the scheduler records when it turns a routine off. Each
- * names the field whose edit answers it. */
+ * names the fix: the field whose edit answers it, or, for a deleted
+ * workflow, a new routine (a PATCH cannot change a routine's workflow). */
 export const EMPTY_PROMPT_REASON = "Its prompt is empty. Edit the routine and add a prompt.";
-export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Edit the routine and pick another workflow.";
+export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
 export const BAD_CRON_REASON = "Its schedule does not parse. Edit the routine and fix the schedule.";
 
 /**

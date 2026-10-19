@@ -148,7 +148,7 @@ describe("updateWorkflowSchedule", () => {
 
     it.each([
       "Its prompt is empty. Edit the routine and add a prompt.",
-      "Its workflow was deleted. Edit the routine and pick another workflow.",
+      "Its workflow was deleted. Delete this routine and make a new one with another workflow.",
       "Its schedule does not parse. Edit the routine and fix the schedule.",
     ])("clears the scheduler reason %s when the schedule is enabled", async (reason) => {
       const id = await disabledByPin();

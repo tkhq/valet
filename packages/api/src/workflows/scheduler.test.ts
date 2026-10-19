@@ -238,12 +238,12 @@ describe("WorkflowScheduler disable reasons", () => {
 
   it("names the fix when a routine's workflow was deleted", async () => {
     await db.insert(workflowSchedules).values({ ...base, id: "wf-gone", targetKind: "workflow", workflowId: "wf_deleted", cron: "0 * * * *" });
-    expect(await reasonFor("wf-gone")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Edit the routine and pick another workflow." });
+    expect(await reasonFor("wf-gone")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
   });
 
   it("names the fix when a workflow routine has no workflow", async () => {
     await db.insert(workflowSchedules).values({ ...base, id: "wf-null", targetKind: "workflow", workflowId: null, cron: "0 * * * *" });
-    expect(await reasonFor("wf-null")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Edit the routine and pick another workflow." });
+    expect(await reasonFor("wf-null")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
   });
 
   it("names the fix when a routine's schedule does not parse", async () => {
