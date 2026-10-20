@@ -296,6 +296,25 @@ describe('workflow node (sub-workflow call)', () => {
     expect(childSignals.some((s) => s.signalType === 'cancel')).toBe(true);
     expect((await store.getRun(wait.runId))?.wakeRequested).toBe(true);
   });
+
+  it('settles a cancel when the call node recorded a child id but never created the child', async () => {
+    let now = 1_000;
+    const store = new InMemoryWorkflowStore(() => now);
+    const engine = resolvingEngine();
+    // The intent records the derived child id, then the input fails to
+    // render, so the drive throws before the child run exists.
+    await store.createRun('wfrun_p7', parentParams(), parentDefinition({ input: { name: '{{ trigger.data.customer > 1 }}' } }), 'v1');
+    await expect(drive(store, engine, 'wfrun_p7')).rejects.toThrow(/compare values of mixed types/);
+    const childRunId = await deriveChildRunId('wfrun_p7', 'call', 0);
+    expect(await store.getRun(childRunId)).toBeNull();
+
+    await store.insertSignal({ runId: 'wfrun_p7', signalId: 'cancel', signalType: 'cancel', createdAt: now });
+    now += 60_000; // the failed drive's lease expires
+    const cancelled = await drive(store, engine, 'wfrun_p7');
+
+    expect(cancelled.outcome).toBe('cancelled');
+    expect(await store.getRun(childRunId)).toBeNull();
+  });
 });
 
 // ─── Executor-level guards ───────────────────────────────────────────────────

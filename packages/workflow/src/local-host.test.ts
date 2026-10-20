@@ -1,12 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { describeRunHostContract, makeRunHostFixtureEngine, type RunHostFixture, type RunHostFixtureOptions } from './conformance/run-host.js';
 import type { RunSettledInfo } from './interpreter.js';
 import { LocalRunHost } from './local-host.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
-import { createDefaultNodeExecutors, executeStop, type NodeExecutorRegistry } from './nodes/index.js';
+import { createDefaultNodeExecutors, executeStop, type NodeExecuteResult, type NodeExecutor, type NodeExecutorRegistry } from './nodes/index.js';
 import type { RunParams } from './store.js';
-import type { SessionNode } from './dag/nodes.js';
+import type { SessionNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
 
 // ─── Test helpers (crashAt test only — the shared suite covers everything else) ─
@@ -552,6 +552,57 @@ describe('LocalRunHost poisoned-run cap', () => {
     expect(throws).toBe(3);
     expect(settled).toHaveLength(1);
     expect(settled[0]).toMatchObject({ runId: 'run-poisoned', outcome: 'failed' });
+  });
+
+  // A drive keeps going after a node parks. A later throw in the same drive
+  // leaves that node's work live with no saved wait on the run.
+  it('aborts work an earlier node parked in the failing drive before it settles the run failed', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = { ...makeRunHostFixtureEngine(), abort: vi.fn(async () => undefined) };
+    const agent: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        const receipt = { threadId: 'thread-agent', queueItemId: 'queue-agent' };
+        await args.store.putIntent({
+          runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'intent', attempt: args.attempt,
+          createdAt: args.clock(), effects: { sessionId: 'session-agent', receipt },
+        });
+        return { status: 'parked', waitingOn: [{ kind: 'submission', nodeId: args.node.id, sessionId: 'session-agent', ...receipt }] };
+      },
+    };
+    const executors: NodeExecutorRegistry = {
+      ...throwingStopExecutors(() => undefined),
+      wait: agent,
+    };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'bad', type: 'stop' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'bad' }],
+    };
+    const host = new LocalRunHost({
+      store, engine, clock: clock.now, pollMs: 10, sweepMs: 20, leaseMs: 50, heartbeatMs: 300,
+      maxConsecutiveDriveFailures: 3, executors,
+    });
+    host.startHost();
+    try {
+      await host.start('run-poisoned-live', runParams(), definition);
+      const advancer = setInterval(() => clock.advance(60), 10);
+      try {
+        await waitFor(async () => (await store.getRun('run-poisoned-live'))?.status === 'settled');
+      } finally {
+        clearInterval(advancer);
+      }
+    } finally {
+      await host.stopHost();
+    }
+
+    expect((await store.getRun('run-poisoned-live'))?.outcome).toBe('failed');
+    expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-agent');
   });
 
   it('a drive that recovers below the cap settles normally — transient failures keep retry-via-reclaim', async () => {
