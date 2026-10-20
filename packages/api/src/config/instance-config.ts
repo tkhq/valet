@@ -74,7 +74,9 @@ export interface McpServerDecl {
   authQueryParam?: string;
   /** OAuth scopes for the authorize request. Only valid when auth is
    * "oauth". Scope-gated servers (e.g. Metabase) issue a token with no
-   * scopes when the request names none, and then list zero tools. */
+   * scopes when the request names none, and then list zero tools. Valet
+   * requests only these; registering a client logs each scope the server
+   * advertises that is not listed (integration-oauth design). */
   scopes?: string[];
   /** The server accepts only tokens from its own OAuth sign-in, so the
    * connect UI offers no token entry. Only valid when auth is "oauth".

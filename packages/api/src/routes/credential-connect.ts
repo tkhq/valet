@@ -39,6 +39,7 @@ import {
   exchangeAuthorizationCode,
   exchangeAuthorizationCodeRaw,
   findOAuthDeclaration,
+  getMcpOAuthClient,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -57,6 +58,9 @@ interface OAuthConnectState {
   orgId?: string;
   service: string;
   codeVerifier?: string;
+  /** mcp mode: the dynamic client the authorize request used. The code
+   * belongs to it, so the callback refuses a different stored client. */
+  clientId?: string;
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
@@ -74,16 +78,18 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
+    if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (exp < nowMs) return null;
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
+      ...(typeof clientId === "string" ? { clientId } : {}),
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
     };
@@ -185,14 +191,18 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
-    const state = signState<OAuthConnectState>("integration-connect", { ...base, codeVerifier }, key);
+    const state = signState<OAuthConnectState>(
+      "integration-connect",
+      { ...base, codeVerifier, clientId: clientRow.clientId },
+      key,
+    );
     const url = buildAuthorizationUrl({
       authorizationEndpoint: clientRow.authorizationEndpoint,
       clientId: clientRow.clientId,
       redirectUri,
       codeChallenge,
       state,
-      scopes: found.decl.scopes,
+      scopes: clientRow.scopes,
     });
     return c.redirect(url, 302);
   }
@@ -232,12 +242,12 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
 /**
  * Scopes to store on the saved credential: what the token response granted
  * (RFC 6749 §5.1 `scope`, possibly "" for a token with no scopes), falling
- * back to the declared list only when the response names none. Never store
- * the declared list over a narrower grant — it would mask a scope-gated
- * server's refusal (TKAI-242).
+ * back to the requested list only when the response names none (§5.1: the
+ * grant then equals the request). Never store the requested list over a
+ * narrower grant — it would mask a scope-gated server's refusal (TKAI-242).
  */
-function grantedScopes(scope: string | undefined, declared: string[] | undefined): string[] | undefined {
-  if (typeof scope !== "string") return declared;
+function grantedScopes(scope: string | undefined, requested: string[] | undefined): string[] | undefined {
+  if (typeof scope !== "string") return requested;
   return scope.split(" ").filter(Boolean);
 }
 
@@ -285,7 +295,14 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
-      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
+      const clientRow = await getMcpOAuthClient({ db }, verified.service);
+      // A connect that re-registered the client after this authorize (a
+      // scope change) replaced it. The code belongs to the old client, and
+      // stored refreshes use the new one, so the user starts again. A state
+      // signed before client binding has no id and keeps the old behavior.
+      if (verified.clientId !== undefined && clientRow.clientId !== verified.clientId) {
+        return c.redirect(`${landing}error=oauth_client_changed`, 302);
+      }
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,
@@ -297,7 +314,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: grantedScopes(tokens.scope, found.decl.scopes),
+        scopes: grantedScopes(tokens.scope, clientRow.scopes.length > 0 ? clientRow.scopes : undefined),
         metadata: { connectedVia: "oauth" },
       };
     } else if (found.oauth.interpretTokenResponse) {

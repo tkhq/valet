@@ -23,6 +23,9 @@ export interface McpClientRow {
   clientId: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
+  /** The scopes the client registered with, sorted. The authorize request
+   * names exactly these; [] sends no scope parameter. */
+  scopes: string[];
 }
 
 /** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
@@ -65,6 +68,26 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
     `MCP OAuth: "${service}" declares no scopes but its server advertises scopes_supported ` +
       `(${scopesSupported.join(", ")}). A scope-gated server grants a token with no ` +
       `scopes and lists zero tools. Add the scopes this instance needs to the mcpServers "${service}" entry.`,
+  );
+}
+
+/**
+ * A declared entry can drift from its server: Metabase 1.64 moved every
+ * read tool to `agent:content:read`, a scope the deployed list never named,
+ * and each reconnect minted a token those tools refused. Valet requests only
+ * the declared scopes, so name the advertised ones the entry lacks when it
+ * registers a client (a first connect, or a scope change). A reused client
+ * makes no network call, so a slow discovery endpoint cannot stall the
+ * connect. The protected resource's list (RFC 9728) is what the server
+ * checks; the issuer's own list can name scopes for other resources.
+ */
+function warnUndeclaredResourceScopes(service: string, declared: string[], advertised: string[] | undefined): void {
+  const missing = (advertised ?? []).filter((s) => !declared.includes(s));
+  if (missing.length === 0) return;
+  console.warn(
+    `MCP OAuth: "${service}" does not declare scopes its server advertises (${missing.join(", ")}). ` +
+      `Tools that need one fail with insufficient_scope. If this instance needs them, add them to the ` +
+      `mcpServers "${service}" entry's scopes, then reconnect ${service}.`,
   );
 }
 
@@ -121,6 +144,7 @@ export async function ensureMcpOAuthClient(
   if (declared.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
     warnScopelessEntry(service, meta.scopes_supported ?? []);
   }
+  if (declared.length > 0) warnUndeclaredResourceScopes(service, declared, meta.resource_scopes_supported);
   const client = await registerClient(meta.registration_endpoint, {
     clientName: "Valet",
     redirectUris: [redirectUri],
@@ -161,12 +185,24 @@ export async function ensureMcpOAuthClient(
   return toRow(stored[0]);
 }
 
+/**
+ * The stored client for `service`, with no discovery or registration. The
+ * OAuth callback uses it: the authorization code belongs to the client the
+ * connect started with, so the callback must not register a replacement.
+ */
+export async function getMcpOAuthClient(deps: OAuthDeps, service: string): Promise<McpClientRow> {
+  const stored = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
+  if (!stored[0]) throw new Error(`MCP OAuth: ${service} has no registered client. Start the connect again.`);
+  return toRow(stored[0]);
+}
+
 function toRow(r: typeof mcpOauthClients.$inferSelect): McpClientRow {
   return {
     service: r.service,
     clientId: r.clientId,
     authorizationEndpoint: r.authorizationEndpoint,
     tokenEndpoint: r.tokenEndpoint,
+    scopes: normalizeScopes(r.registeredScopes ?? undefined),
   };
 }
 

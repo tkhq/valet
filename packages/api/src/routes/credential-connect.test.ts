@@ -15,8 +15,9 @@ import type { ListCredentialsResponse } from "../wire/types.js";
 import { verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
-import { teams, credentials, orgMembers } from "../schema/index.js";
+import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
 import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
 import {
@@ -134,6 +135,22 @@ describe("GET /api/credentials/:service/connect", () => {
     expect(location.searchParams.get("code_challenge_method")).toBe("S256");
     expect(location.searchParams.get("redirect_uri")).toContain("/api/credentials/oauth/callback");
     expect(location.searchParams.get("state")).toBeTruthy();
+  });
+
+  it("mcp mode: the authorize request names only the declared scopes", async () => {
+    // The server advertises more, but Valet never grants a scope the entry
+    // does not declare.
+    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run", "agent:search"])] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect`, { redirect: "manual" });
+      expect(res.status).toBe(302);
+      const location = new URL(res.headers.get("location") ?? "");
+      expect(location.searchParams.get("scope")).toBe("agent:query:run agent:search");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
@@ -294,6 +311,40 @@ describe("GET /api/credentials/oauth/callback", () => {
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored?.scopes).toEqual(["agent:query"]);
+  });
+
+  it("mcp mode: the callback refuses a code when another connect replaced the client", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const first = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+
+    // Another connect re-registered the client after this authorize.
+    await api.providers.db
+      .update(mcpOauthClients)
+      .set({ clientId: "client-2" })
+      .where(eq(mcpOauthClients.service, "linear"));
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(first)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_client_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("mcp mode: a state minted before client binding still completes", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const key = deriveSecretKey(api.providers.encryptionKey);
+    const minted = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+    const verified = verifyOAuthConnectState(minted, key, Date.now());
+    if (!verified) throw new Error("connect state did not verify");
+    // A connect started before this deploy signed no client id.
+    const { clientId: _bound, ...legacy } = verified;
+    const state = signState("integration-connect", legacy, key);
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
+    expect(fake.tokenRequests[0]?.client_id).toBe("client-1");
   });
 
   it("provider error param redirects to /integrations with the error code", async () => {

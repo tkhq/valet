@@ -21,6 +21,10 @@ export interface FakeOAuthServer {
   tokenFailure?: number;
   /** The error body a failure returns. Default: `{ error: "invalid_grant" }`. */
   tokenFailureBody?: Record<string, unknown>;
+  /** The protected resource's `scopes_supported` (RFC 9728). Undefined
+   * serves no protected-resource metadata. Settable, because a server
+   * upgrade changes it. */
+  resourceScopesSupported?: string[];
   close(): Promise<void>;
 }
 
@@ -36,16 +40,29 @@ export function startFakeOAuthServer(opts?: {
   omitRegistration?: boolean;
   /** When set, discovery advertises these as `scopes_supported`. */
   scopesSupported?: string[];
+  /** When set, serves protected-resource metadata with these scopes. */
+  resourceScopesSupported?: string[];
 }): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
-  const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number; tokenFailureBody?: Record<string, unknown> } = {
+  const state: {
+    tokenResponse: Record<string, unknown>;
+    tokenFailure?: number;
+    tokenFailureBody?: Record<string, unknown>;
+    resourceScopesSupported?: string[];
+  } = {
     tokenResponse: { access_token: "at-1", refresh_token: "rt-1", expires_in: 3600, token_type: "bearer" },
+    resourceScopesSupported: opts?.resourceScopesSupported,
   };
 
   const app = new Hono();
   let url = "";
   const discoveryRequests = { count: 0 };
+
+  app.get("/.well-known/oauth-protected-resource", (c) => {
+    if (!state.resourceScopesSupported) return c.text("not found", 404);
+    return c.json({ resource: url, authorization_servers: [url], scopes_supported: state.resourceScopesSupported });
+  });
 
   app.get("/.well-known/oauth-authorization-server", (c) => {
     discoveryRequests.count++;
@@ -103,6 +120,12 @@ export function startFakeOAuthServer(opts?: {
     },
     set tokenFailureBody(v) {
       state.tokenFailureBody = v;
+    },
+    get resourceScopesSupported() {
+      return state.resourceScopesSupported;
+    },
+    set resourceScopesSupported(v) {
+      state.resourceScopesSupported = v;
     },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };

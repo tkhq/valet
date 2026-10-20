@@ -42,6 +42,13 @@ export interface McpActionPluginOptions {
    */
   appConnectHint?: string;
   /**
+   * The scopes an `auth: oauth` mcpServers entry declares for this service.
+   * A scope the server demands that is not listed here is fixed by an admin
+   * editing the entry. Absent for services that keep their scopes in code
+   * or have none to edit.
+   */
+  configScopes?: string[];
+  /**
    * The server accepts only tokens from its own OAuth sign-in. A rejected
    * personal account then tells the user to disconnect it and sign in,
    * because a pasted token saved before the connect UI stopped offering
@@ -115,6 +122,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
     appConnectHint: opts.appConnectHint,
     oauthOnly: opts.oauthOnly,
   };
+  const configScopes = opts.configScopes;
 
   return {
     service: serviceName,
@@ -132,7 +140,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
         throw rejection ? new Error(rejection) : err;
       }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, configScopes),
       );
     },
     probe: async ({ credentials }) => {
@@ -230,6 +238,63 @@ function authRejectionMessage(
   }
 }
 
+/** A challenge's RFC 7235 auth-params, names lowercased; the first value
+ * wins. A value is a quoted string or a bare token. */
+function challengeParams(header: string): Map<string, string> {
+  const params = new Map<string, string>();
+  for (const m of header.matchAll(/([A-Za-z0-9_-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))/g)) {
+    const name = (m[1] ?? '').toLowerCase();
+    if (!params.has(name)) params.set(name, m[2] !== undefined ? m[2].replace(/\\(.)/g, '$1') : (m[3] ?? ''));
+  }
+  return params;
+}
+
+/**
+ * The scopes a 403 `error=insufficient_scope` challenge (RFC 6750 §3.1)
+ * names that the credential lacks. The challenge `scope` may also list
+ * scopes the token holds (Metabase does), so those are removed. A
+ * credential with no recorded grant (a pasted or 1Password token) gives
+ * undefined: its held scopes are unknown, so no subset is claimed.
+ */
+function missingScopes(err: unknown, grantedScopes: string[] | undefined): string[] | undefined {
+  if (!(err instanceof McpHttpError) || err.status !== 403 || !err.wwwAuthenticate) return undefined;
+  if (grantedScopes === undefined) return undefined;
+  const params = challengeParams(err.wwwAuthenticate);
+  if (params.get('error') !== 'insufficient_scope') return undefined;
+  const held = new Set(grantedScopes);
+  const missing = (params.get('scope') ?? '').split(' ').filter((s) => s && !held.has(s));
+  return missing.length > 0 ? missing : undefined;
+}
+
+/**
+ * The error for a refused call. Reconnecting requests the same scopes, so
+ * a missing scope that a config entry does not declare is fixed by an admin
+ * editing the entry. A declared scope the server did not grant, or a
+ * service with no config scopes, keeps the fix for whoever holds the account.
+ */
+function rejectionMessage(
+  err: unknown,
+  { source, scopes }: ResolvedToken,
+  text: RejectionText,
+  configScopes: string[] | undefined,
+): string | undefined {
+  const missing = missingScopes(err, scopes);
+  const accountFix = authRejectionMessage(err, source, text);
+  if (!missing) return accountFix;
+  const { label } = text;
+  const noun = (list: string[]) => (list.length === 1 ? 'scope' : 'scopes');
+  const undeclared = configScopes ? missing.filter((s) => !configScopes.includes(s)) : [];
+  if (undeclared.length > 0) {
+    const list = undeclared.join(', ');
+    return (
+      `${label} refused this call: the connection does not hold the ${list} ${noun(undeclared)}. ` +
+      `Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`
+    );
+  }
+  if (!accountFix) return undefined;
+  return `${label} has not granted the ${missing.join(', ')} ${noun(missing)} to this connection. ${accountFix}`;
+}
+
 function mapToolToAction(
   tool: McpTool,
   client: McpClient,
@@ -239,6 +304,7 @@ function mapToolToAction(
   staticToken: string | undefined,
   appCredentialService: string | undefined,
   messages: RejectionText,
+  configScopes: string[] | undefined,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -254,12 +320,12 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const { token, source } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
+      const resolved = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
-        const result = await client.callTool(token, tool.name, args);
+        const result = await client.callTool(resolved.token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = authRejectionMessage(err, source, messages);
+        const rejection = rejectionMessage(err, resolved, messages, configScopes);
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
