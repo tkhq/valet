@@ -22,7 +22,7 @@ import {
 import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { LineEditor } from "./editor/line-editor";
-import { PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
+import { PLACE_COLUMN_CLASS, PLACE_META_CLASS, PLACE_NAME_CLASS, ROSTER_ROW_CLASS } from "./place-row";
 import { ThreadProblem, isPinProblem } from "./problem-badge";
 import { OwnerBadge, type TeamLike } from "./presence-rows";
 import {
@@ -59,7 +59,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
 
   return (
     <section aria-label={routine.name} className={ROSTER_ROW_CLASS}>
-      <div className="min-w-0 pt-0.5">
+      <div className={PLACE_COLUMN_CLASS}>
         <p className={PLACE_NAME_CLASS}>{schedule}</p>
         <div className={PLACE_META_CLASS}>
           {zone !== undefined && <span>{zone}</span>}
@@ -84,7 +84,7 @@ export function RoutineRosterRow({ routine, sentence, now, children }: {
             {prompt !== "" && <p className="mt-px line-clamp-2 text-xs text-muted [overflow-wrap:anywhere]">{prompt}</p>}
             {routine.detail.ownerType !== "user" && <p className="mt-px"><OwnerBadge ownerType={routine.detail.ownerType} /></p>}
           </div>
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2">
             <Button
               size="sm"
               variant="ghost"

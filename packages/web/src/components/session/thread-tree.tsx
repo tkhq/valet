@@ -658,8 +658,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           width, which defeats row truncation within the fixed-width sidebar. */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
-          <div className="flex items-center gap-1 px-3 py-2">
-            <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+          <div className="flex items-center gap-1 py-2 pl-4 pr-3">
+            <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-xs font-medium text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
               <DropdownMenuContent align="start">

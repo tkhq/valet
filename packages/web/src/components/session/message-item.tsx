@@ -86,10 +86,10 @@ export const MessageItem = memo(function MessageItem({
       <button
         type="button"
         onClick={() => onReply({ messageId: message.id, excerpt: replyExcerpt(copyText) })}
-        className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[10px] opacity-0 transition-opacity hover:text-ink group-hover:opacity-100 focus:opacity-100"
+        className="inline-flex h-[22px] items-center gap-1 rounded px-1.5 text-xs leading-none text-muted/70 opacity-0 transition-opacity hover:bg-ink-wash hover:text-[--fg] group-hover:opacity-100 focus:opacity-100"
         aria-label="Reply to message"
       >
-        <Reply className="h-3 w-3" aria-hidden />
+        <Reply className="h-3.5 w-3.5" aria-hidden />
         Reply
       </button>
     )}

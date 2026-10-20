@@ -526,8 +526,10 @@ describe("Editor", () => {
 
 it("saves the appearance through the editor draft and restores inherited identity on cancel", async () => {
   const onSave = vi.fn().mockResolvedValue(undefined);
+  const user = userEvent.setup();
   render(<Editor initialDefinition={baseDefinition()} onSave={onSave} />);
-  fireEvent.click(screen.getByRole("button", { name: "Appears as" }));
+  await user.click(screen.getByRole("button", { name: "More editor actions" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Appears as" }));
   fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Release bot" } });
   expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "http://example.com/avatar.png" } });
