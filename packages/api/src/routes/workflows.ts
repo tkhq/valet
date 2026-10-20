@@ -988,7 +988,7 @@ workflowsRouter.post("/runs/:runId/retry", async (c) => {
     return c.json({ error: 'from must be "start" or "failed_step".' }, 400);
   }
   if (body.input !== undefined && (typeof body.input !== "object" || body.input === null || Array.isArray(body.input))) {
-    return c.json({ error: "input must be an object of trigger input values." }, 400);
+    return c.json({ error: "input must be an object of run input values. Send a JSON object." }, 400);
   }
 
   const result = await retryWorkflowRun(deps, owner, runId, { from: body.from, input: body.input });
