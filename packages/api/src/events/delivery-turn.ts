@@ -25,7 +25,7 @@ import type { AppDb } from "../lib/drizzle.js";
 
 const MAX_ERROR_CHARS = 2_000;
 const PREFIX = "The assistant turn failed: ";
-const NO_REASON = "the engine recorded no reason. Open the delivery's thread to inspect the turn.";
+const NO_REASON = "the engine recorded no reason. Open the event's thread to inspect the turn.";
 const DISPATCH_PREFIX = "event:";
 
 /** How far back the sweep looks for delivered rows whose turn failed. */
