@@ -51,7 +51,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
     const mayNavigate = () => generation === requestGeneration.current && activeWorkspace.current === workspace && activePath.current === pathname;
     setOpened(workspace);
     setErrors((current) => ({ ...current, [workspace]: "" }));
-    const workflowMatch = /^\/presence\/workflows\/([^/]+)$/.exec(pathname);
+    const workflowMatch = /^\/workflows\/([^/]+)$/.exec(pathname);
     if (workflowMatch) {
       try {
         const conversation = await api.ensureWorkflowConversation(decodeURIComponent(workflowMatch[1]!));
