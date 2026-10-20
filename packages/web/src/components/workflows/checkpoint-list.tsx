@@ -130,6 +130,8 @@ export function CheckpointList({
     (order.get(a.nodeId) ?? nodeOrder.length) - (order.get(b.nodeId) ?? nodeOrder.length) ||
     a.nodeId.localeCompare(b.nodeId) || a.iteration - b.iteration,
   );
+  // A settled run's leftover intent ends with the run, not the page clock.
+  const clock = timeline ? Math.min(now, timeline.end) : now;
   const groups: CheckpointLike[][] = [];
   for (const cp of sorted) {
     const last = groups.at(-1);
@@ -144,7 +146,7 @@ export function CheckpointList({
     waiting: cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting",
     onExplainFailure,
     timeline,
-    now,
+    now: clock,
   });
   return (
     <ol className="overflow-hidden rounded-lg border border-line divide-y divide-line">
@@ -152,7 +154,7 @@ export function CheckpointList({
         <CheckpointRow key={`${items[0].nodeId}:${items[0].iteration}`} {...rowProps(items[0], index)} modelChange={changes.get(items[0].nodeId)} />
       ) : (
         <ItemGroup key={items[0].nodeId} items={items} rowProps={rowProps} index={index}
-          modelChange={changes.get(items[0].nodeId)} costs={costs} timeline={timeline} now={now} />
+          modelChange={changes.get(items[0].nodeId)} costs={costs} timeline={timeline} now={clock} />
       ))}
     </ol>
   );
@@ -194,12 +196,15 @@ function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }
     models,
   } : undefined;
   const reused = items.filter((cp) => cp.reused).length;
+  // A denied item records as completed, so count it apart, as a single row shows it.
+  const denied = items.filter((cp) => deniedResult(cp.result)).length;
   const summary = [
     ...(["succeeded", "failed", "running", "waiting", "skipped", "pending"] as const)
       .flatMap((status) => counts.has(status) ? [`${counts.get(status)} ${LABEL[status].toLowerCase()}`] : []),
+    ...(denied > 0 ? [`${denied} denied`] : []),
     ...(reused > 0 ? [`${reused} reused`] : []),
   ].join(" · ");
-  const open = overall === "failed" || overall === "running" || overall === "waiting";
+  const open = overall === "failed" || overall === "running" || overall === "waiting" || denied > 0;
   return (
     <li className="min-w-0 bg-paper">
       <details className="group/items" open={open}>

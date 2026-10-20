@@ -182,6 +182,23 @@ describe("CheckpointList", () => {
     expect(group.querySelector("details")?.open).toBe(true);
   });
 
+  it("counts a per-item step's denied items and opens the group", () => {
+    render(<CheckpointList now={0} checkpoints={[
+      { nodeId: "notify", iteration: 0, status: "completed", result: { approved: false, policyDenied: true, resolvedBy: "policy" }, startedAt: 0, createdAt: 1_000 },
+      { nodeId: "notify", iteration: 1, status: "completed", startedAt: 0, createdAt: 1_000 },
+    ]} />);
+    const [group] = screen.getAllByRole("listitem");
+    expect(group.textContent).toContain("2 items · 2 completed · 1 denied");
+    expect(group.querySelector("details")?.open).toBe(true);
+  });
+
+  it("ends a settled run's leftover intent with the run, not the page clock", () => {
+    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} checkpoints={[
+      { nodeId: "wait", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 1_000 },
+    ]} />);
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("5.0s");
+  });
+
   it("times a running step from its first start, not from a rewritten intent", () => {
     render(<CheckpointList now={10_000} checkpoints={[
       { nodeId: "summarize", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 7_000 },
