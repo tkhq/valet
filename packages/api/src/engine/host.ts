@@ -3918,8 +3918,16 @@ export class EngineHost {
    * Reuse an existing thread or persist current defaults for a new one.
    * Channel ingress and event delivery share this guard because they can
    * reach the same thread while its first creation awaits persistence.
+   * `init.title` titles a thread this call creates. An existing thread keeps
+   * its title.
    */
-  async ensureFreshThread(session: Session, key: string, meta: SessionMeta, actorUserId = meta.userId): Promise<Thread> {
+  async ensureFreshThread(
+    session: Session,
+    key: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+    init?: { title?: string; metadata?: Record<string, unknown> },
+  ): Promise<Thread> {
     const existing = await session.threadByKey(key);
     if (existing) return existing;
     let pending = this.threadCreations.get(session);
@@ -3931,7 +3939,7 @@ export class EngineHost {
     if (inflight) return inflight;
     const creation = (async () => {
       const settings = await this.resolveFreshThreadSettings(session.id, meta, actorUserId);
-      return session.createThread(key, settings);
+      return session.createThread(key, { ...settings, ...init });
     })();
     pending.set(key, creation);
     try {

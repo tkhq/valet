@@ -225,3 +225,32 @@ describe("presence overrides", () => {
       .toEqual({ name: "Renamed" });
   });
 });
+
+describe("buildSubscriptionPatch thread policy", () => {
+  const base = { name: "PR alerts", eventKeys: ["github.pr.opened"], filters: [], anyChannel: false };
+
+  it("sends nothing when the policy equals the effective stored one", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "own" } })).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "orchestrator", follow: true } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "orchestrator", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t" } },
+    )).toBeNull();
+  });
+
+  it("sends a changed policy", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "subject" } })).toEqual({ thread: { mode: "subject" } });
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "orchestrator", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t2" } },
+    )).toEqual({ thread: { mode: "existing", sessionId: "s", threadId: "t2" } });
+  });
+
+  it("never sends a policy for a workflow target", () => {
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "workflow", workflowId: "wf" } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
+  });
+});

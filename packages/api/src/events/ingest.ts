@@ -280,7 +280,7 @@ export async function ingestEvent(
         const result = await matchEventWaiters({
           ...waiters,
           // The mention rule reuses the subscriptions this ingest already read.
-          appMentionCovered: async (_orgId, mention) => appMentionCoveredBy(subs, mention, deps.plugins),
+          appMentionCovered: async (_orgId, mention) => appMentionCoveredBy(deps.db, subs, mention, deps.plugins),
         }, orgId, service, event);
         // An event that no running waiter shares a subject with adds no stage.
         if (result.candidates > 0) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(result.appended));

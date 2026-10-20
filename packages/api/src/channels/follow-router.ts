@@ -179,7 +179,12 @@ async function routeFollowedMessage(
       orgId,
       owner: { type: follow.ownerType, id: follow.ownerId },
       actorUserId,
-      threadKey,
+      // The thread the binding mention landed in (spec 2026-10-16: delivery
+      // threads, Part B step 5). A follow bound before that column keeps the
+      // Slack thread key.
+      destination: follow.sessionId !== null && follow.threadId !== null
+        ? { kind: "target", sessionId: follow.sessionId, threadId: follow.threadId, reason: "conversation_follow" }
+        : { kind: "key", key: threadKey },
       ...(presence ? { presence } : {}),
       signal: {
         kind: "signal",
@@ -191,6 +196,7 @@ async function routeFollowedMessage(
       },
       ...(author ? { author } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
+      slackChannel: f.channel,
       mismatchReason: "followed_target_mismatch",
       ...(inbound ? { inbound } : {}),
     });

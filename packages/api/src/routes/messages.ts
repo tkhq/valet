@@ -12,6 +12,7 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { threadRef } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
@@ -112,7 +113,7 @@ export async function loadOwnedSession(
   }
   const thread = decisionAccess?.threadId ? await engineStore.getThread(id, decisionAccess.threadId) : undefined;
   if (decisionAccess?.threadId && !thread) return null;
-  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread.key))) return row;
+  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread))) return row;
   // Named approval grants decision access only, never private child content.
   if (decisionAccess && c.var.principal.type === "user") {
     const gates = await engineStore.listDecisionGates(id, decisionAccess.threadId, "pending");
@@ -428,7 +429,7 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
     const stored = await engineStore.listThreads(row.id);
     const threads = [];
     for (const thread of stored) {
-      if (!await visible(thread.key)) continue;
+      if (!await visible(thread)) continue;
       // Root anchors carry authorization; keep old history when an anchor already held entries.
       if (row.id === session.id && anchors.has(thread.id)) {
         const entries = await db.select({ id: sql<string>`id` }).from(sql`engine_entries`)
@@ -979,7 +980,7 @@ async function visibleThread(
   threadId: string | undefined,
 ) {
   const thread = resolveThread(engineSession, threadId);
-  return thread && await threadsVisibleTo(c, session)(thread.key) ? thread : undefined;
+  return thread && await threadsVisibleTo(c, session)(threadRef(thread)) ? thread : undefined;
 }
 
 // ── Messages: list ────────────────────────────────────────────────────────
@@ -1571,7 +1572,7 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; de
     if (session.decisionApproverOnly) return false;
     const thread = engineSession.threadById(gate.threadId)
       ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
-    return !!thread && visible(thread.key);
+    return !!thread && visible(threadRef(thread));
   }));
   return pending.filter((_, i) => shown[i]);
 }

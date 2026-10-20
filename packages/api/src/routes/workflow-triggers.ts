@@ -102,6 +102,7 @@ workflowTriggersRouter.get("/triggers", async (c) => {
         timezone: s.timezone,
         targetKind: s.targetKind,
         prompt: s.prompt,
+        ...(s.thread !== undefined ? { thread: s.thread } : {}),
         input: s.input,
         nextFireAt: s.nextFireAt,
         lastFiredAt: s.lastFiredAt,
@@ -194,6 +195,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
+    thread: body.thread,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };
@@ -212,7 +214,7 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const owner = ownerFrom(c);
-  const result = await updateWorkflowSchedule(db, owner, c.req.param("id"), body);
+  const result = await updateWorkflowSchedule(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404

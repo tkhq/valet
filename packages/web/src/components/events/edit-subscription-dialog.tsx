@@ -1,10 +1,13 @@
-import { type Presence, validatePresence } from "@valet/shared";
+import { type AssistantThreadPolicy, type Presence, validatePresence } from "@valet/shared";
+import { PICK_A_THREAD_ERROR, RunsInField } from "~/components/presence/runs-in-field";
+import { displayThreadPolicy, subjectKindForKeys } from "~/components/presence/thread-policy-copy";
 import { PresenceSettings } from "~/components/presence-settings";
 import { AutomationReview } from "./automation-review";
 import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * EditSubscriptionDialog — edit an existing event subscription: name, event
- * keys, filters, and, for an assistant target, its prompt templates. The
+ * keys, filters, and, for an assistant target, its prompt templates and its
+ * thread policy (**Runs in**). The
  * target itself is shown read-only: the server pins the target's kind and
  * owner on PATCH (only a same-owner `assistantId` re-point is accepted, which
  * this dialog does not offer yet), so pointing a rule at a different target is
@@ -87,6 +90,16 @@ export function EditSubscriptionDialog({
   const [prompts, setPrompts] = useState<PromptFieldsValue>(() =>
     promptFieldsFrom(sub.target.kind === "orchestrator" ? sub.target : {}),
   );
+  // Seeded at mount (open time) with the policy the row runs with today, so
+  // a rule with no stored policy shows its effective default. Null while
+  // "An existing thread…" is chosen and no thread is picked yet.
+  const [thread, setThread] = useState<AssistantThreadPolicy | null>(() =>
+    sub.target.kind === "orchestrator" ? displayThreadPolicy(sub.target, sub.eventKeys) : { mode: "own" },
+  );
+  const subjectKind = subjectKindForKeys([...keys]);
+  // The picker lists the rule owner's assistant threads. The org assistant
+  // has no workspace key, so an org rule cannot pin a thread here.
+  const threadWorkspace = sub.ownerType === "user" ? "user" : sub.ownerType === "team" ? sub.ownerId : undefined;
   const [error, setError] = useState<string | null>(null);
   // See the wizard: `committed: false` is a refused write (409) with a "Save
   // anyway" path; `committed: true` is a saved write that still overlaps.
@@ -115,6 +128,15 @@ export function EditSubscriptionDialog({
       return;
     }
     const { filters } = match;
+    const assistant = sub.target.kind === "orchestrator";
+    if (assistant && thread === null) {
+      setError(PICK_A_THREAD_ERROR);
+      return;
+    }
+    if (assistant && thread?.mode === "subject" && subjectKind === null) {
+      setError("This rule's events have no subject to group by. Pick another thread option.");
+      return;
+    }
 
     let body = buildSubscriptionPatch(sub, {
       name,
@@ -123,6 +145,7 @@ export function EditSubscriptionDialog({
       anyChannel,
       prompts,
       presence,
+      ...(assistant && thread !== null ? { thread } : {}),
       ...(sub.ownerType === "user" && sub.target.kind === "orchestrator" ? { deliveryPreferences } : {}),
     });
     if (review && !sub.enabled) body = { ...body, enabled: true };
@@ -205,6 +228,19 @@ export function EditSubscriptionDialog({
               />
             )}
           </div>
+
+          {sub.target.kind === "orchestrator" && (
+            <RunsInField
+              idPrefix="edit-subscription"
+              value={thread}
+              onChange={setThread}
+              subjectKind={subjectKind}
+              ruleKind="listener"
+              workspace={threadWorkspace}
+              eventKeys={[...keys]}
+              disabled={patch.isPending}
+            />
+          )}
 
           {sub.ownerType === "user" && sub.target.kind === "orchestrator" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
 

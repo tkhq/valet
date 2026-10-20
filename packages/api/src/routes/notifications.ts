@@ -109,7 +109,7 @@ notificationsRouter.get("/decisions", async (c) => {
       if (approver && (caller.type !== "user" || approver.userId !== caller.id)) return null;
       const key = JSON.stringify([sessionId, gate.threadId]);
       if (!visibility.has(key)) visibility.set(key, row.kind === "app"
-        ? engineStore.getThread(sessionId, gate.threadId).then(thread => thread ? threadsVisibleTo(c, session)(thread.key) : false)
+        ? engineStore.getThread(sessionId, gate.threadId).then(thread => thread ? threadsVisibleTo(c, session)(thread) : false)
         : runVisible(c, { ownerType: row.ownerType, origin: row.origin, actorUserId: row.actorUserId, params: { input: row.input } }));
       const canOpenThread = await visibility.get(key) ?? false;
       if (!approver && !canOpenThread) return null;

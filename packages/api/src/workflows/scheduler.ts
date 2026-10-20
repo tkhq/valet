@@ -18,7 +18,16 @@
  */
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, eq, lte } from "drizzle-orm";
-import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
+import { readThreadPolicy } from "@valet/shared";
+import { PinUnavailableError } from "../events/assistant-delivery.js";
+import type { AssistantDeliverFn } from "../events/dispatcher.js";
+import { resolveDestination } from "../events/destination.js";
+import {
+  destinationMetricReason,
+  recordDeliveryDestination,
+  type DeliveryDestinationMetricReason,
+  type DestinationRecorder,
+} from "../observability/delivery-metrics.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
@@ -31,12 +40,15 @@ export interface WorkflowSchedulerDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
-  /** Orchestrator-target fires submit the schedule's prompt through the
-   * same delivery seam event subscriptions use (idempotent by dispatchId,
-   * org-asserted, lands on a dedicated orchestrator thread). */
-  deliverToOrchestrator: OrchestratorDeliverFn;
+  /** Assistant-prompt fires submit the schedule's prompt through the same
+   * delivery seam event subscriptions use (idempotent by dispatchId,
+   * org-asserted, lands on the thread the schedule's policy names). */
+  deliverToAssistant: AssistantDeliverFn;
   /** Injectable clock for tests. */
   now?: () => number;
+  /** Counts a dead pin (spec Part E step 3). Absent → the
+   * `valet_event_delivery_destination` counter. Tests pass a recorder. */
+  recordDestination?: DestinationRecorder;
 }
 
 /** Pure: the derived, idempotent run id for one (schedule, slot) fire. */
@@ -49,6 +61,10 @@ export class WorkflowScheduler {
   private ticking = false;
 
   constructor(private readonly deps: WorkflowSchedulerDeps) {}
+
+  private recordDestination(reason: DeliveryDestinationMetricReason): void {
+    (this.deps.recordDestination ?? recordDeliveryDestination)(reason);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -93,33 +109,53 @@ export class WorkflowScheduler {
   private async dispatch(
     schedule: typeof workflowSchedules.$inferSelect,
     slotMs: number,
-  ): Promise<"ok" | { error: string }> {
+  ): Promise<"ok" | { error: string; pinUnavailable?: true }> {
     const { db, workflowRunHost } = this.deps;
 
     if (schedule.targetKind === "orchestrator") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
         return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
       }
-      await this.deps.deliverToOrchestrator({
-        orgId: schedule.orgId,
-        ownerType: schedule.ownerType,
-        ownerId: schedule.ownerId,
-        // Shared schedules never inherit their creator's personal authority.
-        actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
-        signal: {
-          kind: "signal",
-          signalType: "schedule",
-          body: schedule.prompt,
-          attributes: {
-            scheduleId: schedule.id,
-            scheduleName: schedule.name,
-            cron: schedule.cron,
-            firedAt: new Date(slotMs).toISOString(),
-          },
-        },
-        dispatchId: `schedule:${schedule.id}:${slotMs}`,
-        unattended: true,
+      // A schedule has no event, binding, or claim: its policy decides
+      // (spec 2026-10-16: delivery threads, Part B). `new` keys on the slot,
+      // so a retried fire reuses its thread.
+      const destination = resolveDestination({
+        rule: { id: schedule.id, kind: "schedule", name: schedule.name, policy: readThreadPolicy(schedule.threadPolicy) },
+        fireAt: slotMs,
+        binding: null,
+        claim: null,
       });
+      if (destination.kind === "skip") throw new Error("A schedule resolved to a skip. Report this schedule to Valet support.");
+      try {
+        await this.deps.deliverToAssistant({
+          orgId: schedule.orgId,
+          ownerType: schedule.ownerType,
+          ownerId: schedule.ownerId,
+          // Shared schedules never inherit their creator's personal authority.
+          actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
+          signal: {
+            kind: "signal",
+            signalType: "schedule",
+            body: schedule.prompt,
+            attributes: {
+              scheduleId: schedule.id,
+              scheduleName: schedule.name,
+              cron: schedule.cron,
+              firedAt: new Date(slotMs).toISOString(),
+            },
+          },
+          dispatchId: `schedule:${schedule.id}:${slotMs}`,
+          destination,
+          unattended: true,
+        });
+      } catch (err) {
+        // A pin that cannot receive deliveries never falls back to another
+        // mode (spec Part B step 4). The poll loop disables the schedule,
+        // logs this text, and counts it (`fire`).
+        if (!(err instanceof PinUnavailableError)) throw err;
+        return { error: err.message, pinUnavailable: true };
+      }
+      this.recordDestination(destinationMetricReason(destination));
       return "ok";
     }
 
@@ -183,8 +219,13 @@ export class WorkflowScheduler {
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
     if (result !== "ok") {
-      console.error(`workflow scheduler: disabling ${schedule.id} — ${result.error}`);
-      await db.update(workflowSchedules).set({ enabled: false, updatedAt: now }).where(eq(workflowSchedules.id, schedule.id));
+      console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
+      const disabled = await db.update(workflowSchedules).set({ enabled: false, updatedAt: now })
+        .where(and(eq(workflowSchedules.id, schedule.id), eq(workflowSchedules.enabled, true)))
+        .returning({ id: workflowSchedules.id });
+      // The counter pages a person once per dead pin: only the fire that
+      // disables the schedule counts, not a replica that re-fired the slot.
+      if (result.pinUnavailable && disabled.length > 0) this.recordDestination("pin_unavailable");
       return;
     }
     await db
@@ -205,7 +246,8 @@ export class WorkflowScheduler {
     const schedule = await accessibleScheduleRow(db, owner, scheduleId);
     if (!schedule) return "not_found";
     const result = await this.dispatch(schedule, now);
-    if (result !== "ok") return result;
+    // A manual fire changes no state, so a dead pin is not counted here.
+    if (result !== "ok") return { error: result.error };
     await db
       .update(workflowSchedules)
       .set({ lastFiredAt: now, updatedAt: now })

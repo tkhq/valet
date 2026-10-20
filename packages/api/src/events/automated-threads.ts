@@ -6,14 +6,34 @@
 export const EVENTS_THREAD_KEY = "events";
 
 /**
- * A thread only automated deliveries write to: the owner's "events" firehose
- * or a Slack channel's bot-event thread (`slackEventsThreadKey`). No person
- * waits on a turn there that a person did not type, including a delegated
- * task's follow-up, so the host marks those turns unattended
- * (`automatedThread` in `engine/host.ts`). A task such a turn delegates can
- * still ask in the inbox. This module imports nothing, so the host can load
- * it without a cycle.
+ * A thread only automated deliveries write to. The thread policy lands a
+ * delivery on a key it owns: `sub:<rule>` (a rule's own thread),
+ * `sub:<rule>:<delivery>` (a new thread per event), `schedule:<rule>` and
+ * `schedule:<rule>:<fire>` (a routine's threads), or `subject:<natural
+ * subject>` (one thread per pull request, issue, or channel). Rows written
+ * before the policy sit on the owner's `events` firehose or a Slack
+ * channel's `slack-events:<channel>` thread. No person waits on a turn there
+ * that a person did not type, including a delegated task's follow-up, so
+ * the host marks those turns unattended (`automatedThread` in
+ * `engine/host.ts`). A pinned existing thread keeps its own key and is not
+ * one of these. A task such a turn delegates can still ask in the inbox.
+ *
+ * A policy key does not prove that nobody waits. A Slack mention under an
+ * absent policy lands on `sub:<rule>:<delivery>`, and the person who
+ * mentioned the assistant answers its questions there. An attended delivery
+ * marks its thread `CONVERSATIONAL_THREAD_KEY` (`deliverToAssistantThread`),
+ * and a marked policy thread is a conversation from then on. The legacy
+ * `events` and `slack-events:<channel>` threads never carry a conversation:
+ * a mention always had its own Slack thread. They stay automated even if a
+ * flagless follow-up marks them.
+ * This module imports nothing, so the host can load it without a cycle.
  */
-export function isAutomatedDeliveryThread(thread: { key: string }): boolean {
-  return thread.key === EVENTS_THREAD_KEY || /^slack-events:[^:]+$/.test(thread.key);
+const POLICY_THREAD_KEY = /^(sub|schedule|subject):/;
+
+/** Thread metadata flag: an attended delivery landed here, so a person takes part. */
+export const CONVERSATIONAL_THREAD_KEY = "conversational";
+
+export function isAutomatedDeliveryThread(thread: { key: string; metadata?: Record<string, unknown> }): boolean {
+  if (thread.key === EVENTS_THREAD_KEY || /^slack-events:[^:]+$/.test(thread.key)) return true;
+  return POLICY_THREAD_KEY.test(thread.key) && thread.metadata?.[CONVERSATIONAL_THREAD_KEY] !== true;
 }

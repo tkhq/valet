@@ -43,6 +43,7 @@ import { linkIdentity } from "../channels/identity-links.js";
 import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { productionEventWaiterDeriver } from "../events/derive.js";
+import { findFollowedThread } from "../events/followed-threads.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
@@ -873,13 +874,17 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const now = Date.now();
     await p.db.insert(teams).values({ id: TEAM, orgId: ORG, name: "Acme SRE", createdAt: now });
     await p.db.insert(teamMembers).values({ teamId: TEAM, userId: USER, role: "admin" });
-    const subscription = (id: string, eventKeys: string[], filters: SubscriptionFilter[]): typeof eventSubscriptions.$inferInsert => ({
+    const subscription = (id: string, eventKeys: string[], filters: SubscriptionFilter[], follow = false): typeof eventSubscriptions.$inferInsert => ({
       id, orgId: ORG, ownerType: "team", ownerId: TEAM, createdBy: USER, name: id, eventKeys, filters,
-      target: { kind: "orchestrator" }, enabled: true, createdAt: now, updatedAt: now,
+      // No thread policy: a follow rule defaults to a thread per mention
+      // (`new`), and a Slack channel event to its channel's thread (`subject`)
+      // (spec 2026-10-16, Part A step 3).
+      target: { kind: "orchestrator", ...(follow ? { follow: true } : {}) }, enabled: true, createdAt: now, updatedAt: now,
     });
     await p.db.insert(eventSubscriptions).values([
       subscription("sub-incidents", ["slack.channel_created"], [{ field: "channel_name", op: "prefix", value: "inc-" }]),
-      subscription("sub-mentions", ["slack.app_mention"], []),
+      // The mention rule follows its threads (incident mention routing, universe).
+      subscription("sub-mentions", ["slack.app_mention"], [], true),
     ]);
     // An admin lets the team assistant post and join without a gate.
     const policy = await fetch(`${u.api.baseUrl}/api/org/policies`, {
@@ -917,7 +922,10 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const e1 = await awaitSignals(u, "slack.channel_created", 1, tInc.sessionId, tInc.threadId);
     expect(e1).toHaveLength(1);
     const thread = await p.engineStore.getThread(tInc.sessionId, tInc.threadId);
-    expect(thread?.key).toBe("slack-events:C900");
+    // The rule sets no thread policy, so the channel event lands in the
+    // channel's subject thread (spec 2026-10-16: delivery threads, Part A
+    // step 3), not a shared rule thread.
+    expect(thread?.key).toBe(`subject:slack:${SLACK_TEAM}/C900`);
 
     // E2: the agent joins, posts the thread link, and arms the stream wait.
     const e2 = await poll(async () => u.agent.results.slice(before), (r) => r.length >= 3, "E2's three tool results");
@@ -954,8 +962,9 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const e4 = await awaitSignals(u, "event.matched", 2, tInc.sessionId, tInc.threadId);
     expect(e4[1]?.content).toContain("failover done");
 
-    // E5: a mention of the bot. The app_mention subscription delivers it
-    // once; the event waiter skips the message event.
+    // E5 / M1: a mention of the bot in the watched channel. The app_mention
+    // subscription delivers it once, to t-inc; the event waiter skips the
+    // message event (incident mention routing, INV-M1).
     const mentionTs = `${++slackTs}.000100`;
     const mentionText = `<@${BOT_USER}> status?`;
     await postSlack(u, { ...slackMessage("C900", "U001", mentionText), ts: mentionTs });
@@ -966,13 +975,72 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await u.watcher.sweep(u.clock.now);
     await expectNoNewSignal(u, "event.matched", 2, tInc.sessionId, tInc.threadId);
     expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
-    // Exactly one turn carries the post, and it comes from the subscription.
+    // Exactly one turn carries the post, it comes from the subscription, and it is in t-inc.
     const turns = await queuedWith(u, "status?");
     expect(turns).toHaveLength(1);
     expect(mentions).toHaveLength(1);
     expect(turns[0]?.id).toBe(mentions[0]?.id);
-    // A top-level mention opens its own conversation, keyed by its Slack post.
-    expect(turns[0]?.threadId).not.toBe(tInc.threadId);
-    expect((await p.engineStore.getThread(turns[0]?.sessionId ?? "", turns[0]?.threadId ?? ""))?.key).toBe(`slack:C900:${mentionTs}`);
+    expect(turns[0]).toMatchObject(tInc);
+    await awaitSignals(u, "slack.app_mention", 1, tInc.sessionId, tInc.threadId);
+    // No new assistant thread exists for the mention's Slack post.
+    const mentionThreads = rowsOf(await p.db.execute(sql`SELECT id FROM engine_threads WHERE key = ${`slack:C900:${mentionTs}`}`));
+    expect(mentionThreads).toHaveLength(0);
+
+    // M2: the routed mention binds no follow (INV-M2).
+    expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: mentionTs })).toBeNull();
+
+    // M4: the agent's reply to the mention posts in the mention's Slack thread.
+    const reply = await poll(
+      async () => u.stub.slackCalls.find((c) => c.method === "chat.postMessage" && c.params.channel === "C900" && c.params.thread_ts === mentionTs),
+      (call) => call !== undefined,
+      "the reply in the mention's Slack thread",
+    );
+    expect(reply?.params.text).toContain("noted");
+
+    // M3: a threaded reply under the mention reaches t-inc once, through the event waiter.
+    const underMention = "replica caught up";
+    await postSlack(u, slackMessage("C900", "U003", underMention, mentionTs));
+    await p.eventDispatcher.pollOnce();
+    u.clock.now += 60_000;
+    await u.watcher.sweep(u.clock.now);
+    const m3 = await awaitSignals(u, "event.matched", 3, tInc.sessionId, tInc.threadId);
+    expect(m3[2]?.content).toContain(underMention);
+    expect(await queuedWith(u, underMention)).toEqual([expect.objectContaining(tInc)]);
+
+    // M5: a mention from U002, who links to no Valet user. The team mention
+    // gate refuses U002, so the mention rule does not skip the message event,
+    // and t-inc receives it once through the event waiter (Part C).
+    const unlinkedTs = `${++slackTs}.000100`;
+    const unlinkedText = `<@${BOT_USER}> is the replica healthy?`;
+    await postSlack(u, { ...slackMessage("C900", "U002", unlinkedText), ts: unlinkedTs });
+    await postSlack(u, { type: "app_mention", channel: "C900", user: "U002", text: unlinkedText, ts: unlinkedTs, team: SLACK_TEAM, event_ts: unlinkedTs });
+    await p.eventDispatcher.pollOnce();
+    u.clock.now += 60_000;
+    await u.watcher.sweep(u.clock.now);
+    const m5 = await awaitSignals(u, "event.matched", 4, tInc.sessionId, tInc.threadId);
+    expect(m5[3]?.content).toContain("is the replica healthy?");
+    expect(await queuedWith(u, "is the replica healthy?")).toEqual([expect.objectContaining(tInc)]);
+    expect(await queuedSignals(u, "slack.app_mention")).toHaveLength(1);
+
+    // M6: the agent cancels the watching waiter. A later mention opens its own
+    // thread, keyed by its delivery (the follow rule's default `new` policy), and the dispatcher binds a
+    // follow to that thread.
+    u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
+    await postSlack(u, slackMessage("C900", "U002", "incident closed, stop watching"));
+    u.clock.now += 60_000;
+    await u.watcher.sweep(u.clock.now);
+    await poll(() => p.engineStore.getWakeup(waiterId), (w) => w?.status !== "running", "the agent to cancel the waiter");
+    expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "cancelled" });
+    const laterTs = `${++slackTs}.000100`;
+    const laterText = `<@${BOT_USER}> who is on call?`;
+    await postSlack(u, { ...slackMessage("C900", "U001", laterText), ts: laterTs });
+    await postSlack(u, { type: "app_mention", channel: "C900", user: "U001", text: laterText, ts: laterTs, team: SLACK_TEAM, event_ts: laterTs });
+    await p.eventDispatcher.pollOnce();
+    const later = await poll(() => queuedWith(u, "who is on call?"), (rows) => rows.length > 0, "the later app_mention delivery");
+    expect(later).toHaveLength(1);
+    expect(later[0]?.threadId).not.toBe(tInc.threadId);
+    expect((await p.engineStore.getThread(later[0]?.sessionId ?? "", later[0]?.threadId ?? ""))?.key).toMatch(/^sub:sub-mentions:/);
+    expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: laterTs }))
+      .toMatchObject({ ownerType: "team", ownerId: TEAM, sessionId: later[0]?.sessionId, threadId: later[0]?.threadId });
   }, 90_000);
 });

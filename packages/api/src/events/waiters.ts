@@ -17,13 +17,14 @@ import {
   type ValetPlugin,
   type Wakeup,
 } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, eventSubscriptions } from "../schema/index.js";
 import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
 import { subscriptionMatchesEvent } from "./match.js";
-import { isTeamAssistantMention } from "./team-slack-gate.js";
+import { isTeamAssistantMention, mentionSenderActor } from "./team-slack-gate.js";
 import { anyMatch, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
 
 /** The counters the matcher writes (spec Part J). Tests replace them. */
@@ -184,20 +185,41 @@ export function waiterMatchStage(count: number): { stage: string; outcome: strin
   };
 }
 
+/** A subscription row, as far as the mention rule reads it. */
+export interface MentionRuleSubscription {
+  enabled: boolean;
+  orgId: string;
+  ownerType: string;
+  ownerId: string;
+  createdBy: string;
+  audience?: string | null;
+  target: unknown;
+  eventKeys: unknown;
+  filters: unknown;
+}
+
 /**
  * Whether one of `subs` is an enabled `slack.app_mention` subscription that
- * matches the event's payload under the subscription matcher (the Part E
- * mention rule). The team mention gate's sender check is not run here.
+ * matches the event's payload under the subscription matcher AND whose
+ * sender gate admits the sender (the Part E mention rule). The gate is the
+ * dispatcher's own (`mentionSenderActor`), run without a drop log because
+ * ingest already logged the denial. A mention that the gate refuses reaches
+ * no subscription, so the event waiter receives it as a channel message.
  */
-export function appMentionCoveredBy(
-  subs: ReadonlyArray<{ enabled: boolean; ownerType: string; target: unknown; eventKeys: unknown; filters: unknown }>,
+export async function appMentionCoveredBy(
+  db: AppDb,
+  subs: ReadonlyArray<MentionRuleSubscription>,
   event: NormalizedEvent,
   plugins: ValetPlugin[],
-): boolean {
+): Promise<boolean> {
   const key = "slack.app_mention";
   const catalog = plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === "slack").flatMap((t) => t.catalog);
-  return subs.some((sub) => sub.enabled
-    && subscriptionMatchesEvent(sub, key, event.payload, catalog, isTeamAssistantMention(sub, key), event.subjects));
+  for (const sub of subs) {
+    if (!sub.enabled) continue;
+    if (!subscriptionMatchesEvent(sub, key, event.payload, catalog, isTeamAssistantMention(sub, key), event.subjects)) continue;
+    if (await mentionSenderActor(db, sub, key, event.payload, false) !== null) return true;
+  }
+  return false;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -215,6 +237,20 @@ export function linearPreviousStatusRef(payload: unknown): { teamKey?: string; s
   if (typeof stateId !== "string" || !stateId) return null;
   const teamKey = asRecord(asRecord(root?.data)?.team)?.key;
   return typeof teamKey === "string" && teamKey ? { teamKey, stateId } : { stateId };
+}
+
+/** A session's org and owner, or null when the session is gone or deleted. */
+export async function loadSessionOwner(
+  db: AppDb,
+  sessionId: string,
+): Promise<{ orgId: string; ownerType: string; ownerId: string } | null> {
+  const [row] = await db
+    .select({ orgId: agentSessions.orgId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sessionId))
+    .limit(1);
+  if (!row || row.status === "deleted") return null;
+  return { orgId: row.orgId, ownerType: row.ownerType, ownerId: row.ownerId };
 }
 
 type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "plugins"> & {
@@ -276,18 +312,9 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
   // One channel check per viewer for the life of these deps, so the
   // credential and identity lookups it caches are shared.
   const viewers = new Map<string, ChannelVisibility>();
-  const sessionOrg: WaiterMatchDeps["sessionOrg"] = async (sessionId) => {
-    const [row] = await providers.db
-      .select({ orgId: agentSessions.orgId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status })
-      .from(agentSessions)
-      .where(eq(agentSessions.id, sessionId))
-      .limit(1);
-    if (!row || row.status === "deleted") return null;
-    return { orgId: row.orgId, ownerType: row.ownerType, ownerId: row.ownerId };
-  };
   return {
     engineStore: providers.engineStore,
-    sessionOrg,
+    sessionOrg: (sessionId) => loadSessionOwner(providers.db, sessionId),
     plugins: providers.plugins,
     // A personal session sees what its owner may see. A team session sees
     // only public channels, the rule for content every member reads.
@@ -325,7 +352,7 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
     async appMentionCovered(orgId, event) {
       const subs = await providers.db.select().from(eventSubscriptions)
         .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-      return appMentionCoveredBy(subs, event, providers.plugins);
+      return appMentionCoveredBy(providers.db, subs, event, providers.plugins);
     },
   };
 }

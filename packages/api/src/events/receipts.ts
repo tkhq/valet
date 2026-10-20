@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventReceipts } from "../schema/index.js";
 import type { EventReceiptWire, ReceiptStage, ReceiptSubscriptionDecision } from "../wire/types.js";
@@ -62,4 +62,52 @@ export async function appendReceiptStage(db: AppDb, receiptId: string | undefine
       ...(patch?.subscriptions !== undefined ? { subscriptions: sanitizeReceiptSubscriptions(patch.subscriptions) } : {}),
     }).where(eq(eventReceipts.id, receiptId));
   } catch { console.warn("[event-receipts] write unavailable"); }
+}
+
+/**
+ * The receipt stage for one assistant delivery's destination (spec
+ * 2026-10-16: delivery threads, Part E step 1). It holds ids and the
+ * reason only, never the thread title or payload text.
+ */
+export function destinationReceiptStage(
+  ids: { subscriptionId: string; deliveryId: string },
+  outcome: { kind: "key"; key: string; reason: string } | { kind: "target"; sessionId: string; threadId: string; reason: string }
+    | { kind: "skip"; reason: string } | { kind: "pin_unavailable"; sessionId: string; threadId: string },
+): { stage: string; outcome: string; detail: string } {
+  const prefix = `Subscription ${ids.subscriptionId}, delivery ${ids.deliveryId}:`;
+  switch (outcome.kind) {
+    case "key": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} thread key ${outcome.key}.` };
+    case "target": return { stage: "destination", outcome: outcome.reason, detail: `${prefix} session ${outcome.sessionId}, thread ${outcome.threadId}.` };
+    case "skip": return { stage: "destination", outcome: "claim_skip", detail: `${prefix} skipped, ${outcome.reason}.` };
+    case "pin_unavailable": return { stage: "destination", outcome: "pin_unavailable", detail: `${prefix} pinned session ${outcome.sessionId}, thread ${outcome.threadId} cannot receive deliveries.` };
+  }
+}
+
+/**
+ * Append a stage to the receipt of a stored event, when that event has one.
+ * With `onceFor`, a stage of the same name whose detail already contains
+ * that text is not appended again, so a retried delivery records once.
+ * Returns what happened, so a caller can count only a first record.
+ */
+export async function appendReceiptStageForEvent(
+  db: AppDb, orgId: string, eventId: string,
+  stage: { stage: string; outcome: string; detail: string },
+  onceFor?: string,
+): Promise<"appended" | "exists" | "no_receipt"> {
+  try {
+    const [row] = await db.select({ id: eventReceipts.id, stages: eventReceipts.stages }).from(eventReceipts)
+      .where(and(eq(eventReceipts.orgId, orgId), eq(eventReceipts.eventId, eventId))).limit(1);
+    if (!row) return "no_receipt";
+    if (onceFor !== undefined && sanitizeReceiptStages(row.stages).some((s) => s.stage === stage.stage && s.detail.includes(onceFor))) return "exists";
+    await appendReceiptStage(db, row.id, stage);
+    return "appended";
+  } catch {
+    console.warn("[event-receipts] write unavailable");
+    return "no_receipt";
+  }
+}
+
+/** The text that names one delivery in its `destination` stage, for `onceFor`. */
+export function destinationStageMarker(deliveryId: string): string {
+  return `delivery ${deliveryId}:`;
 }

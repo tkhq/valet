@@ -8,6 +8,7 @@ import { requireActingUser } from "../middleware/auth.js";
 import { agentSessions } from "../schema/index.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { canViewSession } from "../services/session-access.js";
+import { SLACK_CHANNELS_METADATA_KEY, threadSlackChannelsSql } from "../services/thread-access.js";
 import { changeThreadProjects, readThreadProjects, ThreadProjectsConflict, ThreadProjectsImportConflict } from "../services/thread-projects.js";
 import { threadProjectsMutationSchema } from "../services/thread-projects-schema.js";
 import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
@@ -40,7 +41,9 @@ async function activeThreads(c: Context<AppEnv>, session: typeof agentSessions.$
   )` : sql`false`;
   for (let offset = 0; offset < ids.length; offset += 100) {
     const batch = ids.slice(offset, offset + 100);
-    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key, s.id AS session_id, ${execution} AS execution
+    // The thread's recorded Slack channels gate it with its key (`services/thread-access.ts`).
+    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key, s.id AS session_id, ${execution} AS execution,
+        ${threadSlackChannelsSql(sql`t.session_id`, sql`t.id`)} AS channels
       FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
       LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
       WHERE s.org_id = ${session.orgId} AND s.owner_type = ${session.ownerType} AND s.owner_id = ${session.ownerId}
@@ -53,7 +56,7 @@ async function activeThreads(c: Context<AppEnv>, session: typeof agentSessions.$
             AND a.owner_type = ${session.ownerType} AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL
         )))
         AND t.id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
-    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable(), session_id: z.string(), execution: z.boolean() })) }).parse(result);
+    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable(), session_id: z.string(), execution: z.boolean(), channels: z.array(z.string()).nullable() })) }).parse(result);
     for (const thread of rows) {
       if (thread.session_id !== session.id && !thread.execution) {
         let valid = retained.get(thread.session_id);
@@ -69,7 +72,7 @@ async function activeThreads(c: Context<AppEnv>, session: typeof agentSessions.$
         canSee = threadsVisibleTo(c, source);
         checks.set(thread.session_id, canSee);
       }
-      if (await canSee(thread.key)) visible.add(thread.id);
+      if (await canSee({ key: thread.key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: thread.channels ?? [] } })) visible.add(thread.id);
     }
   }
   return visible;
