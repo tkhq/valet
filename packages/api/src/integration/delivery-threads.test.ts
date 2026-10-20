@@ -33,13 +33,17 @@ import { summaryTitle } from "../events/destination.js";
 import { findFollowedThread } from "../events/followed-threads.js";
 import {
   eventDeliveries,
+  eventSubscriptions,
   events,
   githubInstallations,
   linearInstallations,
+  slackChannelPrivacy,
   slackWebhookInbox,
   workflowSchedules,
 } from "../schema/index.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { storedThreadRef, threadVisibility } from "../services/thread-access.js";
 import { startGithubFixture, type GithubFixtureResponse } from "../test-helpers/github-fixture.js";
 import type {
   CreateEventSubscriptionResponse,
@@ -598,4 +602,42 @@ describe("api integration: delivery threads acceptance scenario", () => {
     expect(await refused.json()).toEqual({ error: CROSS_OWNER });
     expect((await deliveriesOf(api, r2)).length).toBe(1);
   }, 120_000);
+
+  it("keeps a legacy team rule's channel events in one thread per channel", async () => {
+    const api = await bootUniverse();
+    const p = api.providers;
+    const team = await createTeam(p.db, { orgId: ORG, name: "Ops", creatorUserId: USER });
+    await addMember(p.db, { teamId: team.id, userId: OTHER_USER, role: "member" });
+    // CPRIV is private and OTHER_USER is not in it; CPUB is public.
+    await p.db.insert(slackChannelPrivacy).values([
+      { orgId: ORG, channelId: "CPUB", isPrivate: false, checkedAt: Date.now() },
+      { orgId: ORG, channelId: "CPRIV", isPrivate: true, checkedAt: Date.now() },
+    ]);
+    await linkIdentity(p.db, { provider: "slack", externalId: "U002", userId: OTHER_USER });
+    // A rule stored before thread policies: no `thread` in its target.
+    const now = Date.now();
+    await p.db.insert(eventSubscriptions).values({
+      id: "sub-legacy-reactions", orgId: ORG, ownerType: "team", ownerId: team.id, name: "Reactions",
+      eventKeys: ["slack.reaction_added"], filters: [], target: { kind: "orchestrator" },
+      enabled: true, createdBy: USER, createdAt: now, updatedAt: now,
+    });
+    for (const channel of ["CPUB", "CPRIV"]) {
+      const ts = `${++slackTs}.000100`;
+      await postSlack(api, {
+        type: "reaction_added", user: "U001", reaction: "eyes", item_user: "U001",
+        item: { type: "message", channel, ts }, event_ts: ts,
+      });
+    }
+    const rows = await settled(api, "sub-legacy-reactions", 2);
+    const landed = await Promise.all(rows.map((row) => landingOf(api, row)));
+    expect(landed.map((thread) => thread.key).sort()).toEqual([`subject:slack:${SLACK_TEAM}/CPRIV`, `subject:slack:${SLACK_TEAM}/CPUB`]);
+
+    // A teammate outside the private channel still sees the public channel's thread.
+    const outsider = { orgId: ORG, userId: OTHER_USER };
+    for (const thread of landed) {
+      const visible = threadVisibility(p, { ownerType: "team", id: thread.sessionId }, outsider);
+      const ref = await storedThreadRef(p.db, thread.sessionId, thread.id, thread.key);
+      expect(await visible(ref), thread.key).toBe(thread.key.endsWith("/CPUB"));
+    }
+  }, 60_000);
 });

@@ -877,7 +877,8 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const subscription = (id: string, eventKeys: string[], filters: SubscriptionFilter[], follow = false): typeof eventSubscriptions.$inferInsert => ({
       id, orgId: ORG, ownerType: "team", ownerId: TEAM, createdBy: USER, name: id, eventKeys, filters,
       // No thread policy: a follow rule defaults to a thread per mention
-      // (`new`), any other rule to its own thread (spec 2026-10-16, Part A step 3).
+      // (`new`), and a Slack channel event to its channel's thread (`subject`)
+      // (spec 2026-10-16, Part A step 3).
       target: { kind: "orchestrator", ...(follow ? { follow: true } : {}) }, enabled: true, createdAt: now, updatedAt: now,
     });
     await p.db.insert(eventSubscriptions).values([
@@ -921,9 +922,10 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     const e1 = await awaitSignals(u, "slack.channel_created", 1, tInc.sessionId, tInc.threadId);
     expect(e1).toHaveLength(1);
     const thread = await p.engineStore.getThread(tInc.sessionId, tInc.threadId);
-    // The rule sets no thread policy, so it lands in its own thread (spec
-    // 2026-10-16: delivery threads, Part A step 3), not a channel events thread.
-    expect(thread?.key).toBe("sub:sub-incidents");
+    // The rule sets no thread policy, so the channel event lands in the
+    // channel's subject thread (spec 2026-10-16: delivery threads, Part A
+    // step 3), not a shared rule thread.
+    expect(thread?.key).toBe(`subject:slack:${SLACK_TEAM}/C900`);
 
     // E2: the agent joins, posts the thread link, and arms the stream wait.
     const e2 = await poll(async () => u.agent.results.slice(before), (r) => r.length >= 3, "E2's three tool results");

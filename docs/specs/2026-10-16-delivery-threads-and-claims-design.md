@@ -155,9 +155,20 @@ start.
    JSON. The schedule stores it in a new nullable `thread_policy` jsonb
    column on `workflow_schedules`, edited in place in `0000_app.sql`, with
    a matching `SCHEMA_REPAIRS` entry.
-3. An absent policy MUST read as `new` for a delivery with a channel origin,
-   else `own`. No backfill runs. `readThreadPolicy` stays shape-only; the
-   dispatcher applies this default per delivery (`deliveryThreadPolicy`).
+3. An absent policy MUST read per delivery as this table says:
+
+   | delivery | default |
+   |---|---|
+   | has a channel origin (a mention, a message, a DM) | `new` |
+   | Slack event with a channel and no channel origin (a reaction, a channel lifecycle event) | `subject`, key `subject:slack:<team>/<channel>` |
+   | the same, when no natural subject names the channel | `new` |
+   | any other event | `own` |
+
+   So a legacy rule never puts two channels' content in one thread, and a
+   private channel's gate covers only that channel's thread. `own` for
+   channel content stays an explicit owner choice. No backfill runs.
+   `readThreadPolicy` stays shape-only; the dispatcher applies this default
+   per delivery (`deliveryThreadPolicy`).
 4. `subject` MUST be refused for a schedule, and for an event subscription
    whose keys name no natural subject (Part D). The refusal MUST say
    `This rule's events have no subject to group by. Pick another thread
@@ -459,7 +470,8 @@ event wakeups spec Part A.
   socket within the 5-minute recheck window, not at once.
 - **Display default in the web.** The web shows a rule's default policy at
   the rule level: `new` when the rule follows Slack threads or its event
-  keys carry Slack conversations, else `own`.
+  keys carry Slack conversations, `subject` for other Slack event keys,
+  else `own`.
   The dispatcher decides per delivery (Part A step 3), so the shown default
   is an approximation for a rule that mixes channel and other events.
 - **No `existing` option for org-owned rules in the web.** The thread

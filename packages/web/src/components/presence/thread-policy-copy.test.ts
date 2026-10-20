@@ -70,9 +70,13 @@ describe("displayThreadPolicy", () => {
     expect(displayThreadPolicy({ follow: false }, ["slack.message"])).toEqual({ mode: "new" });
   });
 
+  it("reads an absent policy as one thread per channel for other Slack keys", () => {
+    expect(displayThreadPolicy({}, ["slack.reaction_added"])).toEqual({ mode: "subject" });
+    expect(displayThreadPolicy({}, ["slack.channel_archive", "github.pr.opened"])).toEqual({ mode: "subject" });
+  });
+
   it("reads an absent policy as own otherwise", () => {
     expect(displayThreadPolicy({ follow: false }, ["github.pr.opened"])).toEqual({ mode: "own" });
-    expect(displayThreadPolicy({}, ["slack.reaction_added"])).toEqual({ mode: "own" });
     expect(displayThreadPolicy({}, [])).toEqual({ mode: "own" });
   });
 

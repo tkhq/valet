@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { eq, sql } from "drizzle-orm";
 import type { ChannelOrigin, EventClause, Wakeup } from "@valet/engine";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
@@ -390,20 +391,19 @@ describe("EventDispatcher", () => {
     expect(onForeign?.unattended).toBe(true);
   });
 
-  it("lands a Slack event with no thread to reply into by the rule's policy", async () => {
+  it("lands a Slack event with no thread to reply into in its channel's thread", async () => {
     // A reaction in a channel has no Slack thread to answer. With no policy
-    // set, the rule's own thread holds it (spec 2026-10-16: delivery
-    // threads, Part A step 3).
-    const { subscriptionId } = await seedDelivery({
+    // set, the channel's subject thread holds it, so channels never share a
+    // thread (spec 2026-10-16: delivery threads, Part A step 3).
+    await seedDelivery({
       target: { kind: "orchestrator" }, ownerType: "org",
       service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
-      refs: { channel: "CPRIV" }, summary: "reaction :eyes: added in CPRIV by U9",
+      refs: { channel: "CPRIV" }, summary: "reaction :eyes: added in CPRIV by U9", subjects: ["slack:T1/CPRIV"],
       payload: { type: "reaction_added", item: { channel: "CPRIV", ts: "1.2" }, user: "U9", reaction: "eyes" },
     });
     const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
-    await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver }).pollOnce();
-    // The shared events thread is gone: the rule's own thread holds it.
-    expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
+    await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [slackPlugin] }).pollOnce();
+    expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: "subject:slack:T1/CPRIV", title: "CPRIV", reason: "policy_subject" });
   });
 
   it("delivers an assistant-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
@@ -1292,13 +1292,14 @@ describe("EventDispatcher", () => {
       expect(recordDestination.mock.calls).toEqual([["claim_skip"]]);
     });
 
-    it("defaults an absent policy per delivery: new with a channel origin, own without one", async () => {
+    it("defaults an absent policy per delivery: new with a channel origin, never a shared thread for channel content", async () => {
       // A mention rule that does not follow still opens a thread per Slack conversation.
       const mention = await seedDelivery({
         target: { kind: "orchestrator" }, service: "slack", eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2" },
       });
-      // A follow rule's event with no channel origin keeps the rule's thread.
+      // A follow rule's Slack event with no channel origin and no subject gets
+      // its own thread, so it never mixes with another channel's content.
       const reaction = await seedDelivery({
         target: { kind: "orchestrator", follow: true }, service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
         payload: { type: "reaction_added", item: { channel: "C1", ts: "1.2" }, user: "U9", reaction: "eyes" },
@@ -1310,7 +1311,7 @@ describe("EventDispatcher", () => {
       }).pollOnce();
       const byDispatch = new Map(deliver.mock.calls.map(([args]) => [args.dispatchId, args.destination]));
       expect(byDispatch.get(`event:${mention.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${mention.subscriptionId}:${mention.deliveryId}`, reason: "policy_new" });
-      expect(byDispatch.get(`event:${reaction.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${reaction.subscriptionId}`, reason: "policy_own" });
+      expect(byDispatch.get(`event:${reaction.deliveryId}`)).toMatchObject({ kind: "key", key: `sub:${reaction.subscriptionId}:${reaction.deliveryId}`, reason: "policy_new" });
     });
 
     it("records the destination stage and the counter once when a retry recovers an admitted dispatch (M6)", async () => {
@@ -1452,6 +1453,12 @@ describe("deliveryThreadPolicy", () => {
     expect(deliveryThreadPolicy({}, { channelOrigin: true })).toEqual({ mode: "new" });
     expect(deliveryThreadPolicy({ thread: null }, { channelOrigin: true })).toEqual({ mode: "new" });
     expect(deliveryThreadPolicy({}, { channelOrigin: false })).toEqual({ mode: "own" });
+    // A Slack channel event with no reply origin keeps one thread per channel,
+    // or its own thread when no subject names the channel.
+    expect(deliveryThreadPolicy({}, { channelOrigin: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "subject" });
+    expect(deliveryThreadPolicy({}, { channelOrigin: false, slackChannel: true, naturalSubject: false })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({}, { channelOrigin: true, slackChannel: true, naturalSubject: true })).toEqual({ mode: "new" });
+    expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: false, slackChannel: true, naturalSubject: true })).toEqual({ mode: "own" });
     // A stored policy wins over the default.
     expect(deliveryThreadPolicy({ thread: { mode: "own" } }, { channelOrigin: true })).toEqual({ mode: "own" });
     expect(deliveryThreadPolicy({ thread: { mode: "new" } }, { channelOrigin: false })).toEqual({ mode: "new" });

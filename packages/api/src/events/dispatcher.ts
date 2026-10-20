@@ -178,14 +178,29 @@ export function eventDeliveryRunId(deliveryId: string): string {
 
 /**
  * One delivery's effective thread policy (spec 2026-10-16: delivery
- * threads, Part A step 3). An absent policy reads as `new` for a delivery
- * with a channel origin, so each Slack conversation keeps its own assistant
- * thread, and as `own` otherwise. A stored policy always wins.
+ * threads, Part A step 3). A stored policy always wins. An absent policy
+ * reads as:
+ *
+ * - `new` for a delivery with a channel origin, so each Slack conversation
+ *   keeps its own assistant thread.
+ * - `subject` for a Slack event with a channel but no reply origin (a
+ *   reaction, a channel lifecycle event), so each channel keeps its own
+ *   thread and a private channel's gate covers only that channel's thread.
+ *   With no natural subject to group by, such an event reads as `new`: it
+ *   must never share a thread with another channel's content.
+ * - `own` otherwise.
+ *
+ * `own` for channel content stays an explicit owner choice.
  * `readThreadPolicy` stays shape-only.
  */
-export function deliveryThreadPolicy(target: { thread?: unknown }, delivery: { channelOrigin: boolean }): AssistantThreadPolicy {
-  if (target.thread === undefined || target.thread === null) return delivery.channelOrigin ? { mode: "new" } : { mode: "own" };
-  return readThreadPolicy(target.thread);
+export function deliveryThreadPolicy(
+  target: { thread?: unknown },
+  delivery: { channelOrigin: boolean; slackChannel?: boolean; naturalSubject?: boolean },
+): AssistantThreadPolicy {
+  if (target.thread !== undefined && target.thread !== null) return readThreadPolicy(target.thread);
+  if (delivery.channelOrigin) return { mode: "new" };
+  if (delivery.slackChannel) return delivery.naturalSubject ? { mode: "subject" } : { mode: "new" };
+  return { mode: "own" };
 }
 
 /** A Slack direct message: a conversational event (spec Terminology). */
@@ -238,7 +253,8 @@ interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
-   * delivery with a channel origin, else `own`. */
+   * delivery with a channel origin, `subject` for other Slack channel
+   * events, else `own`. */
   thread?: unknown;
   workflowId?: string;
   presence?: Presence;
@@ -500,16 +516,19 @@ export class EventDispatcher {
         const claim = binding || follow ? null : this.deps.claimFor
           ? await this.deps.claimFor({ event, origin, owner })
           : await this.watchingTarget(event, origin, slackChannel, owner);
+        const naturalSubject = this.naturalSubject(event);
         const destination: Destination = follow?.kind === "legacy"
           // A follow bound before follows stored their thread keeps the
           // Slack thread key it has always used.
           ? { kind: "key", key: follow.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
           : resolveDestination({
-            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
+            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, {
+              channelOrigin: origin !== null, slackChannel: slackChannel !== undefined, naturalSubject: naturalSubject !== null,
+            }) },
             event: {
               deliveryId: delivery.id,
               summary: event.summary,
-              naturalSubject: this.naturalSubject(event),
+              naturalSubject,
               conversational: binding !== null || event.eventKey === "slack.app_mention" || (origin !== null && isDirectMessage(event.payload)),
             },
             binding,

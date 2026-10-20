@@ -86,18 +86,19 @@ export function carriesSlackConversation(keys: readonly string[]): boolean {
 /**
  * The policy a stored subscription runs with. An absent policy reads as
  * `new` when the target follows its conversations or the keys carry Slack
- * conversations, else `own`. The api decides per delivery (a delivery with
- * a Slack channel origin gets `new`); this is the rule-level approximation
- * for display.
+ * conversations, `subject` (one thread per channel) for other Slack keys,
+ * else `own`. The api decides per delivery (a delivery with a Slack channel
+ * origin gets `new`, another Slack channel event gets `subject`); this is
+ * the rule-level approximation for display.
  */
 export function displayThreadPolicy(
   target: { thread?: AssistantThreadPolicy | null; follow?: boolean },
   eventKeys: readonly string[],
 ): AssistantThreadPolicy {
-  if (target.thread === undefined || target.thread === null) {
-    return target.follow === true || carriesSlackConversation(eventKeys) ? { mode: "new" } : { mode: "own" };
-  }
-  return target.thread;
+  if (target.thread !== undefined && target.thread !== null) return target.thread;
+  if (target.follow === true || carriesSlackConversation(eventKeys)) return { mode: "new" };
+  if (eventKeys.some((key) => key.startsWith("slack."))) return { mode: "subject" };
+  return { mode: "own" };
 }
 
 /** The note under Runs in when one thread would hold several Slack conversations. */
