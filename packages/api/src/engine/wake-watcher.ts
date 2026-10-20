@@ -39,6 +39,7 @@ import { agentSessions } from "../schema/index.js";
 import type { SessionMeta } from "./host.js";
 import { loadSessionMeta } from "./session-meta.js";
 import {
+  decideDeliveredWaiter,
   decideEventWaiter,
   decideWakeup,
   LOG_TAIL_BYTES,
@@ -223,6 +224,24 @@ export class WakeWatcher {
     const timer = this.timer;
     this.timer = null;
     await timer?.stop();
+  }
+
+  /**
+   * Ends a once-mode event waiter after a claim redirect delivered its
+   * matching event to the waiter's thread (spec 2026-10-16: delivery
+   * threads and claims, Part C step 5). The dispatcher calls it after the
+   * delivery lands, so the terminal signal queues behind the inbound
+   * message. The row's CAS makes it safe to call again on a retry: a waiter
+   * that already ended sends no second terminal signal (INV-E5). Returns
+   * true when this call ended the waiter.
+   */
+  async endDeliveredWaiter(args: { waiterId: string; sessionId: string; threadId: string }): Promise<boolean> {
+    const row = await this.deps.engineStore.getWakeup(args.waiterId);
+    // A stamp names a waiter in the thread it delivered to. Any other row stays.
+    if (!row || row.sessionId !== args.sessionId || row.threadId !== args.threadId) return false;
+    const decision = decideDeliveredWaiter(this.clock(), row);
+    if (!decision) return false;
+    return (await this.applyDecision(row, decision, null, { pastCas: false })) !== null;
   }
 
   /**

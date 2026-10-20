@@ -121,9 +121,10 @@ export function isTeamAssistantMention(
  * The dispatcher's sender gate for an orchestrator delivery: the user id the
  * delivery acts as, or null when the gate refuses the sender. A team
  * assistant mention acts as its verified sender (`teamMentionActor`). Any
- * other rule acts as its owner and refuses nobody. The event waiter's mention
- * rule reuses this gate, so a mention that the dispatcher refuses stays an
- * ordinary channel message for the waiter (incident mention routing, Part C).
+ * other rule acts as its owner and refuses nobody. Claim resolution reuses
+ * this gate for the Slack twin check, so a mention that the dispatcher
+ * refuses stays an ordinary channel message for the waiter (spec
+ * 2026-10-16: delivery threads and claims, Part C step 8).
  */
 export async function mentionSenderActor(
   db: AppDb,

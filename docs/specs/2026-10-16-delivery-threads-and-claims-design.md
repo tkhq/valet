@@ -1,15 +1,15 @@
 # Delivery threads and claims
 
-Date: 2026-10-16. Status: implemented (Parts A, B, D, E); Part C pending.
+Date: 2026-10-16. Status: implemented.
 
 Depends on: `2026-10-15-event-wakeups-design.md` (event waiters, digests,
 Scenario E), `2026-07-20-event-system-design.md` (subscriptions, the
 dispatcher, followed threads), `2026-08-15-workflow-triggers-ui-design.md`
 (schedules and their assistant prompts).
 
-Supersedes: `2026-10-15-incident-mention-routing-design.md`. Its Part A
-becomes the conversational leg of Part C here. Its acceptance scenario
-survives as steps C2 to C7.
+Supersedes the incident mention routing spec (2026-10-15), which this
+spec absorbed and which was removed. Its Part A became the conversational
+leg of Part C here. Its acceptance scenario survives as steps C2 to C7.
 
 The user-facing words for these objects (presence, listener, routine,
 place, appears as) are defined in `2026-10-16-presence-hub-design.md`. This
@@ -121,11 +121,13 @@ and R3 exists.
 |---|---|---|
 | C1 | `U001` posts a top-level message in `C900` with no mention. | `t-inc` receives one `event.matched` digest. P's delivery is `skipped` with `claimed by thread t-inc`. No thread with key `subject:slack:T001/C900` exists. |
 | C2 | `U001` posts `<@U-BOT> status?` in `C900`, Slack thread `X`. | M delivers the mention to `t-inc` as an inbound message with the Slack origin. `t-inc` receives exactly one turn for it and no digest. A `followed_threads` row binds `X` to `t-inc`. |
+| C2b | C2 with the halves in the other order: the `slack.app_mention` arrives and is delivered before its `slack.message`, in a new Slack thread `Y`. | M delivers the mention to `t-inc` and binds `Y` to it. P's delivery of the message half is `skipped` with `the mention delivers this post`. `t-inc` receives exactly one turn for the post and no digest. |
 | C3 | `U003` replies in `X`. | `t-inc` receives the reply once, through the binding. The waiter appends no digest. |
+| C3b | `U001`, a linked member, replies in `X`. | The follow router delivers the reply to `t-inc`. `t-inc` receives exactly one turn for it and no digest. P's delivery is `skipped` with `the followed thread delivers this reply`. |
 | C4 | `U002` posts `<@U-BOT> is the replica healthy?` in `C900`. | The team gate refuses `U002`. `t-inc` receives one digest. No `slack.app_mention` delivery exists. |
-| C5 | `U001` posts a mention in `X2`. | `t-s` receives it through its binding. `t-inc` receives one digest for the channel message. |
+| C5 | `U001` posts a mention in `X2`. | `t-s` receives exactly one turn for it, through its binding. P's delivery is `skipped` with `the mention delivers this post`. `t-inc` receives one digest for the channel message. |
 | C6 | Team `platform` has a mention rule on `C900` and no waiter. A user linked to both teams posts a mention in a new Slack thread. | `platform`'s rule opens a `platform` thread. M delivers to `t-inc`. Each team receives the mention once. |
-| C7 | The agent in `t-inc` calls `wakeup_cancel`. `U001` posts a top-level message. | P delivers to a new thread with key `subject:slack:T001/C900` and title `#incidents`. |
+| C7 | The agent in `t-inc` calls `wakeup_cancel`. `U001` posts a top-level message. | P delivers to a new thread with key `subject:slack:T001/C900` and the channel label as its title (Part D). |
 | C8 | A human review lands on `#12`. | `t-pr` receives one digest. R1's delivery is `skipped` with `claimed by thread t-pr`. No `acme/api#12` subject thread is created for this delivery. |
 | C9 | A human comment lands on `#14`. | R5 delivers it to `t-pr` as an inbound message, through the pull request binding. `t-pr`'s waiter appends no digest. |
 | C10 | A check run completes on `#14`. | `t-pr` receives one digest. R1's delivery is `skipped` with `claimed by thread t-pr`. |
@@ -276,27 +278,88 @@ incident routing spec's Parts A and B.
    append theirs.
 4. A delivery whose binding wins (Part B step 1) still suppresses the digest
    of a candidate whose thread equals the binding's thread. Other candidates
-   append theirs.
+   append theirs. The `target` stamp names the suppressed waiters in
+   `suppressedWaiterIds`. A binding delivery never ends a waiter.
+   - A followed reply has one owner: the follow router. When the router
+     delivers a `slack.message` to a stored follow binding and admits its
+     sender (`followRouteFor`), and its cursor (`last_seen_ts`) has passed
+     the message's ts, ingest treats it as an assistant delivery of the
+     binding's owner, even when no rule of that owner matched. A reply that
+     the router dropped is not routed, so its waiters append. The
+     waiters in the bound thread append no digest. The dispatcher skips a
+     `slack.message` delivery whose destination is that binding with
+     `Skipped, the followed thread delivers this reply.` and reason
+     `follow_routed`, but only when the binding's router cursor
+     (`last_seen_ts`) is at or after the message's ts. The router advances
+     the cursor after it delivers. Otherwise the subscription delivers the
+     reply: this is a named repair for the window in which the binding
+     appears, or the sender becomes admitted, after the router ran. The
+     Slack inbox runs the follow router before subscription ingestion, so
+     the router has passed its own message before the dispatcher sees it.
+     If the route check fails, the waiters append (INV-D6), and ingest
+     records the `claim_resolution` failure stage and the waiter-match
+     failure counter.
+   - The follow router, claim resolution, and the dispatcher read one bot
+     user id (`slackBotUserIdOf`): the credential's `botUserId` metadata,
+     or the id that `auth.test` verifies for a legacy installation.
 5. A once-mode waiter is a candidate. When it is the redirect target, the
-   delivery counts as its match: the waiter ends as `matched` and sends its
-   terminal signal (event wakeups INV-E5) after the inbound delivery.
-6. Ingest MUST stamp each delivery's destination in a new nullable
-   `destination` jsonb column on `event_deliveries`, edited in place in
-   `0000_app.sql`, with a matching `SCHEMA_REPAIRS` entry. The dispatcher
-   MUST execute the stamp. A retry reads the same stamp.
-7. A delivery with no stamp (a row from before this spec, or a resolver
-   failure) MUST resolve its destination at dispatch from the binding and
-   the policy only. It MUST NOT consult waiters. This keeps the failure
-   mode at duplication, never loss (INV-D6).
+   delivery counts as its match. The redirect stamp names the target in
+   `matchedWaiterId`, in once mode and in stream mode. After the inbound
+   delivery lands, the dispatcher ends a once-mode target as `done` and
+   sends exactly one terminal signal (event wakeups INV-E5). The signal is
+   `event.ended` with cause `delivered` ("arrived as a message"), or the
+   terminal `event.matched` when a ready digest is buffered. Only a
+   `claim_redirect` ends a waiter. A failed end leaves the waiter running
+   and does not fail the delivery.
+6. Ingest MUST stamp the destination of each delivery that a claim decides,
+   or that a binding decides for an owner with a candidate. The stamp goes
+   in a new nullable `destination` jsonb column on `event_deliveries`,
+   edited in place in `0000_app.sql`, with a matching `SCHEMA_REPAIRS`
+   entry. Every other delivery stays unstamped and resolves at dispatch
+   (step 7). The dispatcher MUST execute the stamp. A retry reads the same
+   stamp.
+7. A delivery with no stamp (a row from before this spec, a delivery that
+   no claim or binding decided, or a resolver failure) MUST resolve its
+   destination at dispatch from the binding and the policy only. It MUST
+   NOT consult waiters. This keeps the failure mode at duplication, never
+   loss (INV-D6).
+   - A stamped `target` whose thread fails `isDeliverableTarget` at
+     dispatch falls back to this resolution, with reason `claim_fallback`.
+     The thread was archived or deleted after ingest, and the claimed
+     waiter already suppressed its digest, so a dead-letter would lose the
+     event. Only an `existing` pin dead-letters (`pin_unavailable`). A
+     fallback does not end the claimed waiter.
+   - A stamped delivery that ends without reaching its thread gives each
+     waiter in `matchedWaiterId` and `suppressedWaiterIds` its digest back,
+     with reason `claim_recovered`. The terminal paths are: a skip decided
+     after ingest (a team rule now covers it, or the rule was disabled), a
+     deleted rule, a sender gate denial at dispatch, and the last failed
+     attempt. The recovery runs before the row's final write.
+   - Both are named repairs for the window between ingest and dispatch.
 8. Slack sends a mention as two events, `slack.message` and
    `slack.app_mention`, in either order. Each ingest predicts the other
    half through the plugin's `conversationalTwin` (Part D).
-   - At the `slack.message` ingest, a waiter appends no digest when an
-     assistant subscription of its owner would deliver the
-     `slack.app_mention` twin. The sender gate (`mentionSenderActor`)
-     applies to that prediction.
-   - At the `slack.app_mention` ingest, ingest evaluates the claim
-     candidates against the `slack.message` twin.
+   - At the `slack.message` ingest, ingest checks each owner whose
+     accepted candidates exist, not only the owners of matched rules: the
+     mention rule matches only the `app_mention`. When an assistant
+     subscription of the owner would deliver the `slack.app_mention` twin,
+     only the owner's redirect target appends no digest. With a binding,
+     only the waiters in the bound thread append none. The owner's other
+     waiters append theirs (C5). The sender gate (`mentionSenderActor`)
+     applies to that prediction, and a team-covered personal rule does not
+     count.
+   - At dispatch, a `slack.message` delivery whose destination is a follow
+     binding (stamped `conversation_follow` or resolved from the binding)
+     is skipped with `Skipped, the mention delivers this post.` and reason
+     `mention_covered` when its `conversationalTwin` is a
+     `slack.app_mention` that an assistant rule of the owner delivers
+     (`mentionCoveredBy`: sender gate and team coverage included). One
+     post gives one turn in either order of the halves (C2b, C5). The
+     mention's binding stamp names the suppressed waiters for recovery.
+   - At both ingests, the candidate set merges the event's candidates with
+     the twin's. A candidate that accepts only the twin carries no digest,
+     so both halves choose the same redirect target. A `createdAt` tie
+     breaks on the waiter id.
 9. Workflow and `signal` targets MUST NOT yield to a claim (INV-D7).
 10. The event wakeups spec's INV-E2 is reworded: a failure in waiter
     matching or in claim resolution never changes a subscription outcome
@@ -335,12 +398,22 @@ event wakeups spec Part A.
 3. Counter `valet_event_delivery_destination_total{reason}` with reason in
    `policy_new`, `policy_subject`, `policy_own`, `policy_existing`,
    `conversation_follow`, `conversation_pull_request`, `claim_redirect`,
-   `claim_skip`, `pin_unavailable`. A rising `pin_unavailable` pages a
+   `claim_skip`, `claim_fallback`, `claim_recovered`, `follow_routed`,
+   `mention_covered`, `pin_unavailable`. `follow_routed` counts a rule
+   delivery that the follow router owns (Part C step 4). `mention_covered`
+   counts a message half that its mention delivers (Part C step 8).
+   `claim_fallback` and `claim_recovered` count the repairs of Part C step
+   7. A fallback's receipt `destination` stage records outcome
+   `claim_fallback`. A rising `pin_unavailable` pages a
    person. No code repairs it. A schedule counts `pin_unavailable` once, on
    the fire that disables it. A manual fire and a replica that re-fires the
    same slot do not count again. The chart's Grafana rule
    `valet-event-delivery-pin-unavailable` (`deploy/chart/valet/alerts/events.yaml`)
    fires on the first increase.
+4. A claim resolution failure adds the receipt stage `claim_resolution` with
+   outcome `failed` (INV-D6).
+5. The event wakeups signal `event.ended` gains the cause `delivered`. The
+   web signal card reads it as "arrived as a message" (Part C step 5).
 
 ## Invariants
 
@@ -348,9 +421,15 @@ event wakeups spec Part A.
   thread, and no waiter in that thread appends a digest for it.**
   Mechanism: the pure resolver runs once per delivery at ingest and stamps
   the row. Digest suppression reads the same decision. Vectors: C1 to C3,
-  C8 to C10.
+  C8 to C10 in `event-claims.test.ts`; the `resolveClaims: Scenario C`
+  vectors in `claims.test.ts`; `stamps the mention's redirect to the
+  waiting thread and appends no digest (C2)` in `ingest.test.ts`.
 - **INV-D2 A conversation binding wins over claims and policy.** Mechanism:
-  precedence order in `resolveDestination`. Vectors: C3, C5, C9.
+  precedence order in `resolveDestination`, and the binding branch of
+  `resolveClaims`. Vectors: C3, C5, C9 in `event-claims.test.ts`; C3, C5,
+  C9 in `claims.test.ts`; `a stamped pull request binding still builds the
+  inbound comment after the own-write and settle checks (C9)` in
+  `dispatcher.test.ts`.
 - **INV-D3 A skip or a dead-letter creates no thread.** Mechanism: key
   resolution runs at delivery, after the destination kind is known.
   Vectors: C1, C8, T7.
@@ -366,10 +445,18 @@ event wakeups spec Part A.
   runtime.** Mechanism: write-time validation (Part A step 5) and
   `isDeliverableTarget` at delivery. Vectors: T7, T11.
 - **INV-D6 A resolver failure causes duplication, never loss.** Mechanism:
-  Part C step 7; a test injects a throwing resolver and asserts the delivery
-  lands by policy and the waiter appends.
+  Part C step 7. Vectors in `ingest.test.ts`: `leaves the delivery
+  unstamped and the waiter appending when claim resolution throws
+  (INV-D6)` and `appends every waiter's digest when the delivery insert
+  throws (INV-D6)`. In `dispatcher.test.ts`: `an unstamped row lands by
+  policy and never by a waiter (Part C step 7, INV-D6)` and `a stamped
+  redirect whose thread was archived after ingest lands in the rule's own
+  thread (Review Focus 5, INV-D6)`. In `claims.test.ts`: Review Focus 4.
 - **INV-D7 Workflow and `signal` targets never yield.** Mechanism: the
-  resolver runs for assistant targets only. Vector: C12.
+  resolver runs for assistant targets only. Vectors: C12 in
+  `event-claims.test.ts`; `never stamps a workflow delivery (INV-D7)` in
+  `ingest.test.ts`; C8 and C12 and `leaves a signal target unstamped
+  (INV-D7)` in `claims.test.ts`.
 - **INV-D8 Every rule of one owner that groups by a subject shares one
   thread for it.** Mechanism: the `subject` key carries no rule id.
   Vectors: the unit tests `subject: two rules of one owner on one pull
@@ -382,9 +469,11 @@ event wakeups spec Part A.
 - Resolver vectors: one row per precedence branch and per policy mode, as
   data under `packages/api/src/events/destination.vectors.json`, run by one
   test.
-- Scenario T and Scenario C as integration tests beside
+- Scenario T (`delivery-threads.test.ts`) and Scenario C
+  (`event-claims.test.ts`) as integration tests beside
   `event-wakeups.test.ts`. Scenario C steps C2 to C7 replace the incident
-  routing integration steps.
+  routing integration steps. Scenario C shares the Scenario E universe
+  through `_event-universe.ts`.
 - Plugin hook tests: `naturalSubject` and `conversationalTwin` per plugin.
 - The event wakeups spec's Scenario E holds unchanged; E5's note points
   here.
@@ -422,15 +511,9 @@ event wakeups spec Part A.
   follow router routes by a stored thread is refused when that thread is
   archived or deleted. The router throws its existing text and delivers
   nothing. Only the dispatcher falls through to the policy.
-- **Part C is pending.** The claim vectors of Scenario C, which INV-D1,
-  INV-D2, INV-D6, and INV-D7 name, and the `conversationalTwin` hook
-  (Part D) arrive with Part C. Until then the only claim source is the
-  incident mention routing waiter (`watching-waiter.ts`). The dispatcher
-  asks it at dispatch for a `slack.app_mention`, and ingest stamps no
-  destination.
-- **Conversational test.** Until Part C lands, an event is conversational
-  when it has a binding, when it is a `slack.app_mention`, or when it is a
-  Slack direct message (`channel_type: "im"`).
+- **Conversational test.** An event is conversational when it has a
+  binding, when it is a `slack.app_mention`, or when it is a Slack direct
+  message (`channel_type: "im"`).
 - **Schedule pin.** A schedule whose `existing` pin cannot receive a
   delivery is disabled with `Pick another thread for this rule in
   Presence.`, the scheduler's existing handling for a broken schedule.
@@ -497,12 +580,78 @@ event wakeups spec Part A.
   only failed check runs. The table's intent holds. A conclusion filter is
   a catalog addition, not a thread policy change.
 
+- **Legacy follow binding.** `conversationBinding` can return a follow
+  bound before follows stored their thread (`via: "legacy_follow"`). Ingest
+  stamps no destination for it, and every candidate appends its digest.
+  The dispatcher delivers it by the Slack thread key.
+- **Interface names.** Ingest splits waiter work in two:
+  `evaluateWaiterCandidates` returns the candidates without appending, and
+  `appendWaiterDigests` appends after claims decide. `resolveClaims` takes
+  the event's predicted `twin` (or null) beside the event. The dispatcher's
+  former `claimFor` seam and `watching-waiter.ts` are removed.
+- **No `waiter_match` stage for a dead waiter.** A waiter whose session is
+  gone or belongs to another org is no candidate, so it adds no
+  `waiter_match` receipt stage.
+- **A twin-only claim trusts the prediction.** At the `slack.message`
+  ingest, a candidate that accepts only the predicted `slack.app_mention`
+  twin can be the only claim, so the message delivery is skipped as
+  claimed. The post then reaches that thread only when the predicted
+  mention arrives. If Slack never sends it, no thread receives the post.
+  A claim resolver or candidate evaluation failure at the mention ingest
+  has the same result for a twin-only waiter: it gets no digest, and the
+  post still reaches the owner's rule thread. A candidate evaluation
+  failure resolves no claims, so every accepted waiter appends (INV-D6).
+- **Fallback can duplicate inside the race window.** A `claim_fallback`
+  delivery can land in a thread that already holds an older waiter's digest
+  for the same event. This duplication is accepted (INV-D6).
+- **A fallback after an admitted attempt misrecords.** A retry that flips to
+  fallback after an earlier attempt was admitted records `claim_fallback`,
+  though the event landed in the admitted thread. Only the record is wrong.
+- **Recovery can duplicate across the two halves of a mention.** Claim
+  recovery appends a digest for the event the dispatcher skipped. A waiter
+  can also hold the digest of the other half of the same Slack mention.
+  The two digests have different dedupe keys, so `appendEventMatch` keeps
+  both. This duplication is accepted (INV-D6).
+- **Valet's own pull request comment recovers nothing.** The dispatcher
+  skips a comment that Valet wrote itself (`isOwnPullRequestWrite`) and does
+  not give the `t-pr` waiter its suppressed digest. This is on purpose: the
+  waiter's `self` filter drops the thread's own write anyway.
+- **The C7 title.** A `slack.message` event does not name its channel, so
+  the Slack `naturalSubject` label falls back to the channel id (Part D).
+  In the Scenario E universe, C7's thread title is `C900`.
+
+- **A reply dropped before its binding can duplicate.** The follow router
+  drops a reply that arrives before its binding exists, or before its
+  sender is admitted. If the binding appears before dispatch, the
+  subscription delivers that reply (Part C step 4). The router cursor stays
+  at the mention, so the router's next gap re-hydration can include the
+  same reply again. This duplication is accepted (INV-D6). A reply that the
+  router passes because a later reply advanced the cursor reaches the
+  thread only as re-hydrated context.
+- **A failed router run can duplicate, or lose the reply.** If the follow
+  router throws, its cursor stays put. When a rule of the owner matched the
+  reply, that rule's delivery reaches the thread, and the inbox retry can
+  make the router deliver the reply a second time. When no rule matched,
+  only the inbox retries can deliver it. If every retry fails, no thread
+  receives the reply. The inbox record's `failedAt` is the visible record.
+- **A `mention_covered` skip with no waiter trusts the mention.** For a
+  bound thread with no waiter, the dispatcher skips the message half when
+  the owner's mention rule will deliver the `app_mention` half. If that
+  mention delivery dies, no thread receives the post. The dead mention
+  delivery row is the visible record.
+- **`followRouteFor` reads the payload, the router reads the envelope.**
+  Claim resolution and the dispatcher pass the stored event payload, which
+  is the envelope's `event` object. The router parses the whole envelope
+  and drops the same posts: bot posts, subtypes, top-level messages, posts
+  that address the bot, and unadmitted senders. A unit test runs both on
+  the same raw Slack event.
+
 ## Errata to other specs
 
 - Event wakeups Part E: the mention rule paragraph is replaced by a pointer
   to Part C here. INV-E2 is reworded as in Part C step 10. Scenario E5's
   note names this spec.
-- Incident mention routing: superseded. Its header says so.
+- Incident mention routing: superseded by Part C and removed.
 - Event system "Dispatcher": the thread heuristics paragraph points to Part
   B here.
 - Workflow triggers UI: assistant-prompt schedules carry a thread policy

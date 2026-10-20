@@ -26,7 +26,7 @@ import type { Presence } from "@valet/shared";
  * becomes due again when the lease lapses.
  */
 import { slackEventChannel } from "../services/thread-access.js";
-import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SessionStore, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
@@ -34,10 +34,13 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
 import { findFollowedThread, repointFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
-import { allCatalogEntries } from "./ingest.js";
+import { allCatalogEntries, conversationalTwinOf } from "./ingest.js";
+import { mentionCoveredBy } from "./claims.js";
+import { followRouteFor, followRouterPassed } from "../channels/follow-router.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
-import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, threadForPullRequest, type InboundChannelMessage } from "../services/channel-messages.js";
+import { inboundSlackMessage, isOwnPullRequestWrite, OWN_WRITE_SETTLE_MS, pullRequestComment, type InboundChannelMessage } from "../services/channel-messages.js";
 import {
   followBindingAuthorized,
   isTeamAssistantMention,
@@ -47,10 +50,14 @@ import {
   newcomerAuthor,
 } from "./team-slack-gate.js";
 import { resolvePath } from "./match.js";
-import { loadSessionOwner } from "./waiters.js";
-import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
-import { isDeliverableTarget, PinUnavailableError, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
-import { resolveDestination, summaryTitle, type Destination } from "./destination.js";
+import {
+  PinUnavailableError,
+  PIN_UNAVAILABLE_MESSAGE,
+  isDeliverableTarget,
+  type DeliveredThread,
+  type DeliveryDestination,
+} from "./assistant-delivery.js";
+import { readDestinationStamp, resolveDestination, summaryTitle, suppressedWaiters, type Destination } from "./destination.js";
 import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
 import {
   destinationMetricReason,
@@ -130,23 +137,26 @@ export interface EventDispatcherDeps {
    */
   plugins?: ValetPlugin[];
   /**
-   * The engine store, for incident mention routing
-   * (`watching-waiter.ts`): a `slack.app_mention` in a channel that a stream
-   * event waiter of the same owner watches goes to that waiter's thread.
-   * Absent → no waiter claims a mention, and the rule's thread policy decides.
+   * Ends a once-mode waiter that a claim redirect delivered to, after the
+   * delivery lands (spec 2026-10-16: delivery threads and claims, Part C
+   * step 5). The WakeWatcher owns the end and its one terminal signal
+   * (`WakeWatcher.endDeliveredWaiter`). Absent → the waiter stays running.
    */
-  engineStore?: Pick<SessionStore, "findEventWaiters">;
+  endMatchedWaiter?: (args: { waiterId: string; sessionId: string; threadId: string }) => Promise<boolean>;
   /**
-   * The claim source (spec 2026-10-16: delivery threads, Part C): a waiter
-   * thread of the owner that takes this delivery. Absent → the incident
-   * mention routing waiter (`watching-waiter.ts`), the only claim source
-   * until Part C lands.
+   * Appends the event's digest to the waiter that a claim redirect named,
+   * when the dispatcher skips that delivery for a reason decided after
+   * ingest (`claim-recovery.ts`). Returns true when the waiter got a digest.
+   * Absent → the waiter does not see the event.
    */
-  claimFor?: (args: {
-    event: typeof events.$inferSelect;
-    origin: ChannelOrigin | null;
-    owner: { type: "user" | "team" | "org"; id: string };
-  }) => Promise<{ sessionId: string; threadId: string; waiterId: string } | null>;
+  recoverClaimedDigest?: (args: { waiterId: string; orgId: string; service: string; event: NormalizedEvent }) => Promise<boolean>;
+  /**
+   * The org's Slack bot user id, for the follow router's predicate and the
+   * `conversationalTwin` hook. Production resolves it like the follow
+   * router (`slackBotUserIdOf`). Absent: no message text counts as
+   * addressed to the bot.
+   */
+  slackBotUserId?: (orgId: string) => Promise<string | undefined>;
   /**
    * Counts where a delivery landed (spec Part E step 3). Absent → the
    * `valet_event_delivery_destination` counter. Tests pass a recorder.
@@ -203,11 +213,6 @@ export function deliveryThreadPolicy(
   return { mode: "own" };
 }
 
-/** A Slack direct message: a conversational event (spec Terminology). */
-function isDirectMessage(payload: unknown): boolean {
-  return typeof payload === "object" && payload !== null && "channel_type" in payload && payload.channel_type === "im";
-}
-
 /** The stored event row as the plugin contract's `NormalizedEvent`, for `naturalSubject`. */
 function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEvent {
   const actor = event.actor;
@@ -246,6 +251,12 @@ export async function recordSkippedDelivery(db: AppDb, args: {
     destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination),
     destinationStageMarker(args.deliveryId));
   if (recorded !== "exists") recordDestination("claim_skip");
+}
+
+/** Why another path owns a delivery, as its skip text and counter reason. */
+interface OwnedElsewhere {
+  text: string;
+  reason: "follow_routed" | "mention_covered";
 }
 
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
@@ -366,6 +377,8 @@ export class EventDispatcher {
       .where(eq(eventSubscriptions.id, delivery.subscriptionId))
       .limit(1);
     if (!event || !sub) {
+      // A deleted rule delivers nothing: give the suppressed waiters the event back.
+      if (event) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
         .set({ status: "dead", lastError: "event or subscription vanished" })
@@ -391,6 +404,12 @@ export class EventDispatcher {
             .returning({ id: eventSubscriptions.id });
           paused = changed.length > 0;
         }
+        // Recover first: a crash before the skipped write runs this again,
+        // and `appendEventMatch` refuses a digest the waiter already holds for
+        // this event, so a crash loses nothing. Across the two halves of a
+        // Slack mention, the waiter can still get two digests with different
+        // dedupe keys. That duplication is accepted (spec Deviations).
+        await this.recoverClaimedDigest(delivery.destination, event);
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
           ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
           : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
@@ -403,12 +422,14 @@ export class EventDispatcher {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
         // A verified mention carries a human actor. Other shared event work
-        // acts as its owner, never as the member who created the rule. The
-        // event waiter's mention rule reuses this gate (`mentionSenderActor`).
+        // acts as its owner, never as the member who created the rule. Claim
+        // resolution reuses this gate (`mentionSenderActor`).
         const actorUserId = await mentionSenderActor(db, sub, event.eventKey, event.payload);
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the
           // same split the drop log makes in `team-slack-gate.ts`.
+          // The delivery dies, so the waiters it suppressed get the event back.
+          await this.recoverClaimedDigest(delivery.destination, event);
           const lastError = teamMention && audience === "organization"
             ? "Team mention denied. Check the sender's Slack identity link and organization membership."
             : "Team mention denied. Check the sender's Slack identity link and team membership.";
@@ -473,10 +494,6 @@ export class EventDispatcher {
         // A pull request comment continues in the thread that opened the
         // pull request, when that thread is in this owner's runtime.
         const parsedComment = origin ? null : pullRequestComment(event.eventKey, event.payload);
-        const commentThread = parsedComment && sub.ownerType !== "org"
-          ? await threadForPullRequest(db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, parsedComment.pullRequestUrl)
-          : null;
-        const commentThreadKey = commentThread?.key ?? null;
         // Valet posts with a person's GitHub token, so its own comment arrives
         // as that person. A comment it recorded as sent is its own: it never
         // wakes an assistant.
@@ -495,49 +512,35 @@ export class EventDispatcher {
           await db.update(eventDeliveries).set({ nextAttemptAt: settledAt }).where(eq(eventDeliveries.id, deliveryId));
           return;
         }
-        const prComment = parsedComment;
-        const prThreadKey = prComment ? commentThreadKey : null;
+        const owner = { type: sub.ownerType, id: sub.ownerId };
+        // Ingest stamps the destination that a claim or a binding decided
+        // (spec 2026-10-16: delivery threads, Part C step 6). A retry reads
+        // the same stamp.
+        const stamp = readDestinationStamp(delivery.destination);
+        // A named repair for the window between ingest and dispatch (CLAUDE.md,
+        // "Invariants: alert, don't auto-repair", rule 3). A stamped binding or
+        // claim thread can be archived or deleted after ingest. The claimed
+        // waiter already suppressed its digest, so a dead-letter would lose the
+        // event (INV-D6). The delivery lands by the binding or the rule's
+        // policy instead, and the counter's `claim_fallback` reason records
+        // it. A pin is the person's explicit choice and keeps its dead-letter
+        // (`PinUnavailableError`).
+        const fallback = stamp?.kind === "target" && stamp.reason !== "policy_existing"
+          && !(await isDeliverableTarget({ db }, event.orgId, owner, stamp));
+        const destination = stamp && !fallback ? stamp : await this.unstampedDestination(sub, target, delivery.id, event, origin);
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
-          : prThreadKey && prComment ? prComment.message : undefined;
-        const owner = { type: sub.ownerType, id: sub.ownerId };
-        // Destination precedence (spec 2026-10-16: delivery threads, Part B
-        // step 1): a conversation binding, then a claim, then the policy.
-        const follow = await this.followBinding(event, origin, owner);
-        const binding = follow?.kind === "target"
-          ? { sessionId: follow.sessionId, threadId: follow.threadId, via: "follow" as const }
-          : prComment && commentThread
-            ? { sessionId: commentThread.sessionId, threadId: commentThread.threadId, via: "pull_request" as const }
-            : null;
-        // A mention in a channel that this owner already watches goes to the
-        // watching thread (spec 2026-10-15: incident mention routing, Part A).
-        // The sender gate above has already run (Part C). This is today's
-        // only claim source.
-        const claim = binding || follow ? null : this.deps.claimFor
-          ? await this.deps.claimFor({ event, origin, owner })
-          : await this.watchingTarget(event, origin, slackChannel, owner);
-        const naturalSubject = this.naturalSubject(event);
-        const destination: Destination = follow?.kind === "legacy"
-          // A follow bound before follows stored their thread keeps the
-          // Slack thread key it has always used.
-          ? { kind: "key", key: follow.key, title: summaryTitle(event.summary), reason: "conversation_follow" }
-          : resolveDestination({
-            rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, {
-              channelOrigin: origin !== null, slackChannel: slackChannel !== undefined, naturalSubject: naturalSubject !== null,
-            }) },
-            event: {
-              deliveryId: delivery.id,
-              summary: event.summary,
-              naturalSubject,
-              conversational: binding !== null || event.eventKey === "slack.app_mention" || (origin !== null && isDirectMessage(event.payload)),
-            },
-            binding,
-            claim,
-          });
+          : parsedComment && destination.kind === "target" && destination.reason === "conversation_pull_request"
+            ? parsedComment.message : undefined;
         const receiptIds = { subscriptionId: sub.id, deliveryId: delivery.id };
         if (destination.kind === "skip") {
           await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination },
             (reason) => this.recordDestination(reason));
+          return;
+        }
+        const owned = await this.ownedElsewhere(sub, event, destination);
+        if (owned) {
+          await this.skipDelivery({ ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id }, owned);
           return;
         }
         const author = teamMention
@@ -568,7 +571,7 @@ export class EventDispatcher {
             // talking to Valet in a place they can answer. Any other event,
             // including a comment that falls back to the shared events thread,
             // has no one to answer.
-            ...(!origin && !(prComment && commentThread) ? { unattended: true } : {}),
+            ...(!origin && !(parsedComment && destination.kind === "target" && destination.reason === "conversation_pull_request") ? { unattended: true } : {}),
             ...(slackChannel ? { slackChannel } : {}),
           });
         } catch (err) {
@@ -589,20 +592,21 @@ export class EventDispatcher {
         // admitted, then crashed before recording, on an event with no
         // receipt, is counted once at most and may be missed.
         const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
-          destinationReceiptStage(receiptIds, destination), destinationStageMarker(delivery.id));
+          destinationReceiptStage(receiptIds, fallback ? { ...destination, reason: "claim_fallback" } : destination),
+          destinationStageMarker(delivery.id));
         if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {
-          this.recordDestination(destinationMetricReason(destination));
+          this.recordDestination(fallback ? "claim_fallback" : destinationMetricReason(destination));
         }
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
         // threadKey is `{channelType}:{channelId}:{threadTs}`.
         // Message subscriptions already deliver later replies. A second follow
         // binding would submit each reply twice and outlive the subscription.
-        // A mention routed to a watching thread binds no follow: its event
-        // waiter already receives the later replies (Part B, INV-M2).
         // The follow binds the Slack thread to the thread the delivery landed
-        // in (spec 2026-10-16: delivery threads, Part B step 5).
-        if (target.follow && origin && event.eventKey === "slack.app_mention" && destination.reason !== "claim_redirect") {
+        // in (spec 2026-10-16: delivery threads, Part B step 5). A claim
+        // redirect binds too: the binding then carries the replies, and the
+        // waiter in that thread appends no digest for them (Part C step 4).
+        if (target.follow && origin && event.eventKey === "slack.app_mention") {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
             const key = {
@@ -649,6 +653,11 @@ export class EventDispatcher {
             });
           }
         }
+        // Only a claim redirect is a waiter's match. A binding delivery never
+        // ends the waiters it suppressed.
+        if (destination.kind === "target" && destination.reason === "claim_redirect" && destination.matchedWaiterId !== undefined) {
+          await this.endMatchedWaiter(destination.matchedWaiterId, landed);
+        }
       } else if (target.kind === "signal") {
         await this.signalParkedRuns(event, refs);
       } else {
@@ -661,6 +670,9 @@ export class EventDispatcher {
     } catch (err) {
       const attempts = delivery.attempts + 1;
       const backoff = BACKOFF_MS[attempts - 1];
+      // The last attempt failed, so the waiters this delivery suppressed get
+      // the event back before the row goes dead.
+      if (backoff === undefined) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
         .set({
@@ -673,57 +685,146 @@ export class EventDispatcher {
     }
   }
 
-  /**
-   * The follow binding of this owner for a channel event's Slack thread
-   * (spec 2026-10-16: delivery threads, Part B step 1). `target` names the
-   * thread the binding mention landed in. `legacy` is a follow bound before
-   * follows stored their thread: it keeps the Slack thread key. A bound
-   * thread that can no longer receive deliveries is no binding: the policy
-   * decides, and a follow mention re-binds the Slack thread where it lands.
-   */
-  private async followBinding(
-    event: typeof events.$inferSelect,
-    origin: ChannelOrigin | null,
-    owner: { type: "user" | "team" | "org"; id: string },
-  ): Promise<{ kind: "target"; sessionId: string; threadId: string } | { kind: "legacy"; key: string } | null> {
-    if (!origin) return null;
-    const [, channelId, threadTs] = origin.threadKey.split(":");
-    if (!channelId || !threadTs) return null;
-    const db = this.deps.db;
-    const bound = await findFollowedThread(db, { orgId: event.orgId, channelType: origin.channelType, channelId, threadTs });
-    if (!bound || bound.ownerType !== owner.type || bound.ownerId !== owner.id) return null;
-    if (bound.sessionId === null || bound.threadId === null) return { kind: "legacy", key: origin.threadKey };
-    const target = { sessionId: bound.sessionId, threadId: bound.threadId };
-    return await isDeliverableTarget({ db }, event.orgId, owner, target) ? { kind: "target", ...target } : null;
-  }
-
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */
   private naturalSubject(event: typeof events.$inferSelect): { subject: string; label: string } | null {
     const plugin = (this.deps.plugins ?? []).find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
     return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
   }
 
-  /** The watching waiter's thread for a Slack mention, or null (Part A).
-   * The caller looks for a follow binding first, which outranks a claim. */
-  private async watchingTarget(
+  /**
+   * The destination of a delivery that ingest did not stamp: a row from
+   * before stamps, a resolver failure, or a delivery that no claim and no
+   * waiter-owner binding decided. It resolves from the binding and the
+   * policy only, never from waiters (spec Part C step 7), so a failure
+   * duplicates a delivery but never loses one (INV-D6).
+   */
+  private async unstampedDestination(
+    sub: typeof eventSubscriptions.$inferSelect,
+    target: SubscriptionTarget,
+    deliveryId: string,
     event: typeof events.$inferSelect,
     origin: ChannelOrigin | null,
-    channel: string | undefined,
-    owner: { type: "user" | "team" | "org"; id: string },
-  ): Promise<{ sessionId: string; threadId: string; waiterId: string } | null> {
-    const engineStore = this.deps.engineStore;
-    if (!engineStore || !origin || !channel || event.eventKey !== "slack.app_mention") return null;
-    const team = slackEventTeam(event.subjects, event.payload, channel);
-    if (!team) return null;
-    const db = this.deps.db;
-    return findWatchingWaiter(
-      {
-        engineStore,
-        sessionOwner: (sessionId) => loadSessionOwner(db, sessionId),
-        isDeliverableTarget: (target) => isDeliverableTarget({ db }, event.orgId, owner, target),
+  ): Promise<Destination> {
+    const bindingEvent = { key: event.eventKey, payload: event.payload };
+    const found = await conversationBinding(this.deps.db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, bindingEvent, origin);
+    // A follow bound before follows stored their thread keeps the Slack
+    // thread key it has always used.
+    if (found?.via === "legacy_follow") {
+      return { kind: "key", key: found.key, title: summaryTitle(event.summary), reason: "conversation_follow" };
+    }
+    const naturalSubject = this.naturalSubject(event);
+    return resolveDestination({
+      rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, {
+        channelOrigin: origin !== null, slackChannel: slackEventChannel(event) !== undefined, naturalSubject: naturalSubject !== null,
+      }) },
+      event: {
+        deliveryId,
+        summary: event.summary,
+        naturalSubject,
+        conversational: isConversationalEvent(bindingEvent, origin, found),
       },
-      event.orgId, owner, team, channel,
-    );
+      binding: found,
+      claim: null,
+    });
+  }
+
+  /**
+   * Why another path owns a `slack.message` delivery that follows a follow
+   * binding, or null (spec Part C steps 4 and 8). One post gives one turn:
+   * - The follow router delivers the reply to the bound thread, and its
+   *   cursor has passed the reply, so the rule skips it (`follow_routed`).
+   * - The post addresses the bot, and an assistant rule of the owner
+   *   delivers its `app_mention` half (sender gate and team coverage
+   *   included), so the rule skips the message half (`mention_covered`).
+   *   The mention's stamp names the suppressed waiters for recovery.
+   */
+  private async ownedElsewhere(
+    sub: typeof eventSubscriptions.$inferSelect,
+    event: typeof events.$inferSelect,
+    destination: Destination,
+  ): Promise<OwnedElsewhere | null> {
+    if (event.eventKey !== "slack.message" || destination.kind === "skip" || destination.reason !== "conversation_follow") return null;
+    const { db } = this.deps;
+    const botUserId = await this.deps.slackBotUserId?.(event.orgId);
+    const route = await followRouteFor(db, { orgId: event.orgId, ...(botUserId ? { botUserId } : {}), payload: event.payload });
+    const sameThread = destination.kind === "key" || (route?.sessionId === destination.sessionId && route?.threadId === destination.threadId);
+    // A named repair for the router-before-binding window (CLAUDE.md,
+    // "Invariants: alert, don't auto-repair", rule 3). The router runs at
+    // webhook time and dispatch runs later. A binding can appear (the
+    // mention's delivery binds the thread) or the sender can become admitted
+    // in between, so the router dropped a reply that `followRouteFor` now
+    // routes. That is normal operation, not a defect. The rule skips only a
+    // reply that the router's cursor has passed. Otherwise the subscription
+    // delivers it, or the reply reaches no thread.
+    if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread
+      && followRouterPassed(route, event.payload)) {
+      return { text: "the followed thread delivers this reply", reason: "follow_routed" };
+    }
+    const plugins = this.deps.plugins ?? [];
+    const twin = await conversationalTwinOf(plugins, { slackBotUserId: async () => botUserId }, event.orgId, event.service, normalizedEventFromRow(event));
+    if (twin?.key !== "slack.app_mention") return null;
+    const subs = await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, event.orgId),
+      eq(eventSubscriptions.ownerType, sub.ownerType), eq(eventSubscriptions.ownerId, sub.ownerId), eq(eventSubscriptions.enabled, true)));
+    const catalog = allCatalogEntries(plugins);
+    const covered = await mentionCoveredBy(db, subs, { type: sub.ownerType, id: sub.ownerId }, twin, catalog,
+      (rule, mention) => hasTeamCoverage(db, rule, { eventKey: mention.key, payload: mention.payload, subjects: mention.subjects ?? null }, catalog));
+    return covered ? { text: "the mention delivers this post", reason: "mention_covered" } : null;
+  }
+
+  /** Settles a delivery that another path owns: skipped, with its receipt stage and counter. */
+  private async skipDelivery(
+    args: { deliveryId: string; subscriptionId: string; attempts: number; orgId: string; eventId: string },
+    owned: OwnedElsewhere,
+  ): Promise<void> {
+    const { db } = this.deps;
+    await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${owned.text}.`, attempts: args.attempts + 1 })
+      .where(eq(eventDeliveries.id, args.deliveryId));
+    const recorded = await appendReceiptStageForEvent(db, args.orgId, args.eventId,
+      destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, { kind: "skip", reason: owned.text, outcome: owned.reason }),
+      destinationStageMarker(args.deliveryId));
+    if (recorded !== "exists") this.recordDestination(owned.reason);
+  }
+
+  /**
+   * A named repair for the window between ingest and dispatch (CLAUDE.md,
+   * "Invariants: alert, don't auto-repair", rule 3). It runs on every
+   * terminal path that delivers nothing: a skip decided after ingest, a
+   * deleted rule, a sender gate denial, and the last failed attempt.
+   * Ingest suppressed the digest of the waiters that the stamp names (a
+   * claim redirect's target, or the waiters in a binding's thread), and the
+   * delivery now ends without reaching them. That is expected in normal
+   * operation: a rule or a membership can change at any moment, and a
+   * delivery can fail. Without the repair the waiter would never see the
+   * event (INV-D6). The counter's `claim_recovered`
+   * reason records each repair.
+   */
+  private async recoverClaimedDigest(stamp: unknown, event: typeof events.$inferSelect): Promise<void> {
+    const destination = readDestinationStamp(stamp);
+    const recover = this.deps.recoverClaimedDigest;
+    if (!recover || !destination) return;
+    for (const waiterId of suppressedWaiters(destination)) {
+      try {
+        const appended = await recover({ waiterId, orgId: event.orgId, service: event.service, event: normalizedEventFromRow(event) });
+        if (appended) this.recordDestination("claim_recovered");
+      } catch (err) {
+        console.error(`event dispatch: recovering waiter ${waiterId}'s digest failed; the waiter misses this event:`, err);
+      }
+    }
+  }
+
+  /**
+   * Ends the once-mode waiter that a claim redirect delivered to (spec Part
+   * C step 5). The delivery has landed, so a failure here does not fail it:
+   * the waiter stays running, and the log line is the record.
+   */
+  private async endMatchedWaiter(waiterId: string, landed: DeliveredThread): Promise<void> {
+    const end = this.deps.endMatchedWaiter;
+    if (!end) return;
+    try {
+      await end({ waiterId, sessionId: landed.sessionId, threadId: landed.threadId });
+    } catch (err) {
+      console.error(`event dispatch: ending waiter ${waiterId} after its redirect delivery failed; it stays running:`, err);
+    }
   }
 
   private async startWorkflow(

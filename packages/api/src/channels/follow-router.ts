@@ -60,22 +60,85 @@ interface SlackMessageFields {
  * noise subtypes (edits, joins) the channel transport also drops.
  */
 export function slackMessageFields(raw: unknown): SlackMessageFields | null {
-  if (typeof raw !== "object" || raw === null) return null;
-  const env = raw as Record<string, unknown>;
-  const eventId = typeof env.event_id === "string" ? env.event_id : undefined;
-  const event = env.event;
+  if (typeof raw !== "object" || raw === null || !("event_id" in raw) || typeof raw.event_id !== "string" || !("event" in raw)) return null;
+  const fields = slackEventFields(raw.event);
+  return fields ? { ...fields, eventId: raw.event_id } : null;
+}
+
+/** The routable fields of one Slack message event (the envelope's `event`), or null. */
+function slackEventFields(event: unknown): Omit<SlackMessageFields, "eventId"> | null {
   if (typeof event !== "object" || event === null) return null;
-  const e = event as Record<string, unknown>;
+  const e = event as Record<string, unknown>; // a Slack event object; each field is narrowed below
   if (e.type !== "message") return null;
   if (typeof e.bot_id === "string") return null;
   if (typeof e.subtype === "string") return null;
   const channel = typeof e.channel === "string" ? e.channel : undefined;
   const threadTs = typeof e.thread_ts === "string" ? e.thread_ts : undefined; // threaded only
   const ts = typeof e.ts === "string" ? e.ts : undefined;
-  if (channel === undefined || threadTs === undefined || ts === undefined || eventId === undefined) return null;
+  if (channel === undefined || threadTs === undefined || ts === undefined) return null;
   const user = typeof e.user === "string" ? e.user : undefined;
   const text = typeof e.text === "string" ? e.text : "";
-  return { channel, threadTs, ts, user, text, eventId };
+  return { channel, threadTs, ts, user, text };
+}
+
+/** A stored follow binding row. */
+export type FollowedThreadRow = NonNullable<Awaited<ReturnType<typeof findFollowedThread>>>;
+
+/** True when the text addresses the bot. The `app_mention` half carries that post. */
+function addressesBot(botUserId: string | undefined, text: string): boolean {
+  return botUserId !== undefined && botUserId !== "" && text.includes(`<@${botUserId}>`);
+}
+
+/**
+ * The follow binding for a threaded message and the actor it runs as. The
+ * actor is null when the binding exists but the sender is not admitted.
+ * Null when no authorized binding exists.
+ */
+async function admitFollowedMessage(
+  db: AppDb,
+  orgId: string,
+  f: { channel: string; threadTs: string; user?: string },
+): Promise<{ follow: FollowedThreadRow; actorUserId: string | null } | null> {
+  const follow = await findFollowedThread(db, { orgId, channelType: "slack", channelId: f.channel, threadTs: f.threadTs });
+  if (!follow) return null;
+  // Re-check the membership this follow's audience requires, live, on every
+  // message. A thread bound by an organization-audience mention runs for an
+  // actor who is on no team, so re-checking team membership here would drop
+  // every later message in that thread. A binding that authorizes nobody any
+  // more stops the thread until an authorized mention re-binds it.
+  if (!(await followBindingAuthorized(db, follow))) return null;
+  return { follow, actorUserId: await followedMessageActor(db, follow, f.user) };
+}
+
+/**
+ * The follow binding that the follow router delivers this Slack message
+ * event to, or null when the router does not deliver it. `payload` is the
+ * Slack event object. Claim resolution and the dispatcher read it, so a
+ * followed reply has one owner: the router (spec 2026-10-16: delivery
+ * threads and claims, Part C step 4).
+ */
+export async function followRouteFor(
+  db: AppDb,
+  args: { orgId: string; botUserId?: string; payload: unknown },
+): Promise<FollowedThreadRow | null> {
+  const f = slackEventFields(args.payload);
+  if (!f || addressesBot(args.botUserId, f.text)) return null;
+  const admitted = await admitFollowedMessage(db, args.orgId, f);
+  return admitted && admitted.actorUserId !== null ? admitted.follow : null;
+}
+
+/**
+ * True when the follow router has passed this Slack message event: the
+ * binding's gap cursor (`lastSeenTs`) is at or after the message's ts. The
+ * router advances the cursor after it delivers a message, and its gap
+ * re-hydration covers a message it passed without a delivery. A null cursor
+ * is false.
+ */
+export function followRouterPassed(follow: FollowedThreadRow, payload: unknown): boolean {
+  const f = slackEventFields(payload);
+  if (!f || follow.lastSeenTs === null) return false;
+  // Numeric compare, as the router does: a Slack ts is `seconds.micros`.
+  return Number.parseFloat(follow.lastSeenTs) >= Number.parseFloat(f.ts);
 }
 
 /**
@@ -100,7 +163,7 @@ export async function handleFollowedMessage(
   if (!f) return;
   // Slack emits message and app_mention envelopes for the same bot mention.
   // Reserve addressed messages for app_mention, independent of delivery order.
-  if (deps.botUserId && f.text.includes(`<@${deps.botUserId}>`)) return;
+  if (addressesBot(deps.botUserId, f.text)) return;
   const key = `${args.orgId}:${f.channel}:${f.threadTs}`;
   const prior = routeChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => routeFollowedMessage(deps, args.orgId, f));
@@ -118,20 +181,9 @@ async function routeFollowedMessage(
   orgId: string,
   f: SlackMessageFields,
 ): Promise<void> {
-  const follow = await findFollowedThread(deps.db, {
-    orgId,
-    channelType: "slack",
-    channelId: f.channel,
-    threadTs: f.threadTs,
-  });
-  if (!follow) return;
-  // Re-check the membership this follow's audience requires, live, on every
-  // message. A thread bound by an organization-audience mention runs for an
-  // actor who is on no team, so re-checking team membership here would drop
-  // every later message in that thread. A binding that authorizes nobody any
-  // more stops the thread until an authorized mention re-binds it.
-  if (!(await followBindingAuthorized(deps.db, follow))) return;
-  const actorUserId = await followedMessageActor(deps.db, follow, f.user);
+  const admitted = await admitFollowedMessage(deps.db, orgId, f);
+  if (!admitted) return;
+  const { follow, actorUserId } = admitted;
   if (actorUserId === null) {
     if (follow.ownerType === "team") await deps.onSenderDenied?.();
     return;

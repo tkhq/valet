@@ -19,6 +19,7 @@ import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
+import { claimedThreadId } from "../events/destination.js";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { allCatalogEntries, catalogForService, subscribableEntries } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
@@ -446,6 +447,46 @@ async function deliveryThreads(
   return found;
 }
 
+/** The skip text for a viewer who may not open the thread that claimed the delivery. */
+const CLAIMED_ELSEWHERE = "Skipped, claimed by another thread.";
+
+/**
+ * The thread whose waiter claimed each skipped delivery, by delivery id
+ * (spec 2026-10-16: delivery threads and claims, Part E step 2). The
+ * delivery's destination stamp names the thread. A thread stays only when
+ * this request may open it, by the checks `deliveryThreads` applies.
+ */
+async function claimThreads(
+  c: Context<AppEnv>,
+  claims: Array<{ deliveryId: string; threadId: string }>,
+): Promise<Map<string, { sessionId: string; threadId: string }>> {
+  const found = new Map<string, { sessionId: string; threadId: string }>();
+  if (claims.length === 0) return found;
+  const threadIds = [...new Set(claims.map((claim) => claim.threadId))];
+  const result = await c.var.providers.db.execute(sql`
+    SELECT t.id AS thread_id, t.session_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
+    FROM engine_threads t
+    JOIN agent_sessions s ON s.id = t.session_id
+    WHERE t.id IN (${sql.join(threadIds.map((id) => sql`${id}`), sql`, `)})
+      AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'`) as {
+    rows: Array<{
+      thread_id: string; session_id: string; key: string;
+      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+    }>;
+  };
+  const readable = new Map<string, { sessionId: string; threadId: string }>();
+  for (const row of result.rows) {
+    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) continue;
+    readable.set(row.thread_id, { sessionId: row.session_id, threadId: row.thread_id });
+  }
+  for (const claim of claims) {
+    const thread = readable.get(claim.threadId);
+    if (thread) found.set(claim.deliveryId, thread);
+  }
+  return found;
+}
+
 /** The workflow run each delivery started, by delivery id, when this request
  * may open it: the check the run page applies (`canReadWorkflowRun`). A
  * delivery that started no run has no run to read. */
@@ -483,6 +524,7 @@ eventsRouter.get("/events/:id", async (c) => {
       lastError: eventDeliveries.lastError,
       deliveredAt: eventDeliveries.deliveredAt,
       nextAttemptAt: eventDeliveries.nextAttemptAt,
+      destination: eventDeliveries.destination,
       target: eventSubscriptions.target,
     })
     .from(eventDeliveries)
@@ -492,14 +534,20 @@ eventsRouter.get("/events/:id", async (c) => {
   // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
   const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
     deliveryRows.filter((d) => (d.target as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
-  const [threads, runs] = await Promise.all([
+  const claims = deliveryRows.flatMap((d) => {
+    const threadId = d.status === "skipped" ? claimedThreadId(d.destination) : null;
+    return threadId ? [{ deliveryId: d.id, threadId }] : [];
+  });
+  const [threads, runs, claimed] = await Promise.all([
     deliveryThreads(c, idsFor("orchestrator")),
     deliveryRuns(c, idsFor("workflow")),
+    claimThreads(c, claims),
   ]);
-  const destination = (id: string): Pick<EventDeliveryWire, "thread" | "runId"> => {
+  const destination = (id: string): Pick<EventDeliveryWire, "thread" | "claimedBy" | "runId"> => {
     const thread = threads.get(id);
+    const claimedBy = claimed.get(id);
     const runId = runs.get(id);
-    return { ...(thread ? { thread } : {}), ...(runId ? { runId } : {}) };
+    return { ...(thread ? { thread } : {}), ...(claimedBy ? { claimedBy } : {}), ...(runId ? { runId } : {}) };
   };
 
   const resp: GetEventResponse = {
@@ -510,7 +558,8 @@ eventsRouter.get("/events/:id", async (c) => {
       subscriptionName: d.subscriptionName,
       status: d.status,
       attempts: d.attempts,
-      lastError: d.lastError,
+      // A viewer who may not open the claiming thread does not see its id.
+      lastError: claims.some((claim) => claim.deliveryId === d.id) && !claimed.has(d.id) ? CLAIMED_ELSEWHERE : d.lastError,
       deliveredAt: d.deliveredAt,
       // `next_attempt_at` keeps its last value after a delivery settles: a
       // dead row holds the timestamp of the attempt that gave up, and a
