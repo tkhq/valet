@@ -261,7 +261,15 @@ Pass criterion: all steps, in one run, from a clean start.
     team of the org's newest Slack subject thread, else the team of its
     newest Slack event in the last 30 days. A Slack line
     has no `placeKey` while none of these names a Slack workspace; the
-    overview then groups it by its filters.
+    overview then groups it by its filters. The places read issues a
+    bounded number of queries regardless of how many conversations the
+    workspace has. It judges visibility only for the threads a place can
+    show (subject threads and the threads that follows and running waiters
+    name), and it never selects an event's payload. The visibility query
+    walks each linked session's parent chain once. Its `walked` CTE is
+    `MATERIALIZED`, so PostgreSQL cannot inline it and repeat the walks
+    for each thread row. A read slower than one
+    second logs one line with its scope, duration, and session count.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.

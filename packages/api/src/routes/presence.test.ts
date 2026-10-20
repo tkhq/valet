@@ -10,6 +10,7 @@ import { linkIdentity } from "../channels/identity-links.js";
 import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowSchedules } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
+import { slowPlacesLine } from "./presence.js";
 import type {
   ListEventSubscriptionsResponse, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceDetailResponse, PresencePlaceWire,
 } from "../wire/types.js";
@@ -418,4 +419,17 @@ it("lists a follow's channel only when its bound thread is visible, and keeps a 
   // The synthesized Slack parent has no listeners, so it carries no reach.
   expect(map.get("slack:T1")).toMatchObject({ label: "Everywhere in Slack", listenerCount: 0 });
   expect(map.get("slack:T1")?.scopeLabel).toBeUndefined();
+});
+
+it("logs a places read only when it takes longer than a second", () => {
+  expect(slowPlacesLine("team_1", 1500.4, 6)).toBe("presence places: team_1 took 1500 ms over 6 sessions");
+  expect(slowPlacesLine("user", 1000, 1)).toBeNull();
+});
+
+it("sends only the places on the list route", async () => {
+  api = await boot();
+  const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await session.createThread("subject:github:acme/api#12");
+  const res = await fetch(`${api.baseUrl}/api/presence/places?scope=user`);
+  expect(Object.keys(await res.json() as Record<string, unknown>)).toEqual(["places"]);
 });

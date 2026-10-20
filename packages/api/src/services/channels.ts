@@ -235,6 +235,8 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
 export type ChannelVisibility = (key: string) => Promise<boolean>;
 /** Of a runtime's threads, the ids the viewer may see. */
 export type ThreadsShown = (sessionId: string, threadIds: string[]) => Promise<Set<string>>;
+/** Of threads from several runtimes, the ones (`<session>:<thread>`) the viewer may see, in one pass. */
+export type ThreadPairsShown = (threads: ReadonlyArray<{ sessionId: string; threadId: string }>) => Promise<Set<string>>;
 
 /** The channels a workspace talks or listens in, most recent first. */
 export async function listChannels(

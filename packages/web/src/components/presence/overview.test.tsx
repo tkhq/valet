@@ -120,6 +120,8 @@ let places: PresencePlaceWire[] = [];
 let rules: EventSubscriptionWire[] = [];
 let routines: WorkflowTriggerItem[] = [];
 let placesFail = false;
+/** Each places read the overview sends, by its query string. */
+const placesReads: string[] = [];
 let logItems: EventLogItem[] = [];
 const patches: Array<{ id: string; body: PatchEventSubscriptionRequest }> = [];
 
@@ -173,6 +175,7 @@ function answer(method: string, url: URL, body: string | undefined): Response {
   }
   if (method !== "GET") return json({ error: "not in this test" }, 404);
   if (path === "/api/presence/places") {
+    placesReads.push(url.search);
     if (placesFail) return json({ error: "boom" }, 500);
     return json({ places } satisfies ListPresencePlacesResponse);
   }
@@ -194,6 +197,7 @@ beforeEach(() => {
   placesFail = false;
   logItems = [];
   patches.length = 0;
+  placesReads.length = 0;
   window.sessionStorage.clear();
   window.localStorage.clear();
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -571,5 +575,14 @@ describe("Presence overview", () => {
     expect(eng.className).toContain("bg-moss-wash");
     await waitFor(() => expect(scrolled).toEqual([eng]));
     expect(screen.getByRole("region", { name: "acme/api" }).getAttribute("data-highlight")).toBeNull();
+  });
+
+  // Four parts of the overview read the places (the groups, onboarding, the
+  // faults banner, and the place rows). They share one query key, so a load
+  // sends one request.
+  it("sends one places read for one load", async () => {
+    mountOverview();
+    await screen.findByRole("heading", { level: 2, name: "On a schedule" });
+    expect(placesReads).toEqual(["?scope=user"]);
   });
 });

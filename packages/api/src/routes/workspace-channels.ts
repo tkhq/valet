@@ -7,7 +7,7 @@ import type { AppEnv } from "../env.js";
 import { getChannel, listChannels, type ChannelNames } from "../services/channels.js";
 import { orgSlackCredential, setCapped } from "../services/thread-access.js";
 import { channelsVisibleTo, keepVisibleThreads } from "./_thread-access.js";
-import type { ThreadsShown } from "../services/channels.js";
+import type { ThreadPairsShown, ThreadsShown } from "../services/channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 
 export const workspaceChannelsRouter = new Hono<AppEnv>();
@@ -51,6 +51,11 @@ workspaceChannelsRouter.get("/:workspace/channel", async (c) => {
   if (!detail) return c.json({ error: "This workspace has no conversation in that channel. Open Channels to see the channels it uses." }, 404);
   return c.json(detail);
 });
+
+/** Of threads from several runtimes, the ones (`<session>:<thread>`) this request may see, in one pass (`thread-access.ts`). */
+export function threadPairsShownTo(c: Context<AppEnv>, owner: { type: string }): ThreadPairsShown {
+  return async (threads) => new Set((await keepVisibleThreads(c, owner, [...threads])).map((row) => `${row.sessionId}:${row.threadId}`));
+}
 
 /** Of a runtime's threads, the ones this request may see (`thread-access.ts`). */
 export function threadsShownTo(c: Context<AppEnv>, owner: { type: string }): ThreadsShown {
