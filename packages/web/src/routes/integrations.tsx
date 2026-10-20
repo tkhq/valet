@@ -74,6 +74,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   team_access_changed: "Team access changed. Ask a team admin to restart the connection.",
   team_connection_exists: "This team already has a connection. Disconnect it before connecting another account.",
   team_reconnect_unneeded: "The team connection changed while you signed in, so nothing was replaced. Reload the page to see it.",
+  team_connection_removed: "The team connection was removed while you signed in, so nothing was saved. Connect it again for the team.",
+  team_step_up_not_granted:
+    "The team connection was kept: the sign-in did not grant every scope it needs, or the connection changed while you signed in. Reload the page to see it.",
   team_identity_unsupported: "This personal identity cannot be used for a team. Connect a team account instead.",
   identity_conflict:
     "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",

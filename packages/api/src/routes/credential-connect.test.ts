@@ -948,6 +948,55 @@ describe("team OAuth connections", () => {
     });
   });
 
+  async function startStepUp(baseUrl: string, db: NonNullable<typeof api>["providers"]["db"], teamId: string, addScopes: string) {
+    await addMember(db, { teamId, userId: "test-member", role: "member" });
+    await db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
+      ownerType: "team", ownerId: teamId, workspace: "w", createdAt: 1, updatedAt: 1 });
+    const started = await fetch(`${baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent(addScopes)}&session=team-thread-session`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(started.status).toBe(302);
+    return new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  }
+
+  it("keeps a healthy team connection when a step-up adds no scope, or names no conversation", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read", "write"] });
+    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read");
+    fake.tokenResponse = { access_token: "member-token", expires_in: 3600, scope: "read write" };
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
+    // Without a session the request is an ordinary team connect, which never replaces a live connection.
+    const bare = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${team.id}&addScopes=read`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const bareState = new URL(bare.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    expect((await finish(app.baseUrl, bareState, "test-member")).headers.get("location")).toContain("error=team_connection_exists");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "old-team" });
+  });
+
+  it("keeps the team connection when the provider grants less than the step-up asked for", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read", "write"] });
+    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read write extra");
+    fake.tokenResponse = { access_token: "narrow", expires_in: 3600, scope: "read" };
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+      accessToken: "old-team", scopes: ["read", "write"],
+    });
+  });
+
+  it("keeps a connection that an admin repaired while the member signed in", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
+    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "oauth2", accessToken: "admin-repair", scopes: ["read", "extra", "write"],
+    });
+    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "admin-repair" });
+  });
+
   it("lets a team member connect a team account", async () => {
     const { app, team } = await setup();
     await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });

@@ -35,11 +35,13 @@ export async function lockTeamCredentialRole(
 }
 
 async function teamConnectionRow(db: AppQueryable, teamId: string, service: string, lock: boolean) {
-  const query = db.select({ type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata })
+  const query = db.select({ type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata, scopes: credentials.scopes })
     .from(credentials)
     .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId), eq(credentials.service, service)));
   const [row] = lock ? await query.for("update") : await query;
-  return row ? { ...row, metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata) } : undefined;
+  return row
+    ? { ...row, metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata), scopes: fromJsonbColumn<string[]>(row.scopes) }
+    : undefined;
 }
 
 /** True when the team's connection for `service` is dead (`isDeadConnection`). */
@@ -66,18 +68,28 @@ export async function replaceDeadTeamCredential(
 /**
  * Replaces the team's connection with one that holds more scopes (step-up
  * after an `insufficient_scope` answer). Any member may do this, as for a
- * dead connection: the new row holds the signing-in member's account. A
- * connection removed while the member signed in is not restored. Call inside
- * the transaction that holds `lockTeamCredentialRole`.
+ * dead connection: the new row holds the signing-in member's account. The
+ * locked row is compared with the new grant, so the replacement happens only
+ * when the request adds a scope the connection lacks and the grant keeps every
+ * scope the connection holds plus every requested one. A narrower grant, a
+ * request that adds nothing, a connection whose grant is unknown, and a
+ * connection that someone changed or removed while the member signed in are
+ * all kept. Call inside the transaction that holds `lockTeamCredentialRole`.
  */
 export async function replaceTeamCredentialForStepUp(
   tx: AppTx, encryptionKey: string, teamId: string,
-  service: string, credential: StoredCredential,
-): Promise<boolean> {
+  service: string, credential: StoredCredential, requested: string[],
+): Promise<"replaced" | "removed" | "not_granted"> {
   const row = await teamConnectionRow(tx, teamId, service, true);
-  if (!row) return false;
+  if (!row) return "removed";
+  const held = row.scopes;
+  if (!Array.isArray(held)) return "not_granted";
+  const granted = new Set(credential.scopes ?? []);
+  const adds = requested.some((scope) => !held.includes(scope));
+  const keeps = [...held, ...requested].every((scope) => granted.has(scope));
+  if (!adds || !keeps) return "not_granted";
   await replaceCredential(tx, encryptionKey, { type: "team", id: teamId }, service, credential);
-  return true;
+  return "replaced";
 }
 
 function encryptedCredentialValues(

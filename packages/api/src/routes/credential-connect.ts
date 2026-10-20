@@ -71,8 +71,10 @@ interface OAuthConnectState {
   /** Step-up: the scopes the authorize request asked for, stored when the
    * token response names none. */
   scopes?: string[];
-  /** Step-up on a team: replace the team's live connection. */
-  stepUp?: true;
+  /** Step-up on a team: the added scopes. The callback replaces the team's
+   * live connection only with a grant that holds them and every scope the
+   * connection already holds (`replaceTeamCredentialForStepUp`). */
+  stepUp?: string[];
   nonce: string;
   exp: number;
 }
@@ -93,7 +95,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
-    if (stepUp !== undefined && (stepUp !== true || typeof teamId !== "string")) return null;
+    if (stepUp !== undefined && (!Array.isArray(stepUp) || !stepUp.every((s) => typeof s === "string") || typeof teamId !== "string")) return null;
     if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
     return {
@@ -102,7 +104,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
       ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
-      ...(stepUp === true ? { stepUp } : {}),
+      ...(Array.isArray(stepUp) ? { stepUp: stepUp.filter((s): s is string => typeof s === "string") } : {}),
     };
   });
 }
@@ -203,7 +205,9 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     }
     teamId = owner.teamId;
   }
-  const stepUp = addScopes !== undefined && teamId !== undefined;
+  // A team step-up comes only from an assistant's link, which names the
+  // conversation. A bare `teamId` with `addScopes` is an ordinary team connect.
+  const stepUp = addScopes !== undefined && sessionId !== undefined && teamId !== undefined;
   // Every connect lands on /integrations. An old `?landing=` link is
   // ignored, so the callback cannot be steered.
   if (scope === "user" && teamId !== undefined) {
@@ -234,7 +238,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
     ...(reconnect ? { reconnect: true as const } : {}),
-    ...(stepUp ? { stepUp: true as const } : {}),
+    ...(stepUp && addScopes ? { stepUp: addScopes } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -434,9 +438,10 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
         };
         if (verified.stepUp) {
-          const replaced = await replaceTeamCredentialForStepUp(tx, encryptionKey, teamId, verified.service, credential);
-          if (replaced) await invalidateWorkflowSources(tx, { teamId });
-          return replaced ? null : "team_connection_removed";
+          const result = await replaceTeamCredentialForStepUp(tx, encryptionKey, teamId, verified.service, credential, verified.stepUp);
+          if (result === "replaced") await invalidateWorkflowSources(tx, { teamId });
+          if (result === "removed") return "team_connection_removed";
+          return result === "replaced" ? null : "team_step_up_not_granted";
         }
         if (verified.reconnect) {
           const replaced = await replaceDeadTeamCredential(tx, encryptionKey, teamId, verified.service, credential, Date.now());
