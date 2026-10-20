@@ -546,7 +546,7 @@ export function Composer({
     try {
       await cancelQueued.mutateAsync({ threadId, itemId });
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Could not cancel the queued message. Try again.");
+      setSubmitError(apiErrorDetail(err, "Could not cancel the queued message. Try again."));
     }
   }
 

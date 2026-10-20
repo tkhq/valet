@@ -1357,6 +1357,23 @@ export class Thread {
     void this.kick();
   }
 
+  /**
+   * Cancel one queued message a person withdrew. It settles `aborted` only
+   * while the item is unclaimed and no promotion superseded it, in one store
+   * CAS, so a concurrent claim or Send now wins and the caller learns it.
+   * It never touches a running turn; that is Stop.
+   */
+  async cancelQueuedItem(queueItemId: string): Promise<boolean> {
+    const settled = await this.session.providers.store.settleUnclaimed(
+      this.session.id, this.id, queueItemId, { outcome: "aborted" }, { onlyIfUnsuperseded: true },
+    );
+    if (!settled) return false;
+    await this.emitSettled(queueItemId, { outcome: "aborted" });
+    await this.emitQueueState();
+    void this.kick();
+    return true;
+  }
+
   /** Cancel one submission without aborting other work on this thread. */
   async abortSubmission(queueItemId: string, withdrawReason: DecisionWithdrawReason = "abort"): Promise<void> {
     const store = this.session.providers.store;

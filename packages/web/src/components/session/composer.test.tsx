@@ -223,6 +223,20 @@ describe("Composer queued-message stack", () => {
     expect(cancelQueuedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", itemId: "q-2" });
   });
 
+  it("shows the server's corrective text when a cancel is refused", async () => {
+    cancelQueuedMutateAsync.mockRejectedValueOnce(
+      new ApiError(409, "POST /threads/thread-1/queue/q-1/cancel → 409", {
+        error: "This message is no longer queued. If it started, select Stop to end it.",
+      }),
+    );
+    queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1"] };
+    renderComposer("streaming", [], 1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText("This message is no longer queued. If it started, select Stop to end it.")).toBeTruthy();
+    expect(screen.queryByText(/→ 409/)).toBeNull();
+  });
+
   it("counts pending items when the live queue state is not loaded", () => {
     renderComposer("streaming", [], 2);
     expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");

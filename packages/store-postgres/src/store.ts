@@ -1327,7 +1327,7 @@ export class PgSessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     outcome: SubmissionOutcome,
-    opts?: { mergedIntoItemId?: string },
+    opts?: { mergedIntoItemId?: string; onlyIfUnsuperseded?: boolean },
   ): Promise<boolean> {
     const mergedIntoItemId = outcome.outcome === "merged" ? (opts?.mergedIntoItemId ?? null) : null;
     // Never-claimed items definitionally ran no tools — stamp the settle-patch
@@ -1338,8 +1338,9 @@ export class PgSessionStore implements SessionStore {
            merged_into_item_id = COALESCE($3, merged_into_item_id),
            settle_patch_status = 'skipped', settle_patch_reason = 'no_work',
            updated_at = $4
-       WHERE id = $5 AND session_id = $6 AND thread_id = $7 AND status IN ('collecting', 'queued')`,
-      [outcome.outcome, outcome.error ?? null, mergedIntoItemId, Date.now(), itemId, sessionId, threadId],
+       WHERE id = $5 AND session_id = $6 AND thread_id = $7 AND status IN ('collecting', 'queued')
+         AND ($8::boolean IS NOT TRUE OR superseded_by_item_id IS NULL)`,
+      [outcome.outcome, outcome.error ?? null, mergedIntoItemId, Date.now(), itemId, sessionId, threadId, opts?.onlyIfUnsuperseded === true],
     );
     return result.rowCount > 0;
   }

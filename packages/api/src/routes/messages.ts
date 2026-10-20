@@ -1494,12 +1494,12 @@ export async function cancelQueuedItem(c: Context<AppEnv>, sessionId: string, th
   const thread = await visibleThread(c, session, engineSession, threadId);
   if (!thread) return c.json({ error: "thread not found" }, 404);
 
+  // One store CAS decides: a claim or a Send now that lands first wins, and
+  // the person is told the message is no longer queued.
   const itemId = c.req.param("itemId");
-  const state = await thread.currentQueueState();
-  if (!itemId || !state.pending.some((item) => item.id === itemId)) {
+  if (!itemId || !await thread.cancelQueuedItem(itemId)) {
     return c.json({ error: "This message is no longer queued. If it started, select Stop to end it." }, 409);
   }
-  await thread.abortSubmission(itemId);
   return c.json({ ok: true });
 }
 

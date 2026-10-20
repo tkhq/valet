@@ -263,6 +263,28 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(result.supersededItemIds).toContain(source.id);
     });
 
+    it("settleUnclaimed with onlyIfUnsuperseded refuses a promoted source and a claimed item", async () => {
+      const source = makeItem({ createdAt: 100, updatedAt: 100 });
+      const other = makeItem({ createdAt: 150, updatedAt: 150 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, source);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, other);
+      await store.admitSubmission(SESSION_ID, THREAD_ID, makeItem({
+        createdAt: 200, updatedAt: 200, metadata: { promotedFromItemId: source.id },
+      }), { steer: true, promoteFromItemId: source.id });
+
+      const cancel = (id: string) => store.settleUnclaimed(SESSION_ID, THREAD_ID, id, { outcome: "aborted" }, { onlyIfUnsuperseded: true });
+      expect(await cancel(source.id)).toBe(false);
+      expect((await store.getQueueItem(SESSION_ID, source.id))?.status).not.toBe("settled");
+
+      await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: other.id, attemptId: "att-o", ownerId: "o" });
+      expect(await cancel(other.id)).toBe(false);
+
+      const fresh = makeItem({ createdAt: 300, updatedAt: 300 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, fresh);
+      expect(await cancel(fresh.id)).toBe(true);
+      expect((await store.getQueueItem(SESSION_ID, fresh.id))?.outcome).toEqual({ outcome: "aborted" });
+    });
+
     it("promotion steer preserves queued siblings and claims the promoted successor first", async () => {
       const active = makeItem({ createdAt: 100, updatedAt: 100 });
       const q1 = makeItem({ createdAt: 200, updatedAt: 200, content: "q1" });

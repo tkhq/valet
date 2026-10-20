@@ -2201,13 +2201,16 @@ export interface SessionStore {
    * outcome is 'merged'. A matched CAS also stamps the settle-patch record
    * `skipped:no_work` (engine traces spec, change 3): a never-claimed item
    * definitionally ran no tools, so there is no diff to capture.
+   * `onlyIfUnsuperseded` also refuses an item a promotion already
+   * superseded (its successor carries the same content), so a person's
+   * cancel cannot report success while that content still runs.
    */
   settleUnclaimed(
     sessionId: string,
     threadId: string,
     itemId: string,
     outcome: SubmissionOutcome,
-    opts?: { mergedIntoItemId?: string },
+    opts?: { mergedIntoItemId?: string; onlyIfUnsuperseded?: boolean },
   ): Promise<boolean>;
   /**
    * Fenced release of a claimed turn back to `queued` (attempt cleared, lease
