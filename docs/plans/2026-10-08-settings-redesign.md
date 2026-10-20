@@ -213,4 +213,3 @@ it("shows a member only Teams and 1Password under Organization", () => { /* memb
 - [ ] Mark superseded sections in `2026-07-14-split-settings-design.md` and `2026-08-17-team-workspace-ui-design.md` with a pointer to the new spec.
 - [ ] `pnpm --filter @valet/web test`, `pnpm --filter @valet/web build`, `make e2e` (full output to a log).
 - [ ] Browser check on the local stack: rail groups, a team page, an org section, Integrations, Skills; light and dark; narrow width.
-- [ ] Deploy to XORS: branch from the deployed sha, cherry-pick the commits, drop the Agent access rail item if XORS lacks `/settings/agent-access`, validate, `valet-deploy.build-on-server`, verify `/opt/valet/DEPLOYED` and health.
