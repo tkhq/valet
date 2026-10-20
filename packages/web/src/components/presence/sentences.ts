@@ -499,14 +499,24 @@ const ANY_PLACE: Readonly<Record<SentenceService, string>> = {
 /** Filter fields that name who sent the event. */
 const SENDER_FIELDS: readonly string[] = ["user", "sender", "creator"];
 
+/** The ops whose value is a whole channel id, so a channel name can stand in for it. */
+const EXACT_OPS: readonly EventSubscriptionFilterWire["op"][] = ["eq", "in"];
+
 /**
  * Each value of a filter with the words a reader sees for it: the filter's
  * own label, then for a Slack channel its name from `names.channels`
- * (`#incidents`), then the raw value.
+ * (`#incidents`), then the raw value. Only an exact match (`eq`, `in`) takes
+ * the name: a `prefix`, `contains`, or `regex` value is a pattern over the
+ * id, and `starts with #proj-valet` would describe a match that never runs.
+ * The lookup is by own property: a saved value such as `constructor` must
+ * not read a method off the map's prototype.
  */
 function filterEntries(filter: EventSubscriptionFilterWire, names: SentenceNames = {}): { value: string; label: string }[] {
   const fallback = (value: string): string => {
-    const channel = filter.field === "channel" ? names.channels?.[value] : undefined;
+    const channels = names.channels;
+    const channel = filter.field === "channel" && EXACT_OPS.includes(filter.op) && channels !== undefined && Object.hasOwn(channels, value)
+      ? channels[value]
+      : undefined;
     return hasText(channel) ? `#${channel}` : value;
   };
   if (Array.isArray(filter.value)) {

@@ -21,6 +21,31 @@ describe("channelNames", () => {
   });
 });
 
+describe("filterLabels with a channel name", () => {
+  const names = { channels: channelNames([{ subject: "slack:T1/C900", label: "#proj-valet" }]) };
+
+  it("names an exact match", () => {
+    expect(filterLabels({ field: "channel", op: "eq", value: "C900" }, names)).toEqual(["#proj-valet"]);
+    expect(filterLabels({ field: "channel", op: "in", value: ["C900", "C901"] }, names)).toEqual(["#proj-valet", "C901"]);
+  });
+
+  // Review of PR #986: the matcher tests the id against a pattern, so the
+  // sentence must show the pattern, not a name the pattern never sees.
+  it("keeps a pattern value literal", () => {
+    for (const op of ["prefix", "contains", "regex"] as const) {
+      expect(filterLabels({ field: "channel", op, value: "C900" }, names)).toEqual(["C900"]);
+    }
+  });
+
+  // Review of PR #986: a value that is a key on Object.prototype must not
+  // read a function off the map and crash the page.
+  it("ignores keys inherited from the object prototype", () => {
+    for (const value of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(filterLabels({ field: "channel", op: "eq", value }, names)).toEqual([value]);
+    }
+  });
+});
+
 describe("filterLabels with an unnamed channel", () => {
   it("shows the raw id when the places list carries no name for it", () => {
     const names = { channels: channelNames([{ subject: "slack:T1/C0AK0T8KPPY", label: "C0AK0T8KPPY" }]) };

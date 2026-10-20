@@ -423,9 +423,12 @@ describe("a Slack channel's name (spec Part C step 2)", () => {
     );
   });
 
-  it("names the channel in a When condition too", () => {
+  // Review of PR #986: the matcher tests the id against the pattern, so a
+  // name in a When condition would describe a match the pattern never makes.
+  // An exact channel is a place, and the place clause names it.
+  it("keeps a pattern over the channel id literal in a When condition", () => {
     expect(whenExplanation([{ field: "channel", op: "prefix", value: "C1" }], ["slack.message"], { channels: { C1: "eng" } }))
-      .toBe("Only when the channel starts with #eng.");
+      .toBe("Only when the channel starts with C1.");
   });
 });
 
