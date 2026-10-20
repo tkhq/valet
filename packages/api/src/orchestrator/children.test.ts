@@ -234,7 +234,13 @@ describe("buildChildSpawner", () => {
     expect(child?.options.parentSessionId).toBe("parent-spawn");
     expect(child?.options.parentThreadId).toBe(parentThread.id);
     expect(child?.owner).toEqual(owner);
-    expect((await api.providers.engineStore.getSession(result.childSessionId))?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
+    // The parent's thread focus is its own choice and does not limit the child.
+    expect((await api.providers.engineStore.getSession(result.childSessionId))?.metadata?.toolScope).toBeUndefined();
+    const ceiled = await spawner(
+      { prompt: "read the run", title: "Ceiling", toolScope: { actions: ["workflows.get_run"] } },
+      { parentSessionId: "parent-spawn", parentThreadId: parentThread.id, actorUserId: "local-user", owner },
+    );
+    expect((await api.providers.engineStore.getSession(ceiled.childSessionId))?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
     // Depth limit 1 (decision 10): the child gets no spawner — `task`
     // inside it falls through to [task_unavailable].
     expect(child?.options.toolConfig?.childSpawner).toBeUndefined();
@@ -2382,11 +2388,12 @@ describe("buildChildSender", () => {
     const deps = childrenDeps(api);
     const receipt = await buildChildSender(deps, new ChildWatcher(deps))(
       { childSessionId: child.id, message: "Check Linear" },
-      { parentSessionId: "actor-parent", parentThreadId: parentThread.id, actorUserId: "test-member" },
+      { parentSessionId: "actor-parent", parentThreadId: parentThread.id, actorUserId: "test-member", toolScope: { actions: ["linear.*"] } },
     );
     const submission = (await engineStore.listUnsettledSubmissions(child.id)).find(item => item.id === receipt?.queueItemId);
     expect(submission?.author).toEqual({ id: "test-member", name: "Valet" });
-    expect(submission?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
+    // Steering keeps the sender's ceiling and drops the parent's thread focus.
+    expect(submission?.metadata?.toolScope).toEqual({ actions: ["linear.*"] });
     expect(await child.credentialProvider({ actorId: submission?.author?.id }).get("linear")).toBeNull();
   });
 

@@ -46,3 +46,40 @@ it("keeps the task ceiling when the security driver resumes an idle runner", asy
     faux.unregister();
   }
 });
+
+it("gives a nudged runner its ceiling, not the thread focus it had selected", async () => {
+  const faux = registerFauxProvider({ provider: "security-nudge-focus" });
+  const api = await bootTestApi();
+  try {
+    const p = api.providers;
+    const now = Date.now();
+    const sessionId = "focus-runner";
+    await p.db.insert(agentSessions).values({ id: sessionId, userId: "local-user", orgId: "local-org", workspace: "/tmp/focus-runner", status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", kind: "security", createdAt: now, updatedAt: now });
+    await createSecurityEngagementService({ db: p.db }).createEngagement({ sessionId, repoFullName: "acme/api", plan: codeReviewPresetPlan() });
+    const [row] = await p.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+    if (!row) throw new Error("runner missing");
+    const session = await p.engineHost.sessionFor(sessionId, await loadSessionMeta(p.db, row));
+    session.options.resolveModel = async () => ({ model: faux.getModel(), apiKey: "test" });
+    session.options.resolveFallbackModel = undefined;
+    session.options.compaction = { enabled: false };
+    faux.setResponses([fauxAssistantMessage("inspected")]);
+    const original = await session.prompt("Inspect engagement");
+    const thread = session.thread();
+    await thread.awaitResult(original.queueItemId, { timeoutMs: 5_000 });
+    // The runner narrows its own tools; a later nudge must not keep that narrowing.
+    const focus = { tools: ["sec_dispatch", "focus_tools"], actions: [] };
+    await thread.setToolFocus(focus);
+
+    faux.setResponses([fauxAssistantMessage("done")]);
+    await p.securityRunnerDriver.sweep();
+    await vi.waitFor(async () => expect((await thread.readEntries()).some((entry) => entry.type === "message" && entry.role === "user" && entry.content === NUDGE_TEXT)).toBe(true));
+    const nudge = (await thread.readEntries()).find((entry) => entry.type === "message" && entry.role === "user" && entry.content === NUDGE_TEXT);
+    if (nudge?.type !== "message" || !nudge.queueItemId) throw new Error("nudge missing");
+    await thread.awaitResult(nudge.queueItemId, { timeoutMs: 5_000 });
+    expect((await p.engineStore.getQueueItem(sessionId, nudge.queueItemId))?.metadata?.toolScope).toEqual({});
+    expect((await p.engineStore.getThread(sessionId, thread.id))?.metadata?.continuationToolScope).not.toEqual(focus);
+  } finally {
+    await api.cleanup();
+    faux.unregister();
+  }
+});

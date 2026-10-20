@@ -581,7 +581,9 @@ export const childSendTool = defineTool({
       },
       {
         parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId,
-        ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}),
+        // A child inherits the parent's ceiling, never its thread focus: focus is
+        // the parent's own reversible choice, so it grants no authority to keep.
+        ...(ctx.toolScopeCeiling ? { toolScope: ctx.toolScopeCeiling } : {}),
         // The host keeps automatic channel replies only for a channel turn.
         ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
         ...(ctx.unattendedWorkflow ? { unattendedWorkflow: true } : {}),
@@ -924,7 +926,7 @@ export const taskTool = defineTool({
     }
 
     const req: SpawnChildRequest = {
-      toolScope: intersectToolScopes(ctx.toolScope, args.toolScope),
+      toolScope: intersectToolScopes(ctx.toolScopeCeiling, args.toolScope),
       prompt: args.prompt,
       title: args.title,
       repo: args.repo,

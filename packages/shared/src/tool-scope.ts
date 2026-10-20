@@ -85,10 +85,16 @@ export function readToolScope(value: unknown): ToolScope | undefined {
   return parsed === false ? { tools: [], actions: [] } : parsed;
 }
 
-/** A session-wide autonomous continuation has no single originating thread. */
+/**
+ * A session-wide autonomous continuation has no single originating thread.
+ * It keeps the session or submission ceiling and every thread's durable
+ * continuation ceiling. A thread's focus is reversible and stays on that
+ * thread, where each turn still applies it; saving it here would turn it into
+ * a ceiling that clearing focus cannot lift.
+ */
 export function continuationToolScope(metadata: Record<string, unknown> | undefined, threads: readonly { metadata?: Record<string, unknown> }[]): ToolScope | undefined {
   return intersectToolScopes(readToolScope(metadata?.[TOOL_SCOPE_KEY]),
-    ...threads.flatMap((thread) => [readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY])]));
+    ...threads.map((thread) => readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY])));
 }
 
 export function isToolScope(value: unknown): value is ToolScope {
