@@ -216,6 +216,21 @@ describe("Ask Valet conversations", () => {
     type: "approval", title: "Change your name?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
   });
 
+  it("counts a conversation with history as started when its activity was not recorded", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const earlier = await open();
+    // Activity recording is best effort, so a conversation can have history without it.
+    await api.providers.engineStore.appendEntries(earlier.sessionId, earlier.threadId, [{
+      id: "earlier-message", sessionId: earlier.sessionId, threadId: earlier.threadId, parentId: null,
+      type: "message", role: "user", content: "An earlier question", createdAt: 1,
+    }]);
+    expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(earlier.threadId);
+    expect((await open({ fresh: true })).threadId).not.toBe(earlier.threadId);
+    expect(await open()).toEqual(earlier);
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([earlier.threadId]);
+  });
+
   it("reuses an empty conversation and starts a fresh one after a message", async () => {
     api = await bootTestApi();
     const { open, list } = conversations("user");

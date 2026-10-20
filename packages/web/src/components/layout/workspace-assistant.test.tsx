@@ -24,6 +24,7 @@ function OpenButton() {
   return <>
     <button onClick={() => assistant.open()}>Ask Valet</button>
     <button onClick={() => assistant.open("Summarize this page")}>Try in chat</button>
+    <button onClick={() => assistant.open("Explain this error")}>Explain error</button>
     <button onClick={assistant.close}>Close Valet</button>
   </>;
 }
@@ -126,6 +127,19 @@ describe("Ask Valet conversation rule", () => {
     expect(screen.getByText("Conversation s1/contextual")).toBeTruthy();
     expect(draft("contextual")).toBe("Summarize this page");
     expect(draft("waiting")).toBeUndefined();
+  });
+
+  it("puts the latest contextual prompt in the draft when two start together", async () => {
+    let finish: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Try in chat" }));
+    await userEvent.click(screen.getByRole("button", { name: "Explain error" }));
+    expect(ensure).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ sessionId: "s1", threadId: "contextual" }));
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Explain this error");
   });
 
   it("starts a new chat from the header and reopens a recent conversation", async () => {

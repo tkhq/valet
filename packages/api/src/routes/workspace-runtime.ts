@@ -74,7 +74,8 @@ function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
 }
 
 /** The viewer's Ask Valet conversations in one session, the most recently used
- * first. A conversation starts with its first message; until then it is empty. */
+ * first. A conversation starts with its first message; until then it is empty.
+ * Activity recording is best effort, so any entry also marks it as started. */
 async function assistantConversations(c: Context<AppEnv>, session: Session): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
   const { db, engineStore } = c.var.providers;
   const threads = (await engineStore.listThreads(session.id)).filter(thread => isAssistantConversationOf(thread.key, c.var.user.id));
@@ -85,7 +86,7 @@ async function assistantConversations(c: Context<AppEnv>, session: Session): Pro
   return threads.map((thread) => {
     const row = meta.get(thread.id);
     return { threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
-      lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null,
+      lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null || thread.activeLeafEntryId !== undefined,
       busy: session.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
   }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
 }

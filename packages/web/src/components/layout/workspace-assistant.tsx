@@ -43,6 +43,8 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   // workspace decides which conversation the panel shows.
   const starting = useRef(new Map<string, Promise<Conversation>>());
   const latestStart = useRef(new Map<string, number>());
+  // Two contextual prompts can share one request; only the later one fills the draft.
+  const latestPrompt = useRef(new Map<string, number>());
   const lastRequest = useRef<EnsureWorkspaceConversationRequest>({ fresh: true, unlessBusy: true });
   const [opened, setOpened] = useState<string>();
   const [loaded, setLoaded] = useState<Record<string, Conversation>>({});
@@ -86,6 +88,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
     const generation = (latestStart.current.get(workspace) ?? 0) + 1;
     latestStart.current.set(workspace, generation);
     const isLatest = () => latestStart.current.get(workspace) === generation;
+    if (prompt) latestPrompt.current.set(workspace, generation);
     const requestKey = `${workspace}\u0000${JSON.stringify(request)}`;
     lastRequest.current = request;
     setOpened(workspace);
@@ -106,7 +109,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
     }
     try {
       const conversation = await pending;
-      if (prompt && useComposerDraftStore.getState().owner === draftOwner) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
+      if (prompt && latestPrompt.current.get(workspace) === generation && useComposerDraftStore.getState().owner === draftOwner) prefillComposerDraft(conversation.sessionId, conversation.threadId, prompt);
       if (isLatest()) setLoaded((current) => ({ ...current, [workspace]: conversation }));
     } catch (error) {
       if (isLatest()) setErrors((current) => ({ ...current, [workspace]: error instanceof Error ? error.message : "Could not open Valet." }));
