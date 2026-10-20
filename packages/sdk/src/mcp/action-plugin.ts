@@ -4,6 +4,7 @@ import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, CredentialSource, PluginAction, RiskLevel } from '@valet/engine';
 import { hasToonCollectionMarker } from '@valet/shared';
 import { McpClient, McpHttpError } from './client.js';
+import { refusedListing, scopeGaps, type McpProbeResult } from './probe.js';
 import type { McpTool, McpToolResult } from './types.js';
 
 export interface McpActionPluginOptions {
@@ -50,6 +51,23 @@ export interface McpActionPluginOptions {
   description?: string;
 }
 
+/** An `ActionPlugin` built by `mcpActionPlugin`, with its health probe. */
+export interface McpActionPlugin extends ActionPlugin {
+  /**
+   * Lists the server's tools with the same credential `resolveActions`
+   * sends, and says what the answer means for the connection: a refusal,
+   * or the scopes the grant lacks for tools that declare them. Throws for a
+   * failure that says nothing about the credential (no credential, a
+   * transport error, a 5xx).
+   */
+  probe(ctx: { credentials: CredentialProvider }): Promise<McpProbeResult>;
+}
+
+/** True for a plugin `mcpActionPlugin` built, also after a spread. */
+export function isMcpActionPlugin(plugin: ActionPlugin): plugin is McpActionPlugin {
+  return 'probe' in plugin && typeof plugin.probe === 'function';
+}
+
 /** The names an auth-rejection message uses. */
 interface RejectionText {
   /** `displayName`, or `serviceName` when absent. */
@@ -62,6 +80,8 @@ interface ResolvedToken {
   token: string | undefined;
   /** Absent for `noAuth`/`staticToken`: no personal or app connection to name. */
   source?: CredentialSource;
+  /** The scopes the credential's grant holds, when the host stored them. */
+  scopes?: string[];
 }
 
 /**
@@ -79,7 +99,7 @@ interface ResolvedToken {
  * rather than capturing the token resolved at discovery time — the token
  * may have been refreshed or connected in between.
  */
-export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
+export function mcpActionPlugin(opts: McpActionPluginOptions): McpActionPlugin {
   const client = new McpClient({
     url: opts.mcpUrl,
     serviceName: opts.serviceName,
@@ -115,6 +135,18 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
         mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages),
       );
     },
+    probe: async ({ credentials }) => {
+      const { token, scopes } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      let tools: McpTool[];
+      try {
+        tools = await client.listTools(token);
+      } catch (err) {
+        const refused = refusedListing(err, scopes);
+        if (refused) return refused;
+        throw err;
+      }
+      return { kind: 'listed', toolCount: tools.length, ...scopeGaps(tools, scopes) };
+    },
   };
 }
 
@@ -142,10 +174,10 @@ async function resolveToken(
   if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
   // A host that does not say whose account it is gives the caller's own.
-  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' } };
+  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' }, scopes: cred.scopes };
   if (appCredentialService) {
     const appCred = await credentials.get(appCredentialService);
-    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' } };
+    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' }, scopes: appCred.scopes };
   }
   throw new Error(`${serviceName}: no credential connected`);
 }

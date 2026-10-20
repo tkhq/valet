@@ -6,8 +6,11 @@
  * are present.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { serve, type ServerType } from "@hono/node-server";
+import { Hono } from "hono";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
+import { mcpActionPlugin } from "@valet/sdk/mcp";
 import { shareCredential } from "../services/credential-shares.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
@@ -631,6 +634,116 @@ describe("GET /api/plugins toolCount (connected dynamic services)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListPluginsResponse;
     expect(body.plugins.find((p) => p.name === "dyn")?.services[0]?.toolCount).toBeUndefined();
+  });
+});
+
+/**
+ * The MCP health probe (integration OAuth design, "MCP health probe"): the
+ * tool listing behind `toolCount` also reports a refused connection and the
+ * scopes a grant lacks. A real `mcpActionPlugin` talks to an in-process MCP
+ * server that answers like Pylon (401 for a pasted token) or like Metabase
+ * 1.64 (every tool listed, each naming its scope).
+ */
+describe("GET /api/plugins health from the MCP probe", () => {
+  let server: ServerType | undefined;
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    server = undefined;
+  });
+
+  async function fakeMcpServer(answer: {
+    tools?: Array<{ name: string; securitySchemes?: Array<{ type: string; scopes?: string[] }> }>;
+    failure?: { status: 401 | 403; wwwAuthenticate: string };
+  }): Promise<string> {
+    const app = new Hono();
+    app.post("/mcp", async (c) => {
+      const body = await c.req.json<{ method: string; id?: number }>();
+      if (body.method === "initialize") {
+        c.header("mcp-session-id", "sess-1");
+        return c.json({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake", version: "1" } } });
+      }
+      if (body.method === "notifications/initialized") return c.body(null, 202);
+      if (answer.failure) {
+        c.header("www-authenticate", answer.failure.wwwAuthenticate);
+        return c.text("refused", answer.failure.status);
+      }
+      return c.json({ jsonrpc: "2.0", id: body.id, result: { tools: answer.tools ?? [] } });
+    });
+    const port = await new Promise<number>((resolve) => {
+      server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => resolve(info.port));
+    });
+    return `http://127.0.0.1:${port}/mcp`;
+  }
+
+  function mcpPlugin(url: string): ValetPlugin {
+    return {
+      name: "probed",
+      version: "0.1.0",
+      actions: [mcpActionPlugin({ mcpUrl: url, serviceName: "probed", defaultRiskLevel: "medium" })],
+      credentials: [{ service: "probed", type: "oauth2", configKeys: ["accessToken"] }],
+    };
+  }
+
+  async function probedService(): Promise<ListPluginsResponse["plugins"][number]["services"][number] | undefined> {
+    const res = await fetch(`${api!.baseUrl}/api/plugins`);
+    const body = (await res.json()) as ListPluginsResponse;
+    return body.plugins.find((p) => p.name === "probed")?.services[0];
+  }
+
+  it("marks a connection the server refuses as rejected", async () => {
+    const url = await fakeMcpServer({ failure: { status: 401, wwwAuthenticate: 'Bearer error="invalid_token"' } });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await fetch(`${api.baseUrl}/api/credentials/probed`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "oauth2", accessToken: "pasted-api-key" }),
+    });
+
+    const service = await probedService();
+    expect(service?.connected).toBe(true);
+    expect(service?.health?.rejected).toBe(true);
+    expect(service?.toolCount).toBeUndefined();
+  });
+
+  it("names the scope the grant lacks for tools that declare one", async () => {
+    const url = await fakeMcpServer({
+      tools: [
+        { name: "search", securitySchemes: [{ type: "oauth2", scopes: ["agent:content:read"] }] },
+        { name: "browse_data", securitySchemes: [{ type: "oauth2", scopes: ["agent:content:read"] }] },
+        { name: "execute_query", securitySchemes: [{ type: "oauth2", scopes: ["agent:query:run"] }] },
+      ],
+    });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "probed", {
+      type: "oauth2",
+      accessToken: "granted-token",
+      scopes: ["agent:query:run"],
+    });
+
+    const service = await probedService();
+    expect(service?.toolCount).toBe(3);
+    expect(service?.health?.missingScopes).toEqual(["agent:content:read"]);
+    expect(service?.health?.blockedTools).toBe(2);
+    expect(service?.health?.rejected).toBeUndefined();
+  });
+
+  it("adds no probe fields for a connection the server accepts in full", async () => {
+    const url = await fakeMcpServer({
+      tools: [{ name: "execute_query", securitySchemes: [{ type: "oauth2", scopes: ["agent:query:run"] }] }],
+    });
+    api = await bootTestApi({ plugins: [mcpPlugin(url)] });
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "probed", {
+      type: "oauth2",
+      accessToken: "granted-token",
+      scopes: ["agent:query:run"],
+    });
+
+    const service = await probedService();
+    expect(service?.toolCount).toBe(1);
+    expect(service?.health?.rejected).toBeUndefined();
+    expect(service?.health?.missingScopes).toBeUndefined();
+    expect(service?.health?.blockedTools).toBeUndefined();
   });
 });
 

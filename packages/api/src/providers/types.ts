@@ -12,7 +12,7 @@ import type { ScratchCaps } from "@valet/shared";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { SourceService } from "../bakes/source-service.js";
-import type { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import type { ServiceProbes } from "../plugins/service-probe.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { ChildWatcher } from "../orchestrator/children.js";
@@ -124,9 +124,10 @@ export interface Providers {
   configMcpServers: readonly McpServerDecl[];
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
-  /** TTL-cached resolved tool counts for connected dynamic services
-   * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
-  dynamicToolCounts: DynamicToolCounts;
+  /** TTL-cached tool listings for connected dynamic services: the
+   * `toolCount` and probe health fields of `/api/plugins` (see
+   * `plugins/service-probe.ts`). */
+  serviceProbes: ServiceProbes;
 
   /** Deploy and agent caps for the node-local `/scratch` volume
    * (`resolveScratchCaps(process.env)` at boot). Threaded into

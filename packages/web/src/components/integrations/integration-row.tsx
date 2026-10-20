@@ -322,7 +322,7 @@ function ServiceBlock({
   const reference = credential?.onepasswordRef;
   const health = serviceHealth(service);
   const badge = healthBadge(health);
-  const note = healthNote(health);
+  const note = healthNote(health, service.health);
   // A broken connection keeps its row in the credential store, so the card
   // offers the repair beside the disconnect instead of only "Disconnect".
   const repair = needsReauth(health);
@@ -441,9 +441,9 @@ function ServiceBlock({
           {service.connected && note && (
             <p
               className={
-                health === "identity-only"
-                  ? "text-xs leading-relaxed text-warning-fg"
-                  : "text-xs leading-relaxed text-danger-500"
+                badge?.variant === "warning"
+                  ? "break-words text-xs leading-relaxed text-warning-fg"
+                  : "break-words text-xs leading-relaxed text-danger-500"
               }
             >
               {note}

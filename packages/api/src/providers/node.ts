@@ -59,7 +59,7 @@ import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
-import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
@@ -928,7 +928,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     configMcpServers: opts.instanceConfig?.mcpServers ?? [],
     actionPluginByService,
-    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
+    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
     prebuildService,
     scratchCaps,
   };
