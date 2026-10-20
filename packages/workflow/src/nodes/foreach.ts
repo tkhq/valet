@@ -109,6 +109,7 @@
 
 import { renderTemplate } from '../dag/expression.js';
 import type { ForeachBodyNode, ForeachNode } from '../dag/nodes.js';
+import { FOREACH_DEFAULT_MAX_ITEMS } from '../dag/validate.js';
 import type { NodeCheckpoint, RunWaitCondition } from '../store.js';
 import { executeLlm } from './llm.js';
 import { executeThread } from './thread.js';
@@ -118,7 +119,6 @@ import { executeSet } from './set.js';
 import { executeTool } from './tool.js';
 import { resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
-const DEFAULT_MAX_ITEMS = 100;
 const DEFAULT_CONCURRENCY = 1;
 
 export interface ForeachItemResult {
@@ -160,7 +160,7 @@ export async function executeForeach(args: NodeExecutorArgs<ForeachNode>): Promi
   }
 
   const inputItems: unknown[] = rendered;
-  const maxItems = node.maxItems ?? DEFAULT_MAX_ITEMS;
+  const maxItems = node.maxItems ?? FOREACH_DEFAULT_MAX_ITEMS;
 
   // An unbounded foreach over an oversized array is the silent-data-loss
   // case: the node has no author-chosen bound, so the built-in ceiling is
