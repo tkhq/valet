@@ -70,6 +70,9 @@ it("marks a delivered event failed with the turn's reason when its turn fails, a
   expect(await problems(local)).toEqual([
     expect.objectContaining({ id: "ev_push", status: "failed", detail: expect.stringMatching(/^The assistant turn failed: The model reached its output limit/) }),
   ]);
+  // The turn started, so the event page warns before a redelivery.
+  const detail = await (await fetch(`${local.baseUrl}/api/events/ev_push`)).json() as { deliveries: Array<{ id: string; turnFailed?: true }> };
+  expect(detail.deliveries).toEqual([expect.objectContaining({ id: "d_push", turnFailed: true })]);
 }, 30_000);
 
 it("keeps a delivery whose turn completes delivered and out of Problems", async () => {

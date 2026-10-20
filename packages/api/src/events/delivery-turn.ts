@@ -25,6 +25,12 @@ import type { AppDb } from "../lib/drizzle.js";
 
 const MAX_ERROR_CHARS = 2_000;
 const PREFIX = "The assistant turn failed: ";
+
+/** True for the reason this module writes. Such a turn started, so it may
+ * have replied or acted before it failed: redelivering can repeat that. */
+export function isFailedTurnMessage(text: string | null): boolean {
+  return text?.startsWith(PREFIX) ?? false;
+}
 const NO_REASON = "the engine recorded no reason. Open the event's thread to inspect the turn.";
 const DISPATCH_PREFIX = "event:";
 
@@ -35,15 +41,18 @@ export type FailedTurnMatch = { deliveryId: string } | { queueItemId: string } |
 
 /** Marks matching delivered rows dead when their turn settled failed. Returns how many it marked. */
 export async function markFailedDeliveryTurns(db: AppDb, match: FailedTurnMatch): Promise<number> {
-  // Each form keeps its lookup on an index: the delivery's primary key, the
-  // queue item's primary key, or the queue items' dispatch-id index.
+  // Each form keeps its lookup on an index: the delivery's primary key with
+  // the dispatch-id index, the queue item's primary key, or (the sweep) the
+  // partial index of delivered rows with the recorded queue item's key. The
+  // sweep therefore covers only rows that recorded their queue item; the
+  // watcher and the dispatcher's check find older rows by dispatch id.
   let where: SQL;
   if ("deliveryId" in match) {
     where = sql`d.id = ${match.deliveryId} AND q.dispatch_id = ${DISPATCH_PREFIX + match.deliveryId}`;
   } else if ("queueItemId" in match) {
     where = sql`q.id = ${match.queueItemId} AND q.dispatch_id LIKE 'event:%' AND d.id = substr(q.dispatch_id, ${DISPATCH_PREFIX.length + 1})`;
   } else {
-    where = sql`d.delivered_at >= ${match.deliveredSince} AND q.dispatch_id = ${DISPATCH_PREFIX} || d.id`;
+    where = sql`d.delivered_at >= ${match.deliveredSince} AND q.id = d.queue_item_id AND q.dispatch_id = ${DISPATCH_PREFIX} || d.id`;
   }
   const result = await db.execute(sql`
     UPDATE event_deliveries d

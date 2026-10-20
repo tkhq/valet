@@ -46,6 +46,8 @@ export function deliveryStatusLine(delivery: EventDeliveryWire, now: number): st
     case "delivered":
       return attempts;
     case "dead":
+      // The turn started before it failed, so it may have replied or acted.
+      if (delivery.turnFailed) return "The assistant's turn failed after it started, so it may have replied or acted already. Check its thread before you press Redeliver.";
       return `Gave up after ${attempts}. To send it again, press Redeliver.`;
     case "pending":
     case "failed": {

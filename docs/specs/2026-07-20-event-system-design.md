@@ -283,15 +283,19 @@ implemented in `packages/api/src/events/dispatcher.ts`:
   records the queue item. Three callers run it: the settle watcher, the
   dispatcher right after its "delivered" write (the turn can settle first),
   and a dispatcher sweep every 60 seconds over rows delivered in the last 24
-  hours, which reads the partial index `event_deliveries_delivered`. The
+  hours, which reads the partial index `event_deliveries_delivered` and joins
+  the recorded queue item by key, so it covers only rows that recorded one. The
   dispatcher's own check only logs a failure, because the delivery already
   succeeded. The sweep exists because the watcher's write can fail or the API can
   exit before it. The delivery is not retried: a retry only recovers the same
-  admission. Limits: an `aborted` turn (a person stopped it) stays delivered;
+  admission. The turn started before it failed, so it may have replied
+  or acted. `GET /api/events/:id` marks such a delivery `turnFailed`, and the
+  events UI tells the reader to check its thread before Redeliver. Limits:
+  an `aborted` turn (a person stopped it) stays delivered;
   a delivery merged into an overheard digest is not followed to the digest's
   turn; a turn that fails more than 24 hours after its delivery and that the
   watcher misses stays delivered.
-- The events Log shows a failed event's reason as its detail
+- The events Log shows a failed event's latest reason as its detail
   (`services/event-log.ts`), so the Problems filter names why. A dead
   delivery that a later redelivery superseded gives no reason, as it gives no
   failed status.
