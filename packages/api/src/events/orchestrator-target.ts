@@ -23,12 +23,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
-/**
- * The thread a non-channel event delivery lands on — the owner's default
- * assistant "events" firehose. Named so the outbound reply path can recognise
- * it without a magic string (`ChannelHost.deliverAssistantMessage`).
- */
-export const EVENTS_THREAD_KEY = "events";
+import { EVENTS_THREAD_KEY } from "./automated-threads.js";
+export { EVENTS_THREAD_KEY };
 
 /**
  * Which assistant thread an event signal lands on. A channel-originated signal
