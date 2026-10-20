@@ -56,6 +56,7 @@ let permissionsData: {
     provenance?: string;
     sharedAccount?: true;
     agentStep?: true;
+    granted?: true;
   }>;
 } = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
@@ -604,6 +605,14 @@ describe("WorkflowEditorPage — permissions badge and pre-approval", () => {
     permissionsData = { definitionToken: "review-a", accountConsent: { teamId: "team-1", teamName: "Fixture team", services: ["widgets"], pending: [] }, nodes: [] };
     render(<WorkflowEditorPage workflowId="wf_1" />);
     expect(screen.queryByTestId("approval-needed-banner")).toBeNull();
+  });
+
+  it("stops asking once saved permissions cover an agent step's dynamic action", () => {
+    permissionsData = { definitionToken: "review-a", nodes: [{ nodeId: "finish", service: "widgets", action: "save", actionId: "widgets.save",
+      mode: "unknown", agentStep: true, granted: true }] };
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.queryByTestId("approval-needed-banner")).toBeNull();
+    expect(screen.queryByText(/1 need approval/)).toBeNull();
   });
 
   it("hides the badge when nothing gates", () => {
