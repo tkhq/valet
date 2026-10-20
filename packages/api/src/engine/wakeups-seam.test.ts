@@ -846,6 +846,14 @@ describe("buildWakeupsSeam", () => {
       expect((await seam.list("thread-1")).wakeups.map((w) => w.id)).toEqual([result.wakeup.id]);
     });
 
+    it("passes the ingress-readiness warning back to the tool", async () => {
+      const store = await storeWithSession();
+      const warning = "GitHub App delivery readiness could not be checked.";
+      const checkArm = async () => ({ ok: true as const, subjects: ["github:acme/lean-proofs#42"], self: [], warning });
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      expect(await seam.armEvent!("thread-1", REQ)).toMatchObject({ warning, wakeup: { kind: "event" } });
+    });
+
     it("stores the arm's primarySubject in the match spec beside the wider subjects (final review, item 3)", async () => {
       const store = await storeWithSession();
       const checkArm = async () => ({

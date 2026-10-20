@@ -136,7 +136,7 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     expect(a4?.content).toContain("github.check_run.completed · failure");
     // The failure also fed the derived clause; build still runs, so its
     // derive digest was dropped with no signal.
-    expect((await p.engineStore.getWakeup(waiterId))?.eventSeen).toContain("derive:github.pull_request.checks_completed:gh-a4");
+    expect((await p.engineStore.getWakeup(waiterId))?.eventSourceSeen).toContain("derive:github.pull_request.checks_completed:gh-a4");
     await expectNoNewSignal(u, "event.matched", 1);
 
     // A5: build passes and no run is pending. The derived event reports the

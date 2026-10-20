@@ -18,6 +18,7 @@ import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, users, githubInstallations } from "../schema/index.js";
 import {
   buildAppConfig,
+  githubIngressConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
@@ -70,6 +71,33 @@ describe("github-app service", () => {
     db = appDb;
     credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+  });
+
+  it("caches live ingress configuration for one minute with App JWT auth", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const config = { events: ["check_run"], permissions: { checks: "read" } };
+    const http = vi.fn(async () => Response.json(config));
+    let now = 0;
+    const deps = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test", now: () => now };
+    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
+    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
+    expect(http).toHaveBeenCalledTimes(1);
+    expect(http).toHaveBeenCalledWith("https://github.test/app", expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer ey/) }) }));
+    now = 60_001;
+    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
+    expect(http).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns unknown ingress readiness without App credentials", async () => {
+    const http = vi.fn(async () => Response.json({}));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId)).toBeNull();
+    expect(http).not.toHaveBeenCalled();
+  });
+
+  it("returns unknown ingress readiness on a failed configuration read", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async () => { throw new Error("network"); });
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId)).toBeNull();
   });
 
   afterEach(async () => {

@@ -145,9 +145,8 @@ clean start.
 
 Scenario errata (Task 16):
 
-- D1 named `acme/other`. R2 checks owner coverage only (D1 errata), so a
-  repository under `acme` that the installation leaves out gets R3. D1 now
-  names an owner that installation `77` does not cover.
+- D1 names an owner that installation `77` does not cover.
+  R2 also checks installation access to the exact repository.
 - A5 and E3 depend on WakeWatcher passes. A stream waiter sends its first
   signal at once and later signals after the min interval. A5 therefore
   arrives after A4's interval, and E3's three messages arrive before one
@@ -322,20 +321,31 @@ subject.
 
 1. Read the pull request. If the source event's SHA differs from the
    current head SHA, return `null`.
-2. List check runs for the head SHA (all pages) and read the combined
-   commit status.
-3. If any check run has a status other than `completed`, or the combined
-   status is `pending` with at least one status, return `null`.
-4. Otherwise return an event with status `failure` when any conclusion is
-   `failure`, `timed_out`, `cancelled`, `action_required`, or
-   `startup_failure`, or the combined status is `failure` or `error`.
-   Return status `success` in all other cases.
+2. Read all visible pages of check runs, check suites, workflow runs, and
+   latest commit status contexts for the head SHA.
+3. If any check run, check suite, or workflow run has a status other than
+   `completed`, return `null`.
+   If any latest status context is not `success`, `failure`, or `error`,
+   return `null`.
+   Terminality is independent of the combined status result.
+4. Compute status `failure` when any visible conclusion is `failure`,
+   `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
+   A latest status context of `failure` or `error` also gives `failure`.
+   Otherwise compute status `success`.
+   Re-read the pull request head immediately before returning the event.
+   If the head changed, return `null`.
+   Include the evaluated commit as `head_sha` in the event and delivered digest.
 5. The derived `dedupeKey` is
    `derived:checks_completed:<owner>/<repo>@<sha>:<status>:<latest>`.
    `<latest>` is the newest `completed_at` of the check runs or
    `updated_at` of the statuses, as ISO 8601, or `0` when none reports
    one. A CI re-run on the same SHA finishes later, so it gets a new key
    and the waiter is not blocked by the earlier run's seen key.
+
+Completion describes check runs, check suites, workflow runs, and latest status
+contexts visible at derivation time. GitHub can create new work after these
+reads. The event does not guarantee that future checks will never appear.
+Consumers can compare `head_sha` with the current pull request head.
 
 A pull request with no checks never produces this event. The waiter's
 deadline ends that wait.
@@ -346,6 +356,10 @@ deadline ends that wait.
 |---|---|
 | Source SHA is an old head | `null` |
 | One check run `in_progress` | `null` |
+| One completed check and a queued suite or workflow | `null` |
+| Head changes during the reads | `null` |
+| Combined failure with a pending latest status context | `null` |
+| Pending context on a later page | `null` |
 | All runs `success`, no statuses | status `success` |
 | All runs complete, one `failure` | status `failure` |
 | All runs `success`, combined status `pending` with one status | `null` |
@@ -354,19 +368,20 @@ deadline ends that wait.
 
 *Depends on: Parts A and B.*
 
-An event waiter is a `wakeups` row with `kind = "event"`. Four nullable
+An event waiter is a `wakeups` row with `kind = "event"`. Five nullable
 columns hold its state:
 
 ```sql
 "match_json"   text,    -- { clauses, once, self, minIntervalMs, primarySubject }
 "subjects"     text[],  -- the subjects it waits on
 "event_buffer" text,    -- JSON array of match digests awaiting delivery
-"event_seen"   text     -- JSON array of delivered dedupe keys, oldest first
+"event_seen"   text,    -- JSON array of lifetime delivered dedupe keys
+"event_source_seen" text -- JSON array of recently consumed derivation source keys
 CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups"
   USING gin ("subjects") WHERE "kind" = 'event' AND "status" = 'running';
 ```
 
-- The four columns and the index MUST ship with matching `SCHEMA_REPAIRS`
+- The five columns and the index MUST ship with matching `SCHEMA_REPAIRS`
   entries.
   `ENGINE_SCHEMA_VERSION` MUST NOT change.
 - `WakeupKind` gains `event`. `WakeupCause` uses the existing `fired`,
@@ -390,21 +405,27 @@ Each write method is one statement.
   event waiters whose subjects overlap the argument.
 - `appendEventMatch(id, digest, updatedAt): Promise<boolean>` appends a
   digest and sets `updatedAt`. It appends only to a `running` row with
-  `kind = "event"`. It refuses a `dedupeKey` that `event_buffer` or
-  `event_seen` holds. It refuses when the buffer holds 200 digests, and it
-  counts that refusal in `valet_event_waiter_buffer_full_total`. It
-  returns whether it appended.
-- `removeEventMatches(id, dedupeKeys, updatedAt): Promise<boolean>` removes
+  `kind = "event"`.
+  It refuses a `dedupeKey` in `event_buffer`, `event_seen`, or `event_source_seen`.
+  It refuses when the buffer holds 200 digests.
+  It counts that refusal in `valet_event_waiter_buffer_full_total`.
+  It returns whether it appended.
+- `removeEventMatches(id, dedupeKeys, updatedAt, mode?): Promise<boolean>` removes
   only the digests with those keys from `event_buffer`. A digest that
   arrived after the caller read the row stays. It appends the keys to
-  `event_seen` and keeps the newest 256, so the oldest key drops first. It
-  returns false for an unknown id or a row that is not an event waiter.
+  `event_seen` for the lifetime of the waiter.
+  Source removal uses mode `source` and records keys in `event_source_seen`.
+  This separate replay list keeps the newest 256 source keys.
+  Source removal cannot evict delivered keys.
+  Existing `event_seen` keys remain valid after upgrade.
+  It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty or whose `deadlineAt` has passed.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
 `summary`, `url`, `actor` login, `occurredAt`, `dedupeKey`, `text`, and an
-optional `derive` key. A derive digest's `dedupeKey` is
+optional `derive` key. A derived completion also holds `head_sha`.
+A derive digest's `dedupeKey` is
 `derive:<derived key>:<event dedupeKey>`, so the direct digest and the
 derive digest of one event can both be buffered. `text` is the message or comment body, cut to 4096
 bytes on a UTF-8 code point boundary. Before it stores a digest, the store
@@ -461,10 +482,22 @@ D1 errata (Task 11):
   disconnected service gets R7 before any read. The tool checks R9 and R8.
   The host's `checkArm` (`packages/api/src/events/waiter-arm.ts`) checks
   the rest.
-- R2 checks owner coverage only: `installationResolvesFor` with
-  `strictOwner`. R3's read with the session's credential catches a
-  repository that the installation leaves out. An org with no GitHub App
-  gets R7.
+- R2 checks owner coverage with `installationResolvesFor` and `strictOwner`.
+  It also checks the exact repository with the App-authenticated installation read.
+  An org with no GitHub App gets R7.
+- GitHub arm checks read the App's live events and permissions with `GET /app`.
+  The host caches this configuration for 60 seconds.
+  Derived keys expand into their source event families.
+  `checks_completed` needs `check_run`, `check_suite`, `workflow_run`, and `status`.
+  These families need read access to `checks`, `actions`, and `statuses`.
+  A known missing event or permission refuses the wait.
+  The refusal names the missing setting.
+  It directs the person to update the App's "Permissions & events".
+  An org owner must approve those changes.
+  If the configuration cannot be read, the wait arms with a tool-result warning.
+- GitHub commit reads resolve abbreviated SHAs to the full 40-character SHA.
+  Arm stores the canonical commit subject.
+  If the commit response has no full SHA, arm asks for the full SHA.
 - R3 reads with the calling turn's credential provider
   (`ToolContext.credentials`). The tool passes it to `armEvent`, so the
   host credential resolver stays private to the host. A read that does not
@@ -543,9 +576,14 @@ step that returns early for an event that no subscription matched.
    `derive: <derived key>`.
 6. Nudge the WakeWatcher with the ids of the waiters that got a digest.
    The nudge runs a light pass over those rows only (Part F).
-7. Append a receipt stage `waiter_match` with the count of waiters that
-   matched. The stage holds metadata only. An event with no candidate
-   waiter adds no stage.
+7. Append a receipt stage `waiter_match` with separate counts for newly
+   buffered direct matches and derivation sources.
+   A successful lookup with no candidates records outcome `no_candidates`.
+   An evaluation or append failure records outcome `failed`.
+   The stage holds metadata only.
+   The WakeWatcher logs each later derivation outcome as `event`, `null`, or `error`.
+   Each log names the waiter id and source dedupe key.
+   Source digests carry no receipt id, so these outcomes do not update receipts.
 
 Claims (`2026-10-16-delivery-threads-and-claims-design.md`, Part C)
 decide which waiters append their digests in step 5, including for a bot
@@ -652,7 +690,7 @@ another digest.
 
 `event.matched` attributes: `wakeupId`, `kind: event`, `subject`,
 `matchCount`, and `digests`. `digests` is a JSON array of
-`{ key, status, actor, summary, url }`, with no text, for the digests the
+`{ key, status, actor, summary, url, head_sha? }`, with no text, for the digests the
 signal shows as blocks. The web card renders from it and falls back to the
 body when it is absent. `matchCount` counts every digest the signal names. `event.ended` attributes: `wakeupId`, `kind: event`,
 `subject`, `cause`.
@@ -765,7 +803,7 @@ hour, with the first-series pattern of the wakeups spec.
   path has no `createLease` call; vector A1 asserts `leases` is empty.
 - **INV-E4 A matched event reaches a thread at most once per waiter.**
   Mechanism: `appendEventMatch` refuses a `dedupeKey` present in
-  `event_buffer` or `event_seen`; dispatch ids are per event count. Vector: a provider redelivery yields one signal.
+  `event_buffer` or lifetime `event_seen`; consumed sources have separate replay state. Dispatch ids are per event count. Vector: a provider redelivery yields one signal.
 - **INV-E5 Every ending except an agent cancel sends exactly one terminal
   signal.** Mechanism: the existing single-statement `transitionWakeup` CAS.
 - **INV-E6 Matching cost is independent of the number of waiters.**
@@ -835,9 +873,9 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
 
 ## Deviations
 
-- B1 step 2 reads at most 20 pages of 100 check runs. If a head SHA has
-  more, `derive` fails with an error that names `github.check_suite.completed`
-  as the alternative. A silent cut could report a false `success`.
+- B1 step 2 reads at most 20 pages of 100 entries per endpoint.
+  If any endpoint needs more pages, `derive` fails instead of using a partial snapshot.
+  The source stays buffered for retry.
 - The subscription editors' catalogs (`GET /api/events/catalog` and
   `GET /api/workflows/trigger-catalog`) leave out derived keys, because
   subscriptions refuse them (Part G). `workflows.list_event_types` lists them

@@ -59,12 +59,14 @@ export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
 /** The most digests an event waiter buffers. `appendEventMatch` refuses past it. */
 export const EVENT_BUFFER_MAX_DIGESTS = 200;
 
-/** The most delivered dedupe keys an event waiter remembers, newest kept (INV-E4). */
-export const EVENT_SEEN_MAX_KEYS = 256;
+/** The most consumed derivation sources an event waiter remembers. */
+export const EVENT_SOURCE_SEEN_MAX_KEYS = 256;
 
 /** The bounded record of one matched event that an event waiter holds until delivery. */
 export interface EventMatchDigest {
   key: string;
+  /** The commit evaluated by a derived completion. */
+  head_sha?: string;
   status?: string;
   previousStatus?: string;
   subjects: string[];
@@ -133,10 +135,12 @@ export interface Wakeup {
   /** `event`: matched digests awaiting delivery. Delivery removes them by dedupe key. */
   eventBuffer?: EventMatchDigest[];
   /**
-   * `event`: the dedupe keys of the newest delivered digests, oldest first,
-   * at most `EVENT_SEEN_MAX_KEYS`. Only `removeEventMatches` writes it.
+   * `event`: delivered dedupe keys for the lifetime of the waiter.
+   * Existing rows can also contain legacy consumed-source keys.
    */
   eventSeen?: string[];
+  /** Consumed derivation sources, bounded independently of delivered keys. */
+  eventSourceSeen?: string[];
 }
 
 /** What kind of owner holds a lease open. */
@@ -260,7 +264,7 @@ export interface ArmEventRequest {
 }
 
 /** What `WakeupsSeam.armEvent` returns: the new event waiter, or the refusal text the tool returns. */
-export type ArmEventResult = { wakeup: Wakeup } | { refused: string };
+export type ArmEventResult = { wakeup: Wakeup; warning?: string } | { refused: string };
 
 /** Host seam a tool context uses to create and manage wakeups and leases. */
 export interface WakeupsSeam {

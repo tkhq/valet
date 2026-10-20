@@ -30,7 +30,7 @@ import type {
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
 import { boundEventDigest } from "../../wakeups/digest.js";
-import { EVENT_BUFFER_MAX_DIGESTS, EVENT_SEEN_MAX_KEYS } from "../../wakeups/types.js";
+import { EVENT_BUFFER_MAX_DIGESTS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -402,7 +402,7 @@ export class InMemorySessionStore implements SessionStore {
     const bounded = boundEventDigest(digest);
     const buffer = w.eventBuffer ?? [];
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
-    if ((w.eventSeen ?? []).includes(bounded.dedupeKey)) return false;
+    if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
     if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
@@ -411,13 +411,15 @@ export class InMemorySessionStore implements SessionStore {
     return true;
   }
 
-  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean> {
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number, mode: "delivered" | "source" = "delivered"): Promise<boolean> {
     const w = this.wakeups.get(id);
     if (!w || w.kind !== "event") return false;
     const removed = new Set(dedupeKeys);
-    const eventSeen = [...(w.eventSeen ?? []).filter((k) => !removed.has(k)), ...removed].slice(-EVENT_SEEN_MAX_KEYS);
+    const field = mode === "source" ? "eventSourceSeen" : "eventSeen";
+    const keys = [...(w[field] ?? []).filter((key) => !removed.has(key)), ...removed];
+    const seen = mode === "source" ? keys.slice(-EVENT_SOURCE_SEEN_MAX_KEYS) : keys;
     const eventBuffer = (w.eventBuffer ?? []).filter((d) => !removed.has(d.dedupeKey));
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, eventSeen, updatedAt }));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, [field]: seen, updatedAt }));
     return true;
   }
 

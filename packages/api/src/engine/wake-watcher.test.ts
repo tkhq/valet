@@ -1124,6 +1124,35 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(h.wakeupEnded).not.toHaveBeenCalled();
   });
 
+  it("keeps a delivered completion deduped after 257 discarded sources", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [{ ...derived, head_sha: "a".repeat(40) }] }, false));
+    const logs = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const w = h.watcher({ deriveEvent: async () => ({ result: "null" }) });
+    try {
+      await w.sweep(NOW);
+      const { content } = signalOf(h.prompt.mock.calls[0]);
+      expect(content).toMatchObject({ attributes: { digests: expect.stringContaining(`"head_sha":"${"a".repeat(40)}"`) } });
+      for (let i = 0; i < 257; i++) {
+        await h.store.appendEventMatch("wk_ev", digest(i, { dedupeKey: `source-${i}`, derive: CHECKS }), NOW);
+        await w.sweep(NOW);
+      }
+      expect(await h.store.appendEventMatch("wk_ev", derived, NOW)).toBe(false);
+      expect(h.prompt).toHaveBeenCalledTimes(1);
+      expect(logs).toHaveBeenCalledWith("WakeWatcher: event waiter derivation", expect.objectContaining({ result: "null", sourceDedupeKey: "source-256" }));
+    } finally { logs.mockRestore(); }
+  });
+
+  it.each(["event", "null", "error"] as const)("logs the %s derivation outcome with its source key", async (result) => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const logs = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      await h.watcher({ deriveEvent: async () => result === "event" ? { result, digest: derived } : result === "null" ? { result } : { result, error: new Error("network") } }).sweep(NOW);
+      expect(logs).toHaveBeenCalledWith("WakeWatcher: event waiter derivation", expect.objectContaining({ result, sourceDedupeKey: "d-1", waiterId: "wk_ev" }));
+    } finally { logs.mockRestore(); }
+  });
+
   it("holds a stream-mode digest inside the min interval and sends it after", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(2)], eventCount: 1, lastEmitAt: NOW - 60_000 }, false));
@@ -1205,7 +1234,7 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
       expect(deriveEvent.mock.calls.map((c) => c[1].dedupeKey).sort()).toEqual([`derive:${CHECKS}:d-1`, `derive:${CHECKS}:d-3`]);
       const row = await h.store.getWakeup("wk_ev");
       expect(row?.eventBuffer?.map((d) => d.dedupeKey)).toEqual([`derive:${CHECKS}:d-1`]);
-      expect(row?.eventSeen).toEqual([`derive:${CHECKS}:d-2`, `derive:${CHECKS}:d-3`]);
+      expect(row?.eventSourceSeen).toEqual([`derive:${CHECKS}:d-2`, `derive:${CHECKS}:d-3`]);
       expect(h.prompt).not.toHaveBeenCalled();
     });
   });

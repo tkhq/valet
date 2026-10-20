@@ -4,12 +4,14 @@
  * are the real GitHub, Slack, and Linear manifests, so subject parsing and
  * the event catalogs are the shipped ones.
  */
+import { generateKeyPairSync } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { ArmEventRequest, Credential, CredentialProvider, CredentialStore, ThreadData } from "@valet/engine";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { githubInstallations } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
 import { upsertFollowedThread } from "./followed-threads.js";
 import { armDeps, checkArm, type ArmDeps, type ArmProviders } from "./waiter-arm.js";
@@ -22,6 +24,7 @@ function deps(over: Partial<ArmDeps> = {}): ArmDeps {
     plugins: PLUGINS,
     serviceConnected: async () => true,
     githubInstallationCovers: async () => true,
+    githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status", "push"], permissions: { checks: "read", actions: "read", statuses: "read", contents: "read" } }),
     slackTeamId: async () => "T001",
     readGithub: async () => ({ readable: true, pullRequest: true }),
     readSlackChannel: async () => ({ ok: true, isPrivate: false, isMember: true, name: "general" }),
@@ -62,7 +65,7 @@ describe("checkArm passes", () => {
       self: ["1001", "9001"],
       primarySubject: "github:acme/lean-proofs#42",
     });
-    expect(covers).toHaveBeenCalledWith("acme");
+    expect(covers).toHaveBeenCalledWith("acme", "lean-proofs");
     expect(readGithub).toHaveBeenCalledWith({ owner: "acme", repo: "lean-proofs", number: 42 });
   });
 
@@ -105,6 +108,56 @@ describe("checkArm passes", () => {
   it("accepts a clause key glob that names a catalog family", async () => {
     const result = await checkArm(deps(), CTX, req({ on: [{ key: "github.check_run.*" }] }));
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("GitHub arm correctness", () => {
+  it.each(["check_run", "check_suite", "workflow_run", "status"])("refuses a derived wait missing event %s", async (family) => {
+    const config = { events: ["check_run", "check_suite", "workflow_run", "status"].filter((e) => e !== family), permissions: { checks: "read", actions: "read", statuses: "read" } };
+    const result = await checkArm(deps({ githubIngressConfig: async () => config }), CTX, req());
+    expect(result).toEqual({ ok: false, text: expect.stringContaining(`event ${family}`) });
+    expect(result.ok === false && result.text).toContain('"Permissions & events"');
+    expect(result.ok === false && result.text).toContain("org owner approve");
+  });
+
+  it("refuses a missing read permission", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read" } }) }), CTX, req());
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("permission statuses: read") });
+  });
+
+  it.each(["null", "throw", "timeout"])("arms with a warning when config read returns %s", async (mode) => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => {
+      if (mode === "throw") throw new Error("network");
+      if (mode === "timeout") return new Promise(() => undefined);
+      return null;
+    } }), CTX, req(), { timeoutMs: 10 });
+    expect(result).toMatchObject({ ok: true, warning: expect.stringContaining("could not be checked") });
+  });
+
+  it("accepts either documented permission for issue comments", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { pull_requests: "read" } }) }), CTX, req({ on: [{ key: "github.issue_comment.created" }] }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("expands direct event globs into their event family", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: [], permissions: { checks: "read" } }) }), CTX, req({ on: [{ key: "github.check_run.*" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event check_run") });
+  });
+
+  it("asks for the full SHA when the abbreviated commit cannot be read", async () => {
+    const result = await checkArm(deps({ readGithub: async () => ({ readable: false }) }), CTX, req({ subject: "github:acme/lean-proofs@aaaaaaa", on: [{ key: "github.status" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("full 40-character SHA") });
+  });
+
+  it.each(["github:acme/lean-proofs@aaaaaaa", "https://github.com/acme/lean-proofs/commit/aaaaaaa"])("canonicalizes the short commit subject %s before storage", async (subject) => {
+    const sha = "a".repeat(40);
+    const result = await checkArm(deps({ readGithub: async () => ({ readable: true, sha }) }), CTX, req({ subject, on: [{ key: "github.status" }] }));
+    expect(result).toMatchObject({ ok: true, subjects: [`github:acme/lean-proofs@${sha}`] });
+  });
+
+  it("asks for the full SHA if canonicalization is unavailable", async () => {
+    const result = await checkArm(deps(), CTX, req({ subject: "github:acme/lean-proofs@aaaaaaa", on: [{ key: "github.status" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("full 40-character SHA") });
   });
 });
 
@@ -375,6 +428,18 @@ describe("armDeps", () => {
     expect(await d.readLinear({ issue: "ENG-404" })).toBe(false);
   });
 
+  it("checks the exact repository installation even when the session can read public metadata", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    const env = { GITHUB_APP_ID: "123", GITHUB_APP_SLUG: "test", GITHUB_APP_CLIENT_ID: "client", GITHUB_APP_CLIENT_SECRET: "test", GITHUB_APP_PRIVATE_KEY: privateKey };
+    await tdb.appDb.insert(githubInstallations).values({ id: "arm-install", orgId: "acme", installationId: 77, accountLogin: "acme", accountType: "Organization", createdAt: 1, updatedAt: 1 });
+    const http = vi.fn(async (input: string | URL | Request) => String(input).endsWith("/lean-proofs/installation")
+      ? Response.json({ id: 77, suspended_at: null }) : new Response("{}", { status: 404 }));
+    const d = armDeps(providers(), personal, credentials({ github: { accessToken: "user" } }), { fetch: http, env, githubApiUrl: "https://gh.test" });
+    expect(await d.githubInstallationCovers("acme", "lean-proofs")).toBe(true);
+    expect(await d.githubInstallationCovers("acme", "public-but-not-installed")).toBe(false);
+    expect(http).toHaveBeenCalledWith("https://gh.test/repos/acme/public-but-not-installed/installation", expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer ey/) }) }));
+  });
+
   it("readGithub reports a pull request and an unreadable repository", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) =>
       String(url).endsWith("/issues/42")
@@ -387,6 +452,13 @@ describe("armDeps", () => {
     expect(await d.readGithub({ owner: "acme", repo: "lean-proofs", number: 42 })).toEqual({ readable: true, pullRequest: true });
     expect(await d.readGithub({ owner: "acme", repo: "other" })).toEqual({ readable: false });
     expect(fetchImpl).toHaveBeenCalledWith("https://gh.test/repos/acme/lean-proofs/issues/42", expect.anything());
+  });
+
+  it("readGithub preserves the canonical SHA returned for an abbreviated SHA", async () => {
+    const sha = "a".repeat(40);
+    const fetchImpl = vi.fn(async () => Response.json({ sha }));
+    const d = armDeps(providers(), personal, credentials({ github: { accessToken: "gh" } }), { fetch: fetchImpl });
+    expect(await d.readGithub({ owner: "acme", repo: "lean-proofs", sha: "aaaaaaa" })).toEqual({ readable: true, sha });
   });
 
   it("readGithub without a session credential is unreadable", async () => {

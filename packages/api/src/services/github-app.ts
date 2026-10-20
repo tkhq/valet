@@ -341,6 +341,54 @@ export async function githubAppRepositoryAccess(
   return body.suspended_at === null;
 }
 
+/** Live App delivery configuration. A missing value means readiness is unknown. */
+export interface GithubIngressConfig {
+  events: string[];
+  permissions: Record<string, unknown>;
+}
+
+const INGRESS_CONFIG_TTL_MS = 60_000;
+const ingressConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<GithubIngressConfig | null> }>>();
+
+/** Cache the App read briefly across arm calls. Unknown configuration permits arming with a warning. */
+export async function githubIngressConfig(
+  deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
+  orgId: string,
+): Promise<GithubIngressConfig | null> {
+  let config: GithubAppConfig | null;
+  try {
+    config = await loadAppConfig(deps, orgId);
+  } catch {
+    return null;
+  }
+  if (!config) return null;
+  const now = (deps.now ?? Date.now)();
+  const key = `${orgId}:${config.appId}:${githubApiUrl(deps)}`;
+  let cache = ingressConfigs.get(deps.credentials);
+  if (!cache) {
+    cache = new Map();
+    ingressConfigs.set(deps.credentials, cache);
+  }
+  const cached = cache.get(key);
+  if (cached && cached.until > now) return cached.value;
+  const value = (async (): Promise<GithubIngressConfig | null> => {
+    try {
+      const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, {
+        headers: appJwtHeaders(mintAppJwt(config)), signal: AbortSignal.timeout(4_000),
+      });
+      if (!res.ok) return null;
+      const body: unknown = await res.json();
+      if (!isRecord(body) || !Array.isArray(body.events) || !body.events.every((e) => typeof e === "string") ||
+          !isRecord(body.permissions) || Array.isArray(body.permissions)) return null;
+      return { events: body.events, permissions: body.permissions };
+    } catch {
+      return null;
+    }
+  })();
+  cache.set(key, { until: now + INGRESS_CONFIG_TTL_MS, value });
+  return value;
+}
+
 // ── Credential verification (`GET /app`) ─────────────────────────────────
 // The admin route that connects an app which already exists checks the app
 // id and the private key against GitHub BEFORE it stores them. Without the

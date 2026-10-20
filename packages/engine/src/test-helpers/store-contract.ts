@@ -896,18 +896,34 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
       });
 
-      it("removeEventMatches keeps the newest 256 seen keys", async () => {
+      it("removeEventMatches preserves delivered keys for the waiter lifetime", async () => {
         await store.createWakeup(eventWaiter());
         const keys = Array.from({ length: 257 }, (_, i) => `k-${i}`);
         await store.removeEventMatches("wk_ev", keys.slice(0, 100), 20);
         await store.removeEventMatches("wk_ev", keys.slice(100), 21);
         const seen = (await store.getWakeup("wk_ev"))?.eventSeen ?? [];
-        expect(seen).toHaveLength(256);
-        expect(seen[0]).toBe("k-1");
-        expect(seen[255]).toBe("k-256");
-        // The oldest key fell off the seen list, so it appends again.
-        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-0" }), 22)).toBe(true);
+        expect(seen).toHaveLength(257);
+        expect(seen[0]).toBe("k-0");
+        expect(seen[256]).toBe("k-256");
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-0" }), 22)).toBe(false);
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-1" }), 23)).toBe(false);
+      });
+
+      it("consuming 257 derivation sources cannot evict a delivered completion", async () => {
+        await store.createWakeup(eventWaiter({ eventSeen: ["legacy-completion"] }));
+        await store.appendEventMatch("wk_ev", digest({ dedupeKey: "completion" }), 20);
+        await store.removeEventMatches("wk_ev", ["completion"], 21);
+        for (let i = 0; i < 257; i++) {
+          const key = `source-${i}`;
+          await store.appendEventMatch("wk_ev", digest({ dedupeKey: key, derive: "checks" }), 22);
+          await store.removeEventMatches("wk_ev", [key], 23, "source");
+        }
+        const row = await store.getWakeup("wk_ev");
+        expect(row?.eventSeen).toEqual(["legacy-completion", "completion"]);
+        expect(row?.eventSourceSeen).toHaveLength(256);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "completion" }), 24)).toBe(false);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "legacy-completion" }), 24)).toBe(false);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "source-256" }), 24)).toBe(false);
       });
 
       it("removeEventMatches returns false for an unknown id or a row that is not an event waiter", async () => {

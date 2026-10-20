@@ -487,12 +487,15 @@ export class WakeWatcher {
       } catch (error) {
         outcome = { result: "error", error };
       }
+      console.info("WakeWatcher: event waiter derivation", {
+        waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
+      });
       if (outcome.result === "error") {
         console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
         return;
       }
       const at = this.clock();
-      await this.deps.engineStore.removeEventMatches(row.id, sources, at);
+      await this.deps.engineStore.removeEventMatches(row.id, sources, at, "source");
       const key = latest.derive;
       if (outcome.result === "event" && key !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, key, outcome.digest)) {
         await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);

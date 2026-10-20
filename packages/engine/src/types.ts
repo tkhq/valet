@@ -2335,12 +2335,13 @@ export interface SessionStore {
   appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean>;
   /**
    * Removes the digests with `dedupeKeys` from the event wakeup's
-   * `eventBuffer`, appends those keys to `eventSeen` (newest
-   * `EVENT_SEEN_MAX_KEYS` kept), and sets `updatedAt`, in one statement.
+   * `eventBuffer` and records those keys in one statement.
+   * Delivered keys stay in `eventSeen` for the waiter lifetime.
+   * Consumed sources use the separate bounded `eventSourceSeen` list.
    * A digest appended after the caller read the row stays buffered.
    * False for an unknown id or a row that is not an event wakeup.
    */
-  removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean>;
+  removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number, mode?: "delivered" | "source"): Promise<boolean>;
   /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
   countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */

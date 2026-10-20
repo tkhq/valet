@@ -79,7 +79,7 @@ async function matchEventWaiters(
   decisions?: ReadonlyMap<string, WaiterDecision>,
 ): Promise<{ candidates: number; appended: number }> {
   const candidates = await evaluateWaiterCandidates(deps, orgId, service, event);
-  return { candidates: candidates.length, appended: await appendWaiterDigests(deps, service, candidates, decisions) };
+  return { candidates: candidates.length, appended: (await appendWaiterDigests(deps, service, candidates, decisions)).waiters };
 }
 
 describe("evaluateWaiterCandidates and appendWaiterDigests", () => {

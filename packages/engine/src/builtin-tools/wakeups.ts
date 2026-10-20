@@ -331,7 +331,7 @@ export const waitForEventTool = defineTool({
     const clauses = validation.value.on.map(clauseText).join(", ");
     const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
     return {
-      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.`,
+      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${result.warning ? `\nWarning: ${result.warning}` : ""}`,
     };
   },
 });
