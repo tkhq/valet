@@ -852,7 +852,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
   const metabaseScopeChallenge = {
     'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
   };
-  async function insufficientScopeError(source: CredentialSource, sessionPurpose?: 'workflow'): Promise<unknown> {
+  async function insufficientScopeError(source: CredentialSource): Promise<unknown> {
     vi.stubGlobal('fetch', makeFetchMockFailingCall(403, 'forbidden', metabaseScopeChallenge));
     const plugin = mcpActionPlugin({
       mcpUrl: 'https://mb.example.com/api/metabase-mcp',
@@ -863,7 +863,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     });
     const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'], source });
     const [action] = await plugin.resolveActions!({ credentials });
-    const result = await action.execute({}, { ...fakeContext(credentials), ...(sessionPurpose ? { sessionPurpose } : {}) });
+    const result = await action.execute({}, fakeContext(credentials));
     return result.success ? undefined : result.error;
   }
 
@@ -875,21 +875,10 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     );
   });
 
-  it('links a team step-up through the session, and says it swaps the team account', async () => {
-    const error = await insufficientScopeError({ kind: 'team' });
-    expect(error).toContain('/api/credentials/metabase/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun&session=session-1');
-    expect(error).toContain("This replaces the team's Turnkey Metabase connection with your own Turnkey Metabase account.");
-  });
-
-  it('keeps the admin fix for a team connection in a workflow run, which has no conversation to link', async () => {
-    expect(await insufficientScopeError({ kind: 'team' }, 'workflow')).toBe(
-      'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
-        "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
-    );
-  });
-
-  it('keeps the admin fix for a connection the caller cannot re-grant', async () => {
-    expect(await insufficientScopeError({ kind: 'app' })).toBe(
+  // A team connection is shared: a member's sign-in would make the team act
+  // as that member, so its missing scope stays an admin fix.
+  it.each([{ kind: 'team' }, { kind: 'app' }] as CredentialSource[])('keeps the admin fix for a $kind connection', async (source) => {
+    expect(await insufficientScopeError(source)).toBe(
       'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
         "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
     );

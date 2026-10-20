@@ -273,22 +273,20 @@ function missingScopes(err: unknown, grantedScopes: string[] | undefined): strin
  * service with no config scopes, keeps the fix for whoever holds the account.
  *
  * Step-up (MCP authorization, "Scope Challenge Handling"): for an undeclared
- * scope on the caller's own connection or the team's, the message links to
- * the connect route with the held and missing scopes, so the person can
- * approve the added scope on the provider's screen and then ask for a retry.
- * `configScopes` is set only for an `auth: oauth` config entry, so the link
- * always has a sign-in to go to. `session` lets the route find the team
- * without the link naming it, so a team link needs a conversation: a workflow
- * run's session id is not one, and its team connection keeps the admin fix.
- * Any other connection (an app, org, vault or another member's shared
- * account) keeps the admin fix too.
+ * scope on the caller's own connection, the message links to the connect
+ * route with the held and missing scopes, so the person can approve the added
+ * scope on the provider's screen and then ask for a retry. `configScopes` is
+ * set only for an `auth: oauth` config entry, so the link always has a
+ * sign-in to go to. Every other connection keeps the admin fix: a team
+ * connection is shared, and a member's sign-in would make the team act as
+ * that member.
  */
 function rejectionMessage(
   err: unknown,
   { source, scopes }: ResolvedToken,
   text: RejectionText,
   configScopes: string[] | undefined,
-  stepUp: { service: string; sessionId: string; workflow: boolean },
+  service: string,
 ): string | undefined {
   const missing = missingScopes(err, scopes);
   const accountFix = authRejectionMessage(err, source, text);
@@ -299,13 +297,10 @@ function rejectionMessage(
   if (undeclared.length > 0) {
     const list = undeclared.join(', ');
     const refused = `${label} refused this call: the connection does not hold the ${list} ${noun(undeclared)}.`;
-    const kind = source?.kind;
-    if (kind === 'personal' || (kind === 'team' && !stepUp.workflow)) {
+    if (source?.kind === 'personal') {
       const addScopes = [...new Set([...(scopes ?? []), ...missing])].sort().join(' ');
-      const query = new URLSearchParams({ addScopes, ...(kind === 'team' ? { session: stepUp.sessionId } : {}) });
-      const link = `/api/credentials/${encodeURIComponent(stepUp.service)}/connect?${query.toString()}`;
-      const team = kind === 'team' ? ` This replaces the team's ${label} connection with your own ${label} account.` : '';
-      return `${refused} To grant it, open ${link} and approve the request on ${label}'s screen. Then ask me to retry.${team}`;
+      const link = `/api/credentials/${encodeURIComponent(service)}/connect?${new URLSearchParams({ addScopes }).toString()}`;
+      return `${refused} To grant it, open ${link} and approve the request on ${label}'s screen. Then ask me to retry.`;
     }
     return `${refused} Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`;
   }
@@ -343,9 +338,7 @@ function mapToolToAction(
         const result = await client.callTool(resolved.token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = rejectionMessage(err, resolved, messages, configScopes, {
-          service: serviceName, sessionId: ctx.sessionId, workflow: ctx.sessionPurpose === 'workflow',
-        });
+        const rejection = rejectionMessage(err, resolved, messages, configScopes, serviceName);
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }

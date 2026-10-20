@@ -35,28 +35,11 @@ export async function lockTeamCredentialRole(
 }
 
 async function teamConnectionRow(db: AppQueryable, teamId: string, service: string, lock: boolean) {
-  const query = db.select({
-    type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata, scopes: credentials.scopes,
-    createdAt: credentials.createdAt, updatedAt: credentials.updatedAt,
-  })
+  const query = db.select({ type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata })
     .from(credentials)
     .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId), eq(credentials.service, service)));
   const [row] = lock ? await query.for("update") : await query;
-  return row
-    ? { ...row, metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata), scopes: fromJsonbColumn<string[]>(row.scopes) }
-    : undefined;
-}
-
-/**
- * The version of the team's connection for `service`: its creation and last
- * write times, or undefined when the team has none. A step-up records it when
- * the person opens the link, and the callback replaces only that version. A
- * replacement, a delete and re-create, and a token refresh each change it, so
- * a refresh during the sign-in makes the person start the step-up again.
- */
-export async function teamConnectionVersion(db: AppQueryable, teamId: string, service: string): Promise<string | undefined> {
-  const row = await teamConnectionRow(db, teamId, service, false);
-  return row ? `${row.createdAt}:${row.updatedAt}` : undefined;
+  return row ? { ...row, metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata) } : undefined;
 }
 
 /** True when the team's connection for `service` is dead (`isDeadConnection`). */
@@ -78,35 +61,6 @@ export async function replaceDeadTeamCredential(
   if (!row || !isDeadConnection(row, now)) return false;
   await replaceCredential(tx, encryptionKey, { type: "team", id: teamId }, service, credential);
   return true;
-}
-
-/**
- * Replaces the team's connection with one that holds more scopes (step-up
- * after an `insufficient_scope` answer). Any member may do this, as for a
- * dead connection: the new row holds the signing-in member's account. The
- * locked row must still be the version the step-up started from
- * (`teamConnectionVersion`), and the replacement happens only when the request
- * adds a scope the connection lacks and the grant keeps every scope the
- * connection holds plus every requested one. A narrower grant, a request that
- * adds nothing, a connection whose grant is unknown, and a connection that
- * someone changed or removed while the member signed in are all kept. Call
- * inside the transaction that holds `lockTeamCredentialRole`.
- */
-export async function replaceTeamCredentialForStepUp(
-  tx: AppTx, encryptionKey: string, teamId: string,
-  service: string, credential: StoredCredential, requested: string[], from: string,
-): Promise<"replaced" | "removed" | "not_granted"> {
-  const row = await teamConnectionRow(tx, teamId, service, true);
-  if (!row) return "removed";
-  if (`${row.createdAt}:${row.updatedAt}` !== from) return "not_granted";
-  const held = row.scopes;
-  if (!Array.isArray(held)) return "not_granted";
-  const granted = new Set(credential.scopes ?? []);
-  const adds = requested.some((scope) => !held.includes(scope));
-  const keeps = [...held, ...requested].every((scope) => granted.has(scope));
-  if (!adds || !keeps) return "not_granted";
-  await replaceCredential(tx, encryptionKey, { type: "team", id: teamId }, service, credential);
-  return "replaced";
 }
 
 function encryptedCredentialValues(

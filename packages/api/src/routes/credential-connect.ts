@@ -23,8 +23,7 @@ import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
 import {
-  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, replaceTeamCredentialForStepUp, teamConnectionIsDead,
-  teamConnectionVersion,
+  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, teamConnectionIsDead,
 } from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
@@ -43,8 +42,6 @@ import {
   getMcpOAuthClient,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
-import { and, eq } from "drizzle-orm";
-import { agentSessions } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
   identityForExternal,
@@ -72,13 +69,6 @@ interface OAuthConnectState {
   /** Step-up: the scopes the authorize request asked for, stored when the
    * token response names none. */
   scopes?: string[];
-  /** Step-up on a team: the added scopes. The callback replaces the team's
-   * live connection only with a grant that holds them and every scope the
-   * connection already holds (`replaceTeamCredentialForStepUp`). */
-  stepUp?: string[];
-  /** Step-up on a team: the connection version the step-up started from
-   * (`teamConnectionVersion`). The callback replaces only that version. */
-  stepUpFrom?: string;
   nonce: string;
   exp: number;
 }
@@ -91,7 +81,7 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, stepUp, stepUpFrom } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
@@ -99,8 +89,6 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
-    if (stepUp !== undefined && (!Array.isArray(stepUp) || !stepUp.every((s) => typeof s === "string") || typeof teamId !== "string")) return null;
-    if ((stepUp === undefined) !== (stepUpFrom === undefined) || (stepUpFrom !== undefined && typeof stepUpFrom !== "string")) return null;
     if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
     return {
@@ -109,9 +97,6 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
       ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
-      ...(Array.isArray(stepUp) && typeof stepUpFrom === "string"
-        ? { stepUp: stepUp.filter((s): s is string => typeof s === "string"), stepUpFrom }
-        : {}),
     };
   });
 }
@@ -168,20 +153,6 @@ export function parseAddScopes(raw: string | undefined): string[] | undefined | 
   return [...new Set(scopes)].sort();
 }
 
-/**
- * Whose connection a step-up link from a conversation refers to: the team that
- * owns the session, or the caller's own account. Null for a session in another
- * organization, another person's session, or one with any other owner.
- */
-async function stepUpOwner(db: AppQueryable, user: { id: string; orgId: string }, sessionId: string): Promise<{ teamId?: string } | null> {
-  const [row] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
-    .from(agentSessions).where(and(eq(agentSessions.id, sessionId), eq(agentSessions.orgId, user.orgId))).limit(1);
-  if (!row) return null;
-  if (row.ownerType === "team") return { teamId: row.ownerId };
-  if (row.ownerType === "user" && row.ownerId === user.id) return {};
-  return null;
-}
-
 credentialConnectRouter.get("/:service/connect", async (c) => {
   const service = c.req.param("service");
   const user = c.var.user;
@@ -194,8 +165,9 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (scope !== undefined && scope !== "team" && scope !== "user") {
     return c.json({ error: "Choose Personal or a team before connecting." }, 400);
   }
-  // Step-up (insufficient_scope): the scopes to add, and the conversation whose
-  // connection lacks them. The session names the team, so the link need not.
+  // Step-up (insufficient_scope): the scopes to add to the caller's own
+  // connection. A team connection is shared, so a member's sign-in would make
+  // the whole team act as that member; its missing scope stays an admin fix.
   const addScopes = parseAddScopes(c.req.query("addScopes"));
   if (addScopes === null) {
     return c.json({ error: "The requested scopes are not valid. Open the link from the assistant's message again." }, 400);
@@ -203,25 +175,16 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (addScopes && found.oauth.mode !== "mcp") {
     return c.json({ error: "Only an MCP sign-in can add scopes. Reconnect this service on the Integrations page." }, 400);
   }
-  let teamId = c.req.query("teamId");
-  const sessionId = c.req.query("session");
-  if (sessionId !== undefined) {
-    const owner = addScopes ? await stepUpOwner(db, user, sessionId) : null;
-    if (!owner || (owner.teamId !== undefined && teamId !== undefined && teamId !== owner.teamId)) {
-      return c.json({ error: "Conversation not found. Open the link from the assistant's message again." }, 404);
-    }
-    teamId = owner.teamId;
+  const teamId = c.req.query("teamId");
+  if (addScopes && teamId !== undefined) {
+    return c.json({ error: "Scopes can be added only to your own connection. Ask an admin to add them to the integration's scopes." }, 400);
   }
-  // A team step-up comes only from an assistant's link, which names the
-  // conversation. A bare `teamId` with `addScopes` is an ordinary team connect.
-  const stepUp = addScopes !== undefined && sessionId !== undefined && teamId !== undefined;
   // Every connect lands on /integrations. An old `?landing=` link is
   // ignored, so the callback cannot be steered.
   if (scope === "user" && teamId !== undefined) {
     return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
   }
   if (c.req.query("scope") === "team" && !teamId) return c.json({ error: "Choose a team before connecting." }, 400);
-  if (stepUp && c.req.query("reconnect") === "1") return c.json({ error: "Open the link from the assistant's message again." }, 400);
   const reconnect = c.req.query("reconnect") === "1";
   if (reconnect && teamId === undefined) return c.json({ error: "Choose the team whose connection to reconnect." }, 400);
   if (teamId !== undefined) {
@@ -238,10 +201,6 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
     }
   }
-  const stepUpFrom = stepUp && teamId !== undefined ? await teamConnectionVersion(db, teamId, service) : undefined;
-  if (stepUp && stepUpFrom === undefined) {
-    return c.json({ error: "This team has no connection to add scopes to. Connect one for the team on the Integrations page." }, 400);
-  }
   const redirectUri = callbackUrl(c.req.url);
   const key = deriveSecretKey(encryptionKey);
   const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
@@ -249,7 +208,6 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
     ...(reconnect ? { reconnect: true as const } : {}),
-    ...(stepUp && addScopes && stepUpFrom ? { stepUp: addScopes, stepUpFrom } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -448,14 +406,6 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
         };
-        if (verified.stepUp && verified.stepUpFrom) {
-          const result = await replaceTeamCredentialForStepUp(
-            tx, encryptionKey, teamId, verified.service, credential, verified.stepUp, verified.stepUpFrom,
-          );
-          if (result === "replaced") await invalidateWorkflowSources(tx, { teamId });
-          if (result === "removed") return "team_connection_removed";
-          return result === "replaced" ? null : "team_step_up_not_granted";
-        }
         if (verified.reconnect) {
           const replaced = await replaceDeadTeamCredential(tx, encryptionKey, teamId, verified.service, credential, Date.now());
           if (replaced) await invalidateWorkflowSources(tx, { teamId });

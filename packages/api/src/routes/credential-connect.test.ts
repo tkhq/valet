@@ -15,7 +15,7 @@ import type { ListCredentialsResponse } from "../wire/types.js";
 import { parseAddScopes, verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
-import { teams, credentials, orgMembers, mcpOauthClients, agentSessions } from "../schema/index.js";
+import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
@@ -160,15 +160,25 @@ describe("GET /api/credentials/:service/connect", () => {
     expect(new URL(res.headers.get("location") ?? "").searchParams.get("scope")).toBe("agent:content:read agent:query:run");
   });
 
-  it("step-up: refuses malformed scopes and a session the caller does not own", async () => {
+  it("step-up: refuses malformed scopes, and any scopes for a team connection", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
     const bad = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent('read "quoted"')}`, { redirect: "manual" });
     expect(bad.status).toBe(400);
-    await api.providers.db.insert(agentSessions).values({ id: "someone-else", userId: "test-member", orgId: "local-org",
-      ownerType: "user", ownerId: "test-member", workspace: "w", createdAt: 1, updatedAt: 1 });
-    const foreign = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=write&session=someone-else`, { redirect: "manual" });
-    expect(foreign.status).toBe(404);
+    // A team connection is shared: a member's sign-in would make the team act as that member.
+    const team = await fetch(`${api.baseUrl}/api/credentials/linear/connect?scope=team&teamId=any-team&addScopes=write`, { redirect: "manual" });
+    expect(team.status).toBe(400);
     expect(parseAddScopes(" b a  b ")).toEqual(["a", "b"]);
+  });
+
+  it("step-up: a token response without scope stores the requested set on the caller's connection", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const started = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=read+write`, { redirect: "manual" });
+    const state = new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    fake.tokenResponse = { access_token: "stepped-up", expires_in: 3600 };
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toMatchObject({
+      accessToken: "stepped-up", scopes: ["read", "write"],
+    });
   });
 
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
@@ -925,110 +935,6 @@ describe("team OAuth connections", () => {
     const publicOutput = `${response.headers.get("location")} ${await listed.text()}`;
     expect(publicOutput).not.toContain("team-access");
     expect(publicOutput).not.toContain("team-refresh");
-  });
-
-  it("lets a member grant an added scope through the conversation, replacing the live team connection", async () => {
-    const { app, team } = await setup();
-    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
-    await app.providers.db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
-      ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
-    const started = await fetch(`${app.baseUrl}/api/credentials/linear/connect?addScopes=read+write&session=team-thread-session`, {
-      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
-    });
-    expect(started.status).toBe(302);
-    const authorize = new URL(started.headers.get("location") ?? "");
-    expect(authorize.searchParams.get("scope")).toBe("read write");
-    fake.tokenResponse = { access_token: "stepped-up", refresh_token: "stepped-refresh", expires_in: 3600 };
-    const response = await finish(app.baseUrl, authorize.searchParams.get("state") ?? "", "test-member");
-    expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
-    // The token response named no scope, so the requested set is stored.
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
-      accessToken: "stepped-up", scopes: ["read", "write"],
-    });
-  });
-
-  async function startStepUp(baseUrl: string, db: NonNullable<typeof api>["providers"]["db"], teamId: string, addScopes: string) {
-    await addMember(db, { teamId, userId: "test-member", role: "member" });
-    await db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
-      ownerType: "team", ownerId: teamId, workspace: "w", createdAt: 1, updatedAt: 1 });
-    const started = await fetch(`${baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent(addScopes)}&session=team-thread-session`, {
-      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
-    });
-    expect(started.status).toBe(302);
-    return new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
-  }
-
-  it("keeps a healthy team connection when a step-up adds no scope, or names no conversation", async () => {
-    const { app, team } = await setup();
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read", "write"] });
-    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read");
-    fake.tokenResponse = { access_token: "member-token", expires_in: 3600, scope: "read write" };
-    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
-    // Without a session the request is an ordinary team connect, which never replaces a live connection.
-    const bare = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${team.id}&addScopes=read`, {
-      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
-    });
-    const bareState = new URL(bare.headers.get("location") ?? "").searchParams.get("state") ?? "";
-    expect((await finish(app.baseUrl, bareState, "test-member")).headers.get("location")).toContain("error=team_connection_exists");
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "old-team" });
-  });
-
-  it("keeps the team connection when the provider grants less than the step-up asked for", async () => {
-    const { app, team } = await setup();
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read", "write"] });
-    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read write extra");
-    fake.tokenResponse = { access_token: "narrow", expires_in: 3600, scope: "read" };
-    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
-      accessToken: "old-team", scopes: ["read", "write"],
-    });
-  });
-
-  it("keeps a connection that an admin repaired while the member signed in", async () => {
-    const { app, team } = await setup();
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
-    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
-      type: "oauth2", accessToken: "admin-repair", scopes: ["read", "extra", "write"],
-    });
-    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
-    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "admin-repair" });
-  });
-
-  it("keeps an account an admin swapped in, with the same scopes, while the member signed in", async () => {
-    const { app, team } = await setup();
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
-    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "admin-account", scopes: ["read"] });
-    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
-    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "admin-account" });
-  });
-
-  it("keeps a connection that was deleted and created again while the member signed in", async () => {
-    const { app, team } = await setup();
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
-    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
-    await app.providers.engineCredentials.delete({ type: "team", id: team.id }, "linear");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "recreated", scopes: ["read"] });
-    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
-    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
-    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "recreated" });
-  });
-
-  it("refuses a team step-up when the team has no connection", async () => {
-    const { app, team } = await setup();
-    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
-    await app.providers.db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
-      ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
-    const started = await fetch(`${app.baseUrl}/api/credentials/linear/connect?addScopes=read+extra&session=team-thread-session`, {
-      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
-    });
-    expect(started.status).toBe(400);
   });
 
   it("lets a team member connect a team account", async () => {
