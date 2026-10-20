@@ -117,7 +117,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<Eve
           CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
             e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
           MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason,
-          MIN(d.last_error) FILTER (WHERE d.status IN ('failed','dead')) AS failed_reason
+          MIN(d.last_error) FILTER (WHERE d.status = 'failed' OR (d.status = 'dead' AND NOT ${SUPERSEDED})) AS failed_reason
         FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
         WHERE ${sql.join(scoped, sql` AND `)}
         GROUP BY e.id

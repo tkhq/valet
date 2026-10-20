@@ -1979,6 +1979,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   {describe:"usage_daily_empty",probe:{kind:"index",index:"usage_daily_empty"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_empty ON usage_daily(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0"},
   {describe:"usage_daily_outcomes",probe:{kind:"index",index:"usage_daily_outcomes"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_outcomes ON usage_daily(created_at,session_id) WHERE pull_requests>0 OR reviews>0"},
   { describe: "event delivery queue items", probe: { kind: "column", table: "event_deliveries", column: "queue_item_id" }, sql: 'ALTER TABLE "event_deliveries" ADD COLUMN "queue_item_id" text' },
+  { describe: "recent delivered event deliveries", probe: { kind: "index", index: "event_deliveries_delivered" }, sql: `CREATE INDEX "event_deliveries_delivered" ON "event_deliveries" ("delivered_at") WHERE "status" = 'delivered'` },
   // After every rollup and its views: the backfill moves facts, and their
   // triggers move the hours and days.
   { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },

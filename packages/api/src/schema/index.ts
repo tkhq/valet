@@ -2132,6 +2132,8 @@ export const eventDeliveries = pgTable(
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),
     index("event_deliveries_event").on(t.eventId),
     index("event_deliveries_subscription").on(t.subscriptionId, t.createdAt),
+    // The failed-turn sweep reads recent delivered rows (`events/delivery-turn.ts`).
+    index("event_deliveries_delivered").on(t.deliveredAt).where(sql`"status" = 'delivered'`),
   ],
 );
 

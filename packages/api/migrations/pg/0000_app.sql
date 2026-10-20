@@ -1197,6 +1197,8 @@ CREATE TABLE "event_deliveries" (
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");
 --> statement-breakpoint
+CREATE INDEX "event_deliveries_delivered" ON "event_deliveries" ("delivered_at") WHERE "status" = 'delivered';
+--> statement-breakpoint
 CREATE INDEX "event_deliveries_event" ON "event_deliveries" ("event_id");
 --> statement-breakpoint
 -- The rule list reads each rule's latest delivery for its problem state.

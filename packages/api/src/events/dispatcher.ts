@@ -693,7 +693,12 @@ export class EventDispatcher {
         .where(eq(eventDeliveries.id, deliveryId));
       // The turn can fail before this write lands; the settle watcher then
       // found the row still pending. Check once more now that it is delivered.
-      if (queueItemId) await markFailedDeliveryTurns(db, { deliveryId });
+      // The delivery already succeeded, so a failed check only logs: the sweep
+      // marks the row later.
+      if (queueItemId) {
+        await markFailedDeliveryTurns(db, { deliveryId })
+          .catch((err) => console.error(`event dispatch ${deliveryId}: failed-turn check:`, err));
+      }
     } catch (err) {
       const attempts = delivery.attempts + 1;
       const backoff = BACKOFF_MS[attempts - 1];
