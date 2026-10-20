@@ -508,16 +508,39 @@ describe("policyResolver seam: unattended workflow task", () => {
       { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
       makeCtx({ unattendedWorkflow: true, policyResolver: resolver, requestDecision: refused }),
     );
-    expect(result.text).toContain("no one can approve during an unattended workflow run");
+    expect(result.text).toContain("Valet sent no approval request");
     expect(executed).toBe(false);
     expect(onResolutionCalls).toEqual([]);
     expect(invocations.map((r) => r.status)).toEqual(["denied"]);
   });
 
-  it("gives ask_approval a fail-closed answer", async () => {
+  // A model told to "say what it needs" wrote "waiting for your approval", so
+  // the owner looked for a request that never existed.
+  it("tells the model that no request was sent and names the fixes that work", async () => {
+    const { resolver } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ unattendedWorkflow: true, policyResolver: resolver, requestDecision: refused }),
+    );
+    expect(result.text).toContain("Do not say that you asked for approval or that approval is pending");
+    // A Tool step asks for approval on each run by itself, so an Approval step
+    // before it would ask twice.
+    expect(result.text).toContain("move github.get_issue to a Tool step, which asks for approval on each run");
+    expect(result.text).not.toContain("Approval step");
+    expect(result.text).toContain("Review permissions");
+    // Since build-time approval, saving a workflow allows nothing.
+    expect(result.text).not.toContain("saving the workflow approves");
+  });
+
+  it("gives ask_approval a fail-closed answer that names the Approval step", async () => {
     const result = await askApprovalTool.execute({ title: "Delete the branch?" }, makeCtx({ unattendedWorkflow: true, requestDecision: refused }));
-    expect(result.text).toContain("No one can approve during an unattended workflow run");
-    expect(result.text).toContain("Do not do this action");
+    expect(result.text).toContain("Valet sent no approval request");
+    expect(result.text).toContain("Do not do the action");
+    expect(result.text).toContain("Do not say that you asked for approval or that approval is pending");
+    expect(result.text).toContain("add an Approval step before this step");
   });
 });
 

@@ -17,6 +17,7 @@ import {
   type PluginCatalog,
   type SessionEntry,
 } from "../src/index.js";
+import { formatPluginOutcome } from "../src/session.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -507,5 +508,16 @@ describe("Session.prompt plugin command execution", () => {
     expect(last?.type === "command_result" && last.ok).toBe(false);
     const output = last?.type === "command_result" ? last.output : "";
     expect(output).toContain("Connect testplug on the Integrations page (/integrations). After connecting, call list_tools (service: \"testplug\") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.");
+  });
+});
+
+describe("formatPluginOutcome", () => {
+  it("says no request was sent when an unattended workflow run refuses an approval", () => {
+    const { ok, output } = formatPluginOutcome({ kind: "denied-unattended" }, "linear.save_project");
+    expect(ok).toBe(false);
+    expect(output).toContain("Valet sent no approval request");
+    expect(output).toContain("move the action to a Tool step, which asks for approval on each run");
+    // Since build-time approval, saving a workflow allows nothing.
+    expect(output).not.toContain("saving the workflow approves");
   });
 });

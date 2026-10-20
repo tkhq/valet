@@ -751,12 +751,17 @@ export const askApprovalTool = defineTool({
       }
       throw err;
     }
+    // The model must not report a request that nobody received: an owner who
+    // reads "waiting for approval" looks for a card that does not exist.
     if (isUnattendedWorkflowRefusal(resolution)) {
       return {
         text:
-          `denied: ${args.title}. No one can approve during an unattended workflow run. ` +
-          "Do not do this action or ask again. Say in the result what it needs, " +
-          "so the workflow's owner can change the workflow.",
+          `not asked: "${args.title}". This is an unattended workflow run, so Valet sent no approval request and nobody can approve. ` +
+          "Do not do the action. Do not ask again, and do not ask anyone in a message. " +
+          "Do not say that you asked for approval or that approval is pending. " +
+          "In your result, say that the action did not run because a workflow run cannot ask for approval. " +
+          "Also say the fix: to approve it on each run, the workflow's owner can add an Approval step before this step " +
+          "and remove the request for approval from this step's prompt.",
       };
     }
     return {
