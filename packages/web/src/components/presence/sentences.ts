@@ -891,6 +891,10 @@ export interface ActivityNames {
   workflowName?: string;
   /** Workflow names by subscription id, for a row whose deliveries reach several workflows. */
   workflowsByListener?: Readonly<Record<string, string>>;
+  /** Whether each known line replies (`replies`), by subscription id. A
+   * delivered outcome reads `replied in` only for a Reply line. A row whose
+   * line is not here falls back to the event key (`isConversational`). */
+  repliesByListener?: Readonly<Record<string, boolean>>;
   /** The place, when the caller knows a better name than the event's refs give. */
   place?: string;
   /** The key of `place` (`github:acme/api#12`). With it, the place reads as a token that links its page. */
@@ -949,8 +953,11 @@ function deliveryOutcome(event: ActivityEvent, delivery: EventDeliveryWire, name
   if (delivery.runId !== undefined) return { words: `started ${workflow ?? "a workflow"} run`, runId: delivery.runId };
   if (delivery.status === "delivered") {
     if (delivery.thread) {
-      const conversational = event.eventKey !== null && isConversational([event.eventKey]);
-      return { words: conversational ? "replied in" : "delivered to", thread: activityThread(delivery.thread, threads) };
+      // The line's stored action decides, as on the line page. The key rule
+      // answers only for a line that is gone.
+      const replied = names.repliesByListener?.[delivery.subscriptionId]
+        ?? (event.eventKey !== null && isConversational([event.eventKey]));
+      return { words: replied ? "replied in" : "delivered to", thread: activityThread(delivery.thread, threads) };
     }
     if (workflow !== undefined) return { words: `started ${workflow} run` };
     return { words: "delivered" };

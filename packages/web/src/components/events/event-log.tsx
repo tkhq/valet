@@ -14,7 +14,7 @@ import { SearchInput } from "~/components/search-input";
 import { useListOwner } from "~/lib/use-list-owner";
 import { relativeTime } from "~/lib/relative-time";
 import { problemStage, reasonLabel } from "~/lib/event-log-labels";
-import { ActivityRow, LOG_STATUS_META, useWorkflowsByListener } from "~/components/presence/activity-row";
+import { ActivityRow, LOG_STATUS_META, useRepliesByListener, useWorkflowsByListener } from "~/components/presence/activity-row";
 import { ServiceMark } from "~/components/presence/service-mark";
 import { ReceiptsPanel } from "./receipts-panel";
 
@@ -73,6 +73,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
   const items = itemsForFilter(log.data?.pages.flatMap((page) => page.items) ?? [], filter);
   const first = log.data?.pages[0];
   const workflowsByListener = useWorkflowsByListener();
+  const repliesByListener = useRepliesByListener();
 
   return (
     <div className="space-y-4">
@@ -121,7 +122,7 @@ export function EventLog({ filter, onFilterChange, query, onQueryChange, place, 
       {items.length > 0 && (
         <WorkList>
           {groupLogItems(items).map(({ item, count }) => item.kind === "event"
-            ? <ActivityRow key={`event:${item.id}`} item={item} workflowsByListener={workflowsByListener} />
+            ? <ActivityRow key={`event:${item.id}`} item={item} workflowsByListener={workflowsByListener} repliesByListener={repliesByListener} />
             : <ProblemRow key={`problem:${item.id}`} item={item} count={count} />)}
         </WorkList>
       )}

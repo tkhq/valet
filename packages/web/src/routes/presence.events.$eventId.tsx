@@ -5,7 +5,7 @@ import { useEvent } from "~/api/events";
 import { DeliveryList } from "~/components/events/delivery-list";
 import { EventReceiptStages } from "~/components/events/receipts-panel";
 import { RedeliverButton } from "~/components/events/redeliver-button";
-import { ActivitySentence, useWorkflowsByListener } from "~/components/presence/activity-row";
+import { ActivitySentence, useRepliesByListener, useWorkflowsByListener } from "~/components/presence/activity-row";
 import { PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "~/components/presence/page-shell";
 import { activityLead, activitySentenceParts, eventInWords } from "~/components/presence/sentences";
 import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
@@ -79,9 +79,10 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
   const { event, deliveries } = data;
   const refs = Object.entries(event.refs);
   const workflowsByListener = useWorkflowsByListener();
+  const repliesByListener = useRepliesByListener();
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  // The same place the Activity row names, so the page's lead matches it.
-  const names = { ...(event.place !== undefined ? { place: event.place } : {}), workflowsByListener };
+  // The same place and verbs the Activity row names, so the page's lead matches it.
+  const names = { ...(event.place !== undefined ? { place: event.place } : {}), workflowsByListener, repliesByListener };
 
   return (
     <div className="space-y-6">

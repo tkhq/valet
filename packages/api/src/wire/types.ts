@@ -2801,6 +2801,13 @@ export interface WorkflowTemplateRequirement {
   service: string;
   connected: boolean;
   /**
+   * A node pins this org-managed service (`requires.orgCredential`) to a
+   * person's own account, which nobody can connect. It does not block
+   * install: `connected` reads as an unpinned node's would. Show a note, not
+   * a Connect control. After install, the node's credential setting is the fix.
+   */
+  organizationManagedPin?: true;
+  /**
    * Set when the plugin resolves its actions at run time (an MCP-backed
    * service). The action NAMES this template calls are then unverifiable
    * when the definition is saved, and can still fail on the first run.

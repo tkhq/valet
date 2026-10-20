@@ -44,7 +44,7 @@ import type { ActionPlugin, ValetPlugin, WorkflowTemplate } from "@valet/engine"
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { nextFireAt } from "./schedule-service.js";
 import { buildValidateEnvironment } from "./validation-env.js";
-import { templateRequirements } from "./templates.js";
+import { orgManagedPinCaveats, templateRequirements } from "./templates.js";
 import { toolNodesOf } from "./tool-nodes.js";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -414,6 +414,43 @@ describe("template requirements", () => {
     // The calendar service is named by its READ key, which is the key the
     // connect flow writes as well.
     expect(required.map((r) => r.service).sort()).toEqual(["github", "google_calendar", "slack"]);
+  });
+
+  /**
+   * Slack is org-managed (`requires.orgCredential`): nobody has a personal
+   * Slack account to connect. A node pinned `"user"` therefore does not
+   * block install. Its requirement reads as an unpinned node's, connected
+   * when the organization row exists and unconfigured when it does not, and
+   * carries `organizationManagedPin` so the card shows a note instead of a
+   * Connect control. The run refuses the node with the credential-setting
+   * fix (`userPinnedPersonalRefusalMessage`).
+   */
+  it("reads an org-managed Slack node pinned to user as the org row, with a note", () => {
+    const assign = ownedById("github.assign-reviewers");
+    const definition = {
+      ...assign.definition,
+      nodes: assign.definition.nodes.map((node) => {
+        if (node.type === "tool" && node.service === "slack") return { ...node, credential: "user" as const };
+        if (node.type === "foreach" && node.body.type === "tool" && node.body.service === "slack") {
+          return { ...node, body: { ...node.body, credential: "user" as const } };
+        }
+        return node;
+      }),
+    };
+    expect(toolNodesOf(definition).filter((node) => node.service === "slack").map((node) => node.credential)).toContain("user");
+    const connected = new Set(["github", "google_calendar", "slack"]);
+    const pinned = templateRequirements(definition, actionPluginByService, connected, new Set(), new Set(["github", "google_calendar"]));
+    expect(pinned.filter((r) => !r.connected)).toEqual([]);
+    expect(pinned.find((r) => r.service === "slack")).toEqual({ service: "slack", connected: true, organizationManagedPin: true });
+    expect(orgManagedPinCaveats(pinned)).toEqual([
+      "Pinned to your own account, but slack connects for the whole organization. After install, change the node's credential setting to the app.",
+    ]);
+    // With no organization Slack row, the organization-setup state wins.
+    const noOrgRow = templateRequirements(definition, actionPluginByService, new Set(["github", "google_calendar"]), new Set(["slack"]), new Set(["github", "google_calendar"]));
+    expect(noOrgRow.find((r) => r.service === "slack")).toEqual({ service: "slack", connected: false, organizationManagedPin: true, unconfigured: true });
+    // An unpinned definition still rides the org-provided Slack bot.
+    const unpinned = templateRequirements(assign.definition, actionPluginByService, connected, new Set(), new Set(["github", "google_calendar"]));
+    expect(unpinned.filter((r) => !r.connected)).toEqual([]);
   });
 
   /**

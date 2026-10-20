@@ -597,6 +597,19 @@ describe("activitySentence outcomes", () => {
     expect(activitySentence({ eventKey: "slack.team_join" }, null)).toBe("Team join → no one listening");
   });
 
+  it("follows the line's stored action when the line is known, and the event key only for a line that is gone", () => {
+    const inc = delivery({ thread: { sessionId: "s", threadId: "t-inc" } });
+    // A mention line that works on it does not reply.
+    expect(activitySentence(mention, inc, { threads, repliesByListener: { "sub-1": false } }))
+      .toBe("Mention in #incidents → delivered to t-inc");
+    // A Reply line replies whatever its event key.
+    expect(activitySentence(message, inc, { threads, repliesByListener: { "sub-1": true } }))
+      .toBe("Message in #incidents → replied in t-inc");
+    // Another line's flag does not answer for this delivery's line.
+    expect(activitySentence(mention, inc, { threads, repliesByListener: { "sub-2": false } }))
+      .toBe("Mention in #incidents → replied in t-inc");
+  });
+
   it("joins the outcomes of several deliveries", () => {
     expect(
       activitySentence(
@@ -612,6 +625,8 @@ describe("activitySentenceParts", () => {
   const cases: Array<[string, Parameters<typeof activitySentence>]> = [
     ["a reply", [mention, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
     ["a run and a reply", [mention, [delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), delivery({ id: "d-2", runId: "r" })], { threads, workflowName: "Triage failures" }]],
+    ["a known line that works on it", [mention, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads, repliesByListener: { "sub-1": false } }]],
+    ["a known Reply line", [message, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads, repliesByListener: { "sub-1": true } }]],
     ["a claim", [message, delivery({ status: "skipped", lastError: "Skipped, claimed by thread t-inc", claimedBy: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
     ["no one listening", [check, null]],
     ["a known place key", [check, null, { place: "acme/api#12", placeKey: "github:acme/api#12" }]],
