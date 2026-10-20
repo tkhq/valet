@@ -19,7 +19,7 @@
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, eq, lte } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
-import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE } from "../events/assistant-delivery.js";
+import { PinUnavailableError } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
 import { resolveDestination } from "../events/destination.js";
 import {
@@ -153,7 +153,7 @@ export class WorkflowScheduler {
         // mode (spec Part B step 4). The poll loop disables the schedule,
         // logs this text, and counts it (`fire`).
         if (!(err instanceof PinUnavailableError)) throw err;
-        return { error: PIN_UNAVAILABLE_MESSAGE, pinUnavailable: true };
+        return { error: err.message, pinUnavailable: true };
       }
       this.recordDestination(destinationMetricReason(destination));
       return "ok";

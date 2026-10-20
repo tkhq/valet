@@ -173,7 +173,13 @@ start.
    cannot read is the same text, `This thread belongs to another owner.
    Pick a thread in your workspace.`, so the answer never shows that the
    thread exists. The refusal for an archived thread is `This thread is
-   archived. Pick an open thread.`
+   archived. Pick an open thread.` If the rule's channel filters name a
+   private Slack channel, the pinned thread MUST already gate on that
+   channel or be readable only by the writer (a personal session). Else the
+   refusal is `This thread is shared with people who cannot see
+   #<channel>. Pick a thread only you can see, or let this line use its own
+   thread.` A patch that changes the match of a pinned rule runs this check
+   alone.
 6. `validateValetPlugin` is unaffected. The policy is rule configuration.
 
 ## Part B: Destination resolution
@@ -434,6 +440,15 @@ event wakeups spec Part A.
   patches the current value through one queued path,
   `patchThreadMetadata`. So no writer can erase a recorded channel with a
   copy it took before an await.
+- **A delivery never narrows a shared pinned thread.** A delivery to an
+  `existing` pin from a private Slack channel (one Slack cannot classify
+  counts as private) that the shared thread does not gate on yet
+  dead-letters with `This thread is shared with people who cannot see
+  #<channel>. Pick another thread in Presence.` The thread's
+  `slackChannels` stay unchanged, and the receipt and the counter record
+  `pin_unavailable`. This backstop covers channels no filter names, such as
+  an any-channel rule. The text names the channel id, because the delivery
+  path has no channel name.
 - **`slackEventsThreadKey` stays.** The dispatcher no longer uses it as a
   destination (Part B step 6). The workflow attention audience keys still
   use it, so the function stays for them.

@@ -2562,6 +2562,75 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     }
   });
 
+  it("refuses pinning a shared thread to a rule that names a private channel the thread does not hold", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values([
+      { teamId: "team_1", userId: "local-user", role: "member" },
+      { teamId: "team_1", userId: "test-member", role: "member" },
+    ]);
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const shared = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-shared", key: "sub:standup",
+    });
+    // A second thread in the same assistant that already holds the channel's content.
+    await a.providers.db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, metadata, created_at, updated_at)
+      VALUES ('thr-holding', 'sess-team', 'sub:incidents', 'idle', 'steer', ${JSON.stringify({ slackChannels: ["CPINPRIV"] })}, 1, 1)`);
+    const rule = (thread: unknown) => ({
+      name: "incident mentions", eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "CPINPRIV", label: "#incidents" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread },
+    });
+    try {
+      const refused = await postSubscription(a.baseUrl, rule({ mode: "existing", ...shared }));
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({
+        error: "This thread is shared with people who cannot see #incidents. Pick a thread only you can see, or let this line use its own thread.",
+      });
+      expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+      // A thread that already holds the channel's content keeps its audience.
+      const accepted = await postSubscription(a.baseUrl, rule({ mode: "existing", sessionId: "sess-team", threadId: "thr-holding" }));
+      expect(accepted.status, await accepted.clone().text()).toBe(201);
+
+      // A filter edit that names the private channel on a pinned shared thread is refused too.
+      const own = await postSubscription(a.baseUrl, { ...rule({ mode: "existing", ...shared }), filters: [{ field: "channel", op: "eq", value: "CPUBLIC", label: "#general" }] });
+      expect(own.status, await own.clone().text()).toBe(201);
+      const pinned = (await own.json()) as CreateEventSubscriptionResponse;
+      const narrowed = await patchSubscription(a.baseUrl, pinned.id, { filters: [{ field: "channel", op: "in", value: ["CPUBLIC", "CPINPRIV"] }] });
+      expect(narrowed.status).toBe(400);
+      expect(await narrowed.json()).toEqual({
+        error: "This thread is shared with people who cannot see #CPINPRIV. Pick a thread only you can see, or let this line use its own thread.",
+      });
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
+  it("lets a personal rule pin its own thread to a private channel", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPINPRIV", isPrivate: true, checkedAt: Date.now() });
+    await a.providers.db.insert(userIdentityLinks).values({ id: "uil-local-user", provider: "slack", externalId: "U_LOCAL", userId: "local-user", createdAt: Date.now() });
+    const slack = await connectSlack(a, { CPINPRIV: ["U_LOCAL"] });
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-mine", key: "sub:standup",
+    });
+    try {
+      const res = await postSubscription(a.baseUrl, {
+        name: "incident mentions", eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "CPINPRIV", label: "#incidents" }],
+        target: { kind: "orchestrator", thread: { mode: "existing", ...mine } },
+      });
+      expect(res.status, await res.clone().text()).toBe(201);
+    } finally {
+      slack.mockRestore();
+    }
+  });
+
   it("refuses a team rule's pin on a member's personal thread, even for that member", async () => {
     const a = await boot();
     await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });

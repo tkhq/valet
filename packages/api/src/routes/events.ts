@@ -24,7 +24,7 @@ import { allCatalogEntries, catalogForService, subscribableEntries } from "../ev
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
-import { existingThreadError } from "../events/thread-policy-write.js";
+import { existingPinChannelError, existingThreadError } from "../events/thread-policy-write.js";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
@@ -663,7 +663,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     // `existing` names a thread, which must belong to the owner just resolved
     // and be one the caller can read.
     const threadError = await existingThreadError(c.var.providers, viewerOf(c),
-      { type: ownerType, id: ownerId }, body.target.thread);
+      { type: ownerType, id: ownerId }, body.target.thread, { eventKeys: body.eventKeys, filters });
     if (threadError) return c.json({ error: threadError }, 400);
   }
 
@@ -931,10 +931,19 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const audience = write.audience ?? null;
   // Only a patch that sets the policy re-checks its thread. A rename of a rule
   // whose pinned thread was archived later must still work.
+  // `merged.eventKeys` passed `validateSubscriptionWrite` above.
+  const rule = { eventKeys: merged.eventKeys as string[], filters };
   if (body.thread != null && patchedTarget.kind === "orchestrator") {
     const threadError = await existingThreadError(c.var.providers, viewerOf(c),
-      { type: row.ownerType, id: row.ownerId }, patchedTarget.thread);
+      { type: row.ownerType, id: row.ownerId }, patchedTarget.thread, rule);
     if (threadError) return c.json({ error: threadError }, 400);
+  } else if ((body.filters !== undefined || body.eventKeys !== undefined) && patchedTarget.kind === "orchestrator") {
+    // A match edit can name a private channel that the pinned thread does
+    // not gate on yet. Only that check runs, so the edit of a rule whose
+    // pinned thread was archived later still works.
+    const channelError = await existingPinChannelError(c.var.providers, row.orgId,
+      { type: row.ownerType, id: row.ownerId }, patchedTarget.thread, rule);
+    if (channelError) return c.json({ error: channelError }, 400);
   }
 
   // Collision gate (TKAI-294), against the row as it would exist after the

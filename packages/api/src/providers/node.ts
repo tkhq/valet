@@ -811,6 +811,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     db,
     engineHost,
     fetchThreadContext: channelThreadContextFetcher(channelHost),
+    slackAccess: { engineCredentials, onePassword },
   });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToAssistant });
 

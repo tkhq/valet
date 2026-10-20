@@ -18,7 +18,7 @@ import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistant
 import type { EngineHost } from "../engine/host.js";
 import { and, eq, sql } from "drizzle-orm";
 import { agentSessions, assistantExecutions, assistants, type AssistantRow } from "../schema/index.js";
-import { SLACK_CHANNELS_METADATA_KEY } from "../services/thread-access.js";
+import { recordedSlackChannels, recordingNarrowsThread, SLACK_CHANNELS_METADATA_KEY, type AccessDeps } from "../services/thread-access.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
@@ -47,6 +47,13 @@ export interface AssistantDeliveryDeps {
    * path never delivers first, so it leaves this unset.
    */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+  /**
+   * The org's Slack credential, to classify a channel that a delivery would
+   * record on a pinned thread. Without it, every such channel counts as
+   * private, and a delivery that would record a new one on a shared pinned
+   * thread dead-letters.
+   */
+  slackAccess?: Omit<AccessDeps, "db">;
 }
 
 /**
@@ -62,10 +69,17 @@ export type DeliveryDestination =
 /** The dead-letter text for an `existing` pin that cannot receive a delivery (spec Part B step 4). */
 export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread for this rule in Presence.";
 
-/** A rule's pinned thread is archived, deleted, or outside the owner's live runtime. */
+/** The dead-letter text for a delivery that would hide a shared pinned thread from readers outside a private channel. */
+export function pinNarrowsMessage(channel: string): string {
+  return `This thread is shared with people who cannot see #${channel}. Pick another thread in Presence.`;
+}
+
+/** A rule's pinned thread cannot take this delivery: it is archived, deleted,
+ * or outside the owner's live runtime, or the delivery's private channel
+ * would narrow who can read it. The message is the dead-letter text. */
 export class PinUnavailableError extends Error {
-  constructor() {
-    super(PIN_UNAVAILABLE_MESSAGE);
+  constructor(message: string = PIN_UNAVAILABLE_MESSAGE) {
+    super(message);
     this.name = "PinUnavailableError";
   }
 }
@@ -307,6 +321,19 @@ async function deliverToAssistantThreadInner(
     workspace: data.workspace,
   }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
   if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
+  // A pinned thread is not this rule's own thread, and other people may read
+  // it. A private channel recorded on it would hide it from every reader
+  // outside that channel, so the delivery dead-letters instead (spec
+  // Deviations, "Channel privacy follows content"). The write-time check
+  // (`thread-policy-write.ts`) covers channels the rule's filters name; this
+  // covers the rest, such as an any-channel rule.
+  if (args.slackChannel && destination.kind === "target" && destination.reason === "policy_existing") {
+    const data = thread.toThreadData();
+    const narrows = await recordingNarrowsThread({ db: deps.db, ...deps.slackAccess },
+      args.orgId, { ownerType: args.owner.type, sessionId: session.id, threadId: thread.id, key: data.key ?? null, recorded: recordedSlackChannels(data.metadata) },
+      args.slackChannel);
+    if (narrows) throw new PinUnavailableError(pinNarrowsMessage(args.slackChannel));
+  }
   // Record the channel on a thread that already existed, and on a team
   // execution's governing thread, before the title seed and the context
   // fetch, so a reader outside a private channel never sees the content.

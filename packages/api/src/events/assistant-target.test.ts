@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
+import type { CredentialStore } from "@valet/engine";
 
 const deliverToAssistantThread = vi.hoisted(() => vi.fn(async () => ({ sessionId: "sess-landed", threadId: "thr-landed" })));
 vi.mock("./assistant-delivery.js", () => ({ deliverToAssistantThread }));
@@ -11,7 +12,7 @@ const { buildAssistantTarget } = await import("./assistant-target.js");
 describe("buildAssistantTarget", () => {
   it("passes the resolved destination through and returns the thread it landed in", async () => {
     // The seam only forwards deps; the delivery function is mocked above.
-    const deps = { db: {} as AppDb, engineHost: {} as EngineHost };
+    const deps = { db: {} as AppDb, engineHost: {} as EngineHost, slackAccess: { engineCredentials: {} as CredentialStore } };
     const deliver = buildAssistantTarget(deps);
     const destination = { kind: "key" as const, key: "sub:rule-1", title: "ENG triage" };
     const landed = await deliver({

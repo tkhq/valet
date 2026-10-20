@@ -33,7 +33,7 @@ import {
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
 import { deliveryThreadPolicy, EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
-import { PinUnavailableError } from "./assistant-delivery.js";
+import { PinUnavailableError, pinNarrowsMessage } from "./assistant-delivery.js";
 import type { DestinationRecorder } from "../observability/delivery-metrics.js";
 
 /** Records the destination counter's reasons. The dispatcher takes it as a
@@ -1246,6 +1246,19 @@ describe("EventDispatcher", () => {
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-pin", threadId: "thr-pin", reason: "policy_existing" });
       expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence." });
+      expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
+    });
+
+    it("existing: a delivery that would narrow a shared pin dead-letters with its own text", async () => {
+      const pin = { mode: "existing", sessionId: "sess-pin", threadId: "thr-pin" };
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: pin } });
+      const text = pinNarrowsMessage("CPRIV");
+      const deliver = vi.fn<AssistantDeliverFn>(async () => { throw new PinUnavailableError(text); });
+      recordDestination.mockClear();
+      await dispatcherWith(deliver).pollOnce();
+      expect(await getDelivery(deliveryId)).toMatchObject({
+        status: "dead", attempts: 1, lastError: "This thread is shared with people who cannot see #CPRIV. Pick another thread in Presence.",
+      });
       expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
     });
 

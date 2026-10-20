@@ -49,7 +49,7 @@ import {
 import { resolvePath } from "./match.js";
 import { loadSessionOwner } from "./waiters.js";
 import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
-import { isDeliverableTarget, PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
+import { isDeliverableTarget, PinUnavailableError, type DeliveredThread, type DeliveryDestination } from "./assistant-delivery.js";
 import { resolveDestination, summaryTitle, type Destination } from "./destination.js";
 import { appendReceiptStageForEvent, destinationReceiptStage, destinationStageMarker } from "./receipts.js";
 import {
@@ -557,7 +557,7 @@ export class EventDispatcher {
           // A pin that cannot receive deliveries dead-letters at once and
           // never falls back to another mode (spec Part B step 4). The
           // counter pages a person; no code repairs the rule.
-          await db.update(eventDeliveries).set({ status: "dead", lastError: PIN_UNAVAILABLE_MESSAGE, attempts: delivery.attempts + 1 })
+          await db.update(eventDeliveries).set({ status: "dead", lastError: err.message, attempts: delivery.attempts + 1 })
             .where(eq(eventDeliveries.id, deliveryId));
           const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds,
             { kind: "pin_unavailable", sessionId: destination.sessionId, threadId: destination.threadId }), destinationStageMarker(delivery.id));

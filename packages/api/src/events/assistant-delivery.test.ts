@@ -9,11 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EngineHost } from "../engine/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { assistantExecutions, assistants, sessionThreads, teams, users } from "../schema/index.js";
+import { assistantExecutions, assistants, sessionThreads, slackChannelPrivacy, teams, users } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
-import { deliverToAssistantThread, PinUnavailableError } from "./assistant-delivery.js";
+import { deliverToAssistantThread, PinUnavailableError, pinNarrowsMessage } from "./assistant-delivery.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -610,6 +610,34 @@ describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery thre
     expect((await mirrorRow(pinned.id))?.archivedAt).toBe(archivedAt);
     const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:pin-delivery'`) as { rows: unknown[] };
     expect(admitted.rows).toHaveLength(0);
+  });
+
+  it("existing: refuses to record a private channel on a shared pinned thread and leaves its audience alone", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type: "team", id: "team-pin" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Pin", createdAt: 1 });
+    await testDb.appDb.insert(slackChannelPrivacy).values([
+      { orgId: ORG, channelId: "CPRIV", isPrivate: true, checkedAt: Date.now() },
+      { orgId: ORG, channelId: "CPUB", isPrivate: false, checkedAt: Date.now() },
+    ]);
+    const { session } = await ensureAssistantExecution(deps, owner, { actorUserId: USER, orgId: ORG }, "web:standup");
+    const pinned = await session.createThread("web:standup");
+    const destination = { kind: "target" as const, sessionId: session.id, threadId: pinned.id, reason: "policy_existing" as const };
+    const stored = async () => (await session.providers.store.getThread(session.id, pinned.id))?.metadata?.slackChannels;
+
+    await expect(deliverToAssistantThread(deps, {
+      ...base, owner, destination, signal: signal("from a private channel"), dispatchId: "event:pin-private", slackChannel: "CPRIV",
+    })).rejects.toThrow(new PinUnavailableError(pinNarrowsMessage("CPRIV")));
+    expect(pinned.toThreadData().metadata?.slackChannels).toBeUndefined();
+    expect(await stored()).toBeUndefined();
+    const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:pin-private'`) as { rows: unknown[] };
+    expect(admitted.rows).toHaveLength(0);
+
+    // A public channel narrows nobody, so it lands and is recorded.
+    await deliverToAssistantThread(deps, {
+      ...base, owner, destination, signal: signal("from a public channel"), dispatchId: "event:pin-public", slackChannel: "CPUB",
+    });
+    expect(await stored()).toEqual(["CPUB"]);
   });
 
   it("records the Slack channel before the title shows and before the context fetch", async () => {

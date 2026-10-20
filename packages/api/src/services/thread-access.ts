@@ -100,7 +100,8 @@ import type { ChannelVisibility } from "./channels.js";
 import { resolveOrgCredentialRead } from "./credential-resolution.js";
 import { OnePasswordAuthError } from "./onepassword.js";
 
-type AccessDeps = Pick<Providers, "db" | "engineCredentials"> & { onePassword?: Providers["onePassword"] };
+/** What the read gate reads: the database and the org's Slack credential. */
+export type AccessDeps = Pick<Providers, "db" | "engineCredentials"> & { onePassword?: Providers["onePassword"] };
 
 /** Caps a TTL cache: past `max` entries it drops the expired ones, then the
  * oldest, so a long-lived process does not keep every key it has seen. */
@@ -141,7 +142,7 @@ const membershipCache = new Map<string, { allowed: boolean; expiresAt: number }>
  * cannot answer. Undefined only for a channel never classified.
  */
 export async function slackChannelIsPrivate(
-  deps: AccessDeps, orgId: string, channelId: string, token: () => Promise<string | null>,
+  deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>,
 ): Promise<boolean | undefined> {
   const cacheKey = `${orgId}:${channelId}`;
   const now = Date.now();
@@ -167,6 +168,30 @@ export async function slackChannelIsPrivate(
   }
   setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + ttl(isPrivate) });
   return isPrivate;
+}
+
+/**
+ * Whether recording Slack `channelId` on a thread would hide the thread from
+ * someone who can read it today. Only a team thread gates on its channels
+ * (`threadVisibility`), so no other thread narrows. A personal session also
+ * has one reader. A team thread narrows unless it already gates on the
+ * channel (by its key, or by channels recorded on it or the threads above
+ * it), or the channel is public. A channel Slack cannot classify counts as
+ * private, as the read gate treats it.
+ */
+export async function recordingNarrowsThread(
+  deps: Pick<AccessDeps, "db"> & Partial<AccessDeps>,
+  orgId: string,
+  thread: { ownerType: string; sessionId: string; threadId: string; key: string | null; recorded?: readonly string[] },
+  channelId: string,
+): Promise<boolean> {
+  if (thread.ownerType !== "team") return false;
+  const recorded = [...(thread.recorded ?? []), ...(await threadSlackChannels(deps.db, thread.sessionId, thread.threadId))];
+  if (gatingChannels(thread.key, recorded).includes(channelId)) return false;
+  const credentials = deps.engineCredentials;
+  // Without a credential store, Slack cannot answer: only a stored answer counts.
+  const bot = async () => credentials ? botToken(await orgSlackCredential({ ...deps, engineCredentials: credentials }, orgId)) : null;
+  return (await slackChannelIsPrivate(deps, orgId, channelId, bot)) !== false;
 }
 
 /** Forgets what this process remembers about channel privacy and membership. Tests only. */

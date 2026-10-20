@@ -544,6 +544,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
+      slackAccess: { engineCredentials, onePassword },
     }),
   });
 
@@ -555,6 +556,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
+      slackAccess: { engineCredentials, onePassword },
     }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),

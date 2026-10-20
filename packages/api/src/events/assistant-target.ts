@@ -21,7 +21,7 @@
 import type { ChannelOrigin } from "@valet/engine";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { deliverToAssistantThread } from "./assistant-delivery.js";
+import { deliverToAssistantThread, type AssistantDeliveryDeps } from "./assistant-delivery.js";
 import type { AssistantDeliverFn } from "./dispatcher.js";
 
 export function buildAssistantTarget(deps: {
@@ -29,6 +29,8 @@ export function buildAssistantTarget(deps: {
   engineHost: EngineHost;
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+  /** The org's Slack credential, to classify a channel a pinned thread would record. */
+  slackAccess: NonNullable<AssistantDeliveryDeps["slackAccess"]>;
 }): AssistantDeliverFn {
   return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, destination, inbound, author, presence, unattended, slackChannel }) =>
     // Every subscription resolves the singleton runtime of its owner.
