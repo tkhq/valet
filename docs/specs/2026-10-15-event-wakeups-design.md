@@ -321,12 +321,24 @@ subject.
 
 1. Read the pull request. If the source event's SHA differs from the
    current head SHA, return `null`.
-2. Read all visible pages of check runs, check suites, workflow runs, and
-   latest commit status contexts for the head SHA.
-3. If any check run, check suite, or workflow run has a status other than
-   `completed`, return `null`.
-   If any latest status context is not `success`, `failure`, or `error`,
-   return `null`.
+2. Read check runs first, then latest status contexts, suites, and workflow runs.
+   Read all pages needed to select the current records.
+3. If any check run has a status other than `completed`, return `null` immediately.
+   This case makes no suite, workflow, or status reads.
+   If any latest status context is not `success`, `failure`, or `error`, return `null`.
+   Ignore suites with `latest_check_runs_count = 0`.
+   GitHub creates these suites for Apps that start no checks and Actions workflows skipped by filters.
+   Select the latest suite per App before computing terminality or failure.
+   Suite ids identify the newest suite, independent of response order.
+   Each selected suite must have status `completed`.
+   Workflow terminality applies to events `pull_request` and `pull_request_target`.
+   Select the latest run per workflow across all pages.
+   Run number, run id, and attempt number order the workflow runs.
+   A superseded cancelled run or older attempt cannot change the selected result.
+   A push-triggered deploy waiting for environment approval does not block this workflow read.
+   All visible check runs still participate, including checks from other workflow events.
+   Check runs and latest contexts stop at the first nonterminal entry.
+   Suites and workflows need all pages before selecting the latest records.
    Terminality is independent of the combined status result.
 4. Compute status `failure` when any visible conclusion is `failure`,
    `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
@@ -356,13 +368,17 @@ deadline ends that wait.
 |---|---|
 | Source SHA is an old head | `null` |
 | One check run `in_progress` | `null` |
-| One completed check and a queued suite or workflow | `null` |
+| One completed check and a queued suite with runs | `null` |
+| One completed check and a queued PR-triggered workflow | `null` |
+| One completed check and a queued zero-run App suite | status `success` |
+| Actions suite with zero runs after workflow filters skip every job | ignored |
+| Unrelated push deploy waiting for environment approval | ignored |
 | Head changes during the reads | `null` |
 | Combined failure with a pending latest status context | `null` |
 | Pending context on a later page | `null` |
 | All runs `success`, no statuses | status `success` |
 | All runs complete, one `failure` | status `failure` |
-| All runs `success`, combined status `pending` with one status | `null` |
+| All runs `success`, one latest context `pending` | `null` |
 
 ## Part C: The event waiter
 
@@ -409,18 +425,29 @@ Each write method is one statement.
   It refuses a `dedupeKey` in `event_buffer`, `event_seen`, or `event_source_seen`.
   It refuses when the buffer holds 200 digests.
   It counts that refusal in `valet_event_waiter_buffer_full_total`.
+  A waiter admits at most 4096 delivered output keys, including buffered outputs reserved for delivery.
+  At this budget, append refuses new outputs and logs the waiter id with a re-arm instruction.
+  Source digests can still be consumed without spending this output budget.
+  The store retains every delivered key instead of evicting one to admit another.
+  Existing rows above the budget keep their keys but cannot admit more outputs.
   It returns whether it appended.
 - `removeEventMatches(id, dedupeKeys, updatedAt, mode?): Promise<boolean>` removes
   only the digests with those keys from `event_buffer`. A digest that
   arrived after the caller read the row stays. It appends the keys to
-  `event_seen` for the lifetime of the waiter.
+  `event_seen` for the lifetime of the waiter, within the admission budget.
   Source removal uses mode `source` and records keys in `event_source_seen`.
   This separate replay list keeps the newest 256 source keys.
   Source removal cannot evict delivered keys.
   Existing `event_seen` keys remain valid after upgrade.
+  It refuses removal that would add delivered keys beyond the budget.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty or whose `deadlineAt` has passed.
+
+During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
+New pods never trim delivered keys.
+Drain old WakeWatchers before new pods handle event waiters to preserve replay protection during rollout.
+Source removal on new pods writes only `event_source_seen` and leaves delivered keys unchanged.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
 `summary`, `url`, `actor` login, `occurredAt`, `dedupeKey`, `text`, and an
@@ -484,10 +511,15 @@ D1 errata (Task 11):
   the rest.
 - R2 checks owner coverage with `installationResolvesFor` and `strictOwner`.
   It also checks the exact repository with the App-authenticated installation read.
+  A non-404 failure or timeout gives unknown coverage and an arm warning.
   An org with no GitHub App gets R7.
-- GitHub arm checks read the App's live events and permissions with `GET /app`.
-  The host caches this configuration for 60 seconds.
-  Derived keys expand into their source event families.
+- GitHub arm checks read granted events and permissions from the repository installation endpoint.
+  The host caches each repository's configuration for 60 seconds.
+  Before refusing missing settings, arm bypasses this cache and reads the installation again.
+  Requested settings from `GET /app` explain a pending owner approval, not readiness.
+  The refusal names pending approval when requested settings exceed the installation grants.
+  Exact derived keys expand into their source event families.
+  Globs include direct catalog entries only, because glob matches do not trigger derivation.
   `checks_completed` needs `check_run`, `check_suite`, `workflow_run`, and `status`.
   These families need read access to `checks`, `actions`, and `statuses`.
   A known missing event or permission refuses the wait.
@@ -497,7 +529,8 @@ D1 errata (Task 11):
   If the configuration cannot be read, the wait arms with a tool-result warning.
 - GitHub commit reads resolve abbreviated SHAs to the full 40-character SHA.
   Arm stores the canonical commit subject.
-  If the commit response has no full SHA, arm asks for the full SHA.
+  For an unresolved abbreviated input, arm asks for the full SHA.
+  For an unreadable full SHA, arm returns the credential readability refusal.
 - R3 reads with the calling turn's credential provider
   (`ToolContext.credentials`). The tool passes it to `armEvent`, so the
   host credential resolver stays private to the host. A read that does not
@@ -580,9 +613,12 @@ step that returns early for an event that no subscription matched.
    buffered direct matches and derivation sources.
    A successful lookup with no candidates records outcome `no_candidates`.
    An evaluation or append failure records outcome `failed`.
+   A partial evaluation retains the successful append counts in that failed stage.
    The stage holds metadata only.
    The WakeWatcher logs each later derivation outcome as `event`, `null`, or `error`.
    Each log names the waiter id and source dedupe key.
+   Permission-denied derivations log `error` and consume the source.
+   Rate limits and transient read errors retain the source for retry.
    Source digests carry no receipt id, so these outcomes do not update receipts.
 
 Claims (`2026-10-16-delivery-threads-and-claims-design.md`, Part C)
@@ -646,7 +682,8 @@ The light pass never overlaps a full pass.
    Process at most one derive call per group per tick, for the group's
    latest digest. That call answers for the older digests of the same
    commit, so on `event` or `null` the WakeWatcher removes that group's
-   digests only. A waiter indexed by its repository subject can hold
+   digests only. Permission errors also consume that group with a logged `error`.
+   Other errors retain the group for retry. A waiter indexed by its repository subject can hold
    sources from other pull requests' commits, and their `null` never
    removes the head commit's sources. One deadline of 20 seconds bounds the
    call. A call past it counts as an error, and the digests stay. At most

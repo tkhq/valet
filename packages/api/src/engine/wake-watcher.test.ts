@@ -1143,6 +1143,22 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     } finally { logs.mockRestore(); }
   });
 
+  it("consumes permission-denied sources and logs error without retrying the next tick", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const derive = vi.fn(async () => ({ result: "error" as const, error: new Error("403"), consumeSource: true }));
+    const logs = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const w = h.watcher({ deriveEvent: derive });
+      await w.sweep(NOW);
+      await w.sweep(NOW + 10_000);
+      expect(derive).toHaveBeenCalledTimes(1);
+      expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
+      expect((await h.store.getWakeup("wk_ev"))?.eventSourceSeen).toEqual(["d-1"]);
+      expect(logs).toHaveBeenCalledWith("WakeWatcher: event waiter derivation", expect.objectContaining({ result: "error", sourceDedupeKey: "d-1" }));
+    } finally { logs.mockRestore(); }
+  });
+
   it.each(["event", "null", "error"] as const)("logs the %s derivation outcome with its source key", async (result) => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));

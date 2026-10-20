@@ -373,11 +373,9 @@ export async function ingestEvent(
           candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin, () => { waiterEvaluationFailed = true; }));
         }
         evaluated = !waiterEvaluationFailed;
-        if (waiterEvaluationFailed) await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Event waiter evaluation failed. Check the API logs." });
       } catch (error) {
         recordWaiterMatchFailure(waiters);
         waiterEvaluationFailed = true;
-        await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Event waiter evaluation failed. Check the API logs." });
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
       }
       if (evaluated && candidates.some((c) => c.accepted)) {
@@ -400,15 +398,22 @@ export async function ingestEvent(
     const appendDigests = async (decisions: ClaimDecision["waiters"] | undefined): Promise<void> => {
       if (!waiters) return;
       if (candidates.length === 0) {
-        if (!waiterEvaluationFailed) await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "no_candidates", detail: "No event waiter candidates found." });
+        await appendReceiptStage(deps.db, receiptId, waiterEvaluationFailed
+          ? { stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." }
+          : { stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
         return;
       }
       try {
         const appended = await appendWaiterDigests(waiters, service, candidates, decisions);
-        if (!waiterEvaluationFailed) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
+        const stage = waiterMatchStage(appended);
+        if (waiterEvaluationFailed) {
+          stage.outcome = "failed";
+          stage.detail += " Evaluation failed. Check the API logs.";
+        }
+        await appendReceiptStage(deps.db, receiptId, stage);
       } catch (error) {
         recordWaiterMatchFailure(waiters);
-        await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Event waiter append failed. Check the API logs." });
+        await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Could not save matches for this wait. Check the API logs." });
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter append failed`, error);
       }
     };

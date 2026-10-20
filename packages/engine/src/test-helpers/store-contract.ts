@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { EVENT_DELIVERED_MAX_KEYS } from "../index.js";
 import type {
   DecisionGate,
   EventMatchDigest,
@@ -907,6 +908,21 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(seen[256]).toBe("k-256");
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-0" }), 22)).toBe(false);
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-1" }), 23)).toBe(false);
+      });
+
+      it("bounds delivered keys by refusing new outputs rather than evicting replay protection", async () => {
+        const keys = Array.from({ length: EVENT_DELIVERED_MAX_KEYS - 1 }, (_, i) => `delivered-${i}`);
+        await store.createWakeup(eventWaiter({ eventSeen: keys }));
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "last" }), 20)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "over-budget" }), 21)).toBe(false);
+        await store.removeEventMatches("wk_ev", ["last"], 22);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "over-budget" }), 23)).toBe(false);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "delivered-0" }), 24)).toBe(false);
+        expect(await store.removeEventMatches("wk_ev", ["over-budget"], 25)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.eventSeen).toEqual([...keys, "last"]);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "source", derive: "checks" }), 26)).toBe(true);
+        await store.removeEventMatches("wk_ev", ["source"], 27, "source");
+        expect((await store.getWakeup("wk_ev"))?.eventSeen).toHaveLength(EVENT_DELIVERED_MAX_KEYS);
       });
 
       it("consuming 257 derivation sources cannot evict a delivered completion", async () => {

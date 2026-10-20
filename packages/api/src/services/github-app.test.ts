@@ -79,25 +79,83 @@ describe("github-app service", () => {
     const http = vi.fn(async () => Response.json(config));
     let now = 0;
     const deps = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test", now: () => now };
-    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
-    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
-    expect(http).toHaveBeenCalledTimes(1);
-    expect(http).toHaveBeenCalledWith("https://github.test/app", expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer ey/) }) }));
-    now = 60_001;
-    expect(await githubIngressConfig(deps, orgId)).toEqual(config);
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
     expect(http).toHaveBeenCalledTimes(2);
+    expect(http).toHaveBeenCalledWith("https://github.test/repos/acme/repo/installation", expect.objectContaining({ headers: expect.objectContaining({ Authorization: expect.stringMatching(/^Bearer ey/) }) }));
+    now = 60_001;
+    expect(await githubIngressConfig(deps, orgId, "acme", "repo")).toEqual(config);
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("reads granted settings and detects pending owner approval", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const granted = { events: ["status"], permissions: { statuses: "read" } };
+    const requested = { events: ["status", "check_run"], permissions: { statuses: "read", checks: "read" } };
+    const http = vi.fn(async (input: string | URL | Request) => Response.json(String(input).endsWith("/installation") ? granted : requested));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
+      .toEqual({ ...granted, pendingApproval: true });
+  });
+
+  it("accepts grants broader than the requested permission", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async (input: string | URL | Request) => Response.json({ events: ["check_run"], permissions: { checks: String(input).endsWith("/installation") ? "write" : "read" } }));
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo"))
+      .toEqual({ events: ["check_run"], permissions: { checks: "write" } });
+  });
+
+  it("keeps known granted settings when requested settings cannot be read", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const granted = { events: ["status"], permissions: { statuses: "read" } };
+    const http = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/app")) throw new Error("network");
+      return Response.json(granted);
+    });
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toEqual(granted);
+  });
+
+  it("bypasses a cached negative configuration after approval", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    let approved = false;
+    const http = vi.fn(async () => Response.json(approved ? { events: ["check_run"], permissions: { checks: "read" } } : { events: [], permissions: {} }));
+    const d = { credentials, env: {}, fetchImpl: http };
+    expect((await githubIngressConfig(d, orgId, "acme", "repo"))?.events).toEqual([]);
+    approved = true;
+    expect((await githubIngressConfig(d, orgId, "acme", "repo"))?.events).toEqual([]);
+    expect((await githubIngressConfig(d, orgId, "acme", "repo", true))?.events).toEqual(["check_run"]);
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("isolates granted configuration caches by repository", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const http = vi.fn(async () => Response.json({ events: [], permissions: {} }));
+    const d = { credentials, env: {}, fetchImpl: http };
+    await githubIngressConfig(d, orgId, "acme", "one");
+    await githubIngressConfig(d, orgId, "acme", "two");
+    expect(http).toHaveBeenCalledTimes(4);
+  });
+
+  it("logs configuration read failures without exception contents", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const http = vi.fn(async () => { throw new Error("secret-token-in-provider-error"); });
+      expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
+      expect(log).toHaveBeenCalledWith("[github-app] granted ingress configuration read failed");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("secret-token");
+    } finally { log.mockRestore(); }
   });
 
   it("returns unknown ingress readiness without App credentials", async () => {
     const http = vi.fn(async () => Response.json({}));
-    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId)).toBeNull();
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
     expect(http).not.toHaveBeenCalled();
   });
 
   it("returns unknown ingress readiness on a failed configuration read", async () => {
     await saveAppConfig({ credentials }, orgId, baseConfig);
     const http = vi.fn(async () => { throw new Error("network"); });
-    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId)).toBeNull();
+    expect(await githubIngressConfig({ credentials, env: {}, fetchImpl: http }, orgId, "acme", "repo")).toBeNull();
   });
 
   afterEach(async () => {

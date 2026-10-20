@@ -223,6 +223,7 @@ export {
   type VerifiedEvent,
   type NormalizedEvent,
   type EventCatalogEntry,
+  DerivePermissionError,
   type DeriveContext,
   type DerivedEventDef,
   type EventSubjects,

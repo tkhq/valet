@@ -755,6 +755,7 @@ export interface WakeupRow {
   event_buffer: string | null;
   /** `event`: a JSON array of delivered dedupe keys, oldest first. */
   event_seen: string | null;
+  /** `event`: a bounded JSON array of consumed derivation source keys. */
   event_source_seen: string | null;
 }
 

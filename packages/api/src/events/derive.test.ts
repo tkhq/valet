@@ -80,6 +80,18 @@ describe("runDerive", () => {
     expect(rec.points).toEqual([{ key: KEY, result: "null" }]);
   });
 
+  it.each([401, 403])("marks HTTP %s permission errors for source consumption", async (statusCode) => {
+    const stub = githubFixture({ statusCode });
+    expect(await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(stub.fetch))).toMatchObject({ result: "error", consumeSource: true });
+  });
+
+  it("retains rate-limited sources for retry instead of consuming them as permission errors", async () => {
+    const limited: typeof fetch = async () => new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+    const out = await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(limited));
+    expect(out).toMatchObject({ result: "error" });
+    expect(out.result === "error" && out.consumeSource).not.toBe(true);
+  });
+
   it("maps a 502 to an error result (keep the digest)", async () => {
     const stub = githubFixture({ statusCode: 502 });
     const rec = recorder();

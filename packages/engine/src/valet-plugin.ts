@@ -134,6 +134,9 @@ export interface NormalizedEvent {
   previousStatus?: string;
 }
 
+/** A permission denial consumes the source instead of repeating the read each tick. */
+export class DerivePermissionError extends Error {}
+
 /** What a `DerivedEventDef.derive` call receives (spec Part B). */
 export interface DeriveContext {
   orgId: string;

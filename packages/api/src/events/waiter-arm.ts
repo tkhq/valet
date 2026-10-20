@@ -61,10 +61,10 @@ export interface ArmDeps {
   plugins: ValetPlugin[];
   /** R7: whether the org has the service connected. */
   serviceConnected(service: string): Promise<boolean>;
-  /** R2: whether the org's GitHub App installation covers the repository. */
-  githubInstallationCovers(owner: string, repo: string): Promise<boolean>;
-  /** Live App event subscriptions and permissions, or null when unreadable. */
-  githubIngressConfig(): Promise<GithubIngressConfig | null>;
+  /** R2: installation coverage of the repository. Null means the read is inconclusive. */
+  githubInstallationCovers(owner: string, repo: string): Promise<boolean | null>;
+  /** Granted installation subscriptions and permissions, or null when unreadable. */
+  githubIngressConfig(owner: string, repo: string, refresh?: boolean): Promise<GithubIngressConfig | null>;
   /** The team id of the org's connected Slack workspace, or null. */
   slackTeamId(): Promise<string | null>;
   /** R3 for GitHub. `pullRequest` is set for a `#n` target. */
@@ -190,8 +190,12 @@ const GITHUB_EVENT_PERMISSIONS: Record<string, readonly string[]> = {
 function githubSourceFamilies(plugins: ValetPlugin[], clauses: readonly EventClause[]): string[] {
   const derived = plugins.flatMap((p) => p.derivedEvents ?? []);
   const catalog = catalogForService(plugins, "github");
-  const keys = clauses.flatMap((c) => catalog.filter((e) => keyMatches(c.key, e.key)).flatMap((e) =>
-    derived.find((d) => d.key === e.key)?.sources ?? [e.key]));
+  const keys = clauses.flatMap((clause) => {
+    const exact = derived.find((entry) => entry.key === clause.key);
+    if (exact) return exact.sources;
+    return catalog.filter((entry) => !derived.some((d) => d.key === entry.key) && keyMatches(clause.key, entry.key))
+      .map((entry) => entry.key);
+  });
   return [...new Set(keys.map((key) => key.split(".")[1]!))];
 }
 
@@ -233,31 +237,38 @@ export async function checkArm(
   let warning: string | undefined;
   if (parsed.service === "github") {
     const { owner, repo } = parsed.target;
-    if (!(await bounded(() => deps.githubInstallationCovers(owner, repo), ms, false))) {
-      return { ok: false, text: R2(owner, repo) };
-    }
-    const config = await bounded(() => deps.githubIngressConfig(), ms, null);
-    if (config) {
+    const coverage = await bounded(() => deps.githubInstallationCovers(owner, repo), ms, null);
+    if (coverage === false) return { ok: false, text: R2(owner, repo) };
+    if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
+    let config = await bounded(() => deps.githubIngressConfig(owner, repo), ms, null);
+    const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
       for (const family of githubSourceFamilies(deps.plugins, req.on)) {
-        if (family === "ping") continue; // GitHub always delivers ping, without an App subscription.
-        if (!config.events.includes(family)) missing.push(`event ${family}`);
+        if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
+        if (!settings.events.includes(family)) missing.push(`event ${family}`);
         const permissions = GITHUB_EVENT_PERMISSIONS[family];
-        if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(config.permissions[p])))) {
+        if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
           missing.push(`permission ${permissions.join(" or ")}: read`);
         }
       }
-      if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App is missing ${[...new Set(missing)].join(", ")}. Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
+      return [...new Set(missing)];
+    };
+    // A just-approved installation must not receive a stale cached refusal.
+    if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
+    if (config) {
+      const missing = missingSettings(config);
+      if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
     } else {
-      warning = `GitHub App delivery readiness could not be checked. Check the App's "Permissions & events" with an org owner.`;
+      warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
     }
     const read = await bounded(() => deps.readGithub(parsed.target), ms, { readable: false });
-    if (!read.readable && parsed.target.sha === undefined) return { ok: false, text: R3(subject) };
+    if (!read.readable && (parsed.target.sha === undefined || parsed.target.sha.length === 40)) return { ok: false, text: R3(subject) };
     if (parsed.target.sha !== undefined) {
-      if (!read.readable || !read.sha || !/^[0-9a-f]{40}$/i.test(read.sha)) {
+      if ((!read.readable || !read.sha || !/^[0-9a-f]{40}$/i.test(read.sha)) && parsed.target.sha.length !== 40) {
         return { ok: false, text: "[wait_for_event] The commit SHA could not be resolved. Give the full 40-character SHA. Then wait again." };
       }
-      subject = `github:${owner}/${repo}@${read.sha.toLowerCase()}`;
+      const sha = read.sha && /^[0-9a-f]{40}$/i.test(read.sha) ? read.sha : parsed.target.sha;
+      subject = `github:${owner}/${repo}@${sha.toLowerCase()}`;
     }
     const needsPr = req.on.find((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key));
     if (needsPr && read.pullRequest === false) return { ok: false, text: R5_PULL_REQUEST(needsPr.key) };
@@ -453,8 +464,8 @@ export function armDeps(
       return githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`);
     },
 
-    githubIngressConfig() {
-      return githubIngressConfig(appDeps, session.orgId);
+    githubIngressConfig(owner, repo, refresh) {
+      return githubIngressConfig(appDeps, session.orgId, owner, repo, refresh);
     },
 
     async slackTeamId() {

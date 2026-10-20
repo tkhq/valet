@@ -98,14 +98,14 @@ describe("ingestEvent event waiter matching", () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => null }));
     expect(result).toMatchObject({ skipped: true });
     expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No event waiter candidates found." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
     expect(nudge).not.toHaveBeenCalled();
   });
 
   it("records no_candidates when no running waiter shares a subject", async () => {
     const elsewhere = { ...message("Ev-9"), subjects: ["slack:T001", "slack:T001/C777"], refs: { channel: "C777" } };
     await ingest(elsewhere, waiterDeps());
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No event waiter candidates found." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
     expect(nudge).not.toHaveBeenCalled();
   });
 
@@ -120,7 +120,17 @@ describe("ingestEvent event waiter matching", () => {
 
   it("records a candidate evaluation failure without changing ingestion", async () => {
     await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => { throw new Error("db down"); } }));
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Event waiter evaluation failed. Check the API logs." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
+  });
+
+  it("keeps successful append counts when another waiter evaluation fails", async () => {
+    await store.createWakeup({ ...waiter(), id: "wk_2", sessionId: "s-broken" });
+    await ingest(message("Ev-partial"), waiterDeps({ sessionOrg: async (id) => {
+      if (id === "s-broken") throw new Error("lookup failed");
+      return { orgId: ORG, ownerType: "team", ownerId: "team-1" };
+    } }));
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toHaveLength(1);
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 1. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
   });
 
   it("records a failed append in receipt diagnostics", async () => {
@@ -147,7 +157,7 @@ describe("ingestEvent event waiter matching", () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ engineStore: broken }));
     expect({ ...result, eventId: "" }).toEqual({ ...baseline, eventId: "" });
     expect((await stagesOf()).filter((s) => s.stage !== "waiter_match")).toEqual(baselineStages);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Event waiter evaluation failed. Check the API logs." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
     expect(failed).toHaveBeenCalledTimes(1);
     expect(errors).toHaveBeenCalled();
     errors.mockRestore();
@@ -172,7 +182,7 @@ describe("ingestEvent event waiter matching", () => {
     expect(result).toMatchObject({ duplicate: false, deliveries: 1 });
     expect({ ...result, eventId: "" }).toEqual({ ...baseline, eventId: "" });
     expect((await stagesOf()).filter((s) => s.stage !== "waiter_match")).toEqual(baselineStages);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Event waiter evaluation failed. Check the API logs." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
     expect(failed).toHaveBeenCalledTimes(1);
     errors.mockRestore();
   });

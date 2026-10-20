@@ -30,7 +30,7 @@ import type {
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
 import { boundEventDigest } from "../../wakeups/digest.js";
-import { EVENT_BUFFER_MAX_DIGESTS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
+import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -403,6 +403,10 @@ export class InMemorySessionStore implements SessionStore {
     const buffer = w.eventBuffer ?? [];
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
     if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
+    if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
+      console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
+      return false;
+    }
     if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
@@ -417,6 +421,7 @@ export class InMemorySessionStore implements SessionStore {
     const removed = new Set(dedupeKeys);
     const field = mode === "source" ? "eventSourceSeen" : "eventSeen";
     const keys = [...(w[field] ?? []).filter((key) => !removed.has(key)), ...removed];
+    if (mode === "delivered" && keys.length > Math.max(EVENT_DELIVERED_MAX_KEYS, w.eventSeen?.length ?? 0)) return false;
     const seen = mode === "source" ? keys.slice(-EVENT_SOURCE_SEEN_MAX_KEYS) : keys;
     const eventBuffer = (w.eventBuffer ?? []).filter((d) => !removed.has(d.dedupeKey));
     this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, [field]: seen, updatedAt }));

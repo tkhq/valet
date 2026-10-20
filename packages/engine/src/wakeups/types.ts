@@ -59,6 +59,9 @@ export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
 /** The most digests an event waiter buffers. `appendEventMatch` refuses past it. */
 export const EVENT_BUFFER_MAX_DIGESTS = 200;
 
+/** Admission budget for delivered outputs. Exhaustion refuses new outputs, never evicts keys. */
+export const EVENT_DELIVERED_MAX_KEYS = 4096;
+
 /** The most consumed derivation sources an event waiter remembers. */
 export const EVENT_SOURCE_SEEN_MAX_KEYS = 256;
 
@@ -135,7 +138,7 @@ export interface Wakeup {
   /** `event`: matched digests awaiting delivery. Delivery removes them by dedupe key. */
   eventBuffer?: EventMatchDigest[];
   /**
-   * `event`: delivered dedupe keys for the lifetime of the waiter.
+   * `event`: delivered dedupe keys for the lifetime of the waiter, capped by output admission.
    * Existing rows can also contain legacy consumed-source keys.
    */
   eventSeen?: string[];

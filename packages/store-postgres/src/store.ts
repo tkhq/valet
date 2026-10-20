@@ -2,6 +2,7 @@ import {
   boundEventDigest,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
+  EVENT_DELIVERED_MAX_KEYS,
   EVENT_SOURCE_SEEN_MAX_KEYS,
   NotFoundError,
   PendingCapError,
@@ -1564,7 +1565,7 @@ export class PgSessionStore implements SessionStore {
     // tell a refusal at the cap from the other refusals.
     const r = await this.db.query(
       `WITH cur AS (
-         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) AS delivered_count, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
            FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
        ),
        u AS (
@@ -1573,6 +1574,8 @@ export class PgSessionStore implements SessionStore {
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
             AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
+                 (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
                              WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
             AND NOT (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) @> jsonb_build_array($2::jsonb->'dedupeKey')
@@ -1583,12 +1586,15 @@ export class PgSessionStore implements SessionStore {
                        WHERE jsonb_array_length(cur.buf) >= $4
                          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
                                           WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
-                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full`,
-      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS],
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full,
+              EXISTS (SELECT 1 FROM cur WHERE NOT $2::jsonb ? 'derive' AND cur.delivered_count +
+                (SELECT count(*) FROM jsonb_array_elements(cur.buf) e WHERE NOT e ? 'derive') >= $5) AS exhausted`,
+      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS],
     );
     const row = r.rows[0];
     if (row?.appended === true) return true;
     if (row?.full === true) recordEventWaiterBufferFull();
+    if (row?.exhausted === true) console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
     return false;
   }
 
@@ -1615,8 +1621,11 @@ export class PgSessionStore implements SessionStore {
                  WHERE ($4::integer IS NULL OR k.rn <= $4)),
               updated_at = $3
         WHERE id = $1 AND kind = 'event'
+          AND ($4::integer IS NOT NULL OR
+            (SELECT count(*) FROM jsonb_array_elements_text(COALESCE(event_seen, '[]')::jsonb) s(key) WHERE NOT s.key = ANY($2::text[])) + cardinality($2::text[])
+              <= GREATEST($5, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb)))
        RETURNING id`,
-      [id, keys, updatedAt, mode === "source" ? EVENT_SOURCE_SEEN_MAX_KEYS : null],
+      [id, keys, updatedAt, mode === "source" ? EVENT_SOURCE_SEEN_MAX_KEYS : null, EVENT_DELIVERED_MAX_KEYS],
     );
     return r.rows.length > 0;
   }

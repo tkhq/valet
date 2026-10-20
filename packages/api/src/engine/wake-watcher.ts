@@ -491,7 +491,8 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
-        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
+        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}:`, outcome.error);
+        if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
       }
       const at = this.clock();

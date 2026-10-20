@@ -3,7 +3,7 @@
  * Part B). Ingest never calls `derive`. Only the WakeWatcher does, for a match
  * digest that a clause on the derived key produced (INV-E9).
  */
-import type { DeriveContext, DerivedEventDef, NormalizedEvent } from "@valet/engine";
+import { DerivePermissionError, type DeriveContext, type DerivedEventDef, type NormalizedEvent } from "@valet/engine";
 import { resolveGithubApiUrl } from "./actions/api.js";
 
 export const CHECKS_COMPLETED_KEY = "github.pull_request.checks_completed";
@@ -53,6 +53,9 @@ async function getJson(ctx: DeriveContext, token: string, path: string): Promise
     signal: AbortSignal.timeout(DERIVE_REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) {
+    if ((res.status === 401 || res.status === 403) && res.headers.get("x-ratelimit-remaining") !== "0" && !res.headers.has("retry-after")) {
+      throw new DerivePermissionError("GitHub denied the derivation read. Ask an org owner to approve checks and actions read access.");
+    }
     throw new Error(`GitHub GET ${path} answered HTTP ${res.status}.`);
   }
   return res.json();
@@ -60,13 +63,14 @@ async function getJson(ctx: DeriveContext, token: string, path: string): Promise
 
 interface CheckRunState { status: string; conclusion: string | null; completedAt?: string }
 
-async function listCheckRuns(ctx: DeriveContext, token: string, base: string, sha: string): Promise<CheckRunState[]> {
+async function listCheckRuns(ctx: DeriveContext, token: string, base: string, sha: string): Promise<CheckRunState[] | null> {
   const runs: CheckRunState[] = [];
   for (let page = 1; page <= CHECK_RUNS_MAX_PAGES; page++) {
     const body = rec(await getJson(ctx, token, `${base}/commits/${sha}/check-runs?per_page=${CHECK_RUNS_PER_PAGE}&page=${page}`));
     const items = Array.isArray(body?.check_runs) ? body.check_runs : [];
     for (const item of items) {
       const run = rec(item);
+      if (run?.status !== "completed") return null;
       const completedAt = str(run?.completed_at);
       runs.push({ status: str(run?.status) ?? "", conclusion: str(run?.conclusion) ?? null, ...(completedAt ? { completedAt } : {}) });
     }
@@ -77,7 +81,7 @@ async function listCheckRuns(ctx: DeriveContext, token: string, base: string, sh
 }
 
 /** Read every visible page. Refuse an incomplete snapshot at the safety limit. */
-async function listStates(ctx: DeriveContext, token: string, path: string, field: string): Promise<Record<string, unknown>[]> {
+async function listStates(ctx: DeriveContext, token: string, path: string, field: string, nonterminal: (state: Record<string, unknown>) => boolean): Promise<Record<string, unknown>[] | null> {
   const states: Record<string, unknown>[] = [];
   for (let page = 1; page <= CHECK_RUNS_MAX_PAGES; page++) {
     const body = rec(await getJson(ctx, token, `${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`));
@@ -86,12 +90,35 @@ async function listStates(ctx: DeriveContext, token: string, path: string, field
     for (const item of items) {
       const state = rec(item);
       if (!state) throw new Error(`GitHub returned an invalid ${field} entry. Retry the event wait.`);
+      if (nonterminal(state)) return null;
       states.push(state);
     }
     const total = typeof body?.total_count === "number" ? body.total_count : undefined;
     if (items.length < 100 || (total !== undefined && states.length >= total)) return states;
   }
-  throw new Error(`GitHub returned too many ${field} pages. Narrow the event wait.`);
+  throw new Error(`GitHub returned too many ${field} pages. Wait on github.check_run.completed or github.status for this commit instead.`);
+}
+
+/** Superseded runs and suites cannot change the latest attempt's result. */
+function latestBy(states: Record<string, unknown>[], identity: (state: Record<string, unknown>) => string | undefined): Record<string, unknown>[] {
+  const latest = new Map<string, Record<string, unknown>>();
+  const unidentified: Record<string, unknown>[] = [];
+  const order = (state: Record<string, unknown>) => [
+    typeof state.run_number === "number" ? state.run_number : 0,
+    typeof state.id === "number" ? state.id : 0,
+    typeof state.run_attempt === "number" ? state.run_attempt : 0,
+    Date.parse(str(state.created_at) ?? "") || 0,
+  ];
+  for (const state of states) {
+    const key = identity(state);
+    if (key === undefined) { unidentified.push(state); continue; }
+    const previous = latest.get(key);
+    const left = order(state);
+    const right = previous ? order(previous) : [];
+    const difference = left.findIndex((value, index) => value !== right[index]);
+    if (!previous || (difference >= 0 && left[difference]! > right[difference]!)) latest.set(key, state);
+  }
+  return [...latest.values(), ...unidentified];
 }
 
 /**
@@ -113,13 +140,13 @@ export function latestCompletedAt(runs: readonly { completedAt?: string }[], sta
 
 /**
  * `github.pull_request.checks_completed` (spec B1): every check run on the
- * pull request's head SHA is complete and every visible suite, workflow,
+ * pull request's head SHA is complete and every suite with runs, PR-triggered workflow,
  * and latest commit status is terminal. `null` while that does not hold yet.
  */
 export const checksCompleted: DerivedEventDef = {
   key: CHECKS_COMPLETED_KEY,
   description:
-    "All visible check runs, check suites, workflow runs, and latest commit status contexts on a pull request's head commit finished. Status is failure when any of them failed, else success. Use it with wait_for_event only; subscriptions do not accept it.",
+    "All visible check runs, suites with runs, PR-triggered workflow runs, and latest commit status contexts on a pull request's head commit finished. Status is failure when any of them failed, else success. Use it with wait_for_event only; subscriptions do not accept it.",
   sources: [
     "github.check_run.completed",
     "github.check_suite.completed",
@@ -147,16 +174,27 @@ export const checksCompleted: DerivedEventDef = {
     const headSha = str(rec(pull?.head)?.sha)?.toLowerCase();
     if (headSha !== sha) return null;
 
-    // Step 2.
+    // Check runs are the common pending case. Stop before the broader reads.
     const runs = await listCheckRuns(ctx, token, base, sha);
-    const statuses = await listStates(ctx, token, `${base}/commits/${sha}/status`, "statuses");
-    const suites = await listStates(ctx, token, `${base}/commits/${sha}/check-suites`, "check_suites");
-    const workflows = await listStates(ctx, token, `${base}/actions/runs?head_sha=${sha}`, "workflow_runs");
-
-    // Terminality is independent of failure. A failed context can coexist with a pending context.
+    if (runs === null) return null;
+    const statuses = await listStates(ctx, token, `${base}/commits/${sha}/status`, "statuses", (s) => !["success", "failure", "error"].includes(String(s.state)));
+    if (statuses === null) return null;
     if (runs.length === 0 && statuses.length === 0) return null;
-    if ([...runs, ...suites, ...workflows].some((r) => r.status !== "completed")) return null;
-    if (statuses.some((s) => !["success", "failure", "error"].includes(String(s.state)))) return null;
+    // GitHub creates suites even when an App or filtered workflow starts no runs.
+    const allSuites = await listStates(ctx, token, `${base}/commits/${sha}/check-suites`, "check_suites", () => false);
+    if (allSuites === null) return null;
+    const suites = latestBy(allSuites, (suite) => {
+      const app = rec(suite.app);
+      return typeof app?.id === "number" ? String(app.id) : str(app?.slug);
+    }).filter((s) => s.latest_check_runs_count !== 0);
+    if (suites.some((suite) => suite.status !== "completed")) return null;
+    // A push-triggered deploy can wait for approval independently of PR checks.
+    // Its check runs still participate above if it actually creates checks.
+    const relevantWorkflow = (run: Record<string, unknown>) => run.event === "pull_request" || run.event === "pull_request_target";
+    const allWorkflows = await listStates(ctx, token, `${base}/actions/runs?head_sha=${sha}`, "workflow_runs", () => false);
+    if (allWorkflows === null) return null;
+    const workflows = latestBy(allWorkflows.filter(relevantWorkflow), (run) => typeof run.workflow_id === "number" ? String(run.workflow_id) : undefined);
+    if (workflows.some((run) => run.status !== "completed")) return null;
 
     const failed =
       [...runs, ...suites, ...workflows].some((r) => typeof r.conclusion === "string" && FAILED_CONCLUSIONS.has(r.conclusion)) ||

@@ -134,6 +134,41 @@ describe("GitHub arm correctness", () => {
     expect(result).toMatchObject({ ok: true, warning: expect.stringContaining("could not be checked") });
   });
 
+  it("excludes derived entries from pull request glob readiness", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["pull_request"], permissions: { pull_requests: "read" } }) }), CTX, req({ on: [{ key: "github.pull_request.*" }] }));
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("refreshes a stale negative configuration before refusing", async () => {
+    const config = vi.fn(async (_owner: string, _repo: string, refresh?: boolean) => refresh
+      ? { events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }
+      : { events: [], permissions: {} });
+    const result = await checkArm(deps({ githubIngressConfig: config }), CTX, req());
+    expect(result).toMatchObject({ ok: true });
+    expect(config).toHaveBeenLastCalledWith("acme", "lean-proofs", true);
+  });
+
+  it("names pending owner approval when requested settings exceed the grants", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: [], permissions: {}, pendingApproval: true }) }), CTX, req());
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("Owner approval is pending") });
+  });
+
+  it.each(["unknown", "throw", "timeout"])("arms with an access warning for %s repository coverage", async (mode) => {
+    const result = await checkArm(deps({ githubInstallationCovers: async () => {
+      if (mode === "throw") throw new Error("503");
+      if (mode === "timeout") return new Promise(() => undefined);
+      return null;
+    } }), CTX, req(), { timeoutMs: 10 });
+    expect(result).toMatchObject({ ok: true, warning: expect.stringContaining("repository access could not be checked") });
+  });
+
+  it("keeps the readability refusal for an unreadable full SHA", async () => {
+    const subject = `github:acme/lean-proofs@${"a".repeat(40)}`;
+    const result = await checkArm(deps({ readGithub: async () => ({ readable: false }) }), CTX, req({ subject, on: [{ key: "github.status" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining(`This session cannot read ${subject}`) });
+    expect(result.ok === false && result.text).not.toContain("Give the full");
+  });
+
   it("accepts either documented permission for issue comments", async () => {
     const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { pull_requests: "read" } }) }), CTX, req({ on: [{ key: "github.issue_comment.created" }] }));
     expect(result.ok).toBe(true);
