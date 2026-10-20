@@ -229,8 +229,10 @@ export async function analyzeDefinitionPermissions(
     const agentStep = ref.agentStep ? { agentStep: true as const } : {};
     if (!entry || !action) {
       // An agent step names a dynamic action exactly, so its id is known.
-      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId: ref.agentStep ? `${ref.service}.${ref.action}` : null,
-        mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}) });
+      const actionId = ref.agentStep ? `${ref.service}.${ref.action}` : null;
+      nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId,
+        mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}),
+        ...(actionId !== null && dynamicActionGranted(rows, ref.service, actionId, now) ? { granted: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
@@ -271,9 +273,21 @@ export type AllowWorkflowPermissionsOutcome =
   | null;
 
 /** A step a run stops at unless the workflow's permissions allow it. An agent
- * step's dynamic action has no risk to read before a run, so it counts. */
-export function needsGrant(node: Pick<WorkflowNodePermissionWire, "mode" | "agentStep">): boolean {
-  return node.mode === "require_approval" || (node.agentStep === true && node.mode === "unknown");
+ * step's dynamic action has no risk to read before a run, so it counts until
+ * a saved grant covers it. */
+export function needsGrant(node: Pick<WorkflowNodePermissionWire, "mode" | "agentStep" | "granted">): boolean {
+  return node.mode === "require_approval" || (node.agentStep === true && node.mode === "unknown" && node.granted !== true);
+}
+
+const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
+
+/** Whether a saved grant covers an agent step's dynamic action, as the run
+ * resolves it (`resolution.ts`: no explicit rule may gate it). The action's
+ * risk is unknown before a run, so a rule at any risk level counts. */
+function dynamicActionGranted(rows: PolicyResolutionRows, service: string, actionId: string, now: number): boolean {
+  if (!rows.workflowGrants?.some((grant) => grant.actionId === actionId)) return false;
+  return !RISK_LEVELS.some((riskLevel) => restrictivePolicyAnywhere(rows,
+    { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }));
 }
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */

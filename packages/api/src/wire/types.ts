@@ -2332,6 +2332,10 @@ export interface WorkflowNodePermissionWire {
    * chooses when to call it and which values to send, so `mode` assumes any
    * values. A dynamic action is `unknown` here and can still be granted. */
   agentStep?: true;
+  /** An agent step's dynamic action that the workflow's saved permissions
+   * allow. Its `mode` stays `unknown` because its risk is unknown before a
+   * run. Set only when no org or team rule could gate it at any risk level. */
+  granted?: true;
 }
 
 export interface GetWorkflowPermissionsResponse {

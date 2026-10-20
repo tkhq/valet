@@ -287,7 +287,7 @@ function WorkflowEditorPane({
   const gatingActions = useMemo(() => {
     const seen = new Map<string, WorkflowNodePermissionWire>();
     for (const node of permissions?.nodes ?? []) {
-      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown")) && node.actionId !== null && !seen.has(node.actionId)) {
+      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown" && !node.granted)) && node.actionId !== null && !seen.has(node.actionId)) {
         seen.set(node.actionId, node);
       }
     }
