@@ -11,11 +11,12 @@ import typography from "@tailwindcss/typography";
  * A theme color held in a CSS variable that also takes an opacity, as in
  * `bg-ink/60`. A plain class keeps `var(--x)`; only an explicit opacity
  * mixes the color with transparent. Before this, a slash class on these
- * tokens emitted no CSS at all.
+ * tokens emitted no CSS at all. A gradient stop (`from-paper`) passes the
+ * number 0, so the value is read as a string.
  */
 function varColor(name: string) {
-  return ({ opacityValue }: { opacityValue?: string }): string =>
-    opacityValue === undefined || opacityValue === "1" || opacityValue.startsWith("var(")
+  return ({ opacityValue }: { opacityValue?: string | number }): string =>
+    opacityValue === undefined || String(opacityValue) === "1" || String(opacityValue).startsWith("var(")
       ? `var(${name})`
       : `color-mix(in oklch, var(${name}) calc(${opacityValue} * 100%), transparent)`;
 }
@@ -106,7 +107,7 @@ export default {
         // Tailwind's numeric amber scale — a bare `amber: "var(--amber)"`
         // REPLACED the whole palette here and silently killed every
         // `amber-500`-style class in the session components.
-        amber: { ...colors.amber, DEFAULT: "var(--amber)" },
+        amber: { ...colors.amber, DEFAULT: varColor("--amber") },
         // Pre-mixed hover/press washes: one tuned alpha per theme (see the
         // wash note in `theme.css`).
         "ink-wash": varColor("--ink-wash"),
@@ -118,10 +119,10 @@ export default {
         // Status washes. The `oklch(... / <alpha-value>)` scales above also
         // take an opacity (`bg-success-500/15`); these tokens keep one alpha
         // per theme.
-        "success-wash": "var(--success-wash)",
-        "danger-wash": "var(--danger-wash)",
-        "warning-wash": "var(--warning-wash)",
-        "warning-fg": "var(--warning-fg)",
+        "success-wash": varColor("--success-wash"),
+        "danger-wash": varColor("--danger-wash"),
+        "warning-wash": varColor("--warning-wash"),
+        "warning-fg": varColor("--warning-fg"),
       },
       fontFamily: {
         sans: [
