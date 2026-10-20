@@ -9,7 +9,17 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { Message } from "@valet/api/wire";
-import { SignalCard, childCardTitle, isLongBody, truncateBody } from "./signal-card";
+import {
+  SignalCard,
+  WatchEventsCard,
+  childCardTitle,
+  groupWatchEvents,
+  formatDurationSeconds,
+  isLongBody,
+  isWakeupSignal,
+  truncateBody,
+  wakeupOutcome,
+} from "./signal-card";
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to, params }: { children: ReactNode; to: string; params: Record<string, string> }) =>
@@ -156,5 +166,134 @@ describe("workflow operations", () => {
     expect(container.querySelector("details")?.open).toBe(false);
     expect(screen.getByText("Workflow request")).toBeTruthy();
     expect(screen.queryByRole("link")).toBeNull();
+  });
+});
+
+describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
+  function wakeupMessage(attributes: Record<string, string>, content: string, signalType = "process.exited"): Message {
+    return baseMessage({ content, parts: [{ kind: "text", text: content }], signal: { signalType, attributes } });
+  }
+
+  it("titles the card with the reason and shows a success badge for exit 0", () => {
+    render(
+      <SignalCard
+        message={wakeupMessage(
+          { wakeupId: "wk_1", kind: "process", reason: "full proof build", cause: "exit", exitCode: "0", durationSeconds: "3840" },
+          "Build completed.",
+        )}
+      />,
+    );
+    expect(screen.getByText("full proof build")).toBeTruthy();
+    const badge = screen.getByText("exit 0");
+    expect(badge.className).toContain("success");
+    expect(screen.getByText("ran 1h 4m")).toBeTruthy();
+  });
+
+  it("shows a danger badge for a non-zero exit and for a cause other than exit", () => {
+    const { unmount } = render(
+      <SignalCard message={wakeupMessage({ wakeupId: "wk_2", reason: "tests", cause: "exit", exitCode: "137" }, "Killed")} />,
+    );
+    expect(screen.getByText("exit 137").className).toContain("danger");
+    unmount();
+    render(<SignalCard message={wakeupMessage({ wakeupId: "wk_3", reason: "proof", cause: "deadline" }, "tail")} />);
+    expect(screen.getByText("deadline reached").className).toContain("danger");
+  });
+
+  it("renders the log in a pre block, not as Markdown", () => {
+    const log = "# not a heading\n***\n_not italic_";
+    const { container } = render(
+      <SignalCard message={wakeupMessage({ wakeupId: "wk_4", reason: "lean build", cause: "exit", exitCode: "1" }, log)} />,
+    );
+    const pre = container.querySelector("pre");
+    expect(pre?.textContent).toBe(log);
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.querySelector("hr")).toBeNull();
+    expect(container.querySelector("em")).toBeNull();
+  });
+
+  it("keeps a non-wakeup signal on the generic envelope", () => {
+    render(<SignalCard message={baseMessage({ signal: { signalType: "slack.message", attributes: { reason: "x" } } })} />);
+    expect(screen.getByText("slack.message")).toBeTruthy();
+  });
+
+  it("classifies signals and outcomes", () => {
+    expect(isWakeupSignal({ signalType: "timer.fired", attributes: { wakeupId: "wk_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "lease.expired", attributes: { leaseId: "ls_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "process.exited" })).toBe(false);
+    expect(isWakeupSignal({ signalType: "github.push", attributes: { wakeupId: "wk_1" } })).toBe(false);
+    expect(wakeupOutcome({})).toBeNull();
+    expect(wakeupOutcome({ cause: "cancelled" })).toEqual({ label: "cancelled", tone: "neutral" });
+    expect(wakeupOutcome({ cause: "exit", exitCode: "0" })).toEqual({ label: "exit 0", tone: "success" });
+    expect(wakeupOutcome({ cause: "exit", exitCode: "2" })).toEqual({ label: "exit 2", tone: "danger" });
+    expect(formatDurationSeconds("45")).toBe("45s");
+    expect(formatDurationSeconds("90000")).toBe("1d 1h");
+    expect(formatDurationSeconds("x")).toBeUndefined();
+  });
+});
+
+describe("wakeup causes in words (fix wave 4, L3)", () => {
+  it("names each cause in words", () => {
+    expect(wakeupOutcome({ cause: "pid_missing" })).toEqual({ label: "process not found", tone: "danger" });
+    expect(wakeupOutcome({ cause: "sandbox_unavailable" })).toEqual({ label: "sandbox stopped", tone: "danger" });
+    expect(wakeupOutcome({ cause: "rate" })).toEqual({ label: "too many events", tone: "danger" });
+    expect(wakeupOutcome({ cause: "deadline", exitCode: "137" })).toEqual({ label: "deadline reached · exit 137", tone: "danger" });
+  });
+
+  it("renders a human cancel as neutral and says a person stopped it", () => {
+    render(
+      <SignalCard
+        message={baseMessage({
+          content: "A person stopped this process.",
+          parts: [{ kind: "text", text: "A person stopped this process." }],
+          signal: {
+            signalType: "process.exited",
+            attributes: { wakeupId: "wk_c", reason: "proof", cause: "cancelled", cancelledBy: "user:u-1" },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("cancelled").className).not.toContain("danger");
+    expect(screen.getByText("by a person")).toBeTruthy();
+  });
+});
+
+describe("wakeup signal origin and watch event grouping (fix wave 3, UX)", () => {
+  function signalMessage(id: string, signalType: string, attributes: Record<string, string>, content: string, extra: Partial<Message> = {}): Message {
+    return baseMessage({ id, content, parts: [{ kind: "text", text: content }], signal: { signalType, attributes }, ...extra });
+  }
+
+  it("shows where a wakeup came from when the signal carries an origin", () => {
+    const message = signalMessage("o1", "timer.fired", { wakeupId: "wk_o", reason: "remind Alice" }, "Check the deploy.");
+    render(<SignalCard message={{ ...message, signal: { signalType: "timer.fired", attributes: { wakeupId: "wk_o", reason: "remind Alice" }, origin: { channelType: "slack" } } }} />);
+    expect(screen.getByText("from Slack")).toBeTruthy();
+  });
+
+  it("groups consecutive watch events of one watch, and absorbs quiet turns between them", () => {
+    const quiet = baseMessage({ id: "q1", role: "assistant", content: "", parts: [] });
+    const items = groupWatchEvents([
+      signalMessage("e1", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 1"),
+      quiet,
+      signalMessage("e2", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 2"),
+      signalMessage("e3", "watch.event", { wakeupId: "wk_other", reason: "other" }, "x"),
+      baseMessage({ id: "a1", role: "assistant", content: "The build is at 50%.", parts: [{ kind: "text", text: "The build is at 50%." }] }),
+      signalMessage("e4", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 3"),
+    ]);
+    expect(items.map((i) => (i.kind === "watch" ? `watch:${i.events.map((e) => e.id).join(",")}` : i.message.id))).toEqual([
+      "watch:e1,e2",
+      "e3",
+      "a1",
+      "e4",
+    ]);
+  });
+
+  it("renders a group as one card with the latest event, expandable to all", () => {
+    const events = [1, 2, 3].map((n) => signalMessage(`e${n}`, "watch.event", { wakeupId: "wk_w", reason: "tail build" }, `event ${n}`));
+    render(<WatchEventsCard events={events} />);
+    expect(screen.getByText("tail build")).toBeTruthy();
+    expect(screen.getByText("3 events")).toBeTruthy();
+    expect(screen.getByText("event 3")).toBeTruthy();
+    expect(screen.queryByText("event 1")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show all 3 events" }));
+    expect(screen.getByText("event 1")).toBeTruthy();
   });
 });

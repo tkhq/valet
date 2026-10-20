@@ -157,9 +157,16 @@ describe("loadPrebuildOverride", () => {
     expect(override).toEqual({ resources: { memory: "4Gi" } });
   });
 
+  it("parses scratch and trims a padded value", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": 'resources:\n  scratch: " 800Gi "\n' }),
+    );
+    expect(override).toEqual({ resources: { scratch: "800Gi" } });
+  });
+
   it("rejects an invalid resources declaration", async () => {
     const cases = [
-      ["resources: 1\n", /resources must be a mapping.*resources.*cpu.*memory/],
+      ["resources: 1\n", /resources must be a mapping.*cpu.*memory.*scratch.*resources.*cpu.*memory/],
       ["resources:\n  cpu: \"4\"\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
       ["resources:\n  cpu: 0\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
       ["resources:\n  cpu: -1\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
@@ -170,6 +177,8 @@ describe("loadPrebuildOverride", () => {
       ["resources:\n  memory: \"0\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"-1Gi\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"8GB\"\n", /resources\.memory.*quantity.*resources.*cpu.*memory/],
+      ["resources:\n  scratch: 4\n", /resources\.scratch must be a quantity string of at least 1Gi/],
+      ["resources:\n  scratch: \"500Mi\"\n", /resources\.scratch must be a quantity string of at least 1Gi/],
     ] as const;
     for (const [yaml, error] of cases) {
       await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": yaml }))).rejects.toThrow(

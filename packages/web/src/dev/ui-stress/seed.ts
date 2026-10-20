@@ -17,6 +17,7 @@ import type {
   ListNotificationsResponse,
   ListPluginsResponse,
   ListTeamsResponse,
+  ListSessionWakeupsResponse,
   ListThreadsResponse,
   ListToolPermissionsResponse,
   ListWorkflowActionRequiredResponse,
@@ -57,7 +58,7 @@ import {
   USAGE_PERIOD, USAGE_TEAM_ID, USAGE_USE_CASES, stressUsageBreakdown, stressUsageItems, stressUsageOutcomes, stressUsageToolEfficiency,
 } from "./fixtures/usage";
 import {
-  SIDEBAR_SESSION_ID, fixedSidebarThreads, searchSidebarThreads, sidebarThreadPage, stressArchivedThreads,
+  SIDEBAR_SESSION_ID, stressSidebarWakeups, fixedSidebarThreads, searchSidebarThreads, sidebarThreadPage, stressArchivedThreads,
   stressChildWork, stressSidebarDecisions,
 } from "./fixtures/threads";
 import { STRESS_AGENT_SESSION_ID, STRESS_RUN_ID, stressAgentDecisions, stressRunDetail } from "./fixtures/workflow-run";
@@ -142,6 +143,7 @@ function seedThreads(client: QueryClient): void {
   );
   client.setQueryData<ListDecisionsResponse>(qk.decisions(SIDEBAR_SESSION_ID), stressSidebarDecisions);
   client.setQueryData<ListThreadsResponse>(qk.threadsArchived(SIDEBAR_SESSION_ID), stressArchivedThreads);
+  client.setQueryData<ListSessionWakeupsResponse>(qk.wakeups(SIDEBAR_SESSION_ID), stressSidebarWakeups);
   client.setQueryData<InfiniteData<ChildWorkResponse, string | undefined>>(childWorkKey(SIDEBAR_SESSION_ID), {
     pages: [stressChildWork],
     pageParams: [undefined],

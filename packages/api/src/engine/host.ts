@@ -9,6 +9,7 @@ import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,8 +40,13 @@ import {
   type ResolvedModel,
   type PolicyResolver,
   type PluginStore,
+  type WakeupLimits,
+  type WakeupsSeam,
+  DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
+import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing, withSharerName } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
@@ -88,6 +94,7 @@ import {
   resolveRepoResources,
   type ResolvedRepoPrebuildFlags,
 } from "./resolve-repo-resources.js";
+import { applyScratchCaps } from "./apply-scratch-caps.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
@@ -141,7 +148,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { codingSystemPrompt } from "./prompt-rules.js";
+import { CHILD_TIMER_HOURS, codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -273,6 +280,25 @@ export interface EngineHostOpts {
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   blobs?: BlobStore;
+  /**
+   * Deploy scratch caps (`resolveScratchCaps(process.env)` at boot), applied
+   * to a repository's `.valet/prebuild.yaml` scratch declaration by
+   * `applyScratchCaps` inside `resolveRepoPrebuildFlags`. A declared value
+   * over the cap is dropped, never clamped.
+   */
+  scratchCaps?: ScratchCaps;
+  /**
+   * Wakeup/lease limits (`resolveWakeupLimits(process.env)` at boot),
+   * passed to every session's `wakeups` seam as `WakeupsSeam.limits`
+   * (spec 2026-10-08).
+   */
+  wakeupLimits?: WakeupLimits;
+  /**
+   * Cap on one detached job's log, in bytes (`resolveJobLogMaxBytes` at
+   * boot). Passed to every session's `wakeups` seam. Optional so test
+   * harnesses can omit it; `node.ts` always sets it.
+   */
+  jobLogMaxBytes?: number;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
   /** pi-ai model id or tier token; defaults to tier "s" when unset. */
@@ -469,6 +495,50 @@ export interface EngineHostOpts {
 /** `agent_sessions.credential_owner_mode`; see {@link SessionMeta.credentialOwnerMode}. */
 export type CredentialOwnerMode = "owner" | "actor";
 
+/** The `wakeups` seam deps every session builder passes. */
+export function wakeupsSeamDeps(
+  opts: Pick<EngineHostOpts, "engineStore" | "wakeupLimits" | "sandboxProvider" | "jobLogMaxBytes">,
+): WakeupsSeamDeps {
+  return {
+    engineStore: opts.engineStore,
+    limits: opts.wakeupLimits ?? DEFAULT_WAKEUP_LIMITS,
+    provider: opts.sandboxProvider,
+    ...(opts.jobLogMaxBytes !== undefined ? { jobLogMaxBytes: opts.jobLogMaxBytes } : {}),
+  };
+}
+
+/**
+ * The session's live `/scratch` size in bytes, from the attachment's last
+ * observation, or undefined when the session has no scratch or nothing has
+ * been observed yet. The wakeups seam caps a detached job log at a quarter
+ * of it (fix wave 3, k8s M-B). Lazy: a job starts after the run-start
+ * reconcile, so the observation exists by then.
+ */
+export function sessionScratchBytes(
+  getSession: () => Pick<WakeupsSeamSession, "attachment"> | undefined,
+): number | undefined {
+  const scratch = getSession()?.attachment.observedResources?.()?.scratch;
+  if (scratch === undefined) return undefined;
+  const bytes = parseResourceQuantity(scratch);
+  return bytes === null || bytes <= 0 ? undefined : bytes;
+}
+
+/** The coding prompt's options. `scratchEnabled` is true when the session's
+ * resources include scratch, so the prompt names `/scratch` only then. */
+export function codingPromptOptions(
+  secretsCli: boolean,
+  flags: { resources?: { scratch?: string }; initialResources?: { scratch?: string } },
+): { secretsCli: boolean; scratchEnabled: boolean } {
+  const scratch = flags.resources?.scratch ?? flags.initialResources?.scratch;
+  return { secretsCli, scratchEnabled: scratch !== undefined };
+}
+
+/** A system-prompt paragraph that tells the model a dropped scratch
+ * request left the session without `/scratch`. Empty when nothing dropped. */
+export function scratchWarningPrompt(warning: string | undefined): string {
+  return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
+}
+
 export interface SessionMeta {
   userId: string;
   orgId: string;
@@ -486,6 +556,9 @@ export interface SessionMeta {
   kubernetes?: boolean;
   /** Per-child CPU and memory overrides persisted on the app session row. */
   sandboxResourceOverrides?: PrebuildResources;
+  /** Thread key of the request that triggered this build. A REST session's
+   * startup warning goes on this thread. Absent means `web:default`. */
+  warningThreadKey?: string;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -755,6 +828,8 @@ export class EngineHost {
   private buildEpoch = new Map<string, number>();
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
+  /** Repo keys whose dropped-scratch warning is active. */
+  private scratchCapWarnings = new Set<string>();
 
   /**
    * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
@@ -852,6 +927,9 @@ export class EngineHost {
     const unsettled = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
 
+    // A lease (wakeups spec C3) keeps the sandbox out of idle suspension.
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
+
     let sinceMs = await this.opts.engineStore.latestActivityAt(sessionId);
     if (sinceMs == null) {
       const data = await this.opts.engineStore.getSession(sessionId);
@@ -871,6 +949,9 @@ export class EngineHost {
     if ((await this.opts.engineStore.listDecisionGates(sessionId, undefined, "pending")).length > 0) return;
     const recheck = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0 || session.hasOtherActiveRuns("") || session.pendingJobCount() > 0) return;
+    // A turn that started, set a hold or a process, and finished inside this
+    // window leaves a lease the first check never saw (PR review 2, item 1).
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.cache.get(sessionId)?.session !== session) return;
     if (session.attachment.state !== "ready") {
       if (execution && ["detached", "suspended"].includes(session.attachment.state)) this.evictCache(sessionId);
@@ -1243,7 +1324,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1257,6 +1338,8 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            ...this.wakeupsOptions(sessionId, () => builtSession),
+            ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1275,7 +1358,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1289,6 +1372,8 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          ...this.wakeupsOptions(sessionId, () => builtSession),
+          ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1298,6 +1383,12 @@ export class EngineHost {
     if (pendingStartRef) {
       await onStartRef(pendingStartRef);
       pendingStartRef = undefined;
+    }
+    // A child reports this warning to its parent (`startupWarnings`). A
+    // REST session has no parent, so the warning goes on the thread that
+    // triggered the build. The system prompt carries it for the model.
+    if (repoFlags.scratchWarning) {
+      await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
     }
 
     extras.bindSession(session);
@@ -2187,7 +2278,14 @@ export class EngineHost {
     const effective = resolved.outcome === "error"
       ? { ...resolved, kubernetes: meta.kubernetes === true }
       : resolved;
-    const result = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    const overridden = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    // `applyScratchCaps` records the refusal metric itself (it has the
+    // `ScratchRequestError.reason`); this call site logs a warning,
+    // deduplicated per repo below (mirroring `resourcesWithheld`), and
+    // surfaces the warning text to callers (REST sessions log it; children
+    // push it onto `startupWarnings` in `childSessionFor`).
+    const capped = applyScratchCaps(overridden, this.opts.scratchCaps ?? {});
+    const result = { ...capped.flags, ...(capped.warning ? { scratchWarning: capped.warning } : {}) };
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -2201,6 +2299,18 @@ export class EngineHost {
       } else {
         this.resourceWithholdingWarnings.delete(warningKey);
       }
+      if (capped.warning) {
+        if (!this.scratchCapWarnings.has(warningKey)) {
+          console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
+          this.scratchCapWarnings.add(warningKey);
+        }
+      } else {
+        this.scratchCapWarnings.delete(warningKey);
+      }
+    } else if (capped.warning) {
+      // No repo key to dedup against with no primary binding, so log every
+      // call, same as before this change.
+      console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
     }
     return result;
   }
@@ -2449,6 +2559,66 @@ export class EngineHost {
       if (!session || session.attachment.state !== "ready") return undefined;
       return session.sandbox as Sandbox;
     }, repos[0].targetDir);
+  }
+
+  /**
+   * Builds the `{ wakeups }` session option every builder spreads in
+   * alongside `extractDocument` (spec 2026-10-08, Task 15). `getSession`
+   * is the same lazy `() => builtSession` accessor each builder already
+   * threads to `buildCommandOptions`/`buildRepoInstructionsProvider`.
+   * It resolves only once the engine has built the session.
+   */
+  private wakeupsOptions(
+    sessionId: string,
+    getSession: () => WakeupsSeamSession | undefined,
+  ): { wakeups: WakeupsSeam } {
+    return {
+      wakeups: buildWakeupsSeam(
+        { ...wakeupsSeamDeps(this.opts), scratchBytes: () => sessionScratchBytes(getSession) },
+        sessionId,
+        getSession,
+      ),
+    };
+  }
+
+  /**
+   * Shows a startup warning as a `system` entry on `threadKey`, where the
+   * session page renders it. The model does not see `system` entries
+   * (`entriesToAgentMessages` skips them); `scratchWarningPrompt` gives it
+   * the same text. A rebuild after a restart finds the entry and does not
+   * write it again. Best-effort: a failed write is logged and never blocks
+   * the session.
+   */
+  private async noteSessionWarning(session: Session, text: string, threadKey: string): Promise<void> {
+    try {
+      const thread = await session.createThread(threadKey);
+      const snapshot = await this.opts.engineStore.getThreadSnapshot(session.id, thread.id);
+      if (snapshot?.entries.some((e) => e.type === "message" && e.role === "system" && e.content === text)) return;
+      await thread.appendEntry({
+        id: `e-${randomUUID()}`,
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "system",
+        content: text,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      console.error(`EngineHost: session ${session.id}: showing a startup warning failed:`, err);
+    }
+  }
+
+  /**
+   * Builds the `{ isLeased }` session option every builder spreads in
+   * alongside `wakeups` (spec INV-8, Task 19). The attachment calls this
+   * before a pod-replacing image or resource change at run-start reconcile
+   * and defers the change while a lease is active.
+   */
+  private leaseOptions(sessionId: string): { isLeased: () => Promise<boolean> } {
+    return {
+      isLeased: () => this.opts.engineStore.countActiveLeases(sessionId).then((n) => n > 0),
+    };
   }
 
   /**
@@ -2860,6 +3030,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -3985,6 +4157,9 @@ export class EngineHost {
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
       );
     }
+    if (repoFlags.scratchWarning) {
+      opts.startupWarnings?.push(repoFlags.scratchWarning);
+    }
     const dockerFlag = opts.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
@@ -4011,6 +4186,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(childSessionId, () => builtSession),
+      ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4051,7 +4228,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4198,6 +4375,10 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
+    // `builtSession` is assigned below, after the engine builds the
+    // session. The wakeups seam resolves it lazily, same as every other
+    // builder's `wakeupsOptions` accessor.
+    let builtSession: Session | undefined;
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -4211,6 +4392,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4237,7 +4420,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}), childTimerHours: CHILD_TIMER_HOURS }),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name
@@ -4265,6 +4448,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);
+    builtSession = session;
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);

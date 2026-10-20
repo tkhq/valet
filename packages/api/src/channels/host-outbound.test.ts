@@ -247,6 +247,8 @@ describe("ChannelHost outbound delivery", () => {
     });
 
     engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider,
       eventStream,
@@ -2775,6 +2777,8 @@ describe("ChannelHost.attentionDeliverer", () => {
     });
 
     const engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider,
       eventStream,

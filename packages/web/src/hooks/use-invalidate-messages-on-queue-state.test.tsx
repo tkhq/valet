@@ -79,6 +79,8 @@ describe("useInvalidateMessagesOnQueueState", () => {
       vi.advanceTimersByTime(1);
     });
     expect(spy).toHaveBeenCalledWith({ queryKey: qk.messages(SESSION, THREAD) });
+    // Background work refreshes on the same cue.
+    expect(spy).toHaveBeenCalledWith({ queryKey: qk.wakeups(SESSION) });
   });
 
   it("does nothing when no queue.state has arrived", () => {

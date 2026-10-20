@@ -11,7 +11,7 @@
  */
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   RouterProvider,
@@ -19,7 +19,9 @@ import {
   createRootRoute,
   createRouter,
 } from "@tanstack/react-router";
+import { api } from "~/api/client";
 import { SessionView } from "./session-view";
+import { ChildPanel } from "./child-panel";
 
 let fullProfile = false;
 let readOnlyReason: string | undefined;
@@ -55,6 +57,10 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   };
 });
 
+// Signal turns reach the transcript only through this refetch hook.
+const queueStateRefetch = vi.hoisted(() => vi.fn());
+vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: queueStateRefetch }));
+
 vi.mock("./session-header", () => ({
   SandboxChip: () => null,
   SessionHeader: ({ session, summaryControl }: { session: { title?: string }; summaryControl?: ReactNode }) => (
@@ -63,7 +69,8 @@ vi.mock("./session-header", () => ({
 }));
 vi.mock("./thread-context-panel", () => ({ ThreadContextPanel: () => <div>Thread summary contents</div> }));
 vi.mock("./message-list", () => ({ MessageList: ({ header }: { header?: ReactNode }) => <div data-testid="message-list">{header}</div> }));
-vi.mock("./composer", () => ({ Composer: () => <div data-testid="composer" /> }));
+// The stub renders the status line slot, so the background work line shows.
+vi.mock("./composer", () => ({ Composer: ({ statusLine }: { statusLine?: ReactNode }) => <div data-testid="composer">{statusLine}</div> }));
 vi.mock("./decision-gate-card", () => ({ DecisionGateCard: () => null }));
 
 vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMinimize, onRestore, onClose, onExpand }: {
@@ -74,9 +81,11 @@ vi.mock("./browser/browser-overlay", () => ({ BrowserOverlay: ({ minimized, onMi
 vi.mock("./browser/browser-pane", () => ({ BrowserPane: () => <section aria-label="Full browser" /> }));
 
 function renderInRouter(sessionId: string, panel: boolean, onClose?: () => void, active = true) {
-  const rootRoute = createRootRoute({
-    component: () => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />,
-  });
+  return renderComponent(() => <SessionView sessionId={sessionId} panel={panel} onClose={onClose} active={active} />);
+}
+
+function renderComponent(component: () => ReactNode) {
+  const rootRoute = createRootRoute({ component });
   const router = createRouter({
     routeTree: rootRoute.addChildren([]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
@@ -167,5 +176,45 @@ describe("SessionView header chrome", () => {
     renderInRouter("sess-1", true);
     expect(await screen.findByTestId("message-list")).toBeTruthy();
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("refetches messages on queue changes, so signal turns render live in a session", async () => {
+    renderInRouter("sess-1", false);
+    expect(await screen.findByTestId("message-list")).toBeTruthy();
+    expect(queueStateRefetch).toHaveBeenCalledWith("sess-1", undefined);
+  });
+});
+
+describe("SessionView: background work status line", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const work = () => ({
+    wakeups: [{ id: "wk_1", threadId: "t1", kind: "timer" as const, status: "pending" as const, reason: "check CI", fireAt: Date.now() + 26 * 60_000 + 10_000, createdAt: Date.now() }],
+    leases: [],
+  });
+
+  it("renders the line with the composer on the session page", async () => {
+    vi.spyOn(api, "listSessionWakeups").mockResolvedValue(work());
+    renderInRouter("sess-1", false);
+    const line = await screen.findByRole("button", { name: /^Background work: / });
+    expect(line.textContent).toContain("next wakeup in 26m");
+    expect(line.textContent).toContain("1 timer");
+    expect(screen.getByTestId("composer").contains(line)).toBe(true);
+  });
+
+  it("renders the line in the child panel", async () => {
+    const list = vi.spyOn(api, "listSessionWakeups").mockResolvedValue(work());
+    renderComponent(() => <ChildPanel childId="sess-1" onClose={() => {}} />);
+    const panel = await screen.findByRole("dialog", { name: "Child thread" });
+    const line = await within(panel).findByRole("button", { name: /^Background work: / });
+    expect(line.textContent).toContain("1 timer");
+    expect(list).toHaveBeenCalledWith("sess-1");
+  });
+
+  it("renders no line while the session has no background work", async () => {
+    const list = vi.spyOn(api, "listSessionWakeups").mockResolvedValue({ wakeups: [], leases: [] });
+    renderInRouter("sess-1", false);
+    expect(await screen.findByTestId("composer")).toBeTruthy();
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /^Background work: / })).toBeNull();
   });
 });

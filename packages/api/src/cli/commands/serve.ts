@@ -343,8 +343,10 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   // boot throws, drop the lock we just claimed so a failed boot leaves no stale
   // lock we own.
   let handle: ServerHandle;
+  let hardExitMs: number;
   try {
-    const { startServer } = await import("../../main.js");
+    const { startServer, SHUTDOWN_HARD_EXIT_MS } = await import("../../main.js");
+    hardExitMs = SHUTDOWN_HARD_EXIT_MS;
     handle = await startServer();
   } catch (err) {
     removeLock();
@@ -374,11 +376,13 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
         .close()
         .then(removeLock)
         .finally(() => resolveExit(ExitCode.OK));
-      // Hard-exit if close() hangs (containers can be slow to stop).
+      // Hard-exit if close() hangs (containers can be slow to stop). The
+      // deadline is main.ts's, so a WakeWatcher pass gets the same time to
+      // finish its row and send its signal here as under the api entry.
       setTimeout(() => {
         removeLock();
         process.exit(1);
-      }, 5_000).unref();
+      }, hardExitMs).unref();
     };
     process.on("SIGINT", () => onSignal("SIGINT"));
     process.on("SIGTERM", () => onSignal("SIGTERM"));

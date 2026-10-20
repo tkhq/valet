@@ -1,7 +1,7 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { uid } from "./ids.js";
-import { builtinTools } from "./builtin-tools/index.js";
+import { builtinTools, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
@@ -329,7 +329,11 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
-    this.builtinTools = options.builtinTools ?? builtinTools;
+    // A session with no wakeup seam (a bare engine, a test) gets no wakeup
+    // tools: each one would only refuse, and six tool schemas widen every
+    // prompt. The api gives every session a seam (`host.ts`).
+    this.builtinTools = options.builtinTools
+      ?? (options.wakeups ? builtinTools : builtinTools.filter((tool) => !WAKEUP_TOOL_NAMES.has(tool.name)));
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;

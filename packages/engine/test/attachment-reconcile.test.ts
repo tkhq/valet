@@ -21,6 +21,7 @@ import {
   type SpecProvider,
 } from "../src/index.js";
 import { readAppliedState } from "../src/sandbox/applied-state.js";
+import { resourceDrift } from "../src/sandbox/attachment.js";
 
 // ── Provider ──────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ class RecordingProvider implements SandboxProvider {
   createWorkspaceStorage: (string | undefined)[] = [];
   preserveResourcesOnAdopt: boolean[] = [];
   preserveResourceFieldsOnAdopt: SandboxCreateOpts["preserveResourceFieldsOnAdopt"][] = [];
+  preserveLivePod: boolean[] = [];
   destroyCalls: string[] = [];
   releaseCalls: string[] = [];
   suspendCalls: string[] = [];
@@ -99,12 +101,14 @@ class RecordingProvider implements SandboxProvider {
     this.createWorkspaceStorage.push(opts.workspaceStorage);
     this.preserveResourcesOnAdopt.push(opts.preserveResourcesOnAdopt === true);
     this.preserveResourceFieldsOnAdopt.push(opts.preserveResourceFieldsOnAdopt);
+    this.preserveLivePod.push(opts.preserveLivePod === true);
     const preservesOnAdopt = opts.preserveResourcesOnAdopt ||
       (opts.preserveResourceFieldsOnAdopt?.length ?? 0) > 0;
-    if (this.adopt && preservesOnAdopt && this.rollAdoptedImage) {
+    if (this.adopt && preservesOnAdopt && this.rollAdoptedImage && !opts.preserveLivePod) {
       this.resourceOverrides = await opts.readResourceOverrides?.(this.adopt) ?? null;
     }
-    const sb = this.adopt && preservesOnAdopt && !this.rollAdoptedImage
+    // preserveLivePod: a real provider keeps the live pod and its template.
+    const sb = this.adopt && (opts.preserveLivePod || (preservesOnAdopt && !this.rollAdoptedImage))
       ? this.adopt
       : new VirtualSandbox(`sb-${this.nextId++}`);
     Object.assign(sb, { resourceOverrides: this.resourceOverrides, adopted: this.adopt !== undefined });
@@ -167,6 +171,20 @@ async function reachReady(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+describe("resourceDrift", () => {
+  it("a scratch-only difference counts as drift", () => {
+    const desired = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    const applied = { cpu: 1, memory: "2Gi" };
+    expect(resourceDrift(desired, applied)).toBe(true);
+  });
+
+  it("equal scratch is not drift", () => {
+    const desired = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    const applied = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    expect(resourceDrift(desired, applied)).toBe(false);
+  });
+});
 
 describe("SandboxAttachment.reconcile", () => {
   it("cold provision applies desired resources and preserves ephemeral storage", async () => {
@@ -425,10 +443,26 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.releaseCalls).toEqual(["sb-existing"]);
   });
 
+  it("a critical prep failure keeps a leased adopted pod running (PR review, finding 5)", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, release: true });
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1", async () => { throw new Error("prep failed"); })] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const att = new SandboxAttachment(provider, {}, fake.provider(), undefined, async () => true);
+
+    await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+
+    expect(provider.destroyCalls).toEqual([]);
+    expect(provider.releaseCalls).toEqual([]);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("kept for its background work"))).toBe(true);
+    warn.mockRestore();
+  });
+
   it.each([
     { cpu: 4, memory: "4Gi" },
     { cpu: 2, memory: "8Gi" },
     { cpu: 4 },
+    { cpu: 2, memory: "4Gi", scratch: "100Gi" },
     {},
   ])("resource drift to %j replaces and applies the full plan", async (resources) => {
     const provider = new RecordingProvider({ release: true });
@@ -706,6 +740,110 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.releaseCalls).toEqual(["sb-1"]); // compute released; workspace retained
     expect(provider.destroyCalls).toEqual([]);
     expect(applied).toEqual(["s1"]); // steps re-applied on the fresh container
+    expect(att.observedImage()).toBe("img:v2");
+    expect(att.state).toBe("ready");
+  });
+
+  it("a leased sandbox defers an image change and keeps its pod (INV-8)", async () => {
+    const provider = new RecordingProvider({ release: true });
+    const applied: string[] = [];
+    const mkSteps = () => [
+      step("s1", "sh1", async () => {
+        applied.push("s1");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => true);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.createImages).toEqual(["img:v1"]);
+    applied.length = 0;
+
+    // Drift the image while a lease is active.
+    fake.spec = { image: "img:v2", specHash: "h2", steps: mkSteps() };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await att.reconcile();
+
+    expect(provider.createImages).toEqual(["img:v1"]); // no replace while leased
+    expect(provider.releaseCalls).toEqual([]);
+    expect(att.currentEpoch()).toBe(1); // same epoch
+    expect(att.state).toBe("ready");
+    expect(att.observedImage()).toBe("img:v1");
+    expect(warnSpy).toHaveBeenCalledWith("sandbox sb-1: deferring image/resource change while a lease is active");
+    warnSpy.mockRestore();
+  });
+
+  it("a cold attachment adopts a leased pod without rolling it, then replaces after the lease releases (INV-8)", async () => {
+    // An api restart rebuilt the session: the attachment is fresh, the live
+    // pod runs img:v1, and the desired spec moved to img:v2 with new resources.
+    const adopted = new VirtualSandbox("sb-live");
+    const liveResources = { cpu: 2, memory: "4Gi" };
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources: liveResources,
+    }));
+    // rollAdoptedImage: without preserveLivePod this provider would replace the pod.
+    const provider = new RecordingProvider({ adopt: adopted, rollAdoptedImage: true, release: true });
+    const fake = new FakeSpecProvider({
+      image: "img:v2", specHash: "h2", resources: { cpu: 4, memory: "8Gi" }, steps: [step("s1", "sh1")],
+    });
+    let leased = true;
+    const att = new SandboxAttachment(provider, { image: "img:v2" }, fake.provider(), undefined, async () => leased);
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.preserveLivePod).toEqual([true]);
+    expect(att.current()).toBe(adopted);
+    expect(att.state).toBe("ready");
+    // The applied state still names the live image and resources, so the
+    // deferred change stays visible to the next reconcile.
+    const state = await readAppliedState(adopted);
+    expect(state?.image).toBe("img:v1");
+    expect(state?.resources).toEqual(liveResources);
+    expect(att.observedImage()).toBe("img:v1");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await att.reconcile();
+    warnSpy.mockRestore();
+    expect(att.current()).toBe(adopted);
+    expect(att.currentEpoch()).toBe(1);
+
+    leased = false;
+    await att.reconcile();
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(att.currentEpoch()).toBe(2);
+    expect(provider.createImages.at(-1)).toBe("img:v2");
+    expect(provider.preserveLivePod.at(-1)).toBe(false);
+    expect(att.observedImage()).toBe("img:v2");
+  });
+
+  it("a cold attachment with no lease does not ask the provider to keep the live pod", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => false);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.preserveLivePod).toEqual([false]);
+  });
+
+  it("an unleased sandbox still replaces on image drift when isLeased is wired", async () => {
+    const provider = new RecordingProvider({ release: true });
+    const applied: string[] = [];
+    const mkSteps = () => [
+      step("s1", "sh1", async () => {
+        applied.push("s1");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => false);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.createImages).toEqual(["img:v1"]);
+    applied.length = 0;
+
+    fake.spec = { image: "img:v2", specHash: "h2", steps: mkSteps() };
+
+    await att.reconcile();
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(att.currentEpoch()).toBe(2); // replace still happens
+    expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
     expect(att.observedImage()).toBe("img:v2");
     expect(att.state).toBe("ready");
   });
@@ -1162,5 +1300,95 @@ describe("SandboxAttachment wake folding", () => {
     expect(provider.createImages).toEqual(["img:v1"]); // no re-provision
     expect(resumed.epoch).toBe(1); // clean suspend/resume keeps the epoch
     expect(att.state).toBe("ready");
+  });
+});
+
+describe("SandboxAttachment keeps /scratch across a record gap (fix wave 3)", () => {
+  it("a scratch value in the applied file never stands in for the provider record (fix wave 4, security N2)", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    // The file lives in the sandbox, where the agent can write it. A
+    // forged scratch here must not reach the next pod spec.
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: {}, resources: { cpu: 2, scratch: "800Gi" },
+    }));
+    // The provider's record is the authority on the live scratch: none here.
+    const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { cpu: 2 } });
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+
+    const att = await reachReady(provider, fake);
+    expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 2 });
+
+    // A YAML that asks for scratch now reads as drift: the pod has none.
+    fake.spec = { image: "img:v1", specHash: "h2", resources: { cpu: 2, scratch: "800Gi" }, steps: [] };
+    await att.reconcile();
+
+    expect(provider.createImages).toHaveLength(2);
+    expect(provider.createResources[1]?.scratch).toBe("800Gi");
+    await att.destroy();
+  });
+
+  it("H-A: a preserved scratch is kept in the create options for a later re-create", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { scratch: "800Gi" } });
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+
+    const att = await reachReady(provider, fake, { resources: { cpu: 1 } });
+    att.reportFailure(att.currentEpoch(), new Error("pod gone"));
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.createResources[1]?.scratch).toBe("800Gi");
+    await att.destroy();
+  });
+
+  it("H-B: a container restart that lost applied.json re-runs steps in place and keeps the pod", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider();
+      let stepCalls = 0;
+      const fake = new FakeSpecProvider({
+        image: "img:v1", specHash: "h1", resources: { scratch: "100Gi" },
+        steps: [step("s1", "sh1", async () => { stepCalls++; })],
+      });
+      const att = await reachReady(provider, fake);
+      const sb = provider.sandboxes[0];
+      if (!sb || att.current() !== sb) throw new Error("expected the first sandbox ready");
+      expect(stepCalls).toBe(1);
+
+      // The restart wiped the container rootfs. The pod and /scratch stay.
+      await sb.rm("/etc/valet/applied.json");
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      await att.reconcile();
+
+      expect(att.current()).toBe(sb);
+      expect(provider.createImages).toHaveLength(1);
+      expect(provider.destroyCalls).toEqual([]);
+      expect(stepCalls).toBe(2);
+      expect((await readAppliedState(sb))?.resources).toEqual({ scratch: "100Gi" });
+      await att.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("H-B: after the restart, a real scratch change still replaces the pod", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider();
+      const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", resources: { scratch: "100Gi" }, steps: [] });
+      const att = await reachReady(provider, fake);
+      const sb = provider.sandboxes[0];
+      if (!sb) throw new Error("expected a virtual sandbox");
+      await sb.rm("/etc/valet/applied.json");
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      fake.spec = { image: "img:v1", specHash: "h2", resources: { scratch: "200Gi" }, steps: [] };
+
+      await att.reconcile();
+
+      expect(provider.createImages).toHaveLength(2);
+      expect(provider.createResources[1]?.scratch).toBe("200Gi");
+      await att.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

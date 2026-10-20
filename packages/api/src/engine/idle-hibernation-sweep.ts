@@ -62,6 +62,7 @@ export interface IdleHibernationSweepDeps {
   engineStore: {
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
     latestActivityAt(sessionId: string): Promise<number | null>;
+    countActiveLeases(sessionId: string): Promise<number>;
   };
   /** Same window the in-memory idle sweep uses (`resolveIdleMinutes`);
    * `<= 0` disables. */
@@ -115,6 +116,8 @@ export class IdleHibernationSweep {
 
     const unsettled = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
+    // A lease (wakeups spec C3) keeps the sandbox out of idle suspension.
+    if ((await this.deps.engineStore.countActiveLeases(sessionId)) > 0) return;
     // Missing activity data fails SAFE, like the cache sweep: a session
     // with no recorded activity is judged by its creation time, so a row
     // created moments before a restart is never hibernated as "idle".
@@ -168,6 +171,8 @@ export class IdleHibernationSweep {
     // the checks above, wins.
     const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0) return;
+    // A lease set since the first check keeps the sandbox up (PR review 2, item 1).
+    if ((await this.deps.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
 
     await this.deps.engineHost.suspendSandbox(sandboxId);

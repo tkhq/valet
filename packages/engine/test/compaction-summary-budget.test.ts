@@ -8,7 +8,11 @@ const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
 it("defers an older tail turn when the generated summary needs its space", async () => {
-  const faux = registerFauxProvider({ provider: "summary-tail-budget", models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
+  // The window leaves about 1k tokens of headroom over the system prompt and
+  // tool definitions. The bash and task tools describe background processes
+  // (wakeups), so the fixture is 21k; at 24k the older tail fits and nothing
+  // is deferred.
+  const faux = registerFauxProvider({ provider: "summary-tail-budget", models: [{ id: "tiny", name: "tiny", contextWindow: 21_000, maxTokens: 5 }] });
   cleanups.push(() => faux.unregister());
   const model = faux.getModel("tiny");
   if (!model) throw new Error("Missing fixture model");
