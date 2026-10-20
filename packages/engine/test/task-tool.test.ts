@@ -168,6 +168,26 @@ describe("task tool: spawner present", () => {
     expect(seenReq?.resources).toEqual({ cpu: 2, memory: "4Gi" });
   });
 
+  it("gives the child the parent's ceiling, not the parent's thread focus", async () => {
+    let seenReq: SpawnChildRequest | undefined;
+    const spawner = vi.fn(async (req: SpawnChildRequest) => {
+      seenReq = req;
+      return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
+    });
+    // A research child must keep shell and web reads that a workflow-diagnosis focus hides from the parent.
+    const ctx = makeCtx({
+      toolScope: { tools: ["task"], actions: ["workflows.get_run"] },
+      toolScopeCeiling: { tools: ["task", "bash", "web_fetch"] },
+      config: { childSpawner: spawner },
+    });
+
+    await executeTask({ prompt: "research the failure" }, ctx);
+    expect(seenReq?.toolScope).toEqual({ tools: ["task", "bash", "web_fetch"] });
+
+    await executeTask({ prompt: "read only", toolScope: { tools: ["web_fetch"] } }, ctx);
+    expect(seenReq?.toolScope).toEqual({ tools: ["web_fetch"] });
+  });
+
   it.each([0, 65])("rejects invalid CPU %s without calling the spawner", async (cpu) => {
     const spawner = vi.fn(async () => {
       return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;

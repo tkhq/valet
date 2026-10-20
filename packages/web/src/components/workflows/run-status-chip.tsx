@@ -1,5 +1,6 @@
 import type { WorkflowRunOutcome, WorkflowRunStatus } from "@valet/api/wire";
 import { Badge, StatusDot } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 
 /**
  * Maps a settled run's outcome to the Badge variant.
@@ -11,44 +12,49 @@ export const OUTCOME_VARIANT: Record<WorkflowRunOutcome, "success" | "danger" | 
   cancelled: "neutral",
 } as const;
 
+const OUTCOME_LABEL: Record<WorkflowRunOutcome, string> = {
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
 export interface RunStatusChipProps {
   status: WorkflowRunStatus;
   outcome?: WorkflowRunOutcome;
   needsApproval: boolean;
+  className?: string;
 }
 
 /**
- * Inline chip that reflects the current run state:
- * - needsApproval (parked + gates): amber "Needs approval" with a static dot
+ * The one chip for a run's state, on the run page and in run lists:
+ * - needsApproval (parked + gates): amber "Needs approval" with a dot
  * - parked, no gates: neutral "Waiting"
- * - running/pending: moss "Running"
- * - settled: outcome Badge via OUTCOME_VARIANT
+ * - running/pending/terminalizing: accent "Running" with a pulsing dot
+ * - settled: the outcome, capitalized, in its OUTCOME_VARIANT color
  */
-export function RunStatusChip({ status, outcome, needsApproval }: RunStatusChipProps) {
+export function RunStatusChip({ status, outcome, needsApproval, className }: RunStatusChipProps) {
   if (needsApproval) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300">
-        <StatusDot tone="warning" />
+      <Badge variant="warning" className={cn("gap-1.5", className)}>
+        <StatusDot tone="warning" size="sm" />
         Needs approval
-      </span>
+      </Badge>
     );
   }
-
   if (status === "settled") {
-    if (outcome) {
-      return <Badge variant={OUTCOME_VARIANT[outcome]}>{outcome}</Badge>;
-    }
-    return <Badge variant="neutral">settled</Badge>;
+    return (
+      <Badge variant={outcome ? OUTCOME_VARIANT[outcome] : "neutral"} className={className}>
+        {outcome ? OUTCOME_LABEL[outcome] : "Finished"}
+      </Badge>
+    );
   }
-
   if (status === "parked") {
-    return <Badge variant="neutral">Waiting</Badge>;
+    return <Badge variant="neutral" className={className}>Waiting</Badge>;
   }
-
-  // running | pending | terminalizing
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium bg-success-500/15 text-success-600 dark:text-success-500">
+    <Badge variant="accent" className={cn("gap-1.5", className)}>
+      <StatusDot tone="accent" size="sm" pulse />
       Running
-    </span>
+    </Badge>
   );
 }

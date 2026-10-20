@@ -57,7 +57,7 @@ export const fallbackRenderer: ToolRenderer = {
               "px-3 py-2 border-t",
               error
                 ? "border-danger-500/30 bg-danger-500/5"
-                : "border-[--border]/60 bg-neutral-50/60 dark:bg-neutral-950/60",
+                : "border-line/60 bg-neutral-50/60 dark:bg-neutral-950/60",
             )}
           >
             <div className="flex items-center justify-between">
@@ -167,10 +167,7 @@ function ValueCell({ value }: { value: unknown }) {
         className={cn(
           "inline-flex items-center px-1 py-[1px] rounded text-[10px] font-medium uppercase tracking-wider",
           value
-            ? // Wash token, not `bg-success-500/15`: the `success` scale is a raw
-              // `oklch(...)` string, so the slash modifier emits no rule at all and
-              // the pill rendered as bare coloured text. Same trap `badge.tsx` and
-              // the OPACITY-MODIFIER note in theme.css describe.
+            ? // The wash token matches `badge.tsx`'s success pill.
               "bg-success-wash text-success-700 dark:text-success-500"
             : "bg-neutral-200/70 dark:bg-neutral-800 text-muted",
         )}
@@ -180,7 +177,7 @@ function ValueCell({ value }: { value: unknown }) {
     );
   }
   if (typeof value === "number") {
-    return <span className="text-[--fg]/95 tabular-nums">{value.toLocaleString()}</span>;
+    return <span className="text-ink/95 tabular-nums">{value.toLocaleString()}</span>;
   }
   if (typeof value === "string") {
     // Identifier-like values (paths, ids, keys — no whitespace) read as
@@ -212,7 +209,7 @@ function CollapsedText({
     mono ? "font-mono" : "font-sans",
     tone === "danger"
       ? "text-danger-700 dark:text-danger-400"
-      : "text-[--fg]/95",
+      : "text-ink/95",
     inline && "text-[12px]",
     !inline && "text-[12px] leading-[1.55]",
   );
@@ -239,7 +236,7 @@ function CollapsedJson({ value }: { value: unknown }) {
   const isShort = compact.length < 80;
 
   if (isShort) {
-    return <span className="font-mono text-[--fg]/85">{compact}</span>;
+    return <span className="font-mono text-ink/85">{compact}</span>;
   }
   if (!expanded) {
     return (

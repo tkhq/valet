@@ -199,11 +199,34 @@ export function describeCheckpointContract(makeStore: () => Promise<WorkflowStor
       ]);
     });
 
+    it('a rewritten intent keeps the first intent time as the step start', async () => {
+      // A schema repair or a dispatch receipt rewrites the intent mid-step.
+      const store = await setup();
+      await store.putIntent(intent({ createdAt: 100 }));
+      await store.putIntent(intent({ createdAt: 160, effects: { repairAttempted: true } }));
+      let [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.startedAt).toBe(100);
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ createdAt: 220 }));
+      [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.startedAt).toBe(100);
+      expect(cp.createdAt).toBe(220);
+    });
+
+    it('a terminal write keeps the intent row time as startedAt', async () => {
+      const store = await setup();
+      await store.putIntent(intent({ createdAt: 100 }));
+      await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ createdAt: 250 }));
+      const [cp] = await store.getCheckpoints(RUN_ID);
+      expect(cp.createdAt).toBe(250);
+      expect(cp.startedAt).toBe(100);
+    });
+
     it('a node can complete directly to terminal without a prior intent write (pure executors)', async () => {
       const store = await setup();
       await store.completeCheckpoint(RUN_ID, 'node-a', 0, 1, terminal({ status: 'skipped', result: undefined }));
       const [cp] = await store.getCheckpoints(RUN_ID);
       expect(cp.status).toBe('skipped');
+      expect(cp.startedAt).toBeUndefined();
     });
 
     it('a same-attempt putIntent overwrites the existing intent row (executor re-writing its own intent)', async () => {

@@ -37,7 +37,15 @@ describe("automation run workspace", () => {
   });
   it("shows run details when no conversation exists", () => {
     render(<RunWorkspace conversations={[]} onSelect={vi.fn()}><button>Retry run</button></RunWorkspace>);
-    expect(screen.getByRole("tab", { name: "Run details" }).getAttribute("aria-selected")).toBe("true");
+    // Nothing to switch between, so no tab bar: the details show directly.
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeTruthy();
     expect(screen.queryByTestId("chat")).toBeNull();
+  });
+
+  it("keeps the back link on screen while the conversation tab is open", () => {
+    render(<RunWorkspace conversations={[{ sessionId: "s1", threadId: "t1", nodeId: "assemble", title: "Assemble" }]} onSelect={vi.fn()}
+      back={<a href="/workflows/wf_1">← Release report</a>}><button>Retry run</button></RunWorkspace>);
+    expect(screen.getByRole("link", { name: "← Release report" })).toBeTruthy();
   });
 });

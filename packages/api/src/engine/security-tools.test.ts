@@ -352,8 +352,10 @@ describe("sec_dispatch", () => {
     );
     await runner.pause();
 
+    // The child gets the runner's ceiling; the runner's own focus stays with the runner.
+    const toolScopeCeiling = { tools: ["sec_dispatch", "bash"], actions: [] };
     const toolScope = { tools: ["sec_dispatch"], actions: [] };
-    const result = await secDispatchTool.execute({}, toolCtx(api, created.id, { threadId: "t-runner", toolScope }));
+    const result = await secDispatchTool.execute({}, toolCtx(api, created.id, { threadId: "t-runner", toolScope, toolScopeCeiling }));
     expect(result.text).toContain("dispatched cell 01-recon");
     expect(result.text).toContain("child.settled signal");
 
@@ -365,7 +367,7 @@ describe("sec_dispatch", () => {
     expect(recon?.status).toBe("running");
     expect(recon?.attempts).toBe(1);
     expect(recon?.childSessionId).toBeTruthy();
-    expect((await api.providers.engineStore.getSession(recon?.childSessionId ?? ""))?.metadata?.toolScope).toEqual(toolScope);
+    expect((await api.providers.engineStore.getSession(recon?.childSessionId ?? ""))?.metadata?.toolScope).toEqual(toolScopeCeiling);
     expect(result.text).toContain(recon!.childSessionId!);
 
     // The spawner (not a bypass) created the durable watch edge, armed for
@@ -398,12 +400,13 @@ describe("sec_handoff tool scopes", () => {
     const runner = await p.engineHost.sessionFor(created.id, await loadSessionMeta(p.db, row));
     await runner.pause();
     await p.db.insert(securityFindings).values({ id: "scope-finding", engagementId: found.engagement.id, cellId: "cell-scope", fingerprint: "scope-fp", severity: "high", title: "Scoped finding", body: "A scoped test finding.", status: "open", createdAt: Date.now() });
+    const toolScopeCeiling = { tools: ["sec_handoff", "bash"], actions: [] };
     const toolScope = { tools: ["sec_handoff"], actions: [] };
-    const result = await secHandoffTool.execute({ finding_id: "scope-finding" }, toolCtx(api, created.id, { threadId: "t-handoff", toolScope }));
+    const result = await secHandoffTool.execute({ finding_id: "scope-finding" }, toolCtx(api, created.id, { threadId: "t-handoff", toolScope, toolScopeCeiling }));
     expect(result.text).toContain("spawned fix session");
     const [watch] = await p.db.select().from(childWatches).where(eq(childWatches.parentSessionId, created.id)).limit(1);
     if (!watch) throw new Error("child watch missing");
-    expect((await p.engineStore.getSession(watch.childSessionId))?.metadata?.toolScope).toEqual(toolScope);
+    expect((await p.engineStore.getSession(watch.childSessionId))?.metadata?.toolScope).toEqual(toolScopeCeiling);
     await p.engineHost.liveSession(watch.childSessionId)?.abort();
   });
 });

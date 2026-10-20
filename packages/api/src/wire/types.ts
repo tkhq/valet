@@ -2135,6 +2135,12 @@ export interface WorkflowRunCheckpoint {
   result?: unknown;
   error?: string;
   createdAt: number;
+  /** When the step began: its first intent write. Absent for steps
+   * recorded before this field. */
+  startedAt?: number;
+  /** Copied from the run this retry repeats: the step did not run again,
+   * and its times are from that earlier run. */
+  reused?: true;
   /** The session a session/orchestrator node drove. Present on a failed
    * node too — that is where the failure is readable. */
   sessionId?: string;

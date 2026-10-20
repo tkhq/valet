@@ -807,6 +807,7 @@ CREATE TABLE "workflow_checkpoints" (
 	"effects" jsonb,
 	"error" text,
 	"created_at" bigint NOT NULL,
+	"started_at" bigint,
 	PRIMARY KEY("run_id", "node_id", "iteration")
 );
 --> statement-breakpoint

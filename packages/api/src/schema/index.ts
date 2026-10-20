@@ -1368,6 +1368,8 @@ export const workflowCheckpoints = pgTable(
     effects: jsonb("effects"),
     error: text("error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** When the step began: the replaced intent row's `created_at`. */
+    startedAt: bigint("started_at", { mode: "number" }),
   },
   (t) => [
     primaryKey({ columns: [t.runId, t.nodeId, t.iteration] }),

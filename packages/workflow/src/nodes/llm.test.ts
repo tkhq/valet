@@ -192,6 +192,32 @@ describe('executeLlm: outputSchema set and valid on first try', () => {
       usage: ZERO_USAGE,
     });
   });
+
+  it('states the output schema in the first prompt, so the model can answer without a repair call', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+    const { engine, calls } = makeEngine([{ text: '```json\n{"answer":"42"}\n```' }]);
+
+    await store.createRun('run-2b', runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { thing: 'logs' }, metadata: {} } }), llmDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-2b');
+    await driveUntilPark('run-2b', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.prompt.startsWith('summarize logs')).toBe(true);
+    expect(calls[0]?.req.prompt).toContain(JSON.stringify(outputSchema));
+  });
+
+  it('leaves a prompt with no output schema as written', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine([{ text: 'the summary' }]);
+
+    await store.createRun('run-2c', runParams({ input: { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: { thing: 'logs' }, metadata: {} } }), llmDefinition(), 'v1');
+    const attempt = await claimAttempt(store, 'run-2c');
+    await driveUntilPark('run-2c', attempt, { store, engine, clock: clock.now });
+
+    expect(calls[0]?.req.prompt).toBe('summarize logs');
+  });
 });
 
 // ─── 3. Schema invalid then valid after ONE repair ───────────────────────────

@@ -13,21 +13,11 @@ import {
 import type { OwnerFilter } from "~/api/client";
 import { Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
 import { TriggerDialog, type TriggerKind } from "./trigger-dialog";
-
-/** Relative "in 2h" formatting for next fire times. */
-function relativeTime(ms: number): string {
-  const delta = ms - Date.now();
-  if (delta <= 0) return "due now";
-  const minutes = Math.round(delta / 60_000);
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
-}
+import { timeUntil } from "~/lib/relative-time";
 
 function triggerSummary(t: WorkflowTriggerItem): string {
   if (t.kind === "schedule") {
-    const next = t.enabled ? ` · next ${relativeTime(t.detail.nextFireAt)}` : "";
+    const next = t.enabled ? ` · next ${timeUntil(t.detail.nextFireAt)}` : "";
     const target = t.detail.targetKind === "orchestrator" ? " · assistant" : "";
     return `${t.detail.cron} (${t.detail.timezone})${target}${next}`;
   }
