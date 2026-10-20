@@ -15,6 +15,17 @@ export function todayJournalPath(now: Date = new Date()): string {
 }
 
 /**
+ * Whether a journal body holds an entry. `ensureTodayJournal` writes only a
+ * `# <date>` heading, so a body of headings and blank lines has no entry yet.
+ */
+export function journalHasEntries(content: string): boolean {
+  return content.split("\n").some((line) => {
+    const text = line.trim();
+    return text !== "" && !/^#{1,6}(\s|$)/.test(text);
+  });
+}
+
+/**
  * Creates today's journal file (`type: 'journal-entry'`) with a minimal
  * header body if it doesn't already exist. Idempotent — a second call on
  * the same UTC day is a no-op (checked via `readFile`, not a blind write,
