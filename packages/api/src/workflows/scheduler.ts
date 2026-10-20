@@ -19,7 +19,7 @@
  */
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { scheduledRunId } from "@valet/shared";
-import { and, eq, lte } from "drizzle-orm";
+import { and, eq, lte, sql, type SQL } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
 import { PinUnavailableError, type DeliveredThread } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
@@ -76,8 +76,21 @@ type DispatchFailed = { ok: false; error: string; pinUnavailable?: true };
 /** The columns that record where a firing landed (spec 2026-10-16: presence
  * hub, Part E step 2). A workflow firing records nothing, so the columns
  * keep their value. */
-function landedColumns(landed: DeliveredThread | null): { lastFiredSessionId?: string; lastFiredThreadId?: string } {
-  return landed === null ? {} : { lastFiredSessionId: landed.sessionId, lastFiredThreadId: landed.threadId };
+function landedColumns(landed: DeliveredThread): { lastFiredSessionId: string; lastFiredThreadId: string } {
+  return { lastFiredSessionId: landed.sessionId, lastFiredThreadId: landed.threadId };
+}
+
+/**
+ * True while the row's thread policy is the one the firing read. A policy
+ * edit during the firing clears the recorded landing (`updateWorkflowSchedule`);
+ * a landing chosen under the old policy must not restore it afterwards, so
+ * the landing columns are written only under this guard. `jsonb` equality
+ * ignores key order.
+ */
+function policyUnchanged(policy: unknown): SQL {
+  return policy === null || policy === undefined
+    ? sql`${workflowSchedules.threadPolicy} IS NULL`
+    : sql`${workflowSchedules.threadPolicy} = ${JSON.stringify(policy)}::jsonb`;
 }
 
 export class WorkflowScheduler {
@@ -259,8 +272,14 @@ export class WorkflowScheduler {
     }
     await db
       .update(workflowSchedules)
-      .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now, ...landedColumns(result.landed) })
+      .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
       .where(eq(workflowSchedules.id, schedule.id));
+    if (result.landed !== null) {
+      await db
+        .update(workflowSchedules)
+        .set(landedColumns(result.landed))
+        .where(and(eq(workflowSchedules.id, schedule.id), policyUnchanged(schedule.threadPolicy)));
+    }
   }
 
   /** Manual fire from the API. Uses `now` as the slot (distinct idempotent
@@ -280,8 +299,14 @@ export class WorkflowScheduler {
     if (!result.ok) return { error: result.error };
     await db
       .update(workflowSchedules)
-      .set({ lastFiredAt: now, updatedAt: now, ...landedColumns(result.landed) })
+      .set({ lastFiredAt: now, updatedAt: now })
       .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)));
+    if (result.landed !== null) {
+      await db
+        .update(workflowSchedules)
+        .set(landedColumns(result.landed))
+        .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId), policyUnchanged(schedule.threadPolicy)));
+    }
     return "ok";
   }
 }

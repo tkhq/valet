@@ -185,6 +185,25 @@ describe("WorkflowScheduler thread policy", () => {
     expect(await stored()).toEqual({ sessionId: "sess-3", threadId: "thr-3" });
   });
 
+  // Review of PR #999: a policy edit during the firing clears the landing;
+  // the firing, chosen under the old policy, must not write it back.
+  it("does not record a landing when the thread policy changed during the firing", async () => {
+    await seedPromptSchedule("sched-raced", { mode: "new" });
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async () => {
+        await db.update(workflowSchedules).set({ threadPolicy: { mode: "own" } }).where(eq(workflowSchedules.id, "sched-raced"));
+        return LANDED;
+      },
+      now: () => 1_000,
+    });
+    await scheduler.tick();
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-raced"));
+    expect(row?.lastFiredAt).toBe(1_000);
+    expect(row?.lastFiredSessionId).toBeNull();
+    expect(row?.lastFiredThreadId).toBeNull();
+  });
+
   it("records no thread for a workflow firing", async () => {
     await db.insert(workflowDefinitions).values({
       id: "wf-landed", orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Nightly",

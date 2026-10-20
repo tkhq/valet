@@ -40,6 +40,35 @@ afterAll(async () => {
 });
 
 describe("updateWorkflowSchedule", () => {
+  // Review of PR #999: the recorded landing belongs to the old policy.
+  it("clears the recorded landing when the thread policy changes, and keeps it otherwise", async () => {
+    const created = await createWorkflowSchedule(
+      armDeps(),
+      OWNER,
+      { prompt: "daily digest", name: "digest", cron: "0 9 * * *", thread: { mode: "new" } },
+      NOW,
+    );
+    if (!created.ok) throw new Error(created.error);
+    const id = created.schedule.scheduleId;
+    const landing = async () => {
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+      return { sessionId: row?.lastFiredSessionId ?? null, threadId: row?.lastFiredThreadId ?? null };
+    };
+    await db.update(workflowSchedules).set({ lastFiredSessionId: "sess-1", lastFiredThreadId: "thr-slot" }).where(eq(workflowSchedules.id, id));
+
+    const renamed = await updateWorkflowSchedule(armDeps(), OWNER, id, { name: "morning digest" }, NOW + 1000);
+    expect(renamed.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: "sess-1", threadId: "thr-slot" });
+
+    const samePolicy = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "new" } }, NOW + 2000);
+    expect(samePolicy.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: "sess-1", threadId: "thr-slot" });
+
+    const changed = await updateWorkflowSchedule(armDeps(), OWNER, id, { thread: { mode: "own" } }, NOW + 3000);
+    expect(changed.ok).toBe(true);
+    expect(await landing()).toEqual({ sessionId: null, threadId: null });
+  });
+
   it("updates name and enabled without recomputing nextFireAt", async () => {
     const created = await createWorkflowSchedule(
       armDeps(),

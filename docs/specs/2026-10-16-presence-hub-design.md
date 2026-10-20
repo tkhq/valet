@@ -531,7 +531,12 @@ Pass criterion: all steps, in one run, from a clean start.
    with no recorded firing, the thread keyed `schedule:<id>` in the
    owner's assistant. The list checks the thread as the event page checks
    its thread links (`readableThreads`). A thread the viewer may not open
-   reads as null.
+   reads as null. The recorded pair belongs to the policy that chose it: a
+   change of the thread policy clears both columns, and a firing writes
+   them only while the row still holds the policy the firing read. The
+   list reads the recorded pairs by thread id and the `schedule:<id>`
+   keys by the owners' assistant sessions, in two queries, so neither
+   scans `engine_threads`.
 
 ## Part F: Activity
 

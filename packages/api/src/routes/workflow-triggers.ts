@@ -10,7 +10,7 @@
 import { type Appearance, validateAppearance } from "@valet/shared";
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import {
@@ -110,14 +110,12 @@ async function routineThreads(
     if (!pairs.has(s.scheduleId) && (mode === "own" || mode === "subject")) byKey.set(`schedule:${s.scheduleId}`, s);
   }
   if (pairs.size === 0 && byKey.size === 0) return found;
-  const conditions = [
-    ...[...pairs.values()].map((p) => sql`(t.session_id = ${p.sessionId} AND t.id = ${p.threadId})`),
-    ...(byKey.size > 0 ? [sql`t.key IN (${sql.join([...byKey.keys()].map((key) => sql`${key}`), sql`, `)})`] : []),
-  ];
-  // A team routine's own thread lives in its execution session, and its
-  // governing thread in the root assistant session carries the same key.
-  // The execution thread comes first: it holds the firings.
-  const result = await db.execute(sql`
+  type Row = ThreadAccessRow & { assistant: boolean };
+  // Two queries, each driven by an index: the recorded pairs by thread id,
+  // and the keys by the owners' assistant sessions. One query with
+  // `t.key IN (...)` OR'd in scans every row of engine_threads, because no
+  // index starts with `key`.
+  const select = (where: SQL) => db.execute(sql`
     SELECT t.id AS thread_id, t.session_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id,
       st.title, (st.archived_at IS NOT NULL) AS archived, (x.session_id IS NOT NULL OR a.id IS NOT NULL) AS assistant
     FROM engine_threads t
@@ -125,23 +123,39 @@ async function routineThreads(
     LEFT JOIN session_threads st ON st.session_id = t.session_id AND st.id = t.id
     LEFT JOIN assistant_executions x ON x.session_id = s.id
     LEFT JOIN assistants a ON a.session_id = s.id
-    WHERE (${sql.join(conditions, sql` OR `)}) AND s.org_id = ${orgId} AND s.status <> 'deleted'
-    ORDER BY (x.session_id IS NOT NULL) DESC, t.created_at DESC`) as {
-    rows: Array<ThreadAccessRow & { assistant: boolean }>;
-  };
+    WHERE (${where}) AND s.org_id = ${orgId} AND s.status <> 'deleted'
+    ORDER BY (x.session_id IS NOT NULL) DESC, t.created_at DESC`) as Promise<{ rows: Row[] }>;
+  const recordedRows = pairs.size === 0 ? [] : (await select(
+    sql.join([...pairs.values()].map((p) => sql`(t.session_id = ${p.sessionId} AND t.id = ${p.threadId})`), sql` OR `),
+  )).rows;
+  // A team routine's own thread lives in its execution session, and its
+  // governing thread in the root assistant session carries the same key.
+  // The execution thread comes first: it holds the firings. Only the
+  // owner's assistant holds the routine's own thread, so the key lookup
+  // starts from those sessions and reads `(session_id, key)`.
+  const owners = [...new Map([...byKey.values()].map((s) => [`${s.ownerType}:${s.ownerId}`, s])).values()];
+  const keyedRows = byKey.size === 0 ? [] : (await select(sql`
+    t.key IN (${sql.join([...byKey.keys()].map((key) => sql`${key}`), sql`, `)})
+    AND t.session_id IN (
+      SELECT oa.session_id FROM assistants oa
+      WHERE (oa.owner_type, oa.owner_id) IN (${sql.join(owners.map((s) => sql`(${s.ownerType}, ${s.ownerId})`), sql`, `)})
+      UNION
+      SELECT ox.session_id FROM assistant_executions ox
+      JOIN assistants oa ON oa.id = ox.assistant_id
+      WHERE (oa.owner_type, oa.owner_id) IN (${sql.join(owners.map((s) => sql`(${s.ownerType}, ${s.ownerId})`), sql`, `)})
+    )`)).rows;
   const check = readableThreads(c);
   const toWire = async (row: ThreadAccessRow): Promise<WorkflowScheduleThreadRef | null> => {
     const ref = await check(row);
     return ref && { sessionId: ref.sessionId, threadId: ref.threadId, title: ref.title ?? null, archived: ref.archived === true };
   };
   for (const [scheduleId, pair] of pairs) {
-    const row = result.rows.find((r) => r.session_id === pair.sessionId && r.thread_id === pair.threadId);
+    const row = recordedRows.find((r) => r.session_id === pair.sessionId && r.thread_id === pair.threadId);
     const ref = row ? await toWire(row) : null;
     if (ref) found.set(scheduleId, ref);
   }
   for (const [key, s] of byKey) {
-    // Only the owner's assistant holds the routine's own thread.
-    const row = result.rows.find((r) => r.key === key && r.assistant && r.owner_type === s.ownerType && r.owner_id === s.ownerId);
+    const row = keyedRows.find((r) => r.key === key && r.assistant && r.owner_type === s.ownerType && r.owner_id === s.ownerId);
     const ref = row ? await toWire(row) : null;
     if (ref) found.set(s.scheduleId, ref);
   }
