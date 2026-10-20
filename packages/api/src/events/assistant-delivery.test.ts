@@ -680,6 +680,30 @@ describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery thre
     expect((await mirrorRow(first.threadId))?.archivedAt).toBeNull();
   });
 
+  it("an attended delivery marks a policy thread conversational and writes no flag on a pinned or slack: thread", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const pinned = await session.createThread("web:platform-ci");
+    await testDb.appDb.insert(sessionThreads).values({ id: pinned.id, sessionId: session.id, createdAt: 1, title: "Platform CI" });
+    const metadataBefore = pinned.toThreadData().metadata;
+    await deliverToAssistantThread(deps, {
+      ...base, signal: signal("CI failed"), dispatchId: "event:pin-attended",
+      destination: { kind: "target", sessionId: session.id, threadId: pinned.id, reason: "policy_existing" },
+    });
+    expect(pinned.toThreadData().metadata).toEqual(metadataBefore);
+    expect(pinned.toThreadData().metadata?.conversational).toBeUndefined();
+
+    const slack = await deliverToAssistantThread(deps, {
+      ...base, signal: signal("hello"), dispatchId: "event:slack-attended", destination: { kind: "key", key: "slack:C1:1.2" },
+    });
+    expect(session.threadById(slack.threadId)?.toThreadData().metadata?.conversational).toBeUndefined();
+
+    const rule = await deliverToAssistantThread(deps, {
+      ...base, signal: signal("ENG-42"), dispatchId: "event:sub-attended", destination: { kind: "key", key: "sub:rule-eng:delivery-1" },
+    });
+    expect(engineHost.liveSession(rule.sessionId)?.threadById(rule.threadId)?.toThreadData().metadata?.conversational).toBe(true);
+  });
+
   it("existing: an archived pin throws the fix text and creates or reopens no thread (INV-D3)", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });

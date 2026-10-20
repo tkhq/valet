@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { isAutomatedDeliveryThread } from "./automated-threads.js";
+import { isAutomatedDeliveryThread, isAutomatedThreadKey } from "./automated-threads.js";
 
 it("marks only the threads that automated deliveries write to", () => {
   expect(isAutomatedDeliveryThread({ key: "events" })).toBe(true);
@@ -28,4 +28,14 @@ it("leaves a policy thread that a conversation marked to the person in it", () =
   // The legacy firehose threads stay automated.
   expect(isAutomatedDeliveryThread({ key: "events", metadata })).toBe(true);
   expect(isAutomatedDeliveryThread({ key: "slack-events:C1", metadata })).toBe(true);
+});
+
+// The conversational flag is written only where the rule reads it.
+it("names the keys the automated-thread rule covers", () => {
+  for (const key of ["events", "slack-events:C1", "sub:rule-1", "sub:rule-1:delivery-9", "schedule:rule-2", "schedule:rule-2:1700000000000", "subject:github:acme/api#12"]) {
+    expect(isAutomatedThreadKey(key)).toBe(true);
+  }
+  for (const key of ["th-user-pinned", "web:abc", "slack:C1:1.2", "slack-events:C1:workflow:wf_1", "subscription:rule-1"]) {
+    expect(isAutomatedThreadKey(key)).toBe(false);
+  }
 });

@@ -33,7 +33,21 @@ const POLICY_THREAD_KEY = /^(sub|schedule|subject):/;
 /** Thread metadata flag: an attended delivery landed here, so a person takes part. */
 export const CONVERSATIONAL_THREAD_KEY = "conversational";
 
+/** True for a legacy automated key, `events` or `slack-events:<channel>`. */
+function isLegacyAutomatedKey(key: string): boolean {
+  return key === EVENTS_THREAD_KEY || /^slack-events:[^:]+$/.test(key);
+}
+
+/**
+ * True when the automated-thread rule covers `key`: a policy key or a
+ * legacy automated key. Only these keys read `CONVERSATIONAL_THREAD_KEY`,
+ * so `deliverToAssistantThread` writes the flag on no other thread.
+ */
+export function isAutomatedThreadKey(key: string): boolean {
+  return isLegacyAutomatedKey(key) || POLICY_THREAD_KEY.test(key);
+}
+
 export function isAutomatedDeliveryThread(thread: { key: string; metadata?: Record<string, unknown> }): boolean {
-  if (thread.key === EVENTS_THREAD_KEY || /^slack-events:[^:]+$/.test(thread.key)) return true;
+  if (isLegacyAutomatedKey(thread.key)) return true;
   return POLICY_THREAD_KEY.test(thread.key) && thread.metadata?.[CONVERSATIONAL_THREAD_KEY] !== true;
 }
