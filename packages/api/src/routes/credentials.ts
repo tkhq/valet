@@ -328,6 +328,7 @@ async function toSummary(
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    refreshError: typeof metadata?.refreshError === "string" ? metadata.refreshError : undefined,
     dead: isDeadConnection(stored, Date.now()) ? true : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
     onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
@@ -479,6 +480,12 @@ credentialsRouter.put("/:service", async (c) => {
   // an ambiguous request, not a merge to resolve implicitly.
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
     return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
+  }
+  // `metadata.refreshError` is the provider's masked answer to a failed
+  // refresh (`OAuthRefreshingCredentialStore`). The Integrations page shows it
+  // as the provider's reply, so only the server writes it.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "refreshError" in body.metadata) {
+    return c.json({ error: "metadata.refreshError is reserved. Valet sets it when a token refresh fails." }, 400);
   }
   // `metadata.githubId` links a personal GitHub App installation to the
   // member who owns that GitHub account (`services/github-app.ts`). Only the

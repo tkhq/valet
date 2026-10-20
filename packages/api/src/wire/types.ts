@@ -3551,6 +3551,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** `metadata.refreshError`: the provider's answer to the last failed
+   * refresh, with tokens masked (`refreshErrorText`). It names the cause,
+   * such as an expired or revoked grant. Cleared by the next good refresh. */
+  refreshError?: string;
   /** True when the provider refused the refresh token and the access token is
    * past expiry (`isDeadConnection`). Any team member may reconnect a dead
    * team connection. */
@@ -5280,6 +5284,9 @@ export interface EventDeliveryWire {
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;
+  /** The assistant turn this dead delivery started failed after it began.
+   * It may have replied or acted, so a redelivery can repeat that. */
+  turnFailed?: true;
   /** On a `dead` delivery, the id of a later delivery for the same event and
    * the same subscription that was delivered, such as a redelivery. The dead
    * row is then settled and is not a fault. Only `GET /api/events/log` sets

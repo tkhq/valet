@@ -103,6 +103,13 @@ describe("IntegrationRow disconnect", () => {
     disconnectError = null;
   });
 
+  it("shows the provider's answer under a failed refresh", () => {
+    credentials = [{ service: "linear", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", refreshFailedAt: 1, refreshError: "400 invalid_grant" }];
+    render(<IntegrationDetail plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { refreshFailed: true } }] }} />);
+    expect(screen.getByText("The last token refresh failed. Select Reconnect to sign in again.")).toBeTruthy();
+    expect(screen.getByText("Linear replied: 400 invalid_grant")).toBeTruthy();
+  });
+
   it("does not offer Disconnect for an organization-provided Slack bot", () => {
     const orgSlack: PluginSummary = {
       ...PLUGIN,

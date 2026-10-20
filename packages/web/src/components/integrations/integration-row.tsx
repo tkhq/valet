@@ -316,8 +316,10 @@ function ServiceBlock({
   const disconnect = useDisconnectCredential();
   // A reference-backed credential stores only an `op://` reference, so
   // disconnecting it leaves the 1Password item in place. The plugin summary
-  // does not carry the reference; the caller's credential list does.
-  const reference = useCredentials().data?.credentials.find((cred) => cred.service === service.service)?.onepasswordRef;
+  // does not carry the reference; the caller's credential list does. So does
+  // the provider's answer to a failed refresh.
+  const credential = useCredentials().data?.credentials.find((cred) => cred.service === service.service);
+  const reference = credential?.onepasswordRef;
   const health = serviceHealth(service);
   const badge = healthBadge(health);
   const note = healthNote(health);
@@ -446,6 +448,9 @@ function ServiceBlock({
             >
               {note}
             </p>
+          )}
+          {service.connected && note && credential?.refreshError && (
+            <p className="break-words text-xs leading-relaxed text-muted">{title} replied: {credential.refreshError}</p>
           )}
           {orgNote}
         </div>

@@ -66,6 +66,12 @@ describe("TeamCredentials", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows the provider's answer under a failed refresh", () => {
+    teamCreds = [cred({ refreshFailedAt: 1, expiresAt: 1, dead: true, refreshError: "400 Refresh token has been invalidated" })];
+    renderRows(false);
+    expect(screen.getByText("Greenhouse replied: 400 Refresh token has been invalidated")).toBeTruthy();
+  });
+
   it("sends an admin to disconnect a broken team connection that is not dead yet", () => {
     teamCreds = [cred({ refreshFailedAt: 1, expiresAt: Date.now() + 3_600_000 })];
     renderRows(true);

@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import type { Providers } from "../providers/types.js";
 import { isPinUnavailableMessage } from "../events/assistant-delivery.js";
+import { isFailedTurnMessage } from "../events/delivery-turn.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { claimedThreadId } from "../events/destination.js";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
@@ -835,6 +836,7 @@ async function deliveriesToWire(c: Context<AppEnv>, deliveryRows: readonly Deliv
       ...(thread ? { thread } : {}),
       ...(claimedBy ? { claimedBy } : {}),
       ...(runId ? { runId } : {}),
+      ...(d.status === "dead" && isFailedTurnMessage(d.lastError) ? { turnFailed: true as const } : {}),
     };
   });
 }

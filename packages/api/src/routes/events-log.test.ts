@@ -325,3 +325,19 @@ it("marks a dead delivery superseded when a later delivery for the same line was
   expect(mixed?.deliveries?.find((d) => d.id === "m_dead")?.supersededBy).toBeUndefined();
   expect((await log(api, "&problems=1")).items.map((item) => item.id)).toContain("ev_mixed");
 });
+
+it("names the active failure, not a dead delivery a redelivery superseded", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_other", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Other",
+    eventKeys: ["github.push"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  await api.providers.db.update(eventDeliveries).set({ lastError: "A resolved failure" }).where(eq(eventDeliveries.id, "d2"));
+  await api.providers.db.insert(eventDeliveries).values([
+    { id: "d2_redelivered", eventId: "ev_bad", subscriptionId: "sub_mine", status: "delivered", attempts: 1, nextAttemptAt: 0, createdAt: now + 1 },
+    { id: "d2_other", eventId: "ev_bad", subscriptionId: "sub_other", status: "dead", lastError: "The current failure", attempts: 4, nextAttemptAt: 0, createdAt: now + 2 },
+  ]);
+  expect((await log(api, "&problems=1")).items.find((item) => item.id === "ev_bad")).toMatchObject({ status: "failed", detail: "The current failure" });
+});

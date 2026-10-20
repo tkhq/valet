@@ -141,7 +141,8 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 
 - On `get()`: if the stored credential is `oauth2`, has a `refreshToken`, and `expiresAt` is present and within a 60-second buffer → refresh, persist the new tokens (preserving the old `refreshToken` if the response omits one), return the fresh credential.
 - Refresh dispatch mirrors the connect branches, resolved from the same manifest declarations: **mcp** → `refreshTokenPkce({ tokenEndpoint, clientId, refreshToken })` using the stored registered client; **authorization_code** → form-POST `tokenUrl` with `grant_type=refresh_token` + env client id/secret.
-- On refresh failure: stamp `metadata.refreshFailedAt` (the field the credential-summary health surface already whitelists) and return the stored (likely expired) credential — the action fails with the provider's own 401 and the UI shows the unhealthy badge. No credential deletion (v1 deleted on GitHub refresh failure; GitHub keeps that behavior in its own service, untouched).
+- On refresh failure: stamp `metadata.refreshFailedAt` (the field the credential-summary health surface already whitelists) and return the stored (likely expired) credential — the action fails with the provider's own 401 and the UI shows the unhealthy badge.
+- When the token endpoint answers with an error (`OAuthTokenError`), the failure also stores `metadata.refreshError`: the provider's answer, at most 300 characters. Any other error (DNS, TLS, missing config) goes to the server log whole and stores no reply. `refreshErrorText` masks the credential's own tokens, the app's client secret for an `authorization_code` refresh, and every `refresh_token`, `access_token`, `id_token`, `client_secret`, and form `code` value first, because a provider can echo the request (Greenhouse returns a malformed refresh token in its error). Each known secret is masked in its raw, JSON-escaped, and URL-encoded forms. The upstream error keeps only the first 200 characters of the body, so the masking also covers a value with no closing quote and a cut-off start of a known secret at the end of the text. `PUT /api/credentials/:service` refuses a client-written `metadata.refreshError`, so only the server sets it. The server log gets the same masked text. The credential summary returns it as `refreshError`, and the Integrations page shows it under the repair note. The next good refresh clears it with the other failure stamps. No credential deletion (v1 deleted on GitHub refresh failure; GitHub keeps that behavior in its own service, untouched).
 - `github` service is excluded from the decorator (its refresh lives in `services/github-tokens.ts`).
 - No proactive cron sweep this phase (v1 had one); lazy refresh covers actual use. Sweep is a follow-up if idle-credential freshness ever matters.
 
@@ -169,7 +170,7 @@ To make the choice real, both of these must land: add `"team"` to `CredentialOwn
 | State invalid/expired/user mismatch | redirect `/integrations?error=oauth_state` |
 | Provider consent denied | redirect `/integrations?error=<provider code>` |
 | Token exchange failure | redirect `/integrations?error=oauth_failed`, server log |
-| Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` stamped |
+| Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` and the masked `metadata.refreshError` stamped |
 
 ## Testing
 

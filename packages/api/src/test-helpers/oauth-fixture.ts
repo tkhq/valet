@@ -19,6 +19,8 @@ export interface FakeOAuthServer {
   tokenResponse: Record<string, unknown>;
   /** When set, the token endpoint returns this HTTP status with an error body. */
   tokenFailure?: number;
+  /** The error body a failure returns. Default: `{ error: "invalid_grant" }`. */
+  tokenFailureBody?: Record<string, unknown>;
   /** The protected resource's `scopes_supported` (RFC 9728). Undefined
    * serves no protected-resource metadata. Settable, because a server
    * upgrade changes it. */
@@ -43,7 +45,12 @@ export function startFakeOAuthServer(opts?: {
 }): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
-  const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number; resourceScopesSupported?: string[] } = {
+  const state: {
+    tokenResponse: Record<string, unknown>;
+    tokenFailure?: number;
+    tokenFailureBody?: Record<string, unknown>;
+    resourceScopesSupported?: string[];
+  } = {
     tokenResponse: { access_token: "at-1", refresh_token: "rt-1", expires_in: 3600, token_type: "bearer" },
     resourceScopesSupported: opts?.resourceScopesSupported,
   };
@@ -82,7 +89,7 @@ export function startFakeOAuthServer(opts?: {
     for (const [k, v] of Object.entries(form)) if (typeof v === "string") entries[k] = v;
     tokenRequests.push(entries);
     if (state.tokenFailure) {
-      return c.json({ error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
+      return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
     }
     return c.json(state.tokenResponse);
   });
@@ -107,6 +114,12 @@ export function startFakeOAuthServer(opts?: {
     },
     set tokenFailure(v) {
       state.tokenFailure = v;
+    },
+    get tokenFailureBody() {
+      return state.tokenFailureBody;
+    },
+    set tokenFailureBody(v) {
+      state.tokenFailureBody = v;
     },
     get resourceScopesSupported() {
       return state.resourceScopesSupported;
