@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLinkTarget } from "@valet/api/memory-links";
 import { cn } from "~/lib/cn";
+import { usePublicOrigin } from "~/lib/public-origin";
 import { CodeBlock } from "./code-block";
 import { MermaidDiagram } from "./mermaid-diagram";
 
@@ -56,6 +57,26 @@ export function memoryHref(path: string): string {
   return `/memory/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/** A download that `file_attach` created (`services/generated-files.ts`). */
+const GENERATED_FILE_PATH = /^\/api\/sessions\/[^/]+\/threads\/[^/]+\/files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A generated download on this deployment's public origin, moved to the
+ * hostname of this page. A deployment can serve the app on more than one
+ * hostname, and `file_attach` links the public one. A sign-in belongs to one
+ * hostname, so a person signed in on another one got a 401 from the link.
+ * A link on any other origin keeps its href. Exported for tests. */
+export function localDownloadHref(href: string | undefined, publicOrigin: string | null, origin = window.location.origin): string | undefined {
+  if (!href || !publicOrigin || publicOrigin === origin) return href;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return href;
+  }
+  if (url.origin !== publicOrigin || url.search || url.hash) return href;
+  return GENERATED_FILE_PATH.test(url.pathname) ? url.pathname : href;
+}
+
 /** True for a click the browser would handle as a plain same-tab
  * navigation. A modified click (new tab, new window, download) keeps the
  * browser's own behavior, which the real `href` on the anchor supports. */
@@ -84,6 +105,7 @@ export function Markdown({
   className?: string;
   memoryLinks?: MemoryLinkHandling;
 }) {
+  const publicOrigin = usePublicOrigin();
   return (
     <div
       className={cn(
@@ -164,7 +186,7 @@ export function Markdown({
               );
             }
             return (
-              <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+              <a href={localDownloadHref(href, publicOrigin)} target="_blank" rel="noopener noreferrer" {...rest}>
                 {children}
               </a>
             );
