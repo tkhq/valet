@@ -1,4 +1,4 @@
-import { UNATTENDED_WORKFLOW_KEY, type Presence } from "@valet/shared";
+import { UNATTENDED_DELIVERY_KEY, type Presence } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
@@ -208,7 +208,7 @@ async function deliverToAssistantThreadInner(
   }
   const metadata = {
     ...(args.presence ? { presence: args.presence } : {}),
-    ...(args.unattended ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}),
+    ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,

@@ -2831,7 +2831,8 @@ export class EngineHost {
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
       threadSystemContext: workflowThreadContext,
-      unattendedThread: (thread: { key: string }) => isWorkflowRunThread(thread) || isAutomatedDeliveryThread(thread),
+      unattendedThread: isWorkflowRunThread,
+      automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],

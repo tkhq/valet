@@ -1,7 +1,7 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
-import { UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
+import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -123,7 +123,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(unattended ? { [UNATTENDED_WORKFLOW_KEY]: true } : null);
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : null);
     }
   });
 
@@ -442,6 +442,51 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     });
     await expect.poll(() => pending(), { timeout: 15_000 }).toBe(1);
     expect(await settled("attended-ask")).toBe(false);
+  });
+
+  it("lets a task that an automated delivery starts ask in the inbox", async () => {
+    // A task does not wait for its child, so the child's question never holds
+    // the shared thread. Only a workflow task makes the child unattended too.
+    const spawned: Array<boolean | undefined> = [];
+    const host = new EngineHost({
+      engineStore: new PgSessionStore(testDb.pgdb),
+      sandboxProvider: new VirtualSandboxProvider(),
+      eventStream: new PgEventStream(testDb.pgdb),
+      engineCredentials: new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key")),
+      db: testDb.appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [],
+      childSpawner: async (_req, ctx) => {
+        spawned.push(ctx.unattendedWorkflow);
+        return { childSessionId: `child-${spawned.length}`, queueItemId: `child-item-${spawned.length}` };
+      },
+    });
+    const deps = { db: testDb.appDb, engineHost: host };
+    const delegates = () => faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("task", { prompt: "Approve the pull request." }, { id: "task-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Started a task."),
+    ]);
+    const settled = async (dispatchId: string) => ((await testDb.appDb.execute(sql`SELECT status FROM engine_queue_items
+      WHERE dispatch_id = ${dispatchId}`)) as { rows: Array<{ status: string }> }).rows[0]?.status === "settled";
+    try {
+      for (const [threadKey, unattended] of [["events", true], ["slack-events:C1", undefined], ["signal:workflow:wfrun_1", undefined]] as const) {
+        delegates();
+        await deliverToAssistantThread(deps, {
+          orgId: ORG, owner: OWNER, actorUserId: USER, threadKey, signal: signal("delegate"), dispatchId: threadKey,
+          mismatchReason: "event_target_mismatch", ...(unattended ? { unattended } : {}),
+        });
+        await expect.poll(() => settled(threadKey), { timeout: 15_000 }).toBe(true);
+      }
+      // A workflow task handed to an assistant thread.
+      delegates();
+      const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+      const thread = await session.createThread("workflow-task");
+      const receipt = await thread.submitPrompt("report", { metadata: { [UNATTENDED_WORKFLOW_KEY]: true } });
+      await thread.awaitResult(receipt.queueItemId);
+      expect(spawned).toEqual([undefined, undefined, true, true]);
+    } finally {
+      await host.destroyAll();
+    }
   });
 
   it("delivers into the owner's singleton and persists the initiating actor", async () => {

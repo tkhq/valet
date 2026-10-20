@@ -252,6 +252,15 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     host also treats every turn a person did not type on the "events" thread
     or a `slack-events:<channel>` thread as unattended, which covers a
     delegated task's follow-up and items queued before the marker existed.
+    A task that such a turn starts stays attended and can ask in the inbox.
+    Its question does not hold the shared thread, because `task` does not
+    wait. Only a workflow task makes the tasks it starts unattended. A
+    delivery also cannot ask a teammate to lend a shared account, because
+    that approval would park the thread too. A team subscription or schedule
+    can use a teammate's account in one of two ways. The account owner
+    chooses "Always allow for this team" on an account approval in an
+    attended thread or a workflow run. Or the team connects its own account
+    on the team's Integrations page.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that

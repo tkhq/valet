@@ -10,8 +10,9 @@ export const EVENTS_THREAD_KEY = "events";
  * or a Slack channel's bot-event thread (`slackEventsThreadKey`). No person
  * waits on a turn there that a person did not type, including a delegated
  * task's follow-up, so the host marks those turns unattended
- * (`unattendedThread` in `engine/host.ts`). This module imports nothing, so
- * the host can load it without a cycle.
+ * (`automatedThread` in `engine/host.ts`). A task such a turn delegates can
+ * still ask in the inbox. This module imports nothing, so the host can load
+ * it without a cycle.
  */
 export function isAutomatedDeliveryThread(thread: { key: string }): boolean {
   return thread.key === EVENTS_THREAD_KEY || /^slack-events:[^:]+$/.test(thread.key);
