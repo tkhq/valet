@@ -266,6 +266,18 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     }
 
     const graph = compile(definition);
+
+    // A stop that ran in an earlier drive still ends the run. Its terminate
+    // signal lived only in that drive's memory, so a drive that failed after
+    // the stop's checkpoint (an abort or a read before the settle) would
+    // otherwise leave the run parked on its other branches.
+    const stopped = definition.nodes.find((n) => n.type === 'stop'
+      && (cpAll.get(n.id)?.status === 'completed' || cpAll.get(n.id)?.status === 'failed'));
+    if (stopped) {
+      const failed = cpAll.get(stopped.id)?.status === 'failed' || hasDominatingFailure(cpAll, graph);
+      return await terminateSettle(deps, run.runId, attempt, await inFlightWaits(store, run, parkedWaits()), failed ? 'failed' : 'completed');
+    }
+
     const templateContext = buildTemplateContext(definition, cpAll, graph);
 
     const skippedAny = await propagateSkips(store, run, definition, graph, cpAll, attempt, clock);
@@ -437,21 +449,24 @@ async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDep
 
 /**
  * Abort each submission and cancel each child run before the run settles.
- * Best-effort, like `foreach`'s own aborts: a wait can name work that has
- * already finished (a `foreach` stays `intent` while a later item runs, so
- * an earlier item's saved wait still looks live), and one failed abort must
- * neither keep the run from settling nor skip the aborts after it.
+ * `inFlightWaits` already drops work that finished, so every wait here is
+ * live. One failed abort does not skip the aborts after it, but the first
+ * failure is rethrown: the run must not settle while live work it could not
+ * stop keeps running. The drive fails and a later claim retries the stop.
  */
 async function abortInFlight(deps: InterpreterDeps, runId: string, waits: RunWaitCondition[]): Promise<void> {
   const { store, engine, clock } = deps;
+  let firstError: unknown;
   for (const wait of waits) {
     try {
       if (wait.kind === 'submission') await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
       if (wait.kind === 'run') await cancelChildRun(store, wait.runId, clock);
     } catch (err) {
-      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed; settling anyway:`, err);
+      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed:`, err);
+      firstError ??= err;
     }
   }
+  if (firstError !== undefined) throw firstError;
 }
 
 /**

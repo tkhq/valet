@@ -6,7 +6,7 @@ import type { WorkflowEngineDeps, WorkflowInvokeActionResult } from './engine-de
 import { driveUntilPark, type InterpreterDeps } from './interpreter.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import { createDefaultNodeExecutors, executeTrigger, type NodeExecuteResult, type NodeExecutor, type NodeExecutorRegistry } from './nodes/index.js';
-import type { RunParams } from './store.js';
+import type { NodeCheckpoint, RunParams } from './store.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -1110,6 +1110,76 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     expect(engine.abort).toHaveBeenCalledWith('session-late', 'thread-late', 'queue-late');
   });
 
+  it('does not settle a cancelled run while an abort of live work fails, and settles once the retry aborts it', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    let failures = 1;
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId: string) => {
+        if (failures > 0) { failures -= 1; throw new Error('abort failed once'); }
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('live') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 't', type: 'trigger' }, { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode],
+      edges: [{ from: 't', to: 'agent' }],
+    };
+    await store.createRun('run-cancel-retry', runParams(), definition, 'v1');
+    expect((await driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors })).status).toBe('parked');
+    await store.insertSignal({ runId: 'run-cancel-retry', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+
+    await expect(driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors }))
+      .rejects.toThrow('abort failed once');
+    expect((await store.getRun('run-cancel-retry'))?.status).toBe('running');
+
+    clock.advance(60_000);
+    const park = await driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors });
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends the run on retry when a drive fails after a stop completed', async () => {
+    const clock = makeClock();
+    // One checkpoint read fails right after the stop's checkpoint completes,
+    // before the drive settles the run.
+    class FailingReadStore extends InMemoryWorkflowStore {
+      failRead = true;
+      override async getCheckpoints(runId: string): Promise<NodeCheckpoint[]> {
+        const checkpoints = await super.getCheckpoints(runId);
+        if (this.failRead && checkpoints.some((cp) => cp.nodeId === 'end' && cp.status === 'completed')) {
+          this.failRead = false;
+          throw new Error('checkpoint read failed');
+        }
+        return checkpoints;
+      }
+    }
+    const store = new FailingReadStore(clock.now);
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('approval') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'approval', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'approval' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }],
+    };
+    await store.createRun('run-stop-retry', runParams(), definition, 'v1');
+    await expect(driveUntilPark('run-stop-retry', await claimAttempt(store, 'run-stop-retry'), { store, engine, clock: clock.now, executors }))
+      .rejects.toThrow('checkpoint read failed');
+
+    clock.advance(60_000);
+    const park = await driveUntilPark('run-stop-retry', await claimAttempt(store, 'run-stop-retry'), { store, engine, clock: clock.now, executors });
+    expect(park.outcome).toBe('completed');
+    expect(engine.abort).toHaveBeenCalledWith('session-approval', 'thread-approval', 'queue-approval');
+  });
+
   it('does not abort a submission that finished before a later drive reaches stop', async () => {
     // The first drive parks on the agent and saves its wait on the run. In
     // the second drive the agent completes and the stop ends the run. The
@@ -1157,19 +1227,15 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
   it.each([
     { end: 'stop', outcome: 'completed' },
     { end: 'cancel', outcome: 'cancelled' },
-  ] as const)('settles $outcome after a $end when an abort fails', async ({ end, outcome }) => {
+  ] as const)('settles $outcome after a $end and aborts the current work behind a stale wait', async ({ end, outcome }) => {
     // Like a foreach whose first item finished while a later one still
     // runs: the agent stays `intent`, so the wait saved for its first
-    // submission still counts as live. The abort of that submission fails;
-    // the run must still settle and still abort the agent's current work.
+    // submission still counts as live. Aborting that finished submission is
+    // a no-op in the engine (`requestAbort` skips settled items), so the run
+    // settles and the agent's current work is aborted too.
     const store = new InMemoryWorkflowStore();
     const clock = makeClock();
-    const engine = {
-      ...makeFakeEngineDeps(),
-      abort: vi.fn(async (_sessionId: string, _threadId: string, queueItemId?: string) => {
-        if (queueItemId === 'queue-first') throw new Error('abort reached a settled submission');
-      }),
-    };
+    const engine = { ...makeFakeEngineDeps(), abort: vi.fn(async () => undefined) };
     const defaults = createDefaultNodeExecutors();
     const timer = defaults.wait;
     if (!timer) throw new Error('default wait executor missing');
