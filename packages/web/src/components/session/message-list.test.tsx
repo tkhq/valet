@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
-import { MessageList } from "./message-list";
+import { MessageList, isContinuation } from "./message-list";
 
 vi.mock("./message-item", () => ({
   MessageItem: ({ message }: { message: StreamMessage }) => (
@@ -228,5 +228,23 @@ describe("MessageList scrolling header", () => {
   it("keeps an empty thread's controls available", () => {
     render(<MessageList messages={[]} threadId="t1" header={<button>Session controls</button>} />);
     expect(screen.getByRole("button", { name: "Session controls" })).toBeTruthy();
+  });
+});
+
+describe("isContinuation", () => {
+  const at = 1_000_000;
+  it("joins consecutive assistant messages from one turn under one header", () => {
+    const first = msg({ id: "a", model: "luna", createdAt: at });
+    expect(isContinuation(msg({ id: "b", model: "luna", createdAt: at + 3_000 }), first)).toBe(true);
+  });
+
+  it("starts a new header after a person, a model change, a long gap, or a divider", () => {
+    const next = msg({ id: "b", model: "luna", createdAt: at + 3_000 });
+    expect(isContinuation(next, undefined)).toBe(false);
+    expect(isContinuation(next, msg({ role: "user", createdAt: at }))).toBe(false);
+    expect(isContinuation(next, msg({ model: "sol", createdAt: at }))).toBe(false);
+    expect(isContinuation(next, msg({ model: "luna", createdAt: at - 10 * 60_000 }))).toBe(false);
+    expect(isContinuation(next, msg({ model: "luna", createdAt: at, signal: { signalType: "child.settled" } }))).toBe(false);
+    expect(isContinuation(msg({ role: "user", createdAt: at + 1 }), msg({ createdAt: at }))).toBe(false);
   });
 });

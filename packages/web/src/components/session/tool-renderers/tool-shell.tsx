@@ -217,7 +217,7 @@ export function ToolShell({
             {prettyToolName(toolName)}
           </span>
           {target && (
-            <span className="truncate text-[--fg]/85 min-w-0 flex-1">
+            <span className="truncate text-ink/85 min-w-0 flex-1">
               {target}
             </span>
           )}
@@ -409,7 +409,7 @@ export function TruncatedText({
                 {i + 1}
               </span>
             )}
-            <span className="text-[--fg]/90 min-w-0">{line || " "}</span>
+            <span className="text-ink/90 min-w-0">{line || " "}</span>
           </div>
         ))}
       </pre>
@@ -437,7 +437,7 @@ export function PathLabel({ path, className }: { path: string; className?: strin
   return (
     <span className={cn("font-mono", className)}>
       {dir && <span className="text-muted/80">{dir}</span>}
-      <span className="text-[--fg]/95">{name}</span>
+      <span className="text-ink/95">{name}</span>
     </span>
   );
 }

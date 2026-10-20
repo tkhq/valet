@@ -12,11 +12,16 @@ describe("formatTokens", () => {
 });
 
 describe("formatUsdPrecise", () => {
-  it("keeps four decimals and never shows a nonzero cost as zero", () => {
+  it("keeps four decimals below a dollar and never shows a nonzero cost as zero", () => {
     expect(formatUsdPrecise(0)).toBe("$0.0000");
     expect(formatUsdPrecise(0.00001)).toBe("<$0.0001");
     expect(formatUsdPrecise(0.00421)).toBe("$0.0042");
-    expect(formatUsdPrecise(3.456)).toBe("$3.4560");
+    expect(formatUsdPrecise(0.2634)).toBe("$0.2634");
+  });
+
+  it("shows cents from a dollar up, so totals read as money", () => {
+    expect(formatUsdPrecise(3.456)).toBe("$3.46");
+    expect(formatUsdPrecise(184.2017)).toBe("$184.20");
   });
 });
 

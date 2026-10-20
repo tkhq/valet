@@ -971,6 +971,26 @@ describe("GET /api/workflows/runs/:runId + approvals + cancel", () => {
 
     const detail = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
     expect(detail.provenance).toMatchObject({ build: "abc1234def", workflowVersion: 1, latestWorkflowVersion: 2 });
+    // No one clicked Run, so the run page says "Automatic run".
+    expect(detail.run.actorUserId).toBeUndefined();
+  });
+
+  it("names who started a run and when each step began, as the run page shows them", async () => {
+    api = await bootTestApi({ workflowRunHost: new StubRunHost() });
+    const created = await createWorkflow(api.baseUrl);
+    const runId = "wfrun_manual";
+    const store = api.providers.workflowStore;
+    await store.createRun(runId, { workflowId: created.id, definitionVersionId: "v1" }, created.definition, "v1",
+      { ownerType: "user", ownerId: "local-user", actorUserId: "local-user" });
+    const claim = await store.claimRun(runId, "test", 30_000);
+    if (!claim) throw new Error("claim failed");
+    await store.putIntent({ runId, nodeId: "trigger", iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1_000 });
+    await store.completeCheckpoint(runId, "trigger", 0, claim.attempt,
+      { runId, nodeId: "trigger", iteration: 0, status: "completed", attempt: claim.attempt, createdAt: 4_000 });
+
+    const detail = (await (await fetch(`${api.baseUrl}/api/workflows/runs/${runId}`)).json()) as GetWorkflowRunResponse;
+    expect(detail.run.actorUserId).toBe("local-user");
+    expect(detail.checkpoints).toEqual([expect.objectContaining({ nodeId: "trigger", startedAt: 1_000, createdAt: 4_000 })]);
   });
 
   it("retries a settled failed run with the original input; 409s while non-settled and after completion", async () => {

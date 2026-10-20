@@ -182,6 +182,7 @@ export function MessageList({
                 <MessageItem
                   key={m.id}
                   message={m}
+                  continuation={isContinuation(m, visible[i - 1])}
                   suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
                   viewerId={viewerId}
                   onReply={onReply}
@@ -207,4 +208,13 @@ export function MessageList({
       )}
     </div>
   );
+}
+
+/** Consecutive assistant messages from one turn share the first one's
+ * header: the same model, within a few minutes, with nothing between. */
+export function isContinuation(message: StreamMessage, previous: StreamMessage | undefined): boolean {
+  if (!previous || message.role !== "assistant" || previous.role !== "assistant") return false;
+  if (previous.compaction || previous.signal || previous.command || message.settledOutcome) return false;
+  if ((message.model ?? "") !== (previous.model ?? "")) return false;
+  return message.createdAt - previous.createdAt < 5 * 60_000;
 }
