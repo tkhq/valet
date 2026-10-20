@@ -237,7 +237,10 @@ function missingIntegrationMessage(provider: IssueProvider, raw: string): string
   ) {
     return "Connect the GitHub integration in Settings.";
   }
-  if (provider === "linear" && /no credential connected|linear is not configured/i.test(raw)) {
+  // The invoker also refuses a `credential: "user"` node whose person has no
+  // own connection (`userPinnedPersonalRefusalMessage`); that is the same
+  // missing connection, so it maps to the same corrective message.
+  if (provider === "linear" && /no credential connected|linear is not configured|uses your own linear account, and none is connected/i.test(raw)) {
     return "Connect the Linear integration in Settings.";
   }
   return null;
