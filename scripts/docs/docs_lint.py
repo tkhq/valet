@@ -41,6 +41,7 @@ THRESHOLDS = {
     "docs/guides/placement.md": 2.5,
     "docs/guides/styling.md": 3.5,
     "docs/guides/web-performance.md": 2.5,
+    "docs/testing/post-deploy-journeys.md": 4.0,
     "packages/engine/README.md": 3.5,
     "packages/api/README.md": 4.5,
     "packages/web/README.md": 3.0,
