@@ -13,6 +13,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   EventSubscriptionWire,
+  ListPresencePlacesResponse,
   ListThreadsResponse,
   PatchEventSubscriptionRequest,
   PresencePlaceDetailResponse,
@@ -34,6 +35,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 const getPresencePlace = vi.fn<(scope: string, subject: string) => Promise<PresencePlaceDetailResponse>>();
+const listPresencePlaces = vi.fn<(scope: string) => Promise<ListPresencePlacesResponse>>();
 type ListThreadsOpts = { threadId?: string; archived?: boolean };
 const listThreads = vi.fn<(sessionId: string, opts?: ListThreadsOpts) => Promise<ListThreadsResponse>>();
 const patchEventSubscription = vi.fn<(id: string, body: PatchEventSubscriptionRequest) => Promise<EventSubscriptionWire>>();
@@ -45,6 +47,7 @@ vi.mock("~/api/client", async (importOriginal) => {
     api: {
       ...actual.api,
       getPresencePlace: (scope: string, subject: string) => getPresencePlace(scope, subject),
+      listPresencePlaces: (scope: string) => listPresencePlaces(scope),
       listThreads: (sessionId: string, opts?: ListThreadsOpts) => listThreads(sessionId, opts),
       patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) => patchEventSubscription(id, body),
       deleteEventSubscription: (id: string) => deleteEventSubscription(id),
@@ -175,6 +178,8 @@ function renderPage(subject: string) {
 beforeEach(() => {
   scopeTeamId = undefined;
   getPresencePlace.mockReset();
+  listPresencePlaces.mockReset();
+  listPresencePlaces.mockResolvedValue({ places: [] });
   listThreads.mockReset();
   patchEventSubscription.mockReset();
   deleteEventSubscription.mockReset();
@@ -317,6 +322,48 @@ describe("PlacePage", () => {
     const following = within(screen.getByRole("list", { name: "Following" }));
     expect(following.getByRole("link", { name: "t-inc" })).toBeTruthy();
     expect(following.getByRole("link", { name: /Slack thread/ }).getAttribute("href")).toBe("https://acme.slack.com/archives/C900/p1");
+  });
+
+  it("names this page's channel in a line whose channel filter has no label", async () => {
+    getPresencePlace.mockResolvedValue({
+      place: {
+        subject: "slack:T1/C0AK0T8KPPY", label: "#proj-valet", service: "slack",
+        parent: "slack:T1", listenerCount: 1, activeThreadCount: 0, lastActivityAt: null,
+      },
+      listeners: [listener("W", {
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C0AK0T8KPPY" }],
+        target: { kind: "workflow", workflowId: "wf-1" },
+      })],
+      threads: { subject: [], following: [], active: [] },
+      activity: [],
+    });
+    renderPage("slack:T1/C0AK0T8KPPY");
+    await screen.findByRole("heading", { level: 1, name: "#proj-valet" });
+    const [here] = sectionsInOrder(["Valet here"]);
+    expect(await within(here!).findByText(sentenceText("When someone mentions Valet in #proj-valet, run Incident triage."))).toBeTruthy();
+    expect(within(here!).queryByText(/C0AK0T8KPPY/)).toBeNull();
+  });
+
+  it("names another channel from the places list", async () => {
+    listPresencePlaces.mockResolvedValue({
+      places: [{
+        subject: "slack:T1/C777", label: "#ops", service: "slack",
+        parent: "slack:T1", listenerCount: 0, activeThreadCount: 0, lastActivityAt: null,
+      }],
+    });
+    getPresencePlace.mockResolvedValue({
+      ...INCIDENTS,
+      listeners: [listener("W", {
+        eventKeys: ["slack.message"],
+        filters: [{ field: "channel", op: "in", value: ["C900", "C777"] }],
+        target: { kind: "workflow", workflowId: "wf-1" },
+      })],
+    });
+    renderPage("slack:T1/C900");
+    await screen.findByRole("heading", { level: 1, name: "#incidents" });
+    const [here] = sectionsInOrder(["Valet here"]);
+    expect(await within(here!).findByText(sentenceText("When someone posts a message in #incidents or #ops, run Incident triage."))).toBeTruthy();
   });
 
   it("reads the place once when the URL's key differs from the place's key", async () => {

@@ -305,7 +305,9 @@ Pass criterion: all steps, in one run, from a clean start.
    acme/`). When the api scopes a line to its creator, that actor applies
    to every clause whose key carries `user` (`When you mention Valet or you
    post a message in #incidents`). A labeled sender on a mention line is
-   the actor (`When Alice mentions Valet`).
+   the actor (`When Alice mentions Valet`). A Slack channel in `<place>`
+   reads the filter's own label, then the channel's name from the places
+   list (`#proj-valet`), then the raw channel id.
 
    For a Slack mention, `<event in words>` names who mentions Valet. The
    api scopes a personal, org, or workflow mention line to its creator

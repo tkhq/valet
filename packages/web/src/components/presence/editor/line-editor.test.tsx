@@ -11,6 +11,7 @@ import type {
   EventSubscriptionWire,
   PatchEventSubscriptionRequest,
   PluginSummary,
+  PresencePlaceWire,
   UpdateWorkflowScheduleRequest,
 } from "@valet/api/wire";
 import { useState, type ReactNode } from "react";
@@ -77,6 +78,12 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams: [] } }),
   useOrg: () => ({ data: { features: { organizations: false } } }),
 }));
+/** The places list names a Slack channel saved without a label. */
+let places: PresencePlaceWire[] = [];
+vi.mock("~/api/presence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/presence")>(),
+  usePresencePlaces: () => ({ data: { places } }),
+}));
 vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
   ...await importOriginal<typeof import("~/lib/workspace-scope")>(),
   useWorkspaceScope: () => ({ key: "user", teamId: undefined, available: ["user"], setKey: () => {} }),
@@ -131,6 +138,7 @@ beforeEach(() => {
   updateSchedule.mockReset();
   subscriptions = [];
   pendingRequest = false;
+  places = [];
 });
 
 afterEach(() => {
@@ -313,6 +321,23 @@ describe("LineEditor", () => {
     expect(hint.textContent).not.toContain("1750000000");
     expect(hint.textContent).not.toContain("C123ABC");
     expect(screen.getByRole("button", { name: /^Remove channel is C123ABC/ })).toBeTruthy();
+  });
+
+  it("names a channel saved without a label from the places list", () => {
+    places = [{
+      subject: "slack:T1/C1", label: "#incidents", service: "slack",
+      parent: "slack:T1", listenerCount: 1, activeThreadCount: 0, lastActivityAt: null,
+    }];
+    renderEditor({
+      kind: "edit",
+      line: line("l2", {
+        name: "Incident mentions",
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C1" }],
+        target: { kind: "assistant", assistant: "user", thread: { mode: "own" } },
+      }),
+    });
+    expect(visibleText(screen.getAllByTestId("editor-sentence")[0]?.querySelector('[data-ref="place"]'))).toBe("#incidents");
   });
 
   it("fixes the service when launched from a place", () => {

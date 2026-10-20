@@ -389,6 +389,46 @@ describe("presenceSentence parts", () => {
   });
 });
 
+describe("a Slack channel's name (spec Part C step 2)", () => {
+  const run = { kind: "workflow" as const, workflowId: "wf-1" };
+  const unlabeled = { field: "channel", op: "eq" as const, value: "C0AK0T8KPPY" };
+  const names = { channels: { C0AK0T8KPPY: "proj-valet" } };
+
+  it("reads the name from names.channels when the filter has no label", () => {
+    const s = sub({ filters: [unlabeled], target: run });
+    const parts = presenceSentenceParts(s, catalog, workflows, threads, names);
+    expect(partsText(parts)).toBe("When someone mentions Valet in #proj-valet, run Triage failures.");
+    expect(partsText(parts)).toBe(presenceSentence(s, catalog, workflows, threads, names));
+    expect(parts).toContainEqual({ kind: "place", text: "#proj-valet", service: "slack", subject: "slack:C0AK0T8KPPY" });
+  });
+
+  it("reads each value of an in filter by name", () => {
+    const s = sub({ filters: [{ field: "channel", op: "in", value: ["C1", "C2"] }], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads, { channels: { C1: "eng" } })).toBe(
+      "When someone mentions Valet in #eng or C2, run Triage failures.",
+    );
+  });
+
+  it("keeps the filter's own label over the name", () => {
+    const s = sub({ filters: [{ ...unlabeled, label: "#old-name" }], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads, names)).toBe(
+      "When someone mentions Valet in #old-name, run Triage failures.",
+    );
+  });
+
+  it("reads the raw id with neither a label nor a name", () => {
+    const s = sub({ filters: [unlabeled], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in C0AK0T8KPPY, run Triage failures.",
+    );
+  });
+
+  it("names the channel in a When condition too", () => {
+    expect(whenExplanation([{ field: "channel", op: "prefix", value: "C1" }], ["slack.message"], { channels: { C1: "eng" } }))
+      .toBe("Only when the channel starts with #eng.");
+  });
+});
+
 describe("presenceSentence without the place clause (spec Part B step 5)", () => {
   const noPlace = { place: false } as const;
 

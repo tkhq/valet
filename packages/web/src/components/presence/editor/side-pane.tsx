@@ -11,7 +11,7 @@ import { Button } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { Ref } from "../ref";
 import { Sentence } from "../sentence";
-import { eventInWords, SENTENCE_PLACE_FIELD_SET, type SentencePart } from "../sentences";
+import { eventInWords, filterLabels, SENTENCE_PLACE_FIELD_SET, type SentenceNames, type SentencePart } from "../sentences";
 
 /** Why a proposal cannot turn on: the line it replaces is gone, or that
  * line is already off. */
@@ -55,6 +55,8 @@ export interface SidePaneProps {
   confirmingDiscard: boolean;
   onKeepEditing: () => void;
   onDiscard: () => void;
+  /** Names for a colliding line's place, such as a Slack channel saved without a label. */
+  names?: SentenceNames;
 }
 
 const MINUTE = 60_000;
@@ -84,13 +86,13 @@ export function collisionWords(keys: readonly string[]): string {
   return words.length <= 2 ? words.join(" or ") : `${words.slice(0, -1).join(", ")}, or ${words[words.length - 1]}`;
 }
 
-/** The place a colliding line names, or null when it listens everywhere. */
-function collisionPlace(sub: EventSubscriptionWire): string | null {
+/** The place a colliding line names, or null when it listens everywhere.
+ * A value reads as its label, then a Slack channel's name, then the raw value. */
+function collisionPlace(sub: EventSubscriptionWire, names: SentenceNames = {}): string | null {
   for (const field of SENTENCE_PLACE_FIELD_SET) {
     const filter = sub.filters.find((f) => f.field === field && (f.op === "eq" || f.op === "in"));
     if (filter === undefined) continue;
-    if (typeof filter.value === "string") return filter.label?.trim() || filter.value;
-    return filter.value.map((v, i) => filter.labels?.[i]?.trim() || v).join(" or ");
+    return filterLabels(filter, names).join(" or ");
   }
   return null;
 }
@@ -207,7 +209,7 @@ export function SidePaneRest(props: SidePaneProps) {
       {collisions !== null && collisions !== undefined && (
         <div className="grid gap-2">
           {[...collisions.report.blocking, ...collisions.report.overlapping].map((c) => {
-            const place = collisionPlace(c.subscription);
+            const place = collisionPlace(c.subscription, props.names);
             return (
               <p key={c.subscription.id} className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">
                 <Ref kind="line" text={c.subscription.name} /> also acts on {collisionWords(c.sharedKeys)}

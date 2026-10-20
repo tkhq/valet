@@ -428,6 +428,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     onSave: () => save(),
     onSaveAnyway: () => save(true),
     onDone: done,
+    names,
     confirmingDiscard: confirming,
     onKeepEditing: () => setConfirming(false),
     onDiscard: close,
