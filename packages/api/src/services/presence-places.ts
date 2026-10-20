@@ -19,7 +19,8 @@ import { EVENT_LOG_WINDOW_MS } from "./event-log.js";
 import { isAssistantKind, readScheduleTargetKind, readStoredTarget } from "../events/target-names.js";
 import { slackMessageUrl } from "./channel-messages.js";
 import { eventHeadColumns, type EventHead } from "./event-columns.js";
-import { channelFilterIds, runtimeSessionId, type ChannelNames, type ChannelVisibility, type ThreadsShown } from "./channels.js";
+import { mapBounded } from "../lib/bounded-map.js";
+import { channelFilterIds, runtimeSessionId, type ChannelNames, type ChannelVisibility, type ThreadPairsShown } from "./channels.js";
 import type {
   ChannelConversation, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceService, PresencePlaceWire,
   ThreadFeederWire,
@@ -30,6 +31,8 @@ type SubscriptionRow = typeof eventSubscriptions.$inferSelect;
 type EventRow = EventHead;
 
 const SERVICES: readonly PresencePlaceService[] = ["slack", "github", "linear"];
+/** How many Slack channel checks the places read runs at once. */
+const CHANNEL_CHECK_CONCURRENCY = 5;
 /** The top row of a service whose listeners name no repository or team. Slack's top row is its workspace, `slack:<team>`. */
 const GITHUB_ROOT = "github:*";
 const LINEAR_ROOT = "linear:*";
@@ -375,7 +378,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface PresenceAccess {
   names: ChannelNames;
   canSee: ChannelVisibility;
-  threadsShown: ThreadsShown;
+  threadsShown: ThreadPairsShown;
   /** The org's Slack workspace id, from its bot credential, or null. */
   slackTeamId: () => Promise<string | null>;
 }
@@ -454,38 +457,52 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   const { db } = deps;
   const root = await runtimeSessionId(db, orgId, owner);
   const sessions = root ? await workspaceSessionIds(db, orgId, root) : [];
+  const inWorkspace = new Set(sessions);
 
-  // The threads of each session that this request may see.
+  // Each read below covers every session of the workspace at once, so the
+  // number of queries does not grow with the workspace's conversations.
+  const wakeups = sessions.length === 0 ? [] : (await deps.engineStore.listWakeupsForSessions(sessions, ["running"]))
+    .filter((wakeup) => wakeup.kind === "event");
+  const follows = await db.select().from(followedThreads).where(and(eq(followedThreads.orgId, orgId), eq(followedThreads.channelType, "slack"),
+    eq(followedThreads.ownerType, owner.type), eq(followedThreads.ownerId, owner.id)));
+
+  // The threads a place can show: a subject thread (`subject:<key>`), and a
+  // thread that a follow binding or a running waiter names. A team runtime
+  // holds thousands of other threads, and none of them is a place's.
+  const named = new Map<string, { sessionId: string; threadId: string }>();
+  for (const ref of [...follows.map((follow) => ({ sessionId: follow.sessionId, threadId: follow.threadId })), ...wakeups]) {
+    if (ref.sessionId && ref.threadId && inWorkspace.has(ref.sessionId)) named.set(`${ref.sessionId}:${ref.threadId}`, { sessionId: ref.sessionId, threadId: ref.threadId });
+  }
+  const threadRows = sessions.length === 0 ? [] : (await db.execute(sql`
+    SELECT et.session_id, et.id, et.key, et.updated_at, st.title, (st.archived_at IS NOT NULL) AS archived FROM engine_threads et
+    LEFT JOIN session_threads st ON st.session_id = et.session_id AND st.id = et.id
+    WHERE et.session_id IN (${sql.join(sessions.map((id) => sql`${id}`), sql`, `)})
+      AND ((et.key LIKE 'subject:%' AND st.archived_at IS NULL)${named.size === 0 ? sql`` : sql`
+        OR (et.session_id, et.id) IN (${sql.join([...named.values()].map((ref) => sql`(${ref.sessionId}, ${ref.threadId})`), sql`, `)})`})`) as {
+    // Raw SQL rows are untyped; the SELECT names these columns.
+    rows: Array<{ session_id: string; id: string; key: string | null; updated_at: string | number; title: string | null; archived: boolean | null }>;
+  }).rows;
+
+  // Of those threads, the ones this request may see, in one visibility pass.
+  const shown = await access.threadsShown(threadRows.map((row) => ({ sessionId: row.session_id, threadId: row.id })));
   const threads = new Map<string, Map<string, ThreadRow>>();
-  for (const sessionId of sessions) {
-    const result = await db.execute(sql`
-      SELECT et.id, et.key, et.updated_at, st.title, (st.archived_at IS NOT NULL) AS archived FROM engine_threads et
-      LEFT JOIN session_threads st ON st.session_id = et.session_id AND st.id = et.id
-      WHERE et.session_id = ${sessionId}`) as {
-      // Raw SQL rows are untyped; the SELECT names these columns.
-      rows: Array<{ id: string; key: string | null; updated_at: string | number; title: string | null; archived: boolean | null }>;
-    };
-    const shown = await access.threadsShown(sessionId, result.rows.map((row) => row.id));
-    const visible = new Map<string, ThreadRow>();
-    for (const row of result.rows) {
-      if (!shown.has(row.id)) continue;
-      visible.set(row.id, { id: row.id, key: row.key, updatedAt: Number(row.updated_at), title: row.title, archived: row.archived === true });
-    }
-    threads.set(sessionId, visible);
+  for (const row of threadRows) {
+    if (!shown.has(`${row.session_id}:${row.id}`)) continue;
+    const visible = threads.get(row.session_id) ?? new Map<string, ThreadRow>();
+    visible.set(row.id, { id: row.id, key: row.key, updatedAt: Number(row.updated_at), title: row.title, archived: row.archived === true });
+    threads.set(row.session_id, visible);
   }
   const conversation = (sessionId: string, thread: ThreadRow, fallbackTitle: string, url?: string): ChannelConversation => ({
     sessionId, threadId: thread.id, title: thread.title || fallbackTitle, ...(url ? { url } : {}), lastActivityAt: thread.updatedAt,
   });
 
   const waiters = [];
-  for (const sessionId of sessions) {
-    for (const wakeup of await deps.engineStore.listWakeups(sessionId, ["running"])) {
-      const thread = threads.get(sessionId)?.get(wakeup.threadId);
-      if (wakeup.kind !== "event" || !thread) continue;
-      // A waiter that also holds a wider subject for a derived key waits on its primary one.
-      const subjects = wakeup.eventMatch?.primarySubject ? [wakeup.eventMatch.primarySubject] : wakeup.subjects ?? [];
-      waiters.push({ sessionId, thread, subjects });
-    }
+  for (const wakeup of wakeups) {
+    const thread = threads.get(wakeup.sessionId)?.get(wakeup.threadId);
+    if (!thread) continue;
+    // A waiter that also holds a wider subject for a derived key waits on its primary one.
+    const subjects = wakeup.eventMatch?.primarySubject ? [wakeup.eventMatch.primarySubject] : wakeup.subjects ?? [];
+    waiters.push({ sessionId: wakeup.sessionId, thread, subjects });
   }
 
   // The payload is most of an event row's size, and no place reads it.
@@ -542,8 +559,6 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     }
   }
 
-  const follows = await db.select().from(followedThreads).where(and(eq(followedThreads.orgId, orgId), eq(followedThreads.channelType, "slack"),
-    eq(followedThreads.ownerType, owner.type), eq(followedThreads.ownerId, owner.id)));
   for (const follow of follows) {
     // A follow bound before the thread columns names no Valet thread, and
     // still marks its channel. A bound follow counts only when this request
@@ -580,11 +595,15 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (channelId && natural.label.startsWith("#")) channelNames.set(channelId, natural.label.slice(1));
   }
 
-  // A private Slack channel's place shows only to its members.
-  for (const place of [...places.keys()]) {
+  // A private Slack channel's place shows only to its members. A check that
+  // fails hides the place, as an unknown audience does.
+  const channelPlaces = [...places.keys()].flatMap((place) => {
     const channelId = slackChannelOf(place);
-    if (channelId && !(await access.canSee(`slack:${channelId}`))) places.delete(place);
-  }
+    return channelId ? [{ place, channelId }] : [];
+  });
+  const seen = await mapBounded(channelPlaces, CHANNEL_CHECK_CONCURRENCY,
+    ({ channelId }) => access.canSee(`slack:${channelId}`).catch(() => false));
+  channelPlaces.forEach(({ place }, index) => { if (seen[index] !== true) places.delete(place); });
 
   // Every parent a row names is a row. A parent that only its children name
   // has no counts of its own and takes its children's newest activity.

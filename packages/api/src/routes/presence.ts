@@ -16,7 +16,7 @@ import { canViewSession } from "../services/session-access.js";
 import { orgSlackCredential, storedThreadRef } from "../services/thread-access.js";
 import { getPresencePlace, listPresencePlaces, listThreadFeeders, resolveSlackTeam, type PresenceAccess } from "../services/presence-places.js";
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
-import { slackChannelNames, threadsShownTo } from "./workspace-channels.js";
+import { slackChannelNames, threadPairsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { rowToEventSummary, subscriptionProblems, subscriptionToWire } from "./events.js";
 import type { PresencePlaceDetailResponse } from "../wire/types.js";
@@ -30,7 +30,7 @@ function presenceAccess(c: Context<AppEnv>, owner: Principal): PresenceAccess {
   return {
     names: slackChannelNames(c),
     canSee: channelsVisibleTo(c),
-    threadsShown: threadsShownTo(c, owner),
+    threadsShown: threadPairsShownTo(c, owner),
     slackTeamId: async () => {
       const teamId = (await orgSlackCredential(c.var.providers, c.var.user.orgId))?.metadata?.teamId;
       return typeof teamId === "string" && teamId !== "" ? teamId : null;
