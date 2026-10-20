@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -36,6 +37,7 @@ import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
 import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
+import { stepHistory, usePromptHistory } from "./prompt-history";
 import {
   acceptImages,
   filesFromClipboard,
@@ -169,6 +171,17 @@ export function Composer({
     };
   }, []);
   useAutosizeTextarea(inputRef, text);
+  // Up and Down step through the person's earlier prompts in this thread
+  // (`stepHistory`). The index belongs to the draft slot it was recalled in.
+  const history = usePromptHistory(sessionId, threadId);
+  const recalled = useRef<{ key: string; index: number | null }>({ key: "", index: null });
+  const caretToEnd = useRef(false);
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (!caretToEnd.current || !field) return;
+    caretToEnd.current = false;
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, [text]);
   useEffect(() => {
     if (replyTarget) inputRef.current?.focus();
   }, [replyTarget]);
@@ -264,8 +277,12 @@ export function Composer({
       : undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const popupOpen = !dismissed && popupItems.length > 0;
-  const noticeOpen = !dismissed && !popupOpen && argNotice !== undefined;
+  // A recalled prompt reads as already written: its slash command opens no
+  // popup, so Up and Down keep stepping and Enter sends it, until an edit.
+  const recalledIndex = recalled.current.key === key ? recalled.current.index : null;
+  const showingRecall = recalledIndex !== null && history[recalledIndex] === text;
+  const popupOpen = !dismissed && !showingRecall && popupItems.length > 0;
+  const noticeOpen = !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
   useEffect(() => {
     setSelectedIndex(0);
@@ -821,6 +838,23 @@ export function Composer({
       }
     }
 
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+      const field = e.currentTarget;
+      const step = stepHistory(
+        history,
+        { index: recalledIndex, text },
+        e.key === "ArrowUp" ? "older" : "newer",
+        { start: field.selectionStart, end: field.selectionEnd },
+      );
+      if (step) {
+        e.preventDefault();
+        recalled.current = { key, index: step.index };
+        caretToEnd.current = true;
+        setText(step.text);
+        return;
+      }
+    }
+
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
     // sending a half-finished message.
@@ -1064,6 +1098,7 @@ export function Composer({
             <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden")}>
               <span className="hidden sm:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+                {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
             {working && queueState?.activeItemId && (

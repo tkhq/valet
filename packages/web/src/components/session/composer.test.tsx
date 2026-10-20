@@ -31,6 +31,8 @@ const setMessageQueueItemId = vi.fn();
 // hoisted `vi.mock` factory closes over a stable binding and each test can
 // swap the value the composer reads.
 const queueStateRef: { current: WireQueueState | undefined } = { current: undefined };
+// The session's live transcript, which prompt recall reads.
+const streamMessagesRef: { current: StreamMessage[] } = { current: [] };
 
 function queueState(mode: WireQueueState["mode"]): WireQueueState {
   return {
@@ -66,7 +68,7 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   return {
     ...actual,
     useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
-      selector({ addUserMessage, setMessageQueueItemId }),
+      selector({ addUserMessage, setMessageQueueItemId, bySession: { "orchestrator:user-1": { messages: streamMessagesRef.current } } }),
     useQueueStateForThread: () => queueStateRef.current,
   };
 });
@@ -129,6 +131,7 @@ function renderComposer(
 
 beforeEach(() => {
   queueStateRef.current = undefined;
+  streamMessagesRef.current = [];
   sendState.pending = false;
   sendState.sessions = undefined;
   abortState.sessions = [];
@@ -1161,5 +1164,76 @@ describe("Composer — reply target", () => {
       undefined,
       { messageId: "assistant-7", excerpt: "Use the blue deployment." },
     );
+  });
+});
+
+describe("Composer prompt recall", () => {
+  function sent(id: string, content: string, threadId = "thread-1"): StreamMessage {
+    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1 };
+  }
+
+  it("steps through this thread's earlier prompts with Up and Down", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "elsewhere", "thread-2"), sent("m3", "second prompt")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("second prompt");
+    expect(box.selectionStart).toBe("second prompt".length);
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("second prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("");
+  });
+
+  it("keeps a typed draft and an edited recall", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.change(box, { target: { value: "my draft" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("my draft");
+
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.change(box, { target: { value: "first prompt, fixed" } });
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("first prompt, fixed");
+  });
+
+  it("steps past a recalled slash command without opening the command popup", async () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "/status")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("/status");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "/status" })));
+  });
+
+  it("opens the command popup again once a recalled command is edited", () => {
+    streamMessagesRef.current = [sent("m1", "/status")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.change(box, { target: { value: "/st" } });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+  });
+
+  it("sends a recalled prompt as a new message", async () => {
+    streamMessagesRef.current = [sent("m1", "rerun the report")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "rerun the report", threadId: "thread-1" })));
   });
 });
