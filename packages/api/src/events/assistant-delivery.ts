@@ -187,9 +187,12 @@ export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
 ): Promise<DeliveredThread> {
-  // A delivery can outlive a routing upgrade. The admitted dispatch belongs
-  // to its original runtime, even if today's route selects another one.
-  if (args.dispatchId.startsWith("event:")) {
+  // A delivery can outlive a routing upgrade or a thread policy edit. The
+  // admitted dispatch belongs to its original runtime, even if today's route
+  // selects another one. Event and schedule ids are unique per owner, so one
+  // admission per id holds across every session of the owner. A team routine
+  // admitted under `own` and retried under `new` must not run its slot twice.
+  if (args.dispatchId.startsWith("event:") || args.dispatchId.startsWith("schedule:")) {
     const recovered = await recoverAdmittedEvent(deps, args);
     if (recovered) return recovered;
   }

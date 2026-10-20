@@ -199,6 +199,22 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(externalAction).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
   });
 
+  it("admits one team schedule slot once when its thread policy changes before a retry", async () => {
+    const owner = { type: "team", id: "routine-team" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Routine team", createdAt: 1 });
+    const deps = { db: testDb.appDb, engineHost };
+    const signal = { kind: "signal" as const, signalType: "schedule", body: "Post the standup summary", attributes: { scheduleId: "sched-1" } };
+    const args = { orgId: ORG, owner, actorUserId: `team:${owner.id}`, signal, dispatchId: "schedule:sched-1:100",
+      mismatchReason: "test", unattended: true };
+    // `own` admits the slot in the routine's own execution session.
+    const first = await deliverToAssistantThread(deps, { ...args, destination: { kind: "key", key: "schedule:sched-1", title: "Standup" } });
+    // The policy changes to `new`, which selects another execution session.
+    const retry = await deliverToAssistantThread(deps, { ...args, destination: { kind: "key", key: "schedule:sched-1:100", title: "Standup" } });
+    expect(retry).toEqual({ ...first, recovered: true });
+    const rows = await testDb.appDb.execute(sql`SELECT session_id FROM engine_queue_items WHERE dispatch_id = 'schedule:sched-1:100'`) as { rows: Array<{ session_id: string }> };
+    expect(rows.rows).toEqual([{ session_id: first.sessionId }]);
+  });
+
   it("recovers the admitted event before a new PR target and verifies its original content", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });

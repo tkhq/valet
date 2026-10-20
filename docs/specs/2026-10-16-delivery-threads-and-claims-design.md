@@ -355,8 +355,13 @@ event wakeups spec Part A.
   resolution runs at delivery, after the destination kind is known.
   Vectors: C1, C8, T7.
 - **INV-D4 A retry never creates a second thread.** Mechanism: `new` keys
-  derive from the delivery id or fire time; `existing` recovers the admitted
-  dispatch by `event:<deliveryId>`. Vector: T5.
+  derive from the delivery id or fire time. Before it resolves a
+  destination, every delivery with an `event:<deliveryId>` or
+  `schedule:<id>:<slot>` dispatch id recovers an admission with that id
+  from any session of the owner. A retry after a policy edit selects
+  another team execution session, but it still finds the first admission.
+  Vector: T5; unit test `admits one team schedule slot once when its thread
+  policy changes before a retry` in `assistant-delivery.test.ts`.
 - **INV-D5 An `existing` policy delivers only inside the owner's live
   runtime.** Mechanism: write-time validation (Part A step 5) and
   `isDeliverableTarget` at delivery. Vectors: T7, T11.
