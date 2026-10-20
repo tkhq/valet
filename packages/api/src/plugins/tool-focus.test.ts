@@ -50,6 +50,7 @@ describe("workflow tool focus", () => {
     const scope = workflowToolFocus("repair");
     expect(actionInScope(scope, "workflows.patch_workflow")).toBe(true);
     expect(actionInScope(scope, "workflows.preview_workflow")).toBe(true);
+    expect(actionInScope(scope, "workflows.validate_definition")).toBe(true);
     expect(actionInScope(scope, "workflows.start_run")).toBe(false);
   });
   it("limits validation to named integration actions and run controls", () => {
