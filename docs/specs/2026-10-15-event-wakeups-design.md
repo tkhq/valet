@@ -478,6 +478,10 @@ D1 errata (Task 11):
 - R4 also covers a channel that `conversations.info` reports as
   `channel_not_found`, because the bot cannot see a private channel it is
   not in. The text names `<#C…>` when Slack gives no channel name.
+- R4 counts a DM (`is_im`) or a group DM (`is_mpim`) as joined when the
+  bot token's `conversations.info` read succeeds. Slack sends no
+  `is_member` for these conversations, and the bot token reads only the
+  ones the bot is in. A wait on the bot's DM with its owner arms.
 - R3 for Linear needs the session's own Linear credential. The org's
   app-actor token (`grant = client_credentials`) does not count.
 - R5 also refuses `github.pull_request.checks_completed` unless the
@@ -550,9 +554,13 @@ mention that arrives as two Slack events.
 The tool fixes `self` at arm. It holds three ids for the subject's
 service: the session owner's linked external id, the external id of a
 shared personal credential that the session resolves, and the app's actor id.
-So events by the agent, the person it acts for, or the Valet app are
-skipped unless a clause sets `include_self`. The tool description says
-this and shows `include_self: true` for a wait on the owner's own reply.
+So events by the person the agent acts for, and the agent's own GitHub
+or Linear actions, are skipped unless a clause sets `include_self`. The
+Slack inbox drops Valet's own posts before ingest ("Ignored Valet's own
+message to prevent a reply loop"), so no clause can match them, and the
+agent's own Slack message cannot trigger a wait. The tool description says
+this and shows `include_self: true` for a wait on the owner's own reply,
+in a channel or in the bot's DM with the owner.
 
 `from_status` resolution: when a candidate clause names `from_status` and
 the event has no `previousStatus`, the matcher calls the plugin's status

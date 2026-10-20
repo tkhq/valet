@@ -284,7 +284,7 @@ const clauseSchema = Type.Object({
   from_status: Type.Optional(Type.Array(Type.String(), { description: "Match only an update whose previous status is one of these." })),
   actor: Type.Optional(Type.String({ description: "Match only this actor login or external id." })),
   bots: Type.Optional(Type.Boolean({ description: "false drops events from bot actors." })),
-  include_self: Type.Optional(Type.Boolean({ description: "true keeps events that this session caused." })),
+  include_self: Type.Optional(Type.Boolean({ description: "true keeps events by the person you act for. Valet's own Slack posts never arrive as events." })),
 });
 
 export const waitForEventTool = defineTool({
@@ -301,8 +301,10 @@ export const waitForEventTool = defineTool({
     'A Linear triage shift: subject the team triage URL, on [{ "key": "linear.issue.create", "status": ["triage"] }, ' +
     '{ "key": "linear.issue.update", "status": ["triage"], "from_status": ["backlog", "unstarted", "started", "completed", "canceled"] }], once false. ' +
     'A reply on a Linear issue: subject the issue URL, on [{ "key": "linear.comment.create" }]. ' +
-    "Events by you, the person you act for, or the Valet app are skipped unless a clause sets include_self. " +
-    'To wait for a reply from the person you act for, set it: on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
+    "Events by the person you act for, and your own GitHub or Linear actions, are skipped unless a clause sets include_self. " +
+    "Valet's own Slack posts never arrive as events, so your own Slack message cannot trigger a wait. " +
+    "To wait for a reply from the person you act for, in a channel or in your DM with them, subject the message permalink and set include_self: " +
+    'on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
     "To watch something with no end, propose an event subscription instead.",
   parameters: Type.Object({
     subject: Type.String({ description: "A GitHub pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
