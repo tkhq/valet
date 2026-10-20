@@ -484,6 +484,27 @@ async function abortInFlight(deps: InterpreterDeps, runId: string, waits: RunWai
 }
 
 /**
+ * Abort what a run that is about to settle `failed` after repeated drive
+ * failures may still have in flight. A drive keeps going after a node parks,
+ * so a later throw in the same drive leaves that node's work live with no
+ * saved wait; its intent checkpoint still names it. Best-effort: the run
+ * settles `failed` either way, so a failed abort is logged, not rethrown.
+ */
+export async function abortPoisonedRun(deps: Pick<InterpreterDeps, 'store' | 'engine' | 'clock'>, runId: string): Promise<void> {
+  const run = await deps.store.getRun(runId);
+  if (!run) return;
+  const waits = await inFlightWaits(deps.store, run, []);
+  for (const wait of waits) {
+    try {
+      if (wait.kind === 'submission') await deps.engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
+      if (wait.kind === 'run') await cancelChildRun(deps.store, wait.runId, deps.clock);
+    } catch (err) {
+      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" before the failed settle failed:`, err);
+    }
+  }
+}
+
+/**
  * Every submission and child run the run may still have in flight: its
  * saved waits, the waits nodes parked in this drive before the run saved
  * them, and what each unfinished node's intent checkpoint records. A drive
