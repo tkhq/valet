@@ -29,6 +29,14 @@ describe("filterLabels with a channel name", () => {
     expect(filterLabels({ field: "channel", op: "in", value: ["C900", "C901"] }, names)).toEqual(["#proj-valet", "C901"]);
   });
 
+  // Review of PR #986: the editor saves the raw id as the label of a channel
+  // it could not name, so that label must not hide the name.
+  it("prefers the name over a label that is the raw id", () => {
+    expect(filterLabels({ field: "channel", op: "eq", value: "C900", label: "C900" }, names)).toEqual(["#proj-valet"]);
+    expect(filterLabels({ field: "channel", op: "in", value: ["C900", "C901"], labels: ["C900", "C901"] }, names)).toEqual(["#proj-valet", "C901"]);
+    expect(filterLabels({ field: "channel", op: "eq", value: "C900", label: "#ops" }, names)).toEqual(["#ops"]);
+  });
+
   // Review of PR #986: the matcher tests the id against a pattern, so the
   // sentence must show the pattern, not a name the pattern never sees.
   it("keeps a pattern value literal", () => {

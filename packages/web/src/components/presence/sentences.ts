@@ -519,13 +519,15 @@ function filterEntries(filter: EventSubscriptionFilterWire, names: SentenceNames
       : undefined;
     return hasText(channel) ? `#${channel}` : value;
   };
+  // The editor saves a channel's id as its label when it has no name
+  // (`labels[i] ?? id`), so a label equal to the value is no label: the
+  // channel name from the places list wins over it.
+  const named = (value: string, label: string | undefined): string =>
+    hasText(label) && label.trim() !== value ? label : fallback(value);
   if (Array.isArray(filter.value)) {
-    return filter.value.map((v, i) => {
-      const label = filter.labels?.[i];
-      return { value: v, label: hasText(label) ? label : fallback(v) };
-    });
+    return filter.value.map((v, i) => ({ value: v, label: named(v, filter.labels?.[i]) }));
   }
-  return [{ value: filter.value, label: hasText(filter.label) ? filter.label : fallback(filter.value) }];
+  return [{ value: filter.value, label: named(filter.value, filter.label) }];
 }
 
 /** Each value of a filter as the words a reader sees for it. See `filterEntries`. */
