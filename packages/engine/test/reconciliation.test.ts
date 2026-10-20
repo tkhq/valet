@@ -12,6 +12,7 @@ import {
   InMemorySessionStore,
   MODEL_RESPONSE_METADATA_KEY,
   modelResponseMetadata,
+  SUBMISSION_TIMEOUT_MS,
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
@@ -289,6 +290,12 @@ describe("decideReconciliation — step 6 (timeout)", () => {
   it("now < timeoutAt → resume", () => {
     expect(decideReconciliation(item({ timeoutAt: NOW + 1 }), ctx())).toEqual({ kind: "resume" });
   });
+
+  it("attemptCount 0 past timeoutAt → resume (an item that has not run cannot time out)", () => {
+    const { attemptId: _claimed, ...running } = item({ timeoutAt: NOW - 1 });
+    const queued: QueueItem = { ...running, status: "queued", attemptCount: 0 };
+    expect(decideReconciliation(queued, ctx())).toEqual({ kind: "resume" });
+  });
 });
 
 // ── Step 7: resume ──────────────────────────────────────────────────
@@ -484,9 +491,11 @@ async function seedCrashedRunningTurn(
     supersededByItemId?: string;
     withGate?: boolean;
     gateExpiresAt?: number;
+    /** When the crashed turn was admitted. Defaults to now. */
+    at?: number;
   } = {},
 ): Promise<{ itemId: string; attemptId: string; callId: string }> {
-  const now = Date.now();
+  const now = opts.at ?? Date.now();
   await store.saveSession({
     id: SESSION,
     owner: { type: "user", id: "u1" },
@@ -705,6 +714,30 @@ describe("read-only cutover reconciliation", () => {
 });
 
 describe("reconciliation executor (integration)", () => {
+  it("keeps prompts queued behind a parked turn across restarts, however long they waited", async () => {
+    const store = new InMemorySessionStore();
+    const start = Date.now() - 3 * SUBMISSION_TIMEOUT_MS;
+    const { itemId } = await seedCrashedRunningTurn(store, { withGate: true, at: start });
+    const admittedAt = start + SUBMISSION_TIMEOUT_MS;
+    await store.admitSubmission(SESSION, THREAD, {
+      id: "q-behind", threadId: THREAD, content: "queued behind the gate", status: "queued", attemptCount: 0,
+      maxAttempts: 10, timeoutAt: admittedAt + SUBMISSION_TIMEOUT_MS, createdAt: admittedAt, updatedAt: admittedAt,
+    });
+    const faux = registerFauxProvider({ provider: "queued-behind-gate" });
+    const spy = spyTool();
+    try {
+      for (let restart = 0; restart < 2; restart++) {
+        const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+        await engine.restoreSession({ sessionId: SESSION,
+          options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spy.def] } });
+        expect(await store.getQueueItem(SESSION, itemId)).toMatchObject({ status: "blocked_on_decision_gate" });
+        expect(await store.getQueueItem(SESSION, "q-behind")).toMatchObject({ status: "queued", attemptCount: 0 });
+      }
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it.each(["empty", "length"])("settles a persisted %s terminal response without continuing after a crash", async kind => {
     const store = new InMemorySessionStore();
     const { itemId, attemptId } = await seedCrashedRunningTurn(store);

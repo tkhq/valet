@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../errors.js";
+import { SUBMISSION_TIMEOUT_MS } from "../submission.js";
 import { CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   MessageEntry,
@@ -413,6 +414,25 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       expect(claimed?.ownerId).toBe("owner-1");
       expect(claimed?.attemptCount).toBe(1);
       expect(claimed?.leaseExpiresAt).toBeGreaterThan(Date.now());
+    });
+
+    it("starts the execution clock at a claim with attemptCount 0, not at admission", async () => {
+      const admittedAt = Date.now() - 5 * SUBMISSION_TIMEOUT_MS;
+      const item = makeItem({ createdAt: admittedAt, updatedAt: admittedAt });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const before = Date.now();
+      const claim = { sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, ownerId: "o" };
+      const first = await store.claimSubmission({ ...claim, attemptId: "att-1" });
+      const timeoutAt = first?.timeoutAt ?? 0;
+      expect(timeoutAt).toBeGreaterThanOrEqual(before + SUBMISSION_TIMEOUT_MS);
+      expect(timeoutAt).toBeLessThanOrEqual(Date.now() + SUBMISSION_TIMEOUT_MS);
+      expect((await store.getQueueItem(SESSION_ID, item.id))?.timeoutAt).toBe(timeoutAt);
+
+      // A plain release keeps attemptCount, so the next claim keeps the deadline.
+      expect(await store.releaseSubmission(SESSION_ID, THREAD_ID, item.id, { itemId: item.id, attemptId: "att-1" })).toBe(true);
+      const again = await store.claimSubmission({ ...claim, attemptId: "att-2" });
+      expect(again?.attemptCount).toBe(2);
+      expect(again?.timeoutAt).toBe(timeoutAt);
     });
 
     it("second concurrent claim for the same item returns null", async () => {
