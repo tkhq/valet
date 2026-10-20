@@ -14,7 +14,7 @@ import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
-import { Button, ConfirmDialog, Spinner, StatusDot } from "~/components/primitives";
+import { Button, Callout, ConfirmDialog, Spinner, StatusDot, TabBar } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { StepsPanel } from "./steps-panel";
@@ -139,6 +139,7 @@ export function EngagementPanel({
     <div className="flex flex-1 flex-col min-h-0 min-w-0">
       <div className="sticky top-0 z-10 shrink-0 border-b border-line bg-paper px-3 py-2 md:hidden">
         <label htmlFor={`security-section-${sessionId}`} className="sr-only">Review section</label>
+        {/* A headline picker, not a form field: no field border or shadow. */}
         <select
           id={`security-section-${sessionId}`}
           value={section}
@@ -185,9 +186,9 @@ export function EngagementPanel({
           />
         )}
         {rescan.isError && (
-          <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+          <Callout tone="danger" className="mx-4 mt-2 text-xs">
             {apiErrorText(rescan.error)}
-          </div>
+          </Callout>
         )}
         <div className="border-b border-line px-4 py-2 text-xs text-muted flex flex-wrap items-center gap-2">
           <div className="min-w-0 flex-1">
@@ -399,15 +400,22 @@ export function SecuritySessionLayout({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="md:hidden flex border-b border-line" role="tablist" aria-label="Session panes">
-        <MobileTab
-          label="Chat"
-          active={pane === "chat"}
-          dot={gatePending}
-          onSelect={() => setPane("chat")}
-        />
-        <MobileTab label="Panel" active={pane === "panel"} onSelect={() => setPane("panel")} />
-      </div>
+      <TabBar
+        label="Session panes"
+        className="md:hidden"
+        active={pane}
+        onSelect={setPane}
+        tabs={[
+          {
+            id: "chat",
+            label: "Chat",
+            badge: gatePending && (
+              <StatusDot data-testid="pending-gate-dot" label="A decision gate is pending" tone="warning" size="sm" />
+            ),
+          },
+          { id: "panel", label: "Panel" },
+        ]}
+      />
       <div className="flex-1 flex min-h-0" style={panel.containerStyle}>
         <div
           className={cn(
@@ -438,35 +446,5 @@ export function SecuritySessionLayout({
         </aside>
       </div>
     </div>
-  );
-}
-
-function MobileTab({
-  label,
-  active,
-  dot,
-  onSelect,
-}: {
-  label: string;
-  active: boolean;
-  dot?: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onSelect}
-      className={cn(
-        "min-h-11 flex-1 px-3 py-2 text-sm font-medium inline-flex items-center justify-center gap-1.5",
-        active ? "text-ink border-b-2 border-moss" : "text-muted",
-      )}
-    >
-      {label}
-      {dot && (
-        <StatusDot data-testid="pending-gate-dot" label="A decision gate is pending" tone="warning" size="sm" />
-      )}
-    </button>
   );
 }

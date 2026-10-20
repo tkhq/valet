@@ -30,6 +30,7 @@ import type { PluginServiceSummary } from "@valet/api/wire";
 import {
   Badge,
   Button,
+  Callout,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -529,12 +530,9 @@ function TokenForm({
         autoFocus
       />
       {connect.error && (
-        <div
-          role="alert"
-          className="rounded border border-line bg-danger-wash px-3 py-2 text-xs text-danger-600"
-        >
+        <Callout role="alert" tone="danger" className="text-xs">
           {connect.error.message}
-        </div>
+        </Callout>
       )}
       <Button
         size="lg"

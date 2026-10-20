@@ -28,7 +28,7 @@ import {
 } from "@valet/workflow";
 import { api } from "~/api/client";
 import { useCreateWorkflow } from "~/api/workflows";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Label, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, Callout, Dialog, DialogContent, DialogFooter, Label, Spinner, Textarea } from "~/components/primitives";
 import { errorMessages } from "~/lib/error-text";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { NODE_META } from "./editor-model";
@@ -144,13 +144,13 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
         )}
 
         {phase.kind === "error" && (
-          <ul role="alert" className="grid gap-1 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2">
-            {phase.messages.map((message) => (
-              <li key={message} className="text-xs leading-relaxed text-danger-600">
-                {message}
-              </li>
-            ))}
-          </ul>
+          <Callout asChild tone="danger" className="grid gap-1 text-xs leading-relaxed">
+            <ul role="alert">
+              {phase.messages.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          </Callout>
         )}
 
         {busy && (

@@ -83,7 +83,6 @@ export function ToolPermissions({ plugin }: { plugin: PluginSummary }) {
         <Button
           variant="ghost"
           size="sm"
-          className="max-sm:h-11"
           disabled={overridden.length === 0}
           onClick={() => set(overridden.map((tool) => tool.actionId), null)}
         >
@@ -138,7 +137,7 @@ function ToolRow({ tool, onSet }: { tool: ToolPermissionWire; onSet: (mode: Appr
           <span className="break-words text-xs font-medium text-ink">{tool.name}</span>
           <span className="text-[11px] text-muted">{TAG[tool.source]}</span>
           {tool.overridden && (
-            <Button variant="ghost" size="sm" className="max-sm:h-11" aria-label={`Reset ${tool.name}`} onClick={() => onSet(null)}>
+            <Button variant="ghost" size="sm" aria-label={`Reset ${tool.name}`} onClick={() => onSet(null)}>
               Reset
             </Button>
           )}

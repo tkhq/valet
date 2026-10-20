@@ -66,6 +66,7 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
   const title = displayName(skill.name);
   const plugin = skill.origin === "plugin" ? displayName(skill.plugin) : undefined;
   const showPlugin = plugin !== undefined && plugin !== title;
+  const idLine = `${skill.name}${showPlugin ? ` · ${plugin}` : ""}${skill.takesArgs ? " · takes arguments" : ""}`;
 
   // One line: mark, name, badges, description, and the id an agent passes.
   // The description and id give way on narrow screens; the skill's page has both.
@@ -78,7 +79,7 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
           tone={skill.origin === "plugin" ? "brand" : "accent"}
           size="sm"
         />
-        <span className="min-w-0 shrink truncate text-sm font-medium text-ink sm:max-w-[40%]">{title}</span>
+        <span className="min-w-0 shrink truncate text-sm font-medium text-ink sm:max-w-[40%]" title={title}>{title}</span>
         <div className="flex shrink-0 items-center gap-1.5">
           {/* One badge for the scope axis. A team row takes `OwnerBadge`
               in place of the generic Team badge, because it names the team
@@ -93,11 +94,9 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
             <Badge variant="neutral">prompt</Badge>
           )}
         </div>
-        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block">{skill.description}</span>
-        <span className="ml-auto hidden max-w-[30%] shrink-0 truncate font-mono text-xs text-muted md:block" translate="no">
-          {skill.name}
-          {showPlugin && ` · ${plugin}`}
-          {skill.takesArgs && " · takes arguments"}
+        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block" title={skill.description}>{skill.description}</span>
+        <span className="ml-auto hidden max-w-[30%] shrink-0 truncate font-mono text-xs text-muted md:block" translate="no" title={idLine}>
+          {idLine}
         </span>
       </div>
       {skill.origin !== "plugin" && skill.shadowed && (

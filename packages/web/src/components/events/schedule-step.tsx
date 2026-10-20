@@ -4,7 +4,7 @@
  * cron typed under Advanced replaces them.
  */
 import { useMemo } from "react";
-import { Button, Input, Label } from "~/components/primitives";
+import { Button, Input, Label, Select } from "~/components/primitives";
 import { timeZoneOptions } from "~/lib/time-zones";
 
 /** Days of the week as cron numbers, Monday first. */
@@ -83,16 +83,16 @@ export function ScheduleMatchStep({
       {/* The timezone applies to an Advanced cron too, so it stays open when one is typed. */}
       <div className="grid min-w-0 gap-1">
         <Label htmlFor="automation-timezone">Timezone</Label>
-        <select
+        <Select
           id="automation-timezone"
           value={timezone}
           onChange={(e) => onTimezoneChange(e.target.value)}
-          className="min-h-11 w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
+          className="w-full min-w-0 truncate"
         >
           {zones.map((zone) => (
             <option key={zone.value} value={zone.value}>{zone.label}</option>
           ))}
-        </select>
+        </Select>
       </div>
       <details open={cronOverride !== null} className="text-sm text-ink">
         <summary className="cursor-pointer text-sm text-muted">Advanced</summary>

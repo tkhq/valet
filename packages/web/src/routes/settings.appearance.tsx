@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { Section } from "~/components/settings/section";
-import { RadioCard } from "~/components/settings/radio-card";
+import { RadioCard } from "~/components/primitives";
 import {
   getToolCardDefault,
   setToolCardDefault,

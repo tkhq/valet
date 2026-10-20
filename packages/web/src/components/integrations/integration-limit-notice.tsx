@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type OwnerFilter } from "~/api/client";
-import { Button, ConfirmDialog } from "~/components/primitives";
+import { Button, Callout, ConfirmDialog } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 
 /**
@@ -21,7 +21,7 @@ export function IntegrationLimitNotice({ owner, canClear }: { owner: OwnerFilter
   const services = limit.data?.services;
   if (!services) return null;
   return (
-    <div role="status" className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-warning-wash px-3 py-2 text-sm text-ink">
+    <Callout role="status" tone="warning" className="mt-4 flex flex-wrap items-center justify-between gap-3">
       <p className="min-w-0 flex-1">
         Valet in this workspace can use only {services.length > 0 ? services.join(", ") : "no integrations"}. The limit came from its earlier assistant settings.
       </p>
@@ -31,6 +31,6 @@ export function IntegrationLimitNotice({ owner, canClear }: { owner: OwnerFilter
         confirmLabel="Clear limit" pendingLabel="Clearing…" pending={clear.isPending}
         error={clear.error ? errorText(clear.error) : undefined}
         onConfirm={() => clear.mutate()} />
-    </div>
+    </Callout>
   );
 }

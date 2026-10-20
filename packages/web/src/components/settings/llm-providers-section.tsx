@@ -9,6 +9,7 @@ import {
   DialogFooter,
   Input,
   Label,
+  Select,
   Spinner,
   Switch,
 } from "~/components/primitives";
@@ -497,18 +498,19 @@ function CustomProviderCard({ provider }: { provider: LlmProviderSummary }) {
 
       {provider.models.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <select
+          <Select
+            size="sm"
             aria-label={`Test model for ${provider.name}`}
             value={testModelId}
             onChange={(e) => setTestModelId(e.target.value)}
-            className="h-12 max-w-full rounded border border-[--border] bg-[--bg] px-2 text-base sm:h-8 sm:text-sm text-[--fg]"
+            className="max-w-full"
           >
             {provider.models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
               </option>
             ))}
-          </select>
+          </Select>
           <Button type="button" variant="secondary" size="sm" onClick={handleTest} disabled={test.isPending}>
             {test.isPending ? "Testing…" : "Test"}
           </Button>

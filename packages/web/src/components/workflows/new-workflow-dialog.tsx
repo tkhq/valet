@@ -3,7 +3,7 @@ import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useCreateWorkflow } from "~/api/workflows";
-import { Button, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
+import { Button, Callout, Dialog, DialogContent, DialogFooter, Input, Label } from "~/components/primitives";
 import { createDefaultWorkflowDefinition } from "./editor-model";
 import { errorText } from "~/lib/error-text";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -120,9 +120,9 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
         <AppearanceSettings value={presence} onChange={setPresence} disabled={create.isPending} />
 
         {create.error && (
-          <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+          <Callout tone="danger" className="text-xs">
             {errorText(create.error)}
-          </div>
+          </Callout>
         )}
 
         <DialogFooter>

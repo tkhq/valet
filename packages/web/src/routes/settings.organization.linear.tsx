@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { GetLinearConnectionResponse } from "@valet/api/wire";
 import { useDisconnectLinear, useLinearConnection, useSaveLinearConnection } from "~/api/linear";
 import { apiErrorMessage } from "~/api/policies";
-import { Badge, Button, ConfirmDialog, ErrorRow, Input, LoadingRow } from "~/components/primitives";
+import { Badge, Button, Callout, ConfirmDialog, ErrorRow, Input, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
 
@@ -114,9 +114,9 @@ function SetupCards({ data }: { data: GetLinearConnectionResponse }) {
       </p>
       {data.webhookUrl
         ? <p className="text-xs text-muted">Linear delivers events to <span className="font-mono">{data.webhookUrl}</span>.</p>
-        : <p className="rounded border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-ink dark:border-amber-700/60 dark:bg-amber-950/40">
+        : <Callout tone="warning" className="text-xs leading-relaxed">
           This deployment has no public HTTPS URL, and Linear delivers events only to one. Set VALET_PUBLIC_URL and reload this page before you create the app. Without it, the app connects but workflows never receive Linear events.
-        </p>}
+        </Callout>}
       {!createUrl && <p className="text-sm text-danger-500">
         App setup is unavailable. Ask your deployment admin to configure Valet’s public URL, then reload.
       </p>}

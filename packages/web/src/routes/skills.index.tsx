@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCatalogOwner, useListOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
-import { Button, Spinner, TabBar, tabPanelId, pageClass } from "~/components/primitives";
+import { Button, PageHeader, Spinner, TabBar, tabPanelId, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import {
   readScopeFilter,
@@ -90,19 +90,16 @@ export function SkillsIndexPage() {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={cn(pageClass, "[&>*]:max-w-3xl")}>
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-3">
-            <h1 className="text-2xl font-medium text-ink">Skills</h1>
-            <WorkspaceClause />
-          </div>
-          <Button size="sm" className="shrink-0" asChild>
-            <Link to="/skills/new">New skill</Link>
-          </Button>
-        </div>
-
-        <p className="mt-3 text-sm text-muted">
-          Skills give the assistant instructions for a task. Installed skills do not connect accounts or grant access.
-        </p>
+        <PageHeader
+          title="Skills"
+          clause={<WorkspaceClause />}
+          actions={
+            <Button size="sm" className="shrink-0" asChild>
+              <Link to="/skills/new">New skill</Link>
+            </Button>
+          }
+          description="Skills give the assistant instructions for a task. Installed skills do not connect accounts or grant access."
+        />
         <div className="mt-6">
           <TabBar
             label="Skills views"

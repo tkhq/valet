@@ -10,7 +10,7 @@
  */
 import { useId, useState } from "react";
 import { normalizeInputType, resolveTriggerInput, type WorkflowInputDefinition } from "@valet/workflow";
-import { Button, Dialog, DialogContent, DialogFooter, Label } from "~/components/primitives";
+import { Button, Callout, Dialog, DialogContent, DialogFooter, Label } from "~/components/primitives";
 import { useRetryRun, useStartRun } from "~/api/workflows";
 import { JsonTextarea, LabeledInput, NumberField, SelectField } from "./editor/fields";
 
@@ -99,9 +99,9 @@ export function RunWorkflowDialog({
         </div>
 
         {submitError && (
-          <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+          <Callout tone="danger" className="text-xs">
             {submitError}
-          </div>
+          </Callout>
         )}
 
         <DialogFooter>

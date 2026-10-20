@@ -4,6 +4,7 @@
  * renders them.
  */
 import type { ProxyRequestListItem } from "@valet/api/wire";
+import { Button } from "~/components/primitives";
 
 interface RequestLogProps {
   items: ProxyRequestListItem[];
@@ -77,14 +78,14 @@ export function RequestLog({
           </tbody>
         </table>
       </div>
-      <div className="mt-3 flex items-center justify-center gap-3 text-sm">
-        <button type="button" onClick={onPreviousPage} disabled={!hasPreviousPage || isLoading} className="min-h-11 rounded px-3 py-1.5 border border-line text-muted hover:text-ink hover:border-ink disabled:opacity-50">
+      <div className="mt-3 flex items-center justify-center gap-3">
+        <Button size="sm" variant="secondary" onClick={onPreviousPage} disabled={!hasPreviousPage || isLoading}>
           Previous
-        </button>
+        </Button>
         <span className="text-xs text-muted">Page {pageNumber} · {pageSize} requests per page</span>
-        <button type="button" onClick={onNextPage} disabled={!hasNextPage || isLoading} className="min-h-11 rounded px-3 py-1.5 border border-line text-muted hover:text-ink hover:border-ink disabled:opacity-50">
+        <Button size="sm" variant="secondary" onClick={onNextPage} disabled={!hasNextPage || isLoading}>
           Next
-        </button>
+        </Button>
       </div>
     </div>
   );

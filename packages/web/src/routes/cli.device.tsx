@@ -4,7 +4,7 @@ import { useState, type FormEvent } from "react";
 import { api, ApiError } from "~/api/client";
 import { useMe } from "~/api/settings";
 import { NotYou } from "~/components/auth/not-you";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Button, Callout, Input, Spinner } from "~/components/primitives";
 
 /**
  * `/cli/device` — approve or deny a `valet login` from a terminal
@@ -102,9 +102,9 @@ export function CliDevicePage() {
               The Valet CLI on <strong>{info.data.device}</strong> wants to sign in as <strong>{info.data.account}</strong>.
             </p>
 
-            <div className="rounded border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-ink dark:border-amber-700/60 dark:bg-amber-950/40">
+            <Callout tone="warning" className="text-xs leading-relaxed">
               Allow this only if you, or your agent, just ran <code>valet login</code> and it shows <strong>{info.data.user_code}</strong>.
-            </div>
+            </Callout>
 
             <div className="space-y-2">
               <p className="text-xs uppercase tracking-wide text-muted">If you allow it, the CLI can</p>

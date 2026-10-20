@@ -2,8 +2,11 @@ import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   registerFauxProvider,
+  Type,
 } from "@earendil-works/pi-ai/compat";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import {
   Engine,
   InMemoryEventStream,
@@ -14,6 +17,7 @@ import {
   type CompactionEntry,
   type ResolvedModel,
   type SessionEntry,
+  type ToolDef,
 } from "../src/index.js";
 import { summarize } from "../src/compaction.js";
 
@@ -764,6 +768,68 @@ describe("compaction: pruning persists via updateEntry", () => {
     }
 
     faux.unregister();
+  });
+});
+
+describe("compaction: a prune before a request", () => {
+  it("leaves the provider its full output budget after the prune", async () => {
+    // usable = 200k - 8k. The first request fits; the report pushes the
+    // second over, and the pre-request prune elides the two old outputs.
+    const faux = registerFauxProvider({
+      provider: "prune-usage-anchor",
+      models: [{ id: "window", name: "window", contextWindow: 200_000, maxTokens: 8_000 }],
+    });
+    const caps: number[] = [];
+    faux.setResponses([
+      // Built at request time so its timestamp follows its prefix, as a real stream's does.
+      () => fauxAssistantMessage([fauxToolCall("fetch_report", {}, { id: "call-report" })], { stopReason: "toolUse" }),
+      (context, _options, _state, model) => {
+        // pi-ai's streamSimple sets max_output_tokens with this function.
+        caps.push(clampMaxTokensToContext(model, context, model.maxTokens));
+        return fauxAssistantMessage("done");
+      },
+    ]);
+    const params = Type.Object({});
+    const report: ToolDef<typeof params> = {
+      name: "fetch_report",
+      description: "Return a large report.",
+      parameters: params,
+      execute: async () => ({ text: "y".repeat(120_000) }),
+    };
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("window")!,
+      tools: [report],
+      compaction: { autoContinue: false, pruneProtectTokens: 31_000, pruneMinimumTokens: 1_000 },
+    });
+    const thread = session.thread();
+    const oldOutput = "x".repeat(340_000);
+    const priorTurn = (n: number, parentId: string | null): SessionEntry[] => [
+      { id: `u-${n}`, sessionId: session.id, threadId: thread.id, parentId, type: "message", role: "user", content: `prompt ${n}`, createdAt: 2 * n },
+      {
+        id: `a-${n}`, sessionId: session.id, threadId: thread.id, parentId: `u-${n}`, type: "message", role: "assistant", content: "",
+        parts: [{ type: "tool_call", callId: `tc-${n}`, toolName: "bash", status: "completed", args: { command: `cat /file-${n}` }, result: oldOutput }],
+        createdAt: 2 * n + 1,
+      },
+    ];
+    await store.appendEntries(session.id, thread.id, [...priorTurn(1, null), ...priorTurn(2, "a-1")]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
+
+    try {
+      const receipt = await session.prompt("Read the report.");
+      expect(await thread.awaitResult(receipt.queueItemId)).toMatchObject({ outcome: "completed" });
+      const entries = await store.getEntries(session.id, thread.id);
+      const pruned = entries.find((entry) => entry.id === "a-1");
+      expect(pruned?.type === "message" && pruned.parts?.[0]?.type === "tool_call" && pruned.parts[0].elided).toBe(true);
+      expect(entries.some((entry) => entry.type === "compaction")).toBe(false);
+      expect(caps).toEqual([8_000]);
+    } finally {
+      faux.unregister();
+    }
   });
 });
 

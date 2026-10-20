@@ -4,14 +4,14 @@ import { AppPageHintContext } from "~/lib/app-page-hint";
 import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, History, SquarePen, Sparkles } from "lucide-react";
+import { Check, History, SquarePen } from "lucide-react";
 import { qk } from "~/api/queries";
 import { api } from "~/api/client";
 import { relativeTime } from "~/lib/relative-time";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { AssistantPanel } from "~/components/session/assistant-panel";
 import { prefillComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
 
 type Conversation = { sessionId: string; threadId: string };
 type Assistant = { open: (prompt?: string) => void; panel: ReactNode; close: () => void; isOpen: boolean };
@@ -154,11 +154,6 @@ function ConversationActions({ workspace, current, onNew, onSelect }: {
       </DropdownMenuContent>
     </DropdownMenu>
   </>;
-}
-
-export function WorkspaceAssistantButton() {
-  const assistant = useWorkspaceAssistant();
-  return <Button size="sm" variant="ghost" aria-label="Ask Valet" onClick={() => assistant.open()}><Sparkles className="h-4 w-4" /><span className="hidden sm:inline">Ask Valet</span></Button>;
 }
 
 export function WorkspaceAssistantDock() { return useWorkspaceAssistant().panel; }

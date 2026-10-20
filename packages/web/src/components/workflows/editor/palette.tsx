@@ -27,17 +27,18 @@ export function Palette({ onAdd, disabled = false }: PaletteProps) {
         // button and finding the card it made is one step, not a search.
         const Icon = NODE_ICON[type];
         return (
-          <button
+          <Button
             key={type}
-            type="button"
+            variant="secondary"
+            size="sm"
             disabled={disabled}
             title={meta.description}
             onClick={() => onAdd(type)}
-            className="flex shrink-0 items-center gap-2 whitespace-nowrap rounded border border-line px-2 py-1.5 text-left text-xs font-medium text-ink transition-colors hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss"
+            className="shrink-0 justify-start"
           >
             <Icon className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
             {meta.label}
-          </button>
+          </Button>
         );
       })}
     </div>
