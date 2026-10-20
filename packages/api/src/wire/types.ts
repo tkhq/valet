@@ -818,7 +818,7 @@ export interface PauseSessionResponse {
 
 // ── REST: background work (wakeups and leases) ───────────────────────────
 
-export type WakeupKindWire = "process" | "watch" | "timer";
+export type WakeupKindWire = "process" | "watch" | "timer" | "event";
 export type WakeupStatusWire = "pending" | "running";
 
 /** One open wakeup of a session (spec 2026-10-08, B1). The command and the in-sandbox exec id are not shipped. */
@@ -830,10 +830,18 @@ export interface WakeupSummary {
   status: WakeupStatusWire;
   /** Why the work runs. For a timer, the first 80 characters of its prompt. */
   reason: string;
-  /** `process` and `watch`: when the WakeWatcher stops it (ms). */
+  /** `process`, `watch`, and `event`: when the WakeWatcher stops it (ms). */
   deadlineAt?: number;
   /** `timer`: when it fires (ms). */
   fireAt?: number;
+  /** `event`: the canonical subject it waits on, e.g. `github:acme/x#1`. */
+  subject?: string;
+  /** `event`: the subject's display label, from the owning plugin's `eventSubjects.label`. */
+  subjectLabel?: string;
+  /** `event`: the subject's link, from `eventSubjects.url`. Absent when the plugin returns none. */
+  subjectUrl?: string;
+  /** `event`: the number of match clauses it waits on. */
+  clauseCount?: number;
   createdAt: number;
 }
 

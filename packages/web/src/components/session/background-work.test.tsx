@@ -18,13 +18,16 @@ import { TooltipProvider } from "~/components/primitives";
 import {
   BackgroundWorkSection,
   BackgroundWorkStatusLine,
+  ThreadEventLine,
   ThreadTimerLine,
   backgroundItems,
+  eventSectionDetail,
   itemDetail,
   nextEventLabel,
   sectionDetail,
   statusLine,
   statusLineText,
+  threadEventWaits,
   threadTimerWaits,
   timeSince,
   timeUntil,
@@ -45,6 +48,27 @@ function listing(now: number): ListSessionWakeupsResponse {
       { id: "ls_1", threadId: "th-1", ownerKind: "process", ownerId: "wk_1", reason: "full proof build", deadlineAt: now + 30 * HOUR, createdAt: now - HOUR },
       { id: "ls_2", threadId: "th-1", ownerKind: "hold", reason: "terminal work", deadlineAt: now + 3 * HOUR, createdAt: now },
     ],
+  };
+}
+
+function eventListing(now: number): ListSessionWakeupsResponse {
+  return {
+    wakeups: [
+      {
+        id: "wk_e1",
+        threadId: "th-1",
+        kind: "event",
+        status: "running",
+        reason: "wait for the check run",
+        deadlineAt: now + 20 * HOUR,
+        subject: "github:acme/lean-proofs#42",
+        subjectLabel: "acme/lean-proofs#42",
+        subjectUrl: "https://github.com/acme/lean-proofs/issues/42",
+        clauseCount: 2,
+        createdAt: now,
+      },
+    ],
+    leases: [],
   };
 }
 
@@ -135,6 +159,73 @@ describe("background work helpers", () => {
     expect([...waits.entries()]).toEqual([["th-1", NOW + HOUR]]);
     expect(threadTimerWaits(undefined).size).toBe(0);
   });
+
+  it("keeps an event waiter's subject, link, and clause count", () => {
+    const items = backgroundItems(eventListing(NOW));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "event",
+      subjectLabel: "acme/lean-proofs#42",
+      subjectUrl: "https://github.com/acme/lean-proofs/issues/42",
+      clauseCount: 2,
+    });
+  });
+
+  it("the composer line shows a single event waiter by its subject, not a count", () => {
+    const items = backgroundItems(eventListing(NOW));
+    const line = statusLine(items, "th-1", NOW);
+    expect(line.eventWait).toEqual({ id: "wk_e1", label: "acme/lean-proofs#42", moreCount: 0 });
+    expect(statusLineText(line)).toBe("next deadline in 20h · waiting on acme/lean-proofs#42");
+  });
+
+  it("collapses several event waiters to the oldest one's subject plus a count (fix round 1)", () => {
+    const data = eventListing(NOW);
+    data.wakeups.push(
+      { id: "wk_e2", threadId: "th-1", kind: "event", status: "running", reason: "wait 2", subjectLabel: "acme/other#1", deadlineAt: NOW + 5 * HOUR, createdAt: NOW + MINUTE },
+      { id: "wk_e3", threadId: "th-1", kind: "event", status: "running", reason: "wait 3", subjectLabel: "acme/third#9", deadlineAt: NOW + 5 * HOUR, createdAt: NOW - MINUTE },
+    );
+    const line = statusLine(backgroundItems(data), "th-1", NOW);
+    // wk_e3 is oldest (createdAt NOW - MINUTE), so it names the line; the other two collapse into "+2 more".
+    expect(line.eventWait).toEqual({ id: "wk_e3", label: "acme/third#9", moreCount: 2 });
+    expect(statusLineText(line)).toContain("waiting on acme/third#9 +2 more");
+  });
+
+  it("counts other threads' work the same whether the open thread has one or several event waiters", () => {
+    const data = eventListing(NOW);
+    data.wakeups.push(
+      { id: "wk_e2", threadId: "th-1", kind: "event", status: "running", reason: "wait 2", subjectLabel: "acme/other#1", deadlineAt: NOW + 5 * HOUR, createdAt: NOW + MINUTE },
+      { id: "wk_other", threadId: "th-2", kind: "watch", status: "running", reason: "other thread watch", deadlineAt: NOW + 4 * HOUR, createdAt: NOW },
+    );
+    const line = statusLine(backgroundItems(data), "th-1", NOW);
+    expect(line.otherCount).toBe(1);
+    expect(statusLineText(line)).not.toContain("acme/other#1");
+  });
+
+  it("the card section's event detail names the subject, clause count, and deadline", () => {
+    const [item] = backgroundItems(eventListing(NOW));
+    expect(item && eventSectionDetail(item, NOW)).toEqual({
+      label: "acme/lean-proofs#42",
+      clauses: "2 clauses",
+      deadline: "deadline in 20h",
+    });
+  });
+
+  it("names each thread's oldest event waiter and counts the rest", () => {
+    const data = eventListing(NOW);
+    const waits = threadEventWaits(data);
+    expect([...waits.entries()]).toEqual([["th-1", { label: "acme/lean-proofs#42", moreCount: 0 }]]);
+    expect(threadEventWaits(undefined).size).toBe(0);
+    const base = data.wakeups[0]!;
+    const several = {
+      ...data,
+      wakeups: [
+        { ...base, id: "wk_new", createdAt: NOW - 1_000, subjectLabel: "acme/lean-proofs#43" },
+        { ...base, id: "wk_old", createdAt: NOW - 9_000, subjectLabel: "acme/lean-proofs#41" },
+        { ...base, id: "wk_mid", createdAt: NOW - 5_000, subjectLabel: "acme/lean-proofs#42" },
+      ],
+    };
+    expect(threadEventWaits(several).get("th-1")).toEqual({ label: "acme/lean-proofs#41", moreCount: 2 });
+  });
 });
 
 describe("BackgroundWorkStatusLine", () => {
@@ -210,6 +301,14 @@ describe("BackgroundWorkStatusLine", () => {
     expect(await screen.findByText("terminal work")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Cancel / })).toBeNull();
   });
+
+  it("shows an event waiter as 'waiting on <subject label>' with the event icon", async () => {
+    vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
+    renderLine("th-1");
+    const line = await screen.findByRole("button", { name: /^Background work: / });
+    expect(line.textContent).toContain("waiting on acme/lean-proofs#42");
+    expect(line.querySelector("svg.lucide-bell")).toBeTruthy();
+  });
 });
 
 describe("BackgroundWorkSection", () => {
@@ -252,6 +351,26 @@ describe("BackgroundWorkSection", () => {
     await screen.findByRole("region", { name: "Background work" });
     expect(screen.queryByRole("button", { name: /^Cancel / })).toBeNull();
   });
+
+  it("shows an event waiter's subject as a link, its clause count, and its deadline", async () => {
+    vi.spyOn(api, "listSessionWakeups").mockResolvedValue(eventListing(Date.now()));
+    renderSection("th-1");
+    const section = within(await screen.findByRole("region", { name: "Background work" }));
+    const link = section.getByRole("link", { name: "acme/lean-proofs#42" });
+    expect(link.getAttribute("href")).toBe("https://github.com/acme/lean-proofs/issues/42");
+    expect(section.getByText(/2 clauses/)).toBeTruthy();
+    expect(section.getByText(/deadline in 20h/)).toBeTruthy();
+  });
+
+  it("shows an event waiter's subject as plain text when the plugin gives no link", async () => {
+    const data = eventListing(Date.now());
+    data.wakeups[0] = { ...data.wakeups[0]!, subjectUrl: undefined };
+    vi.spyOn(api, "listSessionWakeups").mockResolvedValue(data);
+    renderSection("th-1");
+    const section = within(await screen.findByRole("region", { name: "Background work" }));
+    expect(section.getByText(/acme\/lean-proofs#42/)).toBeTruthy();
+    expect(section.queryByRole("link", { name: "acme/lean-proofs#42" })).toBeNull();
+  });
 });
 
 describe("ThreadTimerLine", () => {
@@ -259,5 +378,17 @@ describe("ThreadTimerLine", () => {
     const { wrapper } = wrap();
     render(<ThreadTimerLine fireAt={Date.now() + 26 * MINUTE + 10_000} />, { wrapper });
     expect(screen.getByText("Waiting · next wakeup in 26m")).toBeTruthy();
+  });
+});
+
+describe("ThreadEventLine", () => {
+  it("names the subject it waits on", () => {
+    render(<ThreadEventLine label="acme/lean-proofs#42" />);
+    expect(screen.getByText("Waiting on acme/lean-proofs#42")).toBeTruthy();
+  });
+
+  it("counts the other waits on the thread", () => {
+    render(<ThreadEventLine label="acme/lean-proofs#41" moreCount={2} />);
+    expect(screen.getByText("Waiting on acme/lean-proofs#41 +2 more")).toBeTruthy();
   });
 });

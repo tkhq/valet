@@ -6,6 +6,7 @@ import { requireActingUser, requirePrincipal } from '../middleware/auth.js';
 import { requireOrgAdmin } from '../routes/_org-admin.js';
 import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
+import { waiterMatchDeps } from '../events/waiters.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
 import { httpBindingMismatch, httpRouteBinding, httpRouteBindings, type PluginHttpRefusals } from './http-bindings.js';
@@ -198,7 +199,7 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
           return c.json({ error: 'signature verification failed' }, 403);
         }
         for (const event of verification.events) {
-          await ingestEvent({ db, plugins: c.var.providers.plugins, onIngest: eventDispatcher.nudge }, {
+          await ingestEvent({ db, plugins: c.var.providers.plugins, onIngest: eventDispatcher.nudge, waiters: waiterMatchDeps(c.var.providers, { nudge: (ids) => c.var.providers.wakeWatcher.nudge(ids) }) }, {
             orgId: installation.orgId, service: plugin.name, event,
           });
         }

@@ -3,6 +3,8 @@ import type { ValetPlugin } from '@valet/engine';
 import { linearConnectionRoutes } from './connection.js';
 import { LINEAR_TEAMS_SOURCE, makeLinearTeamsResolver } from './filter-options.js';
 import { linearHttpRoutes } from './http.js';
+import { linearStatusResolver } from './status-resolver.js';
+import { linearSubjects } from './subjects.js';
 import { linearTemplates } from './templates.js';
 import { linearTriggerDefs } from './triggers.js';
 
@@ -29,6 +31,8 @@ const plugin: ValetPlugin = {
     }),
   ],
   triggers: linearTriggerDefs,
+  eventSubjects: linearSubjects,
+  statusResolver: linearStatusResolver,
   httpRoutes: [...linearHttpRoutes, ...linearConnectionRoutes],
   templates: linearTemplates,
   filterOptionResolvers: {

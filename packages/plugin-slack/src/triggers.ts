@@ -13,6 +13,7 @@
  * (e.g. "channel", "item.channel").
  */
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, VerifiedEvent } from "@valet/engine";
+import { slackEventSubjects } from "./subjects.js";
 import { verifySlackSignature } from "./transport/verify.js";
 import { SKIP_SUBTYPES } from "./subtypes.js";
 
@@ -78,7 +79,16 @@ function makeVerify(eventTypes: readonly string[], botMessages = false): Trigger
     if (!deliveryId) return null;
     // Make the canonical identity available to the catalog filter when Slack uses bot_profile.
     const payload = botMessages && rawEvent.bot_id !== botId ? { ...rawEvent, bot_id: botId } : rawEvent;
-    return { eventType: botMessages ? "bot_message" : rawType, deliveryId, payload };
+    // The Events API envelope carries `team_id` alongside the inner event,
+    // which some event types (e.g. reaction_added) do not repeat on
+    // themselves. Thread it through so toEvent can fall back to it (spec A3).
+    const envelopeTeamId = str(body.team_id);
+    return {
+      eventType: botMessages ? "bot_message" : rawType,
+      deliveryId,
+      payload,
+      ...(envelopeTeamId ? { context: { teamId: envelopeTeamId } } : {}),
+    };
   };
 }
 function toEvent(event: VerifiedEvent): NormalizedEvent {
@@ -153,14 +163,19 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
       summary = `slack ${type}${channel ? ` in ${channel}` : ""}${user ? ` by ${user}` : ""}`;
   }
 
+  const { subjects, bot } = slackEventSubjects(type, p, event.context?.teamId);
+  const botId = canonicalBotId(p);
+  const actorId = user ?? botId;
+
   return {
     key: keyFor(type),
     dedupeKey: event.deliveryId,
     occurredAt: tsToIso(str(p.ts) ?? str(p.event_ts)),
-    actor: user ? { externalId: user } : undefined,
+    actor: actorId ? { externalId: actorId, bot } : undefined,
     refs,
     summary,
     payload: event.payload,
+    subjects,
   };
 }
 
@@ -326,6 +341,7 @@ const triggerSpecs: TriggerSpec[] = [
         description: "When a channel is created",
         filters: [
           { field: "channel", path: "channel.id", description: "New channel id" },
+          { field: "channel_name", path: "channel.name", description: "New channel name, for a prefix such as inc-" },
           { field: "creator", path: "channel.creator", description: "Slack user id of the creator" },
         ],
       },

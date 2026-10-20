@@ -28,11 +28,15 @@ App webhooks (HMAC-verified).
 | `/api/sessions/:id` | GET / PATCH / DELETE | Detail, update (title etc.), delete. An owner move (`teamId`) stops all background work; a `profile` change stops process, watch, and hold work, also when the api restarted and the sandbox is not live. Both follow the background-work rule below. A move can 403 for a caller who may not stop the work |
 | `/api/sessions/:id/pause` | POST | Pause the session. Follows the background-work rule for process, watch, and hold work; timers keep their schedule. When the sandbox is not attached, 409 `The sandbox is not attached yet. Send a message in the session, then pause again.` before the background-work check |
 | `/api/sessions/:id/sandbox/replace` | POST | Replace the sandbox. Same rule as pause |
-| `/api/sessions/:id/wakeups` | GET | Open wakeups and active leases → `{ wakeups, leases }` (no command or exec id) |
+| `/api/sessions/:id/wakeups` | GET | Open wakeups and active leases → `{ wakeups, leases }` (no command or exec id). An event waiter (`kind: "event"`) also carries `subject`, `subjectLabel`, `subjectUrl`, and `clauseCount` (spec 2026-10-15) |
 | `/api/sessions/:id/wakeups/:wakeupId/cancel` | POST | Cancel one wakeup (`wk_`) or hold (`ls_`) as a person. The agent gets the terminal signal with `cause=cancelled`. Session admins only |
 | `/api/sessions/:id/sandbox-jwt` | POST | Mint a short-lived gateway JWT |
 | `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume; `?threadId=` for a shared thread's guest) |
 | `/api/sessions/:id/gateway/*` | ALL | Authenticated proxy to the sandbox gateway (terminal, VS Code) |
+
+An event waiter (`wait_for_event`, spec 2026-10-15) signals its thread over
+the `/ws` stream: `event.matched` on each match, `event.ended` when it stops
+running (its deadline, a person's cancel, or the hourly rate cap).
 
 ### Background-work rule
 

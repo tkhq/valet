@@ -1,7 +1,11 @@
 import {
+  boundEventDigest,
   ConflictError,
+  EVENT_BUFFER_MAX_DIGESTS,
+  EVENT_SEEN_MAX_KEYS,
   NotFoundError,
   PendingCapError,
+  recordEventWaiterBufferFull,
   recordWakeupBadRow,
   recordWakeupEnded,
   StaleAttemptError,
@@ -14,6 +18,7 @@ import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  EventMatchDigest,
   Lease,
   LeaseReleaseCause,
   ListOpts,
@@ -1481,7 +1486,7 @@ export class PgSessionStore implements SessionStore {
     // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
     const r = await this.db.query(
       `WITH t AS (${TRANSITION_SQL} RETURNING *),
-       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $17
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $18
              WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
        SELECT * FROM t`,
       [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
@@ -1517,7 +1522,8 @@ export class PgSessionStore implements SessionStore {
     const r = await this.db.query(
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
-          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1))${keyset}
+          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
@@ -1537,6 +1543,82 @@ export class PgSessionStore implements SessionStore {
   ): Promise<Wakeup | null> {
     const r = await this.db.query(`${TRANSITION_SQL} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
+    if (subjects.length === 0) return [];
+    // The partial GIN index engine_wakeups_event_subjects serves this read (INV-E6).
+    const r = await this.db.query(
+      `SELECT * FROM engine_wakeups WHERE kind = 'event' AND status = 'running' AND subjects && $1::text[]
+       ORDER BY created_at, id`,
+      [[...subjects]],
+    );
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
+  async appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean> {
+    // One statement: the kind and status checks, the dedupe checks against
+    // the buffer and the seen list, the cap, and the append commit
+    // together, so two ingests of one event append once (INV-E4). The
+    // outer SELECT reads the row as it was before the UPDATE, so it can
+    // tell a refusal at the cap from the other refusals.
+    const r = await this.db.query(
+      `WITH cur AS (
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, COALESCE(event_seen, '[]')::jsonb AS seen
+           FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
+       ),
+       u AS (
+         UPDATE engine_wakeups
+            SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
+                updated_at = $3
+          WHERE id = $1 AND kind = 'event' AND status = 'running'
+            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
+                             WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
+            AND NOT COALESCE(event_seen, '[]')::jsonb @> jsonb_build_array($2::jsonb->'dedupeKey')
+         RETURNING id
+       )
+       SELECT EXISTS (SELECT 1 FROM u) AS appended,
+              EXISTS (SELECT 1 FROM cur
+                       WHERE jsonb_array_length(cur.buf) >= $4
+                         AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
+                                          WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full`,
+      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS],
+    );
+    const row = r.rows[0];
+    if (row?.appended === true) return true;
+    if (row?.full === true) recordEventWaiterBufferFull();
+    return false;
+  }
+
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean> {
+    // One statement: the buffer keeps every digest not named in $2, so a
+    // digest appended after the caller's read survives. The seen list drops
+    // the named keys, appends them as the newest, and keeps the newest $4.
+    const keys = [...new Set(dedupeKeys)];
+    const r = await this.db.query(
+      `UPDATE engine_wakeups
+          SET event_buffer = (
+                SELECT COALESCE(jsonb_agg(b.e ORDER BY b.ord), '[]'::jsonb)::text
+                  FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) WITH ORDINALITY AS b(e, ord)
+                 WHERE NOT (b.e->>'dedupeKey' = ANY($2::text[]))),
+              event_seen = (
+                SELECT COALESCE(jsonb_agg(k.key ORDER BY k.pos), '[]'::jsonb)::text
+                  FROM (SELECT a.key, a.pos, row_number() OVER (ORDER BY a.pos DESC) AS rn
+                          FROM (SELECT s.key, s.ord AS pos
+                                  FROM jsonb_array_elements_text(COALESCE(event_seen, '[]')::jsonb) WITH ORDINALITY AS s(key, ord)
+                                 WHERE NOT (s.key = ANY($2::text[]))
+                                UNION ALL
+                                SELECT n.key, 1000000000 + n.ord
+                                  FROM unnest($2::text[]) WITH ORDINALITY AS n(key, ord)) a) k
+                 WHERE k.rn <= $4),
+              updated_at = $3
+        WHERE id = $1 AND kind = 'event'
+       RETURNING id`,
+      [id, keys, updatedAt, EVENT_SEEN_MAX_KEYS],
+    );
+    return r.rows.length > 0;
   }
 
   async createLease(lease: Lease): Promise<void> {
@@ -1642,7 +1724,8 @@ const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
          log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
          exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
          window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count),
-         watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at)
+         watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at),
+         event_buffer = COALESCE($17, event_buffer)
        WHERE id = $1 AND status = ANY($2::text[])`;
 
 function transitionParams(
@@ -1669,6 +1752,7 @@ function transitionParams(
     patch.windowCount ?? null,
     patch.watchBuffer ?? null,
     patch.lastEmitAt ?? null,
+    jsonOrNull(patch.eventBuffer),
   ];
 }
 
@@ -1676,8 +1760,9 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
   await db.query(
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
-       origin_json, window_start_at, window_count, watch_buffer, last_emit_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
+       origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
+       event_seen)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
     [
       w.id,
       w.sessionId,
@@ -1704,6 +1789,10 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       w.windowCount ?? null,
       w.watchBuffer ?? null,
       w.lastEmitAt ?? null,
+      jsonOrNull(w.eventMatch),
+      w.subjects ? [...w.subjects] : null,
+      jsonOrNull(w.eventBuffer),
+      jsonOrNull(w.eventSeen),
     ],
   );
 }
@@ -1749,7 +1838,7 @@ function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups"
   return out;
 }
 
-const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer"];
+const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer", "event"];
 const WAKEUP_STATUSES: readonly WakeupStatus[] = ["pending", "running", "done", "cancelled", "expired", "lost"];
 
 function isWakeupKind(v: string): v is WakeupKind {

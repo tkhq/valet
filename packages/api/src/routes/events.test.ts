@@ -134,7 +134,7 @@ async function seedSubscriptionRow(
 
 async function seedEventRow(
   a: TestApi,
-  args: { id: string; orgId?: string; service?: string; eventKey?: string; receivedAt: number },
+  args: { id: string; orgId?: string; service?: string; eventKey?: string; receivedAt: number; subjects?: string[] },
 ): Promise<void> {
   await a.providers.db.insert(events).values({
     id: args.id,
@@ -148,6 +148,7 @@ async function seedEventRow(
     payload: { repository: { full_name: "acme/widgets" } },
     occurredAt: args.receivedAt,
     receivedAt: args.receivedAt,
+    subjects: args.subjects ?? null,
   });
 }
 
@@ -165,6 +166,8 @@ describe("GET /api/events/catalog", () => {
     expect(prOpened!.filters.map((f) => f.field)).toContain("repo");
     // Non-actioned family appears as a bare key.
     expect(github!.entries.some((e) => e.key === "github.push")).toBe(true);
+    // The subscription editor never offers a derived key (event wakeups spec, Part G).
+    expect(github!.entries.some((e) => e.key === "github.pull_request.checks_completed")).toBe(false);
   });
 });
 
@@ -1015,6 +1018,27 @@ describe("POST /api/events/:id/redeliver", () => {
     const res = await redeliver(a.baseUrl, "ev_1");
     expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 0 });
     expect(await deliveriesFor(a, "ev_1")).toHaveLength(0);
+  });
+
+  it("honors a subject filter: redelivers only to the subscription whose subject matches (spec Part G)", async () => {
+    const { a } = await bootWithRunHost();
+    await seedWorkflowRow(a, "wf_redeliver");
+    await seedEventRow(a, { id: "ev_1", receivedAt: 1_000, subjects: ["github:acme", "github:acme/widgets"] });
+    await seedSubscriptionRow(a, "sub_match", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "subject", op: "eq", value: "github:acme/widgets" }],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+    await seedSubscriptionRow(a, "sub_miss", "local-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "subject", op: "eq", value: "github:acme/other" }],
+      target: { kind: "workflow", workflowId: "wf_redeliver" },
+    });
+
+    const res = await redeliver(a.baseUrl, "ev_1");
+    expect((await res.json()) as RedeliverEventResponse).toEqual({ created: 1 });
+    const rows = await deliveriesFor(a, "ev_1");
+    expect(rows.map((r) => r.subscriptionId)).toEqual(["sub_match"]);
   });
 
   it("200s with created 0 when nothing matches, so the UI can say so", async () => {

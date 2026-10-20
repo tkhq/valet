@@ -46,7 +46,13 @@ export interface WorkflowTriggerSummary {
 
 export interface EventTypeCatalog {
   service: string;
-  entries: { key: string; description: string; filters: { field: string; description: string }[] }[];
+  entries: {
+    key: string;
+    description: string;
+    filters: { field: string; description: string }[];
+    /** A derived key (spec 2026-10-15: event wakeups, Part B): `wait_for_event` accepts it, a trigger does not. */
+    derived?: true;
+  }[];
 }
 
 export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
@@ -57,6 +63,7 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
       key: e.key,
       description: e.description,
       filters: e.filters.map((f) => ({ field: f.field, description: f.description })),
+      ...(e.derived ? { derived: true as const } : {}),
     })),
   }));
 }

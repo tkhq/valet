@@ -65,6 +65,17 @@ describe("orchestratorPersona", () => {
     }
   });
 
+  // Event wakeups (spec 2026-10-15, Part I): tells the assistant to arm an
+  // event waiter instead of polling GitHub, Slack, or Linear.
+  it("tells the assistant to call wait_for_event instead of polling an external service", () => {
+    for (const owner of OWNERS) {
+      const persona = orchestratorPersona(owner);
+      expect(persona).toContain(
+        "To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call `wait_for_event` with its URL and end your turn. Do not poll with `watch` or `sleep`. Arm it before the action that triggers it, for example before `git push`.",
+      );
+    }
+  });
+
   it("names the team when a display name is given, never the raw id", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "team_c7268244" }, "Platform"));
     expect(persona).toContain("Platform");

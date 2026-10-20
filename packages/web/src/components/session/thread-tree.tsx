@@ -59,7 +59,7 @@ import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/li
 import { backgroundWorkConflict } from "~/api/client";
 import { errorText } from "~/lib/error-text";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
-import { ThreadTimerLine, threadTimerWaits } from "./background-work";
+import { ThreadEventLine, ThreadTimerLine, threadEventWaits, threadTimerWaits, type ThreadEventWait } from "./background-work";
 
 const STOP_AND_ARCHIVE: GuardedAction = {
   title: "Stop background work and archive?",
@@ -351,7 +351,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
   // One query for the session, shared with the composer status line through
   // the query cache: a row line never costs its own request.
-  const timerWaits = threadTimerWaits(useSessionWakeups(sessionId).data);
+  const wakeupsData = useSessionWakeups(sessionId).data;
+  const timerWaits = threadTimerWaits(wakeupsData);
+  const eventWaits = threadEventWaits(wakeupsData);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
   const renameThread = useRenameThread(sessionId);
@@ -574,6 +576,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
               timerFireAt={timerWaits.get(t.id)}
+              eventWait={eventWaits.get(t.id)}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
               projects={projects.value.projects}
@@ -814,10 +817,13 @@ function ThreadNode({
   onPin,
   organizingDisabled,
   timerFireAt,
+  eventWait,
 }: {
   organizingDisabled: boolean;
   /** When the thread's soonest timer fires. Only timers get a row line. */
   timerFireAt?: number;
+  /** The thread's event waits, named by the oldest one, when it has any. */
+  eventWait?: ThreadEventWait;
   pinned: boolean;
   onPin: () => void;
   projects: Array<{ id: string; name: string }>;
@@ -1048,6 +1054,7 @@ function ThreadNode({
         </DropdownMenu>
       </div>
       {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className="-mt-1.5 pb-1.5 pl-9 pr-2" />}
+      {eventWait !== undefined && <ThreadEventLine label={eventWait.label} moreCount={eventWait.moreCount} className="-mt-1.5 pb-1.5 pl-9 pr-2" />}
       {childSessions.length > 0 && !collapsed && (
         <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
           {childSessions.map((c) => (

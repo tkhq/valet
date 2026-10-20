@@ -6,6 +6,7 @@ import type { ToolScope } from "@valet/shared";
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
 import type {
+  EventMatchDigest,
   Lease,
   LeaseReleaseCause,
   Wakeup,
@@ -2303,8 +2304,10 @@ export interface SessionStore {
   listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
   /**
    * Running process/watch wakeups (always due), pending process/watch
-   * wakeups (a start that has not finished, or one a crash cut short), and
-   * pending timer wakeups whose fireAt <= now, in (createdAt, id) order.
+   * wakeups (a start that has not finished, or one a crash cut short),
+   * pending timer wakeups whose fireAt <= now, and running event wakeups
+   * with a non-empty `eventBuffer` or a `deadlineAt <= now`, in
+   * (createdAt, id) order.
    * `after` pages: it returns only rows strictly after that position, so a
    * caller reads every due row. `rows` skips an unreadable row (counted in
    * `valet.wakeups.bad_rows`). `next` is the position of the last row the
@@ -2313,6 +2316,31 @@ export interface SessionStore {
    * the scan early (fix wave 4, data N1).
    */
   listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }>;
+  /**
+   * Running event wakeups whose `subjects` share at least one entry with
+   * `subjects` (spec 2026-10-15, Part C). An index lookup: the store has no
+   * read that lists every running event waiter (INV-E6).
+   */
+  findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]>;
+  /**
+   * Appends `digest` to the event wakeup's `eventBuffer` and sets
+   * `updatedAt`, in one statement. It appends only to a `running` event
+   * wakeup, only when neither `eventBuffer` nor `eventSeen` holds the
+   * digest's `dedupeKey` (INV-E4), and only while the buffer holds fewer
+   * than `EVENT_BUFFER_MAX_DIGESTS` digests. A refusal at the cap counts in
+   * `valet.event_waiter.buffer_full`. The store strips NUL from the
+   * digest's strings and cuts `text` to `EVENT_DIGEST_TEXT_MAX_BYTES` on a
+   * UTF-8 boundary (INV-E7). Returns whether it appended.
+   */
+  appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean>;
+  /**
+   * Removes the digests with `dedupeKeys` from the event wakeup's
+   * `eventBuffer`, appends those keys to `eventSeen` (newest
+   * `EVENT_SEEN_MAX_KEYS` kept), and sets `updatedAt`, in one statement.
+   * A digest appended after the caller read the row stays buffered.
+   * False for an unknown id or a row that is not an event wakeup.
+   */
+  removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean>;
   /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
   countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */

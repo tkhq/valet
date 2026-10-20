@@ -46,6 +46,7 @@ import {
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
+import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
 import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing, withSharerName } from "../services/credential-shares.js";
@@ -148,7 +149,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CHILD_TIMER_HOURS, codingSystemPrompt } from "./prompt-rules.js";
+import { CHILD_TIMER_HOURS, codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -1123,6 +1124,13 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
+    // Event-wakeups Part I: the thread link sentence is per-thread, not
+    // per-session, so it rides the engine's `threadSystemContext` hook
+    // (resolved once per thread, unlike `systemPrompt`) rather than
+    // `codingSystemPrompt`. `publicUrl` is undefined on a deployment with
+    // no public URL, which omits the sentence entirely.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const threadLink = (thread: { id: string }) => threadLinkContext(thread.id, publicUrl);
     const extras = await this.sessionExtras(
       principal,
       meta.orgId,
@@ -1338,7 +1346,8 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
-            ...this.wakeupsOptions(sessionId, () => builtSession),
+            threadSystemContext: threadLink,
+            ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
             ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
@@ -1372,7 +1381,8 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
-          ...this.wakeupsOptions(sessionId, () => builtSession),
+          threadSystemContext: threadLink,
+          ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
           ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
@@ -2571,14 +2581,56 @@ export class EngineHost {
   private wakeupsOptions(
     sessionId: string,
     getSession: () => WakeupsSeamSession | undefined,
+    /**
+     * The session's org and owner, for the `wait_for_event` arm checks
+     * (spec 2026-10-15, Part D). A workflow run passes none, so its seam
+     * has no `armEvent` (R9).
+     */
+    armFor?: { orgId: string; owner: Principal },
   ): { wakeups: WakeupsSeam } {
+    const checkArm = armFor ? this.armChecks(sessionId, armFor.orgId, armFor.owner) : undefined;
     return {
       wakeups: buildWakeupsSeam(
-        { ...wakeupsSeamDeps(this.opts), scratchBytes: () => sessionScratchBytes(getSession) },
+        {
+          ...wakeupsSeamDeps(this.opts),
+          scratchBytes: () => sessionScratchBytes(getSession),
+          ...(checkArm ? { checkArm } : {}),
+        },
         sessionId,
         getSession,
       ),
     };
+  }
+
+  /**
+   * The arm checks for one session. The checks read the subject with the
+   * calling turn's credential provider, which the tool passes in. That is
+   * the resolver this builder already gave the engine, bound to the turn's
+   * actor, so the resolver stays private to the host. Undefined without a
+   * database: the checks need the app tables.
+   */
+  private armChecks(
+    sessionId: string,
+    orgId: string,
+    owner: Principal,
+  ): WakeupsSeamDeps["checkArm"] {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    const providers: ArmProviders = {
+      db,
+      engineStore: this.opts.engineStore,
+      engineCredentials: this.opts.engineCredentials,
+      plugins: this.opts.plugins ?? [],
+      ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
+    };
+    const session = { sessionId, orgId, ownerType: owner.type, ownerId: owner.id };
+    const apiUrl = this.opts.githubTokenDeps?.apiUrl;
+    return (threadId, req, credentials) =>
+      checkArm(
+        armDeps(providers, session, credentials, apiUrl ? { githubApiUrl: apiUrl } : {}),
+        { sessionId, threadId, orgId },
+        req,
+      );
   }
 
   /**
@@ -2888,6 +2940,17 @@ export class EngineHost {
     }
     const db = this.opts.db;
     const apiBaseUrl = this.opts.apiBaseUrl;
+    // Event-wakeups Part I: the thread link sentence, composed with the
+    // existing workflow editor/run context (both are per-thread, so they
+    // share the one `threadSystemContext` hook). `publicUrl` undefined
+    // omits the sentence.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const assistantThreadContext = (thread: { id: string; key: string }): string | undefined => {
+      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread)].filter(
+        (part): part is string => part !== undefined,
+      );
+      return parts.length > 0 ? parts.join("\n\n") : undefined;
+    };
 
     const assistant = await loadAssistant(db, assistantId);
     if (!assistant) {
@@ -3030,7 +3093,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
-      ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -3060,7 +3123,7 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
-      threadSystemContext: workflowThreadContext,
+      threadSystemContext: assistantThreadContext,
       unattendedThread: isWorkflowRunThread,
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
@@ -4186,7 +4249,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
-      ...this.wakeupsOptions(childSessionId, () => builtSession),
+      ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
       ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
@@ -4377,7 +4440,8 @@ export class EngineHost {
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
     // `builtSession` is assigned below, after the engine builds the
     // session. The wakeups seam resolves it lazily, same as every other
-    // builder's `wakeupsOptions` accessor.
+    // builder's `wakeupsOptions` accessor. It passes no arm info: a
+    // workflow run cannot wait for events (spec 2026-10-15, R9).
     let builtSession: Session | undefined;
     const sessionOptions = {
       userId: opts.actorUserId,

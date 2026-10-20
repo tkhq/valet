@@ -1487,6 +1487,47 @@ describe("ChildWatcher", () => {
       expect((await c.settledSignal())?.body).toContain("CI is red");
     });
 
+    it("holds the settle while an event waiter is running and its deadline is within the bound, then reports its terminal turn (spec 2026-10-15, F2)", async () => {
+      const c = await armedChild("event-waiter");
+      const deadlineAt = Date.now() + 60_000;
+      await c.engineStore.createWakeup({
+        id: "wk_event", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "event", status: "running",
+        reason: "wait for CI", deadlineAt, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+        subjects: ["github:acme/lean-proofs#42"], eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+      });
+
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+
+      // The waiter ends at its deadline: the row ends and its signal turn runs.
+      await c.engineStore.transitionWakeup("wk_event", ["running"], "expired", { cause: "deadline", endedAt: Date.now() }, Date.now());
+      const signalItem = "qi-event-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "event.ended"),
+        dispatchId: "wakeup:wk_event:terminal",
+      });
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "no matching event arrived" });
+
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("no matching event arrived");
+    });
+
+    it("does not wait for an event waiter whose deadline falls beyond the retention window", async () => {
+      const c = await armedChild("far-event", { retentionMs: 60_000 });
+      await c.engineStore.createWakeup({
+        id: "wk_far_event", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "event", status: "running",
+        reason: "wait for CI", deadlineAt: Date.now() + 7 * 24 * 3_600_000, logOffset: 0, logTail: "", eventCount: 0,
+        createdAt: Date.now(), updatedAt: Date.now(), subjects: ["github:acme/lean-proofs#42"],
+        eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("event waiter(s) set to end after"))).toBe(true);
+      warn.mockRestore();
+    });
+
     it("waits for a hold's expiry turn and reports it (PR review 2, item 3)", async () => {
       const c = await armedChild("hold-expiry");
       const now = Date.now();
@@ -3587,6 +3628,35 @@ describe("child sandbox retention", () => {
     await engineStore.transitionWakeup("wk_timer", ["pending"], "cancelled", { cause: "cancelled" }, Date.now());
     await watcher.sweepRetention(Date.now() + RETENTION_MS + 3);
     expect((await watchRow(api, "child-leased"))?.sandboxReclaimedAt).not.toBeNull();
+    log.mockRestore();
+  });
+
+  it("retention sweep: skips a child while it holds a running event waiter (spec 2026-10-15, F2)", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: RETENTION_MS });
+    const watcher = new ChildWatcher(deps);
+    const { engineStore } = api.providers;
+
+    const { watch, childThread } = await seedParkableChild(api, "child-event-held", "parent-event-held");
+    watcher.arm(watch);
+    await waitFor(async () => provider.suspendCalls.length === 1);
+
+    // An event waiter holds no lease (INV-E3), so it is not "leased"; it
+    // keeps the sandbox past the retention window all the same.
+    await engineStore.createWakeup({
+      id: "wk_event_held", sessionId: "child-event-held", threadId: childThread.id, kind: "event", status: "running",
+      reason: "wait for CI", deadlineAt: Date.now() + 3_600_000, logOffset: 0, logTail: "", eventCount: 0,
+      createdAt: Date.now(), updatedAt: Date.now(), subjects: ["github:acme/lean-proofs#42"],
+      eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+    });
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+    expect((await watchRow(api, "child-event-held"))?.sandboxReclaimedAt).toBeNull();
+
+    await engineStore.transitionWakeup("wk_event_held", ["running"], "cancelled", { cause: "cancelled" }, Date.now());
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 2);
+    expect((await watchRow(api, "child-event-held"))?.sandboxReclaimedAt).not.toBeNull();
     log.mockRestore();
   });
 

@@ -59,6 +59,7 @@ import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { ingestEvent, logSlackBotIdentityMissing, logSlackMessageBotNearMiss } from "../events/ingest.js";
+import { waiterMatchDeps, type WaiterMatchDeps } from "../events/waiters.js";
 import type { ChannelHost } from "./host.js";
 import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "./follow-router.js";
@@ -170,6 +171,8 @@ interface FanOutDeps {
   engineHost: EngineHost;
   triggerDefs: TriggerDef[];
   onIngest: () => void;
+  /** Event waiter matching for each normalized event. */
+  waiters?: WaiterMatchDeps;
   orgId: string;
   webhookSecret: string;
   headers: Record<string, string>;
@@ -261,7 +264,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
       const normalized = def.toEvent(verified);
       eventPhase = "subscription ingestion";
       const ingestResult = await ingestEvent(
-        { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest },
+        { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest, ...(deps.waiters ? { waiters: deps.waiters } : {}) },
         { orgId: deps.orgId, service: "slack", event: normalized, receiptId },
       );
       if (normalized.key === "slack.app_mention" && ingestResult.authorizationDenied) await notifyUnlinked();
@@ -400,6 +403,9 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
           { orgId: row.orgId, accessToken, teamId: credentialTeamId }) : undefined,
         triggerDefs: slackTriggerDefs(providers.plugins), onIngest: providers.eventDispatcher.nudge,
       };
+      const waiters = waiterMatchDeps(providers, { nudge: (ids) => providers.wakeWatcher.nudge(ids) });
+      // Reuse the bot user id this drain already read, or later resolved.
+      deps.waiters = { ...waiters, slackBotUserId: async (orgId) => deps.botUserId ?? waiters.slackBotUserId(orgId) };
       for (const raw of payload.raws) {
         const receiptId = await recordVerifiedReceipt(db, row.orgId, raw, payload.credentialTeamId, deps,
           { retryNum: typeof payload.retryNum === "string" ? payload.retryNum : undefined,

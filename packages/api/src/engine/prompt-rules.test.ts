@@ -13,6 +13,7 @@ import {
   codingSystemPrompt,
   resolveChildTimerHours,
   SECRETS_RULES_NO_CLI,
+  threadLinkContext,
 } from "./prompt-rules.js";
 
 function flat(text: string): string {
@@ -160,5 +161,26 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(flat(without)).toContain(flat(SECRETS_RULES_NO_CLI));
     expect(without).toContain("Never print a credential");
     expect(CODING_SYSTEM_PROMPT).toBe(withCli);
+  });
+
+  // Event wakeups (spec 2026-10-15, Part I): tells the model to arm an
+  // event waiter instead of polling GitHub, Slack, or Linear.
+  it("tells the model to call wait_for_event instead of polling an external service", () => {
+    expect(BACKGROUND_WORK_RULES).toContain(
+      "To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call `wait_for_event` with its URL and end your turn. Do not poll with `watch` or `sleep`. Arm it before the action that triggers it, for example before `git push`.",
+    );
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(BACKGROUND_WORK_RULES));
+  });
+});
+
+describe("threadLinkContext (event wakeups spec 2026-10-15, Part I)", () => {
+  it("names the thread's own URL when the deployment has a public URL", () => {
+    expect(threadLinkContext("t-1", "https://valet.example")).toBe(
+      "This thread's link is https://valet.example/threads/t-1. Post it when you announce work in a channel, so people can follow the thread.",
+    );
+  });
+
+  it("omits the sentence when no public URL is configured", () => {
+    expect(threadLinkContext("t-1", undefined)).toBeUndefined();
   });
 });
