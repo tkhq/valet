@@ -1,5 +1,5 @@
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
-import type { Principal, Session } from "@valet/engine";
+import type { Principal } from "@valet/engine";
 import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
@@ -67,27 +67,45 @@ workspaceRuntimeRouter.delete("/:workspace/integration-limit", async (c) => {
   return c.body(null, 204);
 });
 
-/** The session that holds the viewer's Ask Valet conversations. A team keys
- * it per person, so every conversation of one person shares one sandbox. */
+/** The session that holds the viewer's older per-person Ask Valet
+ * conversation: the personal runtime, or in a team the person's helper
+ * execution or, after an upgrade, the shared legacy root. */
 function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
   return ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
 }
 
-/** The viewer's Ask Valet conversations in one session, the most recently used
- * first. A conversation starts with its first message; until then it is empty.
+/** Where the viewer's Ask Valet conversations live. A team gives every newer
+ * conversation its own private execution, so only the older per-person
+ * conversation can stay on the shared root. Governing threads in the root
+ * are anchors, not conversations. */
+async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSessionId: string) {
+  if (owner.type !== "team") return { sessionIds: [helperSessionId], anchors: new Set<string>(), sharedRoot: undefined };
+  const { db } = c.var.providers;
+  const root = await findDefaultAssistant(db, c.var.user.orgId, owner);
+  const rows = root ? await db.select({ sessionId: assistantExecutions.sessionId, key: assistantExecutions.conversationKey,
+    governingThreadId: assistantExecutions.governingThreadId }).from(assistantExecutions)
+    .innerJoin(agentSessions, eq(agentSessions.id, assistantExecutions.sessionId))
+    .where(and(eq(assistantExecutions.assistantId, root.id), sql`${agentSessions.status} <> 'deleted'`)) : [];
+  const own = rows.filter(row => isAssistantConversationOf(row.key, c.var.user.id)).map(row => row.sessionId);
+  return { sessionIds: [...new Set([helperSessionId, ...own])], anchors: new Set(rows.map(row => row.governingThreadId)), sharedRoot: root?.sessionId };
+}
+
+/** The viewer's Ask Valet conversations, the most recently used first. A
+ * conversation starts with its first message; until then it is empty.
  * Activity recording is best effort, so any entry also marks it as started. */
-async function assistantConversations(c: Context<AppEnv>, session: Session): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
-  const { db, engineStore } = c.var.providers;
-  const threads = (await engineStore.listThreads(session.id)).filter(thread => isAssistantConversationOf(thread.key, c.var.user.id));
+async function assistantConversations(c: Context<AppEnv>, scope: { sessionIds: string[]; anchors: Set<string> }): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
+  const { db, engineStore, engineHost } = c.var.providers;
+  const threads = (await Promise.all(scope.sessionIds.map(id => engineStore.listThreads(id)))).flat()
+    .filter(thread => isAssistantConversationOf(thread.key, c.var.user.id) && !scope.anchors.has(thread.id));
   if (!threads.length) return [];
   const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt })
     .from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
-  const waiting = new Set((await engineStore.listDecisionGates(session.id, undefined, "pending")).map(gate => gate.threadId));
+  const waiting = new Set((await Promise.all(scope.sessionIds.map(id => engineStore.listDecisionGates(id, undefined, "pending")))).flat().map(gate => gate.threadId));
   return threads.map((thread) => {
     const row = meta.get(thread.id);
-    return { threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
+    return { sessionId: thread.sessionId, threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
       lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null || thread.activeLeafEntryId !== undefined,
-      busy: session.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
+      busy: engineHost.liveSession(thread.sessionId)?.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
   }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
 }
 
@@ -98,25 +116,31 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const body: unknown = await c.req.json().catch(() => undefined);
   const request: EnsureWorkspaceConversationRequest = body && typeof body === "object" ? body : {};
-  const { sessionId, session } = await assistantConversationSession(c, owner);
-  const conversations = await assistantConversations(c, session);
+  const helper = await assistantConversationSession(c, owner);
+  const scope = await conversationScope(c, owner, helper.sessionId);
+  const conversations = await assistantConversations(c, scope);
   const latest = conversations.find(item => item.started);
   // An empty conversation is reused, so opening the panel without a message
-  // saves no new thread and an empty one never counts as the latest.
-  const empty = conversations.find(item => !item.started);
+  // saves no new thread and an empty one never counts as the latest. One on
+  // the shared root never stands in for a fresh conversation.
+  const empty = conversations.find(item => !item.started && item.sessionId !== scope.sharedRoot);
   let reuse = empty;
   if (request.fresh !== true) reuse = latest ?? empty;
   else if (request.unlessBusy === true && latest?.busy) reuse = latest;
-  if (reuse) return c.json({ sessionId, threadId: reuse.threadId } satisfies EnsureWorkspaceConversationResponse);
+  if (reuse) return c.json({ sessionId: reuse.sessionId, threadId: reuse.threadId } satisfies EnsureWorkspaceConversationResponse);
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
   // Without `fresh`, the first conversation keeps the older per-person key, so
-  // concurrent opens agree on one thread.
-  const data = await session.toData();
-  const thread = await c.var.providers.engineHost.ensureFreshThread(session,
-    request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`,
+  // concurrent opens agree on one thread. A fresh team conversation gets its
+  // own private execution, so it never lands on a shared legacy root.
+  const key = request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`;
+  const target = request.fresh === true && owner.type === "team"
+    ? await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, key)
+    : helper;
+  const data = await target.session.toData();
+  const thread = await c.var.providers.engineHost.ensureFreshThread(target.session, key,
     { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, c.var.user.id);
-  return c.json({ sessionId, threadId: thread.id } satisfies EnsureWorkspaceConversationResponse);
+  return c.json({ sessionId: target.sessionId, threadId: thread.id } satisfies EnsureWorkspaceConversationResponse);
 });
 
 // The Recent menu. The panel opens a conversation first, so this normally
@@ -124,9 +148,9 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
 workspaceRuntimeRouter.get("/:workspace/conversations", async (c) => {
   const owner = await authorizedWorkspaceOwner(c);
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
-  const { sessionId, session } = await assistantConversationSession(c, owner);
-  const started = (await assistantConversations(c, session)).filter(item => item.started);
-  const body: ListWorkspaceConversationsResponse = { sessionId, conversations: started.slice(0, 20).map(({ started: _, ...item }) => item) };
+  const helper = await assistantConversationSession(c, owner);
+  const started = (await assistantConversations(c, await conversationScope(c, owner, helper.sessionId))).filter(item => item.started);
+  const body: ListWorkspaceConversationsResponse = { conversations: started.slice(0, 20).map(({ started: _, ...item }) => item) };
   return c.json(body);
 });
 

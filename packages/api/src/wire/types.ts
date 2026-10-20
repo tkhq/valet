@@ -848,6 +848,8 @@ export interface EnsureWorkspaceConversationResponse { sessionId: string; thread
 
 /** One of the viewer's Ask Valet conversations. */
 export interface WorkspaceConversationSummary {
+  /** A team keeps each newer conversation in its own private execution. */
+  sessionId: string;
   threadId: string;
   title?: string;
   createdAt: number;
@@ -857,7 +859,7 @@ export interface WorkspaceConversationSummary {
 }
 /** `GET /api/workspaces/:workspace/conversations`: the viewer's Ask Valet
  * conversations, the most recently used first. */
-export interface ListWorkspaceConversationsResponse { sessionId: string; conversations: WorkspaceConversationSummary[]; }
+export interface ListWorkspaceConversationsResponse { conversations: WorkspaceConversationSummary[]; }
 
 /** The services a workspace's carried-over integration limit allows, or null for no limit. */
 export interface WorkspaceIntegrationLimitResponse { services: string[] | null; }

@@ -147,7 +147,7 @@ function ConversationActions({ workspace, current, onNew, onSelect }: {
           : !recent.data ? <p className="px-2 py-1.5 text-muted">Loading…</p>
           : items.length === 0 ? <p className="px-2 py-1.5 text-muted">No conversations yet.</p>
           : items.map(item => <DropdownMenuItem key={item.threadId} aria-current={item.threadId === current ? "true" : undefined}
-              onSelect={() => onSelect({ sessionId: recent.data.sessionId, threadId: item.threadId })}>
+              onSelect={() => onSelect({ sessionId: item.sessionId, threadId: item.threadId })}>
               <span className="min-w-0 flex-1 truncate">{item.title || "New conversation"}</span>
               {item.threadId === current ? <Check aria-hidden /> : <span className="shrink-0 text-xs text-muted">{relativeTime(item.lastUserActivityAt)}</span>}
             </DropdownMenuItem>)}

@@ -3,6 +3,8 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { assistantMemoryNamespace } from "../services/memory-scope.js";
+import { canAccessSessionResources } from "../services/session-access.js";
 import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, sessionThreads, teams, teamMembers } from "../schema/index.js";
 import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse, EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse } from "../wire/types.js";
 let api: TestApi | undefined;
@@ -268,6 +270,42 @@ describe("Ask Valet conversations", () => {
     expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[newChat.threadId, false], [waiting.threadId, true]]);
   });
 
+  it("gives each fresh conversation in a legacy team its own private execution", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "legacy-ask", orgId: "local-org", name: "Legacy", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "legacy-ask", userId: "local-user", role: "admin" },
+      { teamId: "legacy-ask", userId: "test-member", role: "member" },
+    ]);
+    // An upgraded team: each member's older conversation lives on the shared root.
+    const owner = { type: "team" as const, id: "legacy-ask" };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: root.assistant.id, sessionId: root.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    for (const user of ["local-user", "test-member"]) {
+      const legacy = await root.session.createThread(`app-assistant:${user}`);
+      await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: root.sessionId, conversationKey: legacy.key });
+    }
+    const alice = conversations("legacy-ask");
+    const bob = conversations("legacy-ask", "test-member");
+    expect((await alice.open()).sessionId).toBe(root.sessionId);
+    const mine = await alice.open({ fresh: true });
+    const theirs = await bob.open({ fresh: true });
+    expect(mine.sessionId).toMatch(/^execution:/);
+    expect(theirs.sessionId).toMatch(/^execution:/);
+    expect(mine.sessionId).not.toBe(theirs.sessionId);
+    const session = async (id: string) => (await db.select().from(agentSessions).where(eq(agentSessions.id, id)))[0]!;
+    expect(await canAccessSessionResources(api.providers, await session(mine.sessionId), { type: "user", id: "test-member" })).toBe(false);
+    expect(await canAccessSessionResources(api.providers, await session(theirs.sessionId), { type: "user", id: "local-user" })).toBe(false);
+    expect(await assistantMemoryNamespace(db, mine.sessionId, owner.id, "local-org")).toBe(mine.sessionId);
+    expect(await assistantMemoryNamespace(db, theirs.sessionId, owner.id, "local-org")).toBe(theirs.sessionId);
+    await use(mine);
+    await use(theirs);
+    expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[mine.sessionId, mine.threadId]]);
+    expect((await bob.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[theirs.sessionId, theirs.threadId]]);
+  });
+
   it("keeps each team member's conversations to that member", async () => {
     api = await bootTestApi();
     await api.providers.db.insert(teams).values({ id: "ask-team", orgId: "local-org", name: "Ask", createdAt: 1 });
@@ -284,7 +322,8 @@ describe("Ask Valet conversations", () => {
     expect(own.sessionId).toMatch(/^execution:/);
     expect(own.sessionId).not.toBe(other.sessionId);
     const [execution] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, own.sessionId));
-    expect(execution?.conversationKey).toBe("app-assistant:local-user");
+    // Each fresh conversation has its own private execution, keyed by the conversation.
+    expect(execution?.conversationKey).toMatch(/^app-assistant:local-user:[0-9a-f-]{36}$/);
     expect((await theirs.list()).conversations.map(item => item.threadId)).toEqual([other.threadId]);
     expect((await mine.list()).conversations.map(item => item.threadId)).toContain(own.threadId);
     const read = (threadId: string, user: string) => fetch(`${api!.baseUrl}/api/threads/${threadId}/messages`, { headers: { "x-valet-test-user-id": user } });

@@ -144,11 +144,12 @@ describe("Ask Valet conversation rule", () => {
 
   it("starts a new chat from the header and reopens a recent conversation", async () => {
     const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
-      .mockResolvedValueOnce({ sessionId: "s1", threadId: "older" })
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "first" })
       .mockResolvedValueOnce({ sessionId: "s1", threadId: "newer" });
-    vi.spyOn(api, "listWorkspaceConversations").mockResolvedValue({ sessionId: "s1", conversations: [
-      { threadId: "newer", createdAt: 2, lastUserActivityAt: 2, busy: false },
-      { threadId: "older", title: "Rename my account", createdAt: 1, lastUserActivityAt: 1, busy: true },
+    // A team keeps each conversation in its own session.
+    vi.spyOn(api, "listWorkspaceConversations").mockResolvedValue({ conversations: [
+      { sessionId: "s1", threadId: "newer", createdAt: 2, lastUserActivityAt: 2, busy: false },
+      { sessionId: "s2", threadId: "older", title: "Rename my account", createdAt: 1, lastUserActivityAt: 1, busy: true },
     ] });
     renderAt("/chat");
     await userEvent.click(await screen.findByRole("button", { name: "Ask Valet" }));
@@ -159,7 +160,7 @@ describe("Ask Valet conversation rule", () => {
     await userEvent.click(screen.getByRole("button", { name: "Recent conversations" }));
     expect((await screen.findByRole("menuitem", { name: /New conversation/ })).getAttribute("aria-current")).toBe("true");
     await userEvent.click(screen.getByRole("menuitem", { name: /Rename my account/ }));
-    expect(await screen.findByText("Conversation s1/older")).toBeTruthy();
+    expect(await screen.findByText("Conversation s2/older")).toBeTruthy();
     expect(ensure).toHaveBeenCalledTimes(2);
   });
 });
