@@ -243,12 +243,15 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     (`event_target_mismatch`) and throw. A rule that carries prompt templates
     renders the body first (see "Orchestrator prompt templates" below); one
     that carries none delivers the body described here unchanged. A delivery
-    with no channel origin and no pull request comment has no person to
-    answer it, so it runs unattended: a question or an approval its turn asks
-    is refused at once, and the turn ends with what was missing. Without
-    this, one waiting question held back every later delivery on the same
-    thread. A mention or a pull request comment still lets the person
-    answer. An assistant-prompt schedule also runs unattended.
+    with no person to answer it runs unattended: a question or an approval its
+    turn asks is refused at once, and the turn ends with what was missing.
+    Without this, one waiting question held back every later delivery on the
+    same thread. The dispatcher marks a delivery unattended unless it is a
+    mention or a pull request comment that reaches the thread that opened the
+    pull request; the scheduler marks every assistant-prompt schedule. The
+    host also treats every turn a person did not type on the "events" thread
+    or a `slack-events:<channel>` thread as unattended, which covers a
+    delegated task's follow-up and items queued before the marker existed.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that

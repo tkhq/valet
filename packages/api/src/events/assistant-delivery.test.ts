@@ -424,6 +424,16 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     await expect.poll(() => settled("unattended-ask"), { timeout: 15_000 }).toBe(true);
     expect(await pending()).toBe(0);
 
+    // A signal on an automated delivery thread with no flag, such as a delegated
+    // task's follow-up or an item queued before this change, is unattended too.
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "slack-events:C1",
+      signal: signal("child settled"), dispatchId: "thread-rule-ask", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => settled("thread-rule-ask"), { timeout: 15_000 }).toBe(true);
+    expect(await pending()).toBe(0);
+
     // Without the flag, the same question parks the thread.
     asks();
     await deliverToAssistantThread(deps, {

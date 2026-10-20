@@ -306,6 +306,37 @@ describe("EventDispatcher", () => {
     expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped" });
   });
 
+  it("keeps a pull request comment attended only when it reaches the thread that opened the pull request", async () => {
+    const db = tdb.appDb;
+    const opened = "https://github.com/acme/app/pull/21";
+    const foreign = "https://github.com/acme/app/pull/22";
+    await db.insert(assistants).values({ id: "asst-21", orgId: ORG, ownerType: "user", ownerId: "user-1", sessionId: "sess-21", createdAt: 1 });
+    await db.insert(agentSessions).values({ id: "sess-21", orgId: ORG, userId: "user-1", ownerType: "user", ownerId: "user-1", workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-21', 'sess-21', 'web:pr-21', 'idle', 'steer', 1, 1)`);
+    await db.insert(threadPullRequests).values({
+      sessionId: "sess-21", threadId: "thr-21", url: opened, repo: "acme/app", number: 21, state: "open", createdAt: 1, updatedAt: 1, checkedAt: 1,
+    });
+    const comment = (url: string, id: number) => ({
+      issue: { pull_request: { html_url: url } },
+      comment: { id, body: "Can you rebase this?", created_at: "2026-01-01T00:00:00Z", user: { login: "reviewer", type: "User" } },
+    });
+    for (const [url, id] of [[opened, 701], [foreign, 702]] as const) {
+      await seedDelivery({ target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"], payload: comment(url, id) });
+    }
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    await new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver }).pollOnce();
+
+    const calls = deliver.mock.calls.map(([args]) => args);
+    expect(calls).toHaveLength(2);
+    const onOpened = calls.find(args => args.target?.threadId === "thr-21");
+    const onForeign = calls.find(args => args.target === undefined);
+    // The reviewer can answer on the pull request's own thread.
+    expect(onOpened?.unattended).toBeUndefined();
+    // A comment on a pull request no thread opened falls back to the shared events thread, where no one answers.
+    expect(onForeign?.unattended).toBe(true);
+  });
+
   it("keeps a Slack event with no thread to reply into on its channel's events thread", async () => {
     // A reaction in a channel has no Slack thread to answer, so it would land
     // on the shared events thread; keyed by its channel, the channel's
