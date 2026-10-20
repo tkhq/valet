@@ -226,8 +226,9 @@ export interface QueueItem {
    * the backoff window of it coalesce into the same cycle (no increment).
    */
   lastCredentialReleaseAt?: number;
-  /** Execution deadline. A claim with attemptCount 0 sets it to claim time +
-   * `SUBMISSION_TIMEOUT_MS`, so time spent queued does not count. */
+  /** Deadline counted from the first claim. A claim with attemptCount 0 sets
+   * it to claim time + `SUBMISSION_TIMEOUT_MS`, so time spent queued does not
+   * count. */
   timeoutAt: number;
   abortRequestedAt?: number;
   ownerId?: string;

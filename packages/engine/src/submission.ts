@@ -23,8 +23,10 @@ export const SIGNAL_HOP_BUDGET = 3;
 export const MAX_PENDING_PER_THREAD = 20;
 
 /**
- * Execution budget of one submission. A claim with `attemptCount === 0` sets
- * `timeoutAt` to claim time + this budget, so time spent queued does not count.
+ * Time budget of one submission, counted from its first claim. A claim with
+ * `attemptCount === 0` sets `timeoutAt` to claim time + this budget, so time
+ * spent queued does not count. Time a claimed turn spends parked on a gate
+ * still counts.
  */
 export const SUBMISSION_TIMEOUT_MS = 3_600_000;
 
@@ -394,9 +396,9 @@ export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): Re
     return { kind: "settle", outcome: { outcome: "failed", error: "retry budget exhausted" } };
   }
 
-  // Step 6 — timeout. It bounds execution, so an item that has not run
-  // (attemptCount 0: never claimed, or released before it ran) cannot time
-  // out. It waits behind its thread's head, which its own timeout or its
+  // Step 6 — timeout. The clock starts at the first claim, so an item that
+  // has not run (attemptCount 0: never claimed, or released before it ran)
+  // cannot time out. It waits behind its thread's head, which its own timeout or its
   // gate's expiry bounds. Gate-blocked items are exempt too.
   if (!gateBlocked && item.attemptCount > 0 && ctx.now >= item.timeoutAt) {
     return { kind: "settle", outcome: { outcome: "failed", error: "timed out" } };
