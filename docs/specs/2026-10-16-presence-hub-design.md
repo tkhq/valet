@@ -1218,7 +1218,10 @@ Review-fix deviations (2026-10-19):
 - **The filter-options cache keeps its reason (Part H step 3).** A
   no-credential answer reads `Connect the integration on the Integrations
   page to choose from a list. Type the value instead.` on a cache hit
-  too, so the free-text field stays available.
+  too, so the free-text field stays available. A GitHub source reads the
+  org's App installation token, and with no installation it reads `Install
+  the Valet GitHub App for this organization on the Integrations page to
+  choose from a list. Type the value instead.`
 - **A Create hidden by the filter keeps its mark (Part B step 8).** The
   highlight is computed from the rows the filter shows; a row the filter
   hides keeps its store entry and shows nothing until the filter reveals

@@ -18,6 +18,7 @@ import { and, desc, eq, gte, inArray, ne, or, sql, type SQL } from "drizzle-orm"
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
+import type { Providers } from "../providers/types.js";
 import { isPinUnavailableMessage } from "../events/assistant-delivery.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { claimedThreadId } from "../events/destination.js";
@@ -33,6 +34,8 @@ import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-curso
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
+import { GITHUB_CREDENTIAL_SERVICE, GitHubAuthError, resolveInstallationApiToken } from "../services/github-tokens.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   EventDeliveryThreadRef,
@@ -339,7 +342,61 @@ function dependsOnForSource(plugins: ValetPlugin[], source: string): string[] {
   return [];
 }
 
-/** Per-(org, source, deps, q) memo so a keystroke does not re-hit the provider. */
+/** The credential a filter-option resolver reads, and where it came from. */
+interface FilterOptionsCredential {
+  credential: StoredCredential | null;
+  /** Part of the memo key, so a new install or connect is not masked. */
+  source: "installation" | "org" | "none";
+}
+
+/**
+ * Resolves the credential the filter-options route hands a plugin's resolver.
+ *
+ * The plugin name is its credential service (slack/github/linear). GitHub
+ * reads the org's App installation token first: `github.repos` calls
+ * `GET /installation/repositories`, which accepts an installation token only.
+ * `repoOwner` picks the installation when known; otherwise the org's sole
+ * installation applies. The host and the action invoker use this same mint
+ * for `github:installation`. With no installation, GitHub falls back to the org
+ * `github` row (a PAT still lists branches). Every other plugin reads the org
+ * row only.
+ *
+ * The org row goes through the resolver, not a raw read: an admin's 1Password
+ * reference carries no secret until it is resolved. A missing or
+ * unresolvable credential is a normal outcome here (empty options), so a
+ * typed 1Password failure reads as none. A failed installation-token mint
+ * throws `GitHubAuthError` for the caller to report.
+ */
+async function resolveFilterOptionsCredential(
+  providers: Pick<Providers, "db" | "engineCredentials" | "onePassword" | "encryptionKey">,
+  orgId: string,
+  service: string,
+  repoOwner: string | undefined,
+): Promise<FilterOptionsCredential> {
+  const { db, engineCredentials, onePassword, encryptionKey } = providers;
+  if (service === GITHUB_CREDENTIAL_SERVICE) {
+    const token = await resolveInstallationApiToken(
+      { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) },
+      orgId,
+      repoOwner,
+    );
+    if (token !== null) return { credential: { type: "app_install", accessToken: token }, source: "installation" };
+  }
+  let credential: StoredCredential | null;
+  try {
+    credential = await resolveOrgCredentialRead(
+      { credentials: engineCredentials, onePassword },
+      { orgId, scopes: ["org"] },
+      service,
+    );
+  } catch (err) {
+    if (!(err instanceof OnePasswordAuthError)) throw err;
+    credential = null;
+  }
+  return credential === null ? { credential, source: "none" } : { credential, source: "org" };
+}
+
+/** Per-(org, source, credential source, deps, q) memo so a keystroke does not re-hit the provider. */
 const FILTER_OPTIONS_TTL_MS = 60_000;
 const FILTER_OPTIONS_CACHE_CAP = 500;
 // The whole answer, `reason` included: a hit without the reason turned the
@@ -349,14 +406,14 @@ const filterOptionsCache = new Map<string, { resp: FilterOptionsResponse; expire
 /**
  * Lists the options for one filter field's source, so a rule filters on a
  * looked-up name, not a raw id. Dispatches to the owning plugin's resolver,
- * scoped by the org's credential for that plugin's service, and memoized with a
- * short TTL. An unknown source, an unconnected integration, or a provider error
- * returns `{ options: [], reason }` (200) — never an error status — so the
- * picker degrades to free text instead of breaking the form.
+ * scoped by the org's credential for that plugin's service (the App installation
+ * token for GitHub), and memoized with a short TTL. An unknown source, an
+ * unconnected integration, or a provider error returns `{ options: [], reason }`
+ * (200) — never an error status — so the picker degrades to free text instead of breaking the form.
  */
 eventsRouter.get("/events/filter-options", async (c) => {
   const user = c.var.user;
-  const { plugins, engineCredentials, onePassword } = c.var.providers;
+  const { plugins, engineCredentials, onePassword, db, encryptionKey } = c.var.providers;
   const source = c.req.query("source");
   if (!source) return c.json({ error: "source query parameter is required" }, 400);
 
@@ -373,28 +430,38 @@ eventsRouter.get("/events/filter-options", async (c) => {
   }
   const q = c.req.query("q") || undefined;
 
-  const cacheKey = `${user.orgId}:${source}:${JSON.stringify(deps)}:${q ?? ""}`;
+  // The credential resolves before the memo lookup, and its source is part
+  // of the key. An org that installs the GitHub App, or connects Slack, then
+  // gets a list on the next keystroke instead of a cached "connect" answer.
+  // The resolve reads stored rows and the installation's cached token, so a
+  // keystroke still does not reach the provider while the memo is warm.
+  let resolved: FilterOptionsCredential;
+  try {
+    resolved = await resolveFilterOptionsCredential(
+      { db, engineCredentials, onePassword, encryptionKey },
+      user.orgId,
+      found.plugin.name,
+      // A branch lookup names its repo, so its owner picks the installation.
+      // Otherwise the org's sole installation applies.
+      deps.repo?.split("/")[0] || undefined,
+    );
+  } catch (err) {
+    // A failed installation-token mint is a provider fault, like a resolver
+    // throw: answer with the retry reason and do not memoize it.
+    if (!(err instanceof GitHubAuthError)) throw err;
+    console.error(`[events] filter-options credential for ${source} failed`, err);
+    const resp: FilterOptionsResponse = {
+      options: [],
+      reason: "The provider could not list options right now. Type the value instead.",
+    };
+    return c.json(resp);
+  }
+  const { credential } = resolved;
+
+  const cacheKey = `${user.orgId}:${source}:${resolved.source}:${JSON.stringify(deps)}:${q ?? ""}`;
   const cached = filterOptionsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return c.json(cached.resp);
-  }
-
-  // The plugin name is its credential service (slack/github/linear).
-  // Through the resolver, not the raw row: an admin's 1Password reference
-  // carries no secret until it is resolved, and a raw read handed the
-  // resolver an empty credential and returned no options. A missing or
-  // unresolvable credential is a normal outcome here (empty options), so a
-  // typed 1Password failure reads as none.
-  let credential: StoredCredential | null;
-  try {
-    credential = await resolveOrgCredentialRead(
-      { credentials: engineCredentials, onePassword },
-      { orgId: user.orgId, scopes: ["org"] },
-      found.plugin.name,
-    );
-  } catch (err) {
-    if (!(err instanceof OnePasswordAuthError)) throw err;
-    credential = null;
   }
 
   let options: FilterOption[] = [];
@@ -408,7 +475,10 @@ eventsRouter.get("/events/filter-options", async (c) => {
     failed = true;
   }
   if (options.length === 0 && reason === undefined && credential === null) {
-    reason = "Connect the integration on the Integrations page to choose from a list. Type the value instead.";
+    reason =
+      found.plugin.name === GITHUB_CREDENTIAL_SERVICE
+        ? "Install the Valet GitHub App for this organization on the Integrations page to choose from a list. Type the value instead."
+        : "Connect the integration on the Integrations page to choose from a list. Type the value instead.";
   }
 
   // Never memoize a failed lookup. A provider that rate-limits one keystroke

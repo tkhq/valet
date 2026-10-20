@@ -15,6 +15,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { ingestEvent } from "../events/ingest.js";
+import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
@@ -22,6 +23,7 @@ import {
   eventReceipts,
   events,
   eventSubscriptions,
+  githubInstallations,
   orgMembers,
   sessionThreads,
   slackChannelPrivacy,
@@ -2088,6 +2090,93 @@ describe("GET /api/events/filter-options", () => {
     expect(await read()).toEqual({ options: [], reason });
     // The second answer came from the cache.
     expect(calls).toBe(1);
+  });
+
+  // A resolver that lists the token it received, so a test can assert which
+  // credential the route chose. The plugin name is the credential service.
+  function credentialEchoPlugin(name: string, source: string): ValetPlugin {
+    return {
+      ...fixturePlugin,
+      name,
+      filterOptionResolvers: {
+        [source]: async (ctx) =>
+          ctx.credential ? [{ id: `${ctx.credential.type}:${ctx.credential.accessToken ?? ""}`, label: "acme/app" }] : [],
+      },
+    };
+  }
+
+  async function seedInstallation(a: TestApi, token: string): Promise<void> {
+    const now = Date.now();
+    await a.providers.db.insert(githubInstallations).values({
+      id: "ghi_filter_options",
+      orgId: "local-org",
+      installationId: 4242,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "selected",
+      suspended: false,
+      cachedToken: encryptSecret(token, deriveSecretKey(a.providers.encryptionKey)),
+      cachedTokenExpiresAt: now + 60 * 60_000,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Live finding: an org with the GitHub App installed and no org `github`
+  // row got the "connect" reason, because the route read the org row only.
+  // `GET /installation/repositories` accepts the installation token only.
+  it("hands GitHub the org's installation token when no org row exists", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("github", "fixture.gh-installed")] });
+    api = a;
+    await seedInstallation(a, "ghs-install");
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.gh-installed`)).json()) as {
+      options: { id: string }[];
+      reason?: string;
+    };
+    expect(body).toEqual({ options: [{ id: "app_install:ghs-install", label: "acme/app" }] });
+  });
+
+  it("names the GitHub App install when the org has neither, and picks up a later install", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("github", "fixture.gh-later")] });
+    api = a;
+    const read = async () =>
+      (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.gh-later`)).json()) as {
+        options: { id: string }[];
+        reason?: string;
+      };
+
+    expect(await read()).toEqual({
+      options: [],
+      reason:
+        "Install the Valet GitHub App for this organization on the Integrations page to choose from a list. Type the value instead.",
+    });
+
+    // Inside the memo TTL: the credential source is part of the key, so the
+    // cached "install" answer does not mask the new installation.
+    await seedInstallation(a, "ghs-later");
+    expect(await read()).toEqual({ options: [{ id: "app_install:ghs-later", label: "acme/app" }] });
+  });
+
+  it("hands Slack the org row and keeps the generic reason without one", async () => {
+    const a = await bootTestApi({ plugins: [credentialEchoPlugin("slack", "fixture.slack-org")] });
+    api = a;
+    const read = async () =>
+      (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.slack-org`)).json()) as {
+        options: { id: string }[];
+        reason?: string;
+      };
+
+    expect(await read()).toEqual({
+      options: [],
+      reason: "Connect the integration on the Integrations page to choose from a list. Type the value instead.",
+    });
+
+    await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-org",
+    });
+    expect(await read()).toEqual({ options: [{ id: "bot_token:xoxb-org", label: "acme/app" }] });
   });
 });
 

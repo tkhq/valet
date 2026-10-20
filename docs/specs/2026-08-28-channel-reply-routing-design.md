@@ -253,6 +253,14 @@ is a per-plugin **option source**, not a hardcoded set of Slack endpoints.
   that cannot resolve right now (missing credential, provider error) returns an
   empty list plus a reason the picker shows, and the field falls back to free
   text so the rule is still creatable.
+- **GitHub reads the installation token.** The endpoint resolves each plugin's
+  org credential, but for GitHub it first mints the org's App installation
+  token, because `GET /installation/repositories` accepts no other token. A
+  branch lookup's repo owner picks the installation; otherwise the org's sole
+  installation applies. With no installation, the org `github` row is the
+  fallback, and with neither the reason tells the reader to install the Valet
+  GitHub App. The credential source is part of the cache key, so a new
+  install shows a list on the next request.
 - **Plugin contract.** A plugin exports its resolvers alongside its trigger
   defs; the api registers them by `source` name the same way it registers
   transports. A new provider adds option sources without touching the api.
