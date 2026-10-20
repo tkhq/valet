@@ -88,6 +88,16 @@ async function fetchWellKnown(url: string): Promise<Record<string, unknown> | nu
   }
 }
 
+/** URL equality after WHATWG parsing. A path's trailing slash still
+ * matters (`/api/mcp/` is not `/api/mcp`); an empty path reads as `/`. */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Discover authorization server metadata from an MCP server URL.
  *
@@ -114,7 +124,7 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
     // even when the document names no issuer. They count only when the
     // document describes this server (§3.3): a root document for another
     // resource must not add its scopes.
-    const describesServer = typeof prm?.resource === 'string' && prm.resource.replace(/\/+$/, '') === base;
+    const describesServer = typeof prm?.resource === 'string' && sameUrl(prm.resource, mcpServerUrl);
     if (describesServer) resourceScopes ??= optStrArr(prm?.scopes_supported);
     const advertised = prm?.authorization_servers?.[0];
     if (typeof advertised === 'string' && advertised.length > 0) {

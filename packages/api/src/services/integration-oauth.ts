@@ -131,7 +131,21 @@ export async function ensureMcpOAuthClient(
   let meta: AuthServerMetadata | undefined;
   let requested = declared;
   if (declared.length > 0) {
-    meta = await discoverAuthServer(serverUrl);
+    try {
+      meta = await discoverAuthServer(serverUrl);
+    } catch (err) {
+      // A discovery outage must not block a connect the stored client can
+      // serve. A first registration or a new declared scope needs
+      // discovery, so those still fail.
+      const stored = existing[0];
+      const storedScopes = new Set(stored?.registeredScopes ?? []);
+      if (!stored || !declared.every((s) => storedScopes.has(s))) throw err;
+      console.warn(
+        `MCP OAuth: ${service} discovery failed; connecting with the stored client:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return toRow(stored);
+    }
     requested = requestedScopes(declared, meta, existing[0]?.registeredScopes);
   }
   if (existing[0] && sameScopes(existing[0].registeredScopes, requested)) {

@@ -145,6 +145,25 @@ describe("ensureMcpOAuthClient", () => {
     }
   });
 
+  it("uses the stored client when discovery fails and it holds every declared scope", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["read"]);
+    await fake.close(); // discovery now fails
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+        "read",
+      ]);
+      expect(row.clientId).toBe("client-1");
+      // A new declared scope needs discovery, so the outage still fails it.
+      await expect(
+        ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["read", "write"]),
+      ).rejects.toThrow(/discovery failed/);
+    } finally {
+      warn.mockRestore();
+      fake = await startFakeOAuthServer(); // afterEach closes it
+    }
+  });
+
   it("requests no scope for a scopeless entry, even when the resource advertises scopes", async () => {
     const linear = await startFakeOAuthServer({ resourceScopesSupported: ["read", "write"] });
     try {

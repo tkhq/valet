@@ -111,6 +111,19 @@ describe('discoverAuthServer', () => {
     expect(meta.resource_scopes_supported).toBeUndefined();
   });
 
+  it('treats a resource that differs by a trailing slash as a different resource', async () => {
+    mockFetchRoutes({
+      'https://mcp.example.com/.well-known/oauth-protected-resource': {
+        resource: 'https://mcp.example.com/api/mcp/',
+        scopes_supported: ['admin:all'],
+      },
+      'https://mcp.example.com/.well-known/oauth-authorization-server': AS_METADATA,
+    });
+
+    const meta = await discoverAuthServer('https://mcp.example.com/api/mcp');
+    expect(meta.resource_scopes_supported).toBeUndefined();
+  });
+
   it('falls back to AS metadata on the MCP origin when there is no protected-resource metadata', async () => {
     mockFetchRoutes({
       'https://mcp.example.com/.well-known/oauth-authorization-server/mcp': AS_METADATA,
