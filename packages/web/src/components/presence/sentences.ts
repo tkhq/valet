@@ -503,27 +503,31 @@ const SENDER_FIELDS: readonly string[] = ["user", "sender", "creator"];
 const EXACT_OPS: readonly EventSubscriptionFilterWire["op"][] = ["eq", "in"];
 
 /**
+ * The words for one Slack channel value: its saved label, else its name
+ * from `names.channels` (`#incidents`), else the raw id. The editor saves a
+ * channel's id as its label when it has no name (`labels[i] ?? id`), so a
+ * label equal to the value is no label. The lookup is by own property: a
+ * saved value such as `constructor` must not read a method off the map's
+ * prototype. The sentence, the editor's condition chips, and its thread
+ * summary all name a channel through this one function, so they agree.
+ */
+export function channelWords(value: string, label: string | undefined, names: SentenceNames = {}): string {
+  if (hasText(label) && label.trim() !== value) return label;
+  const channels = names.channels;
+  const channel = channels !== undefined && Object.hasOwn(channels, value) ? channels[value] : undefined;
+  return hasText(channel) ? `#${channel}` : value;
+}
+
+/**
  * Each value of a filter with the words a reader sees for it: the filter's
- * own label, then for a Slack channel its name from `names.channels`
- * (`#incidents`), then the raw value. Only an exact match (`eq`, `in`) takes
- * the name: a `prefix`, `contains`, or `regex` value is a pattern over the
- * id, and `starts with #proj-valet` would describe a match that never runs.
- * The lookup is by own property: a saved value such as `constructor` must
- * not read a method off the map's prototype.
+ * own label, then for a Slack channel its name (`channelWords`), then the
+ * raw value. Only an exact match (`eq`, `in`) takes the name: a `prefix`,
+ * `contains`, or `regex` value is a pattern over the id, and `starts with
+ * #proj-valet` would describe a match that never runs.
  */
 function filterEntries(filter: EventSubscriptionFilterWire, names: SentenceNames = {}): { value: string; label: string }[] {
-  const fallback = (value: string): string => {
-    const channels = names.channels;
-    const channel = filter.field === "channel" && EXACT_OPS.includes(filter.op) && channels !== undefined && Object.hasOwn(channels, value)
-      ? channels[value]
-      : undefined;
-    return hasText(channel) ? `#${channel}` : value;
-  };
-  // The editor saves a channel's id as its label when it has no name
-  // (`labels[i] ?? id`), so a label equal to the value is no label: the
-  // channel name from the places list wins over it.
   const named = (value: string, label: string | undefined): string =>
-    hasText(label) && label.trim() !== value ? label : fallback(value);
+    filter.field === "channel" && EXACT_OPS.includes(filter.op) ? channelWords(value, label, names) : hasText(label) ? label : value;
   if (Array.isArray(filter.value)) {
     return filter.value.map((v, i) => ({ value: v, label: named(v, filter.labels?.[i]) }));
   }
