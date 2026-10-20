@@ -90,6 +90,18 @@ export function wrapAsWorkloadUser(shellCommand: string, browser = false): strin
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
+ * A caller NODE_OPTIONS replaces the image default (`--use-openssl-ca`), which
+ * would drop the eMudhra root distrust. Always prepend the flag so other
+ * options keep working. Do not test for an existing flag: a quoted value can
+ * contain the text. On Node 22.23.3 a duplicate `--use-openssl-ca` is accepted.
+ * `--use-openssl-ca --use-bundled-ca` makes Node exit at startup, so it fails
+ * closed. `--use-openssl-ca --use-system-ca` still rejects the bad roots.
+ */
+export function withTrustedCa(value: string): string {
+  return value.trim() === "" ? "--use-openssl-ca" : `--use-openssl-ca ${value}`;
+}
+
+/**
  * Builds the final `sh -c` payload for a command, folding in `opts.env` and
  * `opts.cwd`. The k8s exec API has no native env/workdir parameters (unlike
  * `docker exec --env`/`--workdir`) — both are synthesized as shell prefixes
@@ -98,17 +110,6 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * scoped to just this command) even though the docker provider gets there
  * via CLI flags instead of shell syntax.
  */
-/**
- * A caller NODE_OPTIONS replaces the image default (`--use-openssl-ca`), which
- * would drop the eMudhra root distrust. Prepend the flag so other options keep
- * working. A later `--use-bundled-ca` or `--use-system-ca` in the caller value
- * can still win; see docker/distrust-compromised-roots.sh.
- */
-export function withTrustedCa(value: string): string {
-  if (value.split(/\s+/).includes("--use-openssl-ca")) return value;
-  return value.trim() === "" ? "--use-openssl-ca" : `--use-openssl-ca ${value}`;
-}
-
 export function buildShellCommand(command: string, opts?: ExecOpts): string {
   const parts: string[] = [];
   if (opts?.env) {

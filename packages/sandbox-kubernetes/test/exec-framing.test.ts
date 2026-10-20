@@ -88,7 +88,8 @@ describe("buildShellCommand", () => {
       return spawnSync("/bin/sh", ["-c", built], { encoding: "utf8" }).stdout;
     };
     expect(run("--max-old-space-size=256")).toBe("--use-openssl-ca --max-old-space-size=256");
-    expect(run("--max-old-space-size=256 --use-openssl-ca")).toBe("--max-old-space-size=256 --use-openssl-ca");
+    expect(run("--max-old-space-size=256 --use-openssl-ca")).toBe("--use-openssl-ca --max-old-space-size=256 --use-openssl-ca");
+    expect(run('--title="has --use-openssl-ca inside"')).toBe('--use-openssl-ca --title="has --use-openssl-ca inside"');
     expect(run("")).toBe("--use-openssl-ca");
     expect(run("--use-system-ca")).toBe("--use-openssl-ca --use-system-ca");
   });
