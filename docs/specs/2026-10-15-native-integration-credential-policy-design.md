@@ -301,3 +301,9 @@ deployment after merge.
    and status routes (`http-slack.ts`, `http-installations.ts`,
    `linear-ingress.ts`) read the stored row directly and never reach an
    action.
+10. **A user-pinned Slack node can run with a null credential.** A
+    user-owned workflow Slack node pinned `credential: "user"`, in an org
+    with only the org bot row, still runs, and the action gets a null
+    credential. A team run in the same state is refused before the action
+    runs; a user-owned run is not. The fix is a follow-up: refuse the
+    user-owned run the same way, and name the fix.
