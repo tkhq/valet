@@ -191,10 +191,8 @@ Pass criterion: all steps, in one run, from a clean start.
    separates a place's own sentences; no place has a border, fill, or
    shadow of its own. A place appears for every mid-grain place (a Slack
    channel, a GitHub repository, a Linear team) that has at least one line
-   of presence. A pull request or issue MUST NOT appear. The api sends the
-   row of each line as `placeKey` (a pull request or issue line rolls up
-   to its parent row), and the overview groups lines by that key, so a row
-   and its place page list the same lines. Lines whose
+   of presence. A pull request or issue MUST NOT appear: the overview
+   groups lines by `placeKey` (step 10). Lines whose
    filters name no single place form one place per service named
    `Everywhere in Slack`, `Across GitHub`, or `Across Linear`, which links
    to the service page (Part C). These three names are the only names of
