@@ -21,7 +21,7 @@ import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "
 import { scheduledRunId } from "@valet/shared";
 import { and, eq, lte } from "drizzle-orm";
 import { readThreadPolicy } from "@valet/shared";
-import { PinUnavailableError } from "../events/assistant-delivery.js";
+import { PinUnavailableError, type DeliveredThread } from "../events/assistant-delivery.js";
 import type { AssistantDeliverFn } from "../events/dispatcher.js";
 import { resolveDestination } from "../events/destination.js";
 import {
@@ -67,6 +67,18 @@ export interface WorkflowSchedulerDeps {
  * routine page finds a routine's runs by the same prefix, so both read it
  * from @valet/shared. */
 export { scheduledRunId };
+
+/** A dispatch that went through. `landed` is the thread an assistant-prompt
+ * firing landed on; a workflow firing starts a run and lands on no thread. */
+type Dispatched = { ok: true; landed: DeliveredThread | null };
+type DispatchFailed = { ok: false; error: string; pinUnavailable?: true };
+
+/** The columns that record where a firing landed (spec 2026-10-16: presence
+ * hub, Part E step 2). A workflow firing records nothing, so the columns
+ * keep their value. */
+function landedColumns(landed: DeliveredThread | null): { lastFiredSessionId?: string; lastFiredThreadId?: string } {
+  return landed === null ? {} : { lastFiredSessionId: landed.sessionId, lastFiredThreadId: landed.threadId };
+}
 
 export class WorkflowScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -121,12 +133,12 @@ export class WorkflowScheduler {
   private async dispatch(
     schedule: typeof workflowSchedules.$inferSelect,
     slotMs: number,
-  ): Promise<"ok" | { error: string; pinUnavailable?: true }> {
+  ): Promise<Dispatched | DispatchFailed> {
     const { db, workflowRunHost } = this.deps;
 
     if (readScheduleTargetKind(schedule.targetKind) === "assistant") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        return { error: EMPTY_PROMPT_REASON };
+        return { ok: false, error: EMPTY_PROMPT_REASON };
       }
       // A schedule has no event, binding, or claim: its policy decides
       // (spec 2026-10-16: delivery threads, Part B). `new` keys on the slot,
@@ -138,8 +150,9 @@ export class WorkflowScheduler {
         claim: null,
       });
       if (destination.kind === "skip") throw new Error("A schedule resolved to a skip. Report this schedule to Valet support.");
+      let landed: DeliveredThread;
       try {
-        await this.deps.deliverToAssistant({
+        landed = await this.deps.deliverToAssistant({
           orgId: schedule.orgId,
           ownerType: schedule.ownerType,
           ownerId: schedule.ownerId,
@@ -165,14 +178,14 @@ export class WorkflowScheduler {
         // mode (spec Part B step 4). The poll loop disables the schedule,
         // logs this text, and counts it (`fire`).
         if (!(err instanceof PinUnavailableError)) throw err;
-        return { error: err.message, pinUnavailable: true };
+        return { ok: false, error: err.message, pinUnavailable: true };
       }
       this.recordDestination(destinationMetricReason(destination));
-      return "ok";
+      return { ok: true, landed: { sessionId: landed.sessionId, threadId: landed.threadId } };
     }
 
     if (!schedule.workflowId) {
-      return { error: WORKFLOW_DELETED_REASON };
+      return { ok: false, error: WORKFLOW_DELETED_REASON };
     }
     const defRows = await db
       .select()
@@ -181,7 +194,7 @@ export class WorkflowScheduler {
       .limit(1);
     const def = defRows[0];
     if (!def) {
-      return { error: WORKFLOW_DELETED_REASON };
+      return { ok: false, error: WORKFLOW_DELETED_REASON };
     }
 
     const runId = scheduledRunId(schedule.id, slotMs);
@@ -218,7 +231,7 @@ export class WorkflowScheduler {
         actorUserId: def.ownerType === "user" ? schedule.createdBy : `${def.ownerType}:${def.ownerId}`,
       });
     }
-    return "ok";
+    return { ok: true, landed: null };
   }
 
   private async fire(schedule: typeof workflowSchedules.$inferSelect, now: number): Promise<void> {
@@ -232,7 +245,7 @@ export class WorkflowScheduler {
       return;
     }
     const result = await this.dispatch(schedule, schedule.nextFireAt);
-    if (result !== "ok") {
+    if (!result.ok) {
       console.error(`workflow scheduler: disabling ${schedule.id}: ${result.error}`);
       // Every disable records its reason, so the routine page can name the fix.
       const disabled = await db.update(workflowSchedules)
@@ -246,12 +259,13 @@ export class WorkflowScheduler {
     }
     await db
       .update(workflowSchedules)
-      .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now })
+      .set({ lastFiredAt: now, nextFireAt: next.at, updatedAt: now, ...landedColumns(result.landed) })
       .where(eq(workflowSchedules.id, schedule.id));
   }
 
   /** Manual fire from the API. Uses `now` as the slot (distinct idempotent
-   * runId per press), updates lastFiredAt, never moves nextFireAt, and
+   * runId per press), updates lastFiredAt and the thread the firing landed
+   * on, never moves nextFireAt, and
    * works on disabled schedules (firing by hand is how you test one).
    * Owner-scoped like every schedule read: a schedule the caller cannot
    * access answers `not_found`, so an org member cannot fire a colleague's
@@ -263,10 +277,10 @@ export class WorkflowScheduler {
     if (!schedule) return "not_found";
     const result = await this.dispatch(schedule, now);
     // A manual fire changes no state, so a dead pin is not counted here.
-    if (result !== "ok") return { error: result.error };
+    if (!result.ok) return { error: result.error };
     await db
       .update(workflowSchedules)
-      .set({ lastFiredAt: now, updatedAt: now })
+      .set({ lastFiredAt: now, updatedAt: now, ...landedColumns(result.landed) })
       .where(and(eq(workflowSchedules.id, scheduleId), eq(workflowSchedules.orgId, owner.orgId)));
     return "ok";
   }

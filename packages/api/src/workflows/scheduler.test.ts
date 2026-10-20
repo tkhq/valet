@@ -161,6 +161,52 @@ describe("WorkflowScheduler thread policy", () => {
     ]);
   });
 
+  it("records the thread each assistant firing landed on", async () => {
+    await seedPromptSchedule("sched-landed", null);
+    let landed = LANDED;
+    let clock = 1_000;
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async () => landed, now: () => clock,
+    });
+    const stored = async () => {
+      const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-landed"));
+      return { sessionId: row?.lastFiredSessionId, threadId: row?.lastFiredThreadId };
+    };
+    await scheduler.tick();
+    expect(await stored()).toEqual(LANDED);
+    // A later firing on another thread replaces the record, by the poll loop and by Fire.
+    landed = { sessionId: "sess-2", threadId: "thr-2" };
+    clock = 10_000_000;
+    await scheduler.tick();
+    expect(await stored()).toEqual({ sessionId: "sess-2", threadId: "thr-2" });
+    landed = { sessionId: "sess-3", threadId: "thr-3" };
+    expect(await scheduler.fireNow({ userId: "user-1", orgId: "org-1" }, "sched-landed")).toBe("ok");
+    expect(await stored()).toEqual({ sessionId: "sess-3", threadId: "thr-3" });
+  });
+
+  it("records no thread for a workflow firing", async () => {
+    await db.insert(workflowDefinitions).values({
+      id: "wf-landed", orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Nightly",
+      definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: 100, updatedAt: 100,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched-wf-landed", orgId: "org-1", ownerType: "user", ownerId: "user-1", targetKind: "workflow",
+      workflowId: "wf-landed", name: "Nightly", cron: "0 * * * *", timezone: "UTC", enabled: true,
+      nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+    });
+    const host = new RecordingRunHost();
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: host,
+      deliverToAssistant: async () => LANDED, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(host.started).toHaveLength(1);
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-wf-landed"));
+    expect(row?.lastFiredAt).toBe(1_000);
+    expect([row?.lastFiredSessionId, row?.lastFiredThreadId]).toEqual([null, null]);
+  });
+
   it("keys a new-policy firing on its slot", async () => {
     await seedPromptSchedule("sched-new", { mode: "new" });
     const destinations: DeliveryDestination[] = [];
