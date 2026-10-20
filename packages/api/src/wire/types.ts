@@ -878,6 +878,9 @@ export interface ThreadSummary {
   key?: string;
   /** When the viewer last read this thread. */
   readAt?: number;
+  /** Set on a team thread that a person wrote in. False when the viewer is
+   * not one of them: its replies then do not show as unread to the viewer. */
+  participant?: boolean;
   /** Time of the newest assistant message. Later than `readAt` means unread. */
   lastAgentActivityAt?: number;
   /** The question the newest assistant message asks, as plain text. It waits on
