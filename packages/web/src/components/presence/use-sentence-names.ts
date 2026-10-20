@@ -24,7 +24,10 @@ export function channelNames(places: readonly Pick<PresencePlaceWire, "subject" 
   for (const place of places) {
     const id = SLACK_CHANNEL_SUBJECT_RE.exec(place.subject)?.[1];
     const name = place.label.trim().replace(/^#/, "");
-    if (id !== undefined && name.length > 0) channels[id] = name;
+    // A place whose label is its own id has no name: the api falls back to
+    // the id when Slack cannot name the channel. Recording it would print
+    // the id as `#C0AK0T8KPPY`; the raw id is the right fallback.
+    if (id !== undefined && name.length > 0 && name !== id) channels[id] = name;
   }
   return channels;
 }
