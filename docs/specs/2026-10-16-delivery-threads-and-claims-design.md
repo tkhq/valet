@@ -467,3 +467,5 @@ event wakeups spec Part A.
   B here.
 - Workflow triggers UI: assistant-prompt schedules carry a thread policy
   (Part A step 2).
+
+- **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked.

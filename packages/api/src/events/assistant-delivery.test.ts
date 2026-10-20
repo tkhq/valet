@@ -187,7 +187,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     engineHost.evictCache(original.id);
     for (let retry = 0; retry < 2; retry++) {
       await deliverToAssistantThread(deps, {
-        orgId: ORG, owner, actorUserId: USER, destination: { kind: "key", key: "slack-events:C1" }, signal,
+        orgId: ORG, owner, actorUserId: USER, destination: { kind: "key", key: "sub:rule-unattended:delivery-2" }, signal,
         dispatchId: "event:cutover-delivery", mismatchReason: "event_target_mismatch",
       });
       engineHost.evictCache(original.id);
