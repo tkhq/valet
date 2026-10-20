@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTokens, formatUsd, formatUsdPrecise } from "./format-usage";
+import { formatTokens, formatTurns, formatUsd, formatUsdPrecise } from "./format-usage";
 
 describe("formatTokens", () => {
   it("formats across magnitudes", () => {
@@ -32,5 +32,13 @@ describe("formatUsd", () => {
     expect(formatUsd(3.456)).toBe("$3.46");
     expect(formatUsd(42.9)).toBe("$43");
     expect(formatUsd(1500)).toBe("$1.5k");
+  });
+});
+
+describe("formatTurns", () => {
+  it("names one turn in the singular", () => {
+    expect(formatTurns(1)).toBe("1 turn");
+    expect(formatTurns(0)).toBe("0 turns");
+    expect(formatTurns(1204)).toBe(`${(1204).toLocaleString()} turns`);
   });
 });

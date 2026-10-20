@@ -5,7 +5,7 @@ import type { UsageMemberSummary, UsageWindow } from "@valet/api/wire";
 import { api } from "~/api/client";
 import { useMe } from "~/api/settings";
 import { Spinner, cardClass } from "~/components/primitives";
-import { formatTokens, formatUsd } from "~/lib/format-usage";
+import { formatTokens, formatTurns, formatUsd } from "~/lib/format-usage";
 import { cn } from "~/lib/cn";
 
 /**
@@ -182,7 +182,7 @@ function WindowStat({ label, window: w }: { label: string; window: UsageWindow }
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
       <div className="mt-0.5 font-display text-lg text-ink leading-tight">{cost.text}</div>
       <div className="text-[10px] text-muted tabular-nums">
-        {formatTokens(w.totalTokens)} tok · {w.turns} turns
+        {formatTokens(w.totalTokens)} tok · {formatTurns(w.turns)}
       </div>
       {cost.note && <div className="text-[10px] text-muted">{cost.note}</div>}
     </div>
@@ -220,7 +220,7 @@ function MemberBar({
         className="w-16 text-right tabular-nums text-muted"
         title={
           cost.note
-            ? `${member.unpricedTurns} of ${member.turns} turns had no price`
+            ? `${member.unpricedTurns} of ${formatTurns(member.turns)} had no price`
             : undefined
         }
       >
