@@ -2331,6 +2331,8 @@ export interface SessionStore {
    * read that lists every running event waiter (INV-E6).
    */
   findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]>;
+  /** Bind an unbound branch waiter once. Preserve its buffer and replay keys. */
+  bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null>;
   /**
    * Appends `digest` to the event wakeup's `eventBuffer` and sets
    * `updatedAt`, in one statement. It appends only to a `running` event

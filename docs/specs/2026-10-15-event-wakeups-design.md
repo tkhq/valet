@@ -192,6 +192,7 @@ keeps its behavior.
 | GitHub | owner | `github:<owner>` |
 | GitHub | repository | `github:<owner>/<repo>` |
 | GitHub | pull request or issue | `github:<owner>/<repo>#<number>` |
+| GitHub | branch | `github:<owner>/<repo>:branch/<branch>` |
 | GitHub | commit | `github:<owner>/<repo>@<full sha>` |
 | Slack | workspace | `slack:<team>` |
 | Slack | channel | `slack:<team>/<channel>` |
@@ -468,6 +469,8 @@ wait_for_event({
   subject: string,         // URL or subject (A1, A5)
   on: Clause[],            // 1 to 8
   once?: boolean,          // default true
+  evaluate_current?: boolean, // default true
+  end_on_close?: boolean,     // default true
   reason: string,          // 1 to 200 characters
   max_hours: number,       // 1 to timerMaxHours
   min_interval_seconds?: number, // stream mode only; 30 to 3600
@@ -551,7 +554,7 @@ D1 errata (Task 11):
 - R3 for Linear needs the session's own Linear credential. The org's
   app-actor token (`grant = client_credentials`) does not count.
 - R5 also refuses `github.pull_request.checks_completed` unless the
-  subject is a pull request: `[wait_for_event] <key> needs a pull request
+  subject is a pull request or branch: `[wait_for_event] <key> needs a pull request
   subject. Pass the pull request URL.` An issue number gets the same text
   after R3's read.
 - R1 also refuses a GitHub owner alone (`github:acme`). The tool supports
@@ -760,6 +763,87 @@ An event waiter follows the rule for timers:
   timer bound keeps the child unsettled.
 - Event waiters on hidden threads are counted and never named.
 
+### F3. Current state at arm time
+
+A derived key MAY declare `evaluateOnArm(ctx, subject)`.
+After the waiter is stored, arm calls each named hook once.
+`evaluate_current: false` skips these calls.
+The hook reads the subject's current state.
+For `checks_completed`, the hook evaluates the current PR head through the normal deriver.
+A result that passes the derived clause's status filters enters the normal digest buffer.
+The WakeWatcher uses the same once and stream rules for this digest.
+A pending result, `null`, or an error leaves the waiter armed.
+Errors appear in the log.
+
+The hook returns the same output key as webhook derivation for the same completion.
+The buffer and lifetime seen keys therefore dedupe an arm result against a later webhook.
+This check evaluates provider state, not a history of earlier events.
+
+### F4. Branch subjects and PR binding
+
+A branch URL has the form `https://github.com/<owner>/<repo>/tree/<branch>`.
+Its subject is `github:<owner>/<repo>:branch/<branch>`.
+Owner and repository names use lower case.
+Branch names keep their case and can contain slashes.
+Branch subjects belong to the repository in Presence.
+
+Arm stores the branch waiter before it searches for an open PR on that head branch.
+The search uses the session's credential.
+It accepts only a head repository that equals the subject's repository.
+An existing open PR binds the waiter at once.
+Current-state evaluation then uses that PR.
+A branch with no open PR stays armed.
+The tool result states that the wait will bind when a PR opens.
+
+An `opened` or `reopened` event can bind an unbound branch waiter through its normalized branch subject.
+This binding runs before clause matching, including when no clause names the opening event.
+An atomic store write adds the PR and repository subjects.
+It makes the PR the primary subject and preserves the branch subject.
+The first binding wins.
+Repeated bindings leave the row unchanged.
+The log records each successful binding.
+Direct clauses then match the bound PR.
+Derived sources can also reach it through the repository subject.
+Until binding, `checks_completed` has no PR to evaluate and returns `null`.
+
+GitHub normalization adds branch subjects from PR heads, check suites, workflow runs, and push branch refs.
+Check runs use their check suite's head branch.
+PR and workflow heads from another repository add no branch subject for the base repository.
+An opening event from a fork therefore cannot bind the waiter.
+Binding preserves buffered digests and lifetime seen keys.
+Later events use the existing digest dedupe rules.
+
+Branch and PR waits also require the App's `pull_request` event and `pull_requests` read permission.
+The other readiness and visibility checks stay in force.
+No new storage columns are required.
+The added match fields remain optional for existing rows.
+
+### F5. PR closure
+
+A PR waiter watches its PR's `github.pull_request.closed` event by default.
+This includes a waiter that binds through a branch.
+`end_on_close: false` disables this implicit watch.
+Explicit clauses keep their normal behavior with this option.
+
+A close event replaces pending buffered work with a final close digest.
+This write reserves the final digest even when the buffer is full.
+The digest has status `merged` or `closed`.
+For a merged PR, the digest also carries `merge_commit_sha`.
+The WakeWatcher sends the final `event.matched` signal in once and stream modes.
+It then sends `event.ended` with cause `subject_closed`.
+This terminal path skips the stream interval and rate window.
+The ending message names the outcome and merge SHA when present.
+It states that later pushes to that branch will not be watched.
+The terminal CAS prevents a duplicate close event from sending another ending.
+
+Arm refuses a PR that is already closed or merged.
+The refusal names the outcome and merge SHA when present.
+It tells the agent to arm on the branch or on a new PR instead.
+A branch whose earlier PR is closed stays armed for an open PR.
+A reopened PR can bind that unbound branch waiter.
+A waiter that already ended stays ended after a reopen.
+A close event for another PR leaves the waiter unchanged.
+
 ## Part G: Subscriptions
 
 *Depends on: Part A.*
@@ -805,9 +889,9 @@ deployment has a public URL:
 > This thread's link is <thread link>. Post it when you announce work in a
 > channel, so people can follow the thread.
 
-The tool description carries four recipes: CI (Scenario A), a Slack reply
-(Scenario B), a Linear triage shift (Scenario C), and a reply on a Linear
-issue. It states that standing, unbounded watching is a subscription, so an
+The tool description carries five recipes: CI (Scenario A), a Slack reply
+(Scenario B), a Linear triage shift (Scenario C), a reply on a Linear
+issue, and a PR that opens after a branch wait arms. It states that standing, unbounded watching is a subscription, so an
 agent asked to "always" watch something proposes one.
 
 ## Part J: Observability
@@ -855,9 +939,9 @@ hour, with the first-series pattern of the wakeups spec.
   the self check on its source event, because the agent's own push or CI
   run is the usual source. The derived event has no actor.
 - **INV-E9 A derive call runs only for a waiter that names the derived
-  key.** Mechanism: only the WakeWatcher calls `derive`, and only for a
-  digest marked `derive`. Vector: zero fixture API calls when no waiter
-  names the key.
+  key.** Mechanism: the WakeWatcher derives only digests marked `derive`.
+  Arm calls `evaluateOnArm` only for named derived keys.
+  Vector: zero fixture API calls when no waiter names the key.
 
 ## Testing
 
@@ -888,7 +972,7 @@ A v1 implementation MUST NOT ship these under this spec.
 | Fork pull request subjects on check events | Needs one API call per event | GitHub normalizer enrichment |
 | Workflow `waitForEvent` node | Workflows have parked runs | The `signal` subscription target |
 | Per-event visibility re-checks for GitHub and Linear | One provider call per event | Run D1's R3 read in the matcher |
-| More than one subject per waiter | No scenario needs it | The `subjects` column is already an array |
+| More than one input subject per waiter | Each wait starts from one object | Branch binding adds internal index subjects |
 | Org-visible threads from subscriptions | Widens thread sharing (#869) to team threads, a policy decision | A `thread_share` option on the subscription target |
 | Fork a thread into a personal workspace | Needs a transcript-prefix copy and a fork record | A fork action on a message, in the web and as a Slack shortcut |
 

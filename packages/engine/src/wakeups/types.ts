@@ -46,6 +46,8 @@ export interface EventMatchSpec {
    * the waiter counts.
    */
   primarySubject?: string;
+  /** False keeps a PR waiter running after the PR closes. */
+  endOnClose?: boolean;
   /**
    * Stream mode: the shortest gap between two `event.matched` signals (ms).
    * Absent means `WakeupLimits.watchMinIntervalMs`.
@@ -70,6 +72,9 @@ export interface EventMatchDigest {
   key: string;
   /** The commit evaluated by a derived completion. */
   head_sha?: string;
+  merge_commit_sha?: string;
+  /** An implicit PR close ends the waiter after this digest. */
+  subjectClosed?: boolean;
   status?: string;
   previousStatus?: string;
   subjects: string[];
@@ -98,7 +103,8 @@ export type WakeupCause =
   | "pid_missing"
   | "sandbox_unavailable"
   | "rate"
-  | "fired";
+  | "fired"
+  | "subject_closed";
 
 export interface Wakeup {
   id: string;
@@ -257,6 +263,8 @@ export interface WakeupsListing {
  * the raw input, a URL or a subject; the host's arm checks parse it.
  */
 export interface ArmEventRequest {
+  evaluateCurrent?: boolean;
+  endOnClose?: boolean;
   subject: string;
   on: EventClause[];
   once: boolean;

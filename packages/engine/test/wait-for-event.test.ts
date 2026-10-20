@@ -261,6 +261,26 @@ describe("waitForEventTool", () => {
     expect(result.text).toBe(refused);
   });
 
+  it("passes both opt-outs through the arm request", async () => {
+    const armEvent = vi.fn(async () => ({ wakeup: eventWakeup() }));
+    await waitForEventTool.execute({ ...VALID, evaluate_current: false, end_on_close: false }, makeCtx({ armEvent }));
+    expect(armEvent).toHaveBeenCalledWith("t1", expect.objectContaining({ evaluateCurrent: false, endOnClose: false }), undefined, stubCredentials);
+  });
+
+  it.each(["evaluate_current", "end_on_close"])("refuses a nonboolean %s", async (name) => {
+    const armEvent = vi.fn(async () => ({ wakeup: eventWakeup() }));
+    const result = await waitForEventTool.execute({ ...VALID, [name]: "false" }, makeCtx({ armEvent }));
+    expect(result.text).toBe(`[wait_for_event] Set ${name} to true or false.`);
+    expect(armEvent).not.toHaveBeenCalled();
+  });
+
+  it("states that an unbound branch wait will bind when a PR opens", async () => {
+    const branch = "github:acme/lean-proofs:branch/feat/nested";
+    const armEvent = vi.fn(async () => ({ wakeup: eventWakeup({ subjects: [branch] }) }));
+    const result = await waitForEventTool.execute({ ...VALID, subject: "https://github.com/acme/lean-proofs/tree/feat/nested" }, makeCtx({ armEvent }));
+    expect(result.text).toContain("The wait will bind when a PR opens.");
+  });
+
   it("includes an ingress-readiness warning in the arm tool result", async () => {
     const warning = "GitHub App delivery readiness could not be checked.";
     const armEvent = vi.fn(async () => ({ wakeup: eventWakeup(), warning }));

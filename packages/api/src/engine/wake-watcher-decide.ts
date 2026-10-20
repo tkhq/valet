@@ -590,6 +590,7 @@ export const EVENT_SIGNAL_MAX_BYTES = 64 * 1024;
 export function digestBlock(d: EventMatchDigest): string {
   const lines = [digestHeader(d), d.summary];
   if (d.url !== undefined) lines.push(d.url);
+  if (d.merge_commit_sha !== undefined) lines.push(`Merge commit: ${d.merge_commit_sha}`);
   if (d.text !== undefined && d.text !== "") lines.push(...d.text.split("\n").map((line) => `> ${line}`));
   return lines.join("\n");
 }
@@ -597,6 +598,7 @@ export function digestBlock(d: EventMatchDigest): string {
 /** One entry of the `digests` signal attribute: the digest without its text. */
 export interface EventDigestEntry {
   head_sha?: string;
+  merge_commit_sha?: string;
   key: string;
   status?: string;
   actor?: string;
@@ -608,6 +610,7 @@ function digestEntry(d: EventMatchDigest): EventDigestEntry {
   return {
     key: d.key,
     ...(d.head_sha !== undefined ? { head_sha: d.head_sha } : {}),
+    ...(d.merge_commit_sha !== undefined ? { merge_commit_sha: d.merge_commit_sha } : {}),
     ...(d.status !== undefined ? { status: d.status } : {}),
     ...(d.actor !== undefined ? { actor: d.actor } : {}),
     summary: d.summary,
@@ -787,6 +790,19 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
   if (match === undefined) return { to: "lost", patch: { endedAt: now }, signals: [], badRow: true };
   const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
   const pastDeadline = row.deadlineAt !== undefined && row.deadlineAt <= now;
+  const closed = ready.find((digest) => digest.subjectClosed);
+  if (closed) {
+    const outcome = closed.status === "merged" ? `merged${closed.merge_commit_sha ? ` at ${closed.merge_commit_sha}` : ""}` : "closed";
+    return {
+      to: "done", cause: "subject_closed",
+      patch: { cause: "subject_closed", endedAt: now, eventBuffer: [] },
+      signals: [eventMatchedSignal(row, [closed], row.eventCount + 1, false), {
+        signalType: "event.ended", dispatchId: `wakeup:${row.id}:terminal`,
+        attributes: { ...eventAttributes(row), cause: "subject_closed" },
+        body: `The PR was ${outcome}. Later pushes to that branch will not be watched. Arm on the branch or on a new PR instead.`,
+      }],
+    };
+  }
 
   if (match.once && ready.length > 0) {
     return {

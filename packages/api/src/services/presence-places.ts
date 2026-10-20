@@ -42,7 +42,7 @@ const EVENT_SCAN_LIMIT = 2000;
 const ACTIVITY_LIMIT = 50;
 
 const SLACK_RE = /^slack:([^/]+)(?:\/([^/]+)(?:\/[^/]+)?)?$/;
-const GITHUB_RE = /^github:([^/#@]+)\/([^/#@]+)(?:#(\d+)|@[0-9a-f]+)?$/i;
+const GITHUB_RE = /^github:([^/#@]+)\/([^/:#@]+)(?:#(\d+)|@[0-9a-f]+|:branch\/.+)?$/i;
 const LINEAR_TEAM_RE = /^linear:team\/([A-Za-z0-9_-]+)$/;
 const LINEAR_ISSUE_RE = /^linear:(?!team\/)([A-Za-z0-9_-]+)$/;
 

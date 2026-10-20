@@ -46,11 +46,12 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
     occurredAt: stripNul(digest.occurredAt),
     dedupeKey: stripNul(digest.dedupeKey),
   };
-  const optional = ["status", "previousStatus", "url", "actor", "derive", "head_sha"] as const;
+  const optional = ["status", "previousStatus", "url", "actor", "derive", "head_sha", "merge_commit_sha"] as const;
   for (const field of optional) {
     const value = digest[field];
     if (value !== undefined) out[field] = stripNul(value);
   }
+  if (digest.subjectClosed === true) out.subjectClosed = true;
   if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
   return out;
 }

@@ -1559,6 +1559,19 @@ export class PgSessionStore implements SessionStore {
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
   }
 
+  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null> {
+    const result = await this.db.query(
+      `UPDATE engine_wakeups SET
+         subjects = ARRAY[$3::text] || array_remove(subjects, $3::text) || CASE WHEN $4 = ANY(subjects) THEN '{}'::text[] ELSE ARRAY[$4::text] END,
+         match_json = jsonb_set(match_json::jsonb, '{primarySubject}', to_jsonb($3::text))::text,
+         updated_at = $5
+       WHERE id = $1 AND kind = 'event' AND status = 'running'
+         AND match_json::jsonb->>'primarySubject' = $2
+       RETURNING *`, [id, branch, pullRequest, repository, updatedAt],
+    );
+    return result.rows[0] ? rowToWakeup(rawToWakeupRow(result.rows[0])) : null;
+  }
+
   async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
     if (subjects.length === 0) return [];
     // The partial GIN index engine_wakeups_event_subjects serves this read (INV-E6).

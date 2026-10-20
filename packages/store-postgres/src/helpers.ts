@@ -890,6 +890,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
   if (minIntervalMs !== undefined && (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)) {
     throw new Error(`${field}.minIntervalMs is not a non-negative number`);
   }
+  const endOnClose = optBoolean(parsed, "endOnClose", field);
   const primarySubject = parsed.primarySubject;
   if (primarySubject !== undefined && typeof primarySubject !== "string") {
     throw new Error(`${field}.primarySubject is not a string`);
@@ -900,6 +901,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     self: parsed.self,
     ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
     ...(primarySubject !== undefined ? { primarySubject } : {}),
+    ...(endOnClose !== undefined ? { endOnClose } : {}),
   };
 }
 
@@ -907,7 +909,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
 function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
   if (!isRecord(v)) throw new Error(`${field} is not an object`);
   if (!isStringArray(v.subjects)) throw new Error(`${field}.subjects is not a string array`);
-  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha"] as const;
+  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha", "merge_commit_sha"] as const;
   const out: EventMatchDigest = {
     key: reqString(v, "key", field),
     subjects: v.subjects,
@@ -915,6 +917,8 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
     occurredAt: reqString(v, "occurredAt", field),
     dedupeKey: reqString(v, "dedupeKey", field),
   };
+  const subjectClosed = optBoolean(v, "subjectClosed", field);
+  if (subjectClosed !== undefined) out.subjectClosed = subjectClosed;
   for (const key of optional) {
     const value = optString(v, key, field);
     if (value !== undefined) out[key] = value;
@@ -946,7 +950,7 @@ function isWakeupStatus(v: string): v is WakeupStatus {
 }
 
 function isWakeupCause(v: string): v is WakeupCause {
-  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired", "subject_closed"].includes(v);
 }
 
 export function rowToWakeup(row: WakeupRow): Wakeup {

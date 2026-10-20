@@ -1,7 +1,7 @@
 /**
  * GitHub derived events (spec: docs/specs/2026-10-15-event-wakeups-design.md,
- * Part B). Ingest never calls `derive`. Only the WakeWatcher does, for a match
- * digest that a clause on the derived key produced (INV-E9).
+ * Part B). The WakeWatcher derives matched sources. The arm hook uses
+ * the same deriver with the current PR head (INV-E9).
  */
 import { DerivePermissionError, type DeriveContext, type DerivedEventDef, type NormalizedEvent } from "@valet/engine";
 import { resolveGithubApiUrl } from "./actions/api.js";
@@ -153,8 +153,23 @@ export const checksCompleted: DerivedEventDef = {
     "github.workflow_run.completed",
     "github.status",
   ],
+  async evaluateOnArm(ctx, subject) {
+    const pr = parsePullRequestSubject(subject);
+    if (!pr) return null;
+    const token = await ctx.appToken();
+    if (!token) throw new Error("GitHub App access is missing. Connect GitHub in Settings.");
+    const pull = rec(await getJson(ctx, token, `/repos/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/pulls/${pr.number}`));
+    const sha = str(rec(pull?.head)?.sha);
+    if (!sha) return null;
+    return checksCompleted.derive(ctx, subject, {
+      key: CHECKS_COMPLETED_KEY, dedupeKey: "arm", occurredAt: new Date().toISOString(),
+      refs: {}, summary: "Current PR checks", payload: null,
+      subjects: [`github:${pr.owner}/${pr.repo}@${sha}`],
+    });
+  },
   async derive(ctx, subject, source) {
     const pr = parsePullRequestSubject(subject);
+    if (!pr && subject.includes(":branch/")) return null;
     if (!pr) {
       throw new Error(`${CHECKS_COMPLETED_KEY} needs a pull request subject such as github:owner/repo#42, not "${subject}".`);
     }

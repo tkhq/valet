@@ -838,6 +838,22 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(rows[0]?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
       });
 
+      it("binds a branch once and preserves buffered and seen digests", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/nested";
+        await store.createWakeup(eventWaiter({ subjects: [branch],
+          eventMatch: { clauses: [{ key: "github.pull_request.checks_completed" }], once: false, self: [], primarySubject: branch, endOnClose: false },
+          eventBuffer: [digest({ merge_commit_sha: "b".repeat(40), subjectClosed: true })], eventSeen: ["seen"],
+        }));
+        const row = await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#42", "github:acme/lean-proofs", 30);
+        expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", branch, "github:acme/lean-proofs"]);
+        expect(row?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
+        expect(row?.eventMatch?.endOnClose).toBe(false);
+        expect(row?.eventBuffer).toEqual([digest({ merge_commit_sha: "b".repeat(40), subjectClosed: true })]);
+        expect(row?.eventSeen).toEqual(["seen"]);
+        expect(await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", "github:acme/lean-proofs", 31)).toBeNull();
+        expect((await store.findEventWaiters(["github:acme/lean-proofs#42"])).map((w) => w.id)).toEqual(["wk_ev"]);
+      });
+
       it("findEventWaiters returns running event rows that share a subject", async () => {
         await store.createWakeup(eventWaiter());
         await store.createWakeup(eventWaiter({ id: "wk_other", subjects: ["github:acme/other#1"] }));

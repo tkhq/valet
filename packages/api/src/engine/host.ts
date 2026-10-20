@@ -46,6 +46,7 @@ import {
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
 import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
@@ -404,6 +405,8 @@ export interface EngineHostOpts {
    * at all: sessions read credentials straight from the store as before.
    * Same shape/`key` `ActionInvokerOpts.githubTokenDeps` uses.
    */
+  /** Wake the event delivery pass after an arm-time match. */
+  nudgeEventWaiters?: (ids: string[]) => void;
   githubTokenDeps?: {
     key: Buffer;
     apiUrl?: string;
@@ -2589,12 +2592,20 @@ export class EngineHost {
     armFor?: { orgId: string; owner: Principal },
   ): { wakeups: WakeupsSeam } {
     const checkArm = armFor ? this.armChecks(sessionId, armFor.orgId, armFor.owner) : undefined;
+    const db = this.opts.db;
+    const tokenDeps = this.opts.githubTokenDeps;
+    const plugins = this.opts.plugins ?? [];
+    const derive = db && tokenDeps ? productionEventWaiterDeriver({ db, plugins,
+      githubTokenDeps: { ...tokenDeps, db, credentials: this.opts.engineCredentials },
+    }) : undefined;
     return {
       wakeups: buildWakeupsSeam(
         {
           ...wakeupsSeamDeps(this.opts),
           scratchBytes: () => sessionScratchBytes(getSession),
+          nudge: (ids) => this.opts.nudgeEventWaiters?.(ids),
           ...(checkArm ? { checkArm } : {}),
+          ...(derive ? { evaluateEvent: derive } : {}),
         },
         sessionId,
         getSession,

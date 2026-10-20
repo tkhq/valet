@@ -94,6 +94,21 @@ export function githubEventSubjects(eventType: string, payload: Record<string, u
     subjects.push(`github:${owners.ownerRepo}`);
     for (const n of numbersOf(payload)) subjects.push(`github:${owners.ownerRepo}#${n}`);
     for (const sha of shasOf(payload)) subjects.push(`github:${owners.ownerRepo}@${sha}`);
+    const prHead = rec(rec(payload.pull_request)?.head);
+    const suite = rec(rec(payload.check_run)?.check_suite) ?? rec(payload.check_suite);
+    const workflow = rec(payload.workflow_run);
+    let branch: string | undefined;
+    if (prHead) {
+      if (str(rec(prHead.repo)?.full_name)?.toLowerCase() === owners.ownerRepo) branch = str(prHead.ref);
+    } else if (workflow) {
+      if (str(rec(workflow.head_repository)?.full_name)?.toLowerCase() === owners.ownerRepo) branch = str(workflow.head_branch);
+    } else if (suite) {
+      const headRepo = str(rec(suite.head_repository)?.full_name);
+      if (!headRepo || headRepo.toLowerCase() === owners.ownerRepo) branch = str(suite.head_branch);
+    } else if (eventType === "push" && str(payload.ref)?.startsWith("refs/heads/")) {
+      branch = str(payload.ref)?.slice("refs/heads/".length);
+    }
+    if (branch) subjects.push(`github:${owners.ownerRepo}:branch/${branch}`);
   }
 
   const bot = str(rec(payload.sender)?.type) === "Bot";
@@ -106,6 +121,12 @@ const SUBJECT_RE = /^github:[^/#@]+(?:\/[^/#@]+(?:#\d+|@[0-9a-f]+)?)?$/i;
 const URL_RE = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\/(pull|issues|commit)\/([^/?#]+))?\/?$/i;
 
 function fromUrl(url: string): { subject: string; slackChannel?: string } | null {
+  const branch = /^(?:https:\/\/github\.com\/|github:)([^/]+)\/([^/:]+)(?:\/tree\/|:branch\/)([^?#\s]+)$/.exec(url);
+  if (branch) {
+    let ref: string;
+    try { ref = decodeURIComponent(branch[3]!); } catch { return null; }
+    return { subject: `github:${branch[1]!.toLowerCase()}/${branch[2]!.toLowerCase()}:branch/${ref}` };
+  }
   if (url.startsWith("github:")) {
     return SUBJECT_RE.test(url) ? { subject: url } : null;
   }
@@ -130,6 +151,8 @@ function label(subject: string): string {
 function url(subject: string): string | null {
   if (!subject.startsWith("github:")) return null;
   const rest = subject.slice("github:".length);
+  const branch = /^([^/]+)\/([^/:]+):branch\/(.+)$/.exec(rest);
+  if (branch) return `https://github.com/${branch[1]}/${branch[2]}/tree/${branch[3]!.split("/").map(encodeURIComponent).join("/")}`;
   const prMatch = /^([^/#@]+)\/([^/#@]+)#(\d+)$/.exec(rest);
   if (prMatch) return `https://github.com/${prMatch[1]}/${prMatch[2]}/pull/${prMatch[3]}`;
   const shaMatch = /^([^/#@]+)\/([^/#@]+)@([0-9a-f]+)$/i.exec(rest);

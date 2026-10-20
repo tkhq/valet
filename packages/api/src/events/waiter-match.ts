@@ -209,6 +209,10 @@ export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDig
     dedupeKey: derive !== undefined ? `derive:${derive}:${event.dedupeKey}` : event.dedupeKey,
   };
   if (typeof event.refs.head_sha === "string") digest.head_sha = event.refs.head_sha;
+  const pull = asRecord(asRecord(event.payload)?.pull_request);
+  if (event.key === "github.pull_request.closed" && pull?.merged === true && typeof pull.merge_commit_sha === "string") {
+    digest.merge_commit_sha = pull.merge_commit_sha;
+  }
   if (event.status !== undefined) digest.status = event.status;
   if (event.previousStatus !== undefined) digest.previousStatus = event.previousStatus;
   if (event.actor?.login !== undefined) digest.actor = event.actor.login;

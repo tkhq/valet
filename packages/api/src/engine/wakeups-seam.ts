@@ -21,6 +21,8 @@ import type {
 import { newExecId, newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
 import { DEFAULT_JOB_LOG_MAX_BYTES } from "../providers/sandbox-backend.js";
 import type { ArmCheckResult } from "../events/waiter-arm.js";
+import type { EventWaiterDerive } from "../events/derive.js";
+import { derivedClausesAccept } from "../events/waiter-match.js";
 import { isSandboxGone } from "./wakeups-admin.js";
 
 /**
@@ -64,6 +66,9 @@ export interface WakeupsSeamDeps {
    */
   scratchBytes?: () => number | undefined;
   now?: () => number;
+  /** Evaluate plugin hooks after the checked waiter is stored. */
+  evaluateEvent?: EventWaiterDerive;
+  nudge?: (ids: string[]) => void;
   /**
    * Runs the `wait_for_event` arm checks (spec 2026-10-15, Part D1) for
    * this session. Absent for a workflow run: the seam then has no
@@ -389,11 +394,38 @@ export function buildWakeupsSeam(
         clauses: req.on,
         once: req.once,
         self: checked.self,
+        ...(req.endOnClose !== undefined ? { endOnClose: req.endOnClose } : {}),
         ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
         ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
         const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+        if (checked.resolveBranch) {
+          const branch = checked.primarySubject;
+          const pullRequest = await checked.resolveBranch();
+          if (branch && pullRequest) {
+            const repository = branch.split(":branch/")[0]!;
+            const bound = await engineStore.bindEventWaiter(result.wakeup.id, branch, pullRequest, repository, now());
+            if (bound) console.info("[event-waiters] bound branch", { waiterId: bound.id, branch, pullRequest });
+          }
+          // A webhook can bind the row while the lookup runs.
+          result.wakeup = await engineStore.getWakeup(result.wakeup.id) ?? result.wakeup;
+        }
+        if (req.evaluateCurrent !== false && deps.evaluateEvent) {
+          for (const key of new Set(req.on.map((clause) => clause.key))) {
+            const source = { key, derive: key, dedupeKey: `arm:${key}`, subjects: result.wakeup.subjects ?? [],
+              summary: "Current subject state", occurredAt: new Date(now()).toISOString() };
+            try {
+              const outcome = await deps.evaluateEvent(result.wakeup, source, true);
+              if (outcome.result === "error") console.warn("[event-waiters] arm evaluation failed", { waiterId: result.wakeup.id, key }, outcome.error);
+              if (outcome.result === "event" && outcome.digest.status !== "pending" && derivedClausesAccept(match, key, outcome.digest)) {
+                if (await engineStore.appendEventMatch(result.wakeup.id, outcome.digest, now())) deps.nudge?.([result.wakeup.id]);
+              }
+            } catch (error) {
+              console.warn("[event-waiters] arm evaluation failed", { waiterId: result.wakeup.id, key }, error);
+            }
+          }
+        }
         return { ...result, ...(checked.warning ? { warning: checked.warning } : {}) };
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };

@@ -391,6 +391,17 @@ export class InMemorySessionStore implements SessionStore {
     return copyWakeup(next);
   }
 
+  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null> {
+    const row = this.wakeups.get(id);
+    if (!row || row.kind !== "event" || row.status !== "running" || row.eventMatch?.primarySubject !== branch) return null;
+    const next = copyWakeup({ ...row, updatedAt,
+      subjects: [...new Set([pullRequest, ...(row.subjects ?? []), repository])],
+      eventMatch: { ...row.eventMatch, primarySubject: pullRequest },
+    });
+    this.wakeups.set(id, next);
+    return copyWakeup(next);
+  }
+
   async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
     const wanted = new Set(subjects);
     return [...this.wakeups.values()]

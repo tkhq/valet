@@ -492,7 +492,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let wakeWatcherRef: WakeWatcher | undefined;
   const engineHost = new EngineHost({
+    nudgeEventWaiters: (ids) => wakeWatcherRef?.nudge(ids),
     engineStore,
     sandboxProvider,
     eventStream,
@@ -628,6 +630,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       ? { jobLogDir: "/tmp/valet-jobs" }
       : {}),
   });
+
+  wakeWatcherRef = wakeWatcher;
 
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
   // security runner that stopped with work remaining; a stall cap alerts the
