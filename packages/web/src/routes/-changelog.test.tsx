@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cn } from "~/lib/cn";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type { ChangelogEntry, GetChangelogResponse } from "@valet/api/wire";
 
@@ -51,11 +53,12 @@ function setPagedData(): void {
 }
 
 let changelogPending = false;
+let changelogError = false;
 let searchParams: Record<string, unknown> = {};
 const navigate = vi.fn();
 
 vi.mock("~/api/changelog", () => ({
-  useChangelog: () => ({ data: changelogPending ? undefined : data, isPending: changelogPending, isError: false }),
+  useChangelog: () => ({ data: changelogPending ? undefined : data, isPending: changelogPending, isError: changelogError }),
 }));
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "user-1" } }),
@@ -79,6 +82,7 @@ describe("ChangelogPage", () => {
     window.localStorage.clear();
     data = makeData();
     changelogPending = false;
+    changelogError = false;
     searchParams = {};
     navigate.mockReset();
   });
@@ -138,7 +142,7 @@ describe("ChangelogPage", () => {
     expect(screen.queryAllByText("New")).toHaveLength(0);
   });
 
-  it("restores filters and search from a shared URL", () => {
+  it("restores filters and search from a shared URL", async () => {
     searchParams = { category: "fix" };
     const view = render(<ChangelogPage />);
     expect(screen.getByText("Repair login")).toBeTruthy();
@@ -146,13 +150,13 @@ describe("ChangelogPage", () => {
 
     searchParams = { q: "missing" };
     view.rerender(<ChangelogPage />);
-    expect(screen.getByText("No changes match these filters.")).toBeTruthy();
+    expect(await screen.findByText("No changes match these filters.")).toBeTruthy();
   });
 
   it("writes control changes to the URL and resets the page", async () => {
     searchParams = { page: 2 };
     render(<ChangelogPage />);
-    fireEvent.change(screen.getByLabelText("Filter by change type"), { target: { value: "fix" } });
+    fireEvent.change(screen.getByLabelText("Change type"), { target: { value: "fix" } });
     expect(lastNavigationSearch()).toMatchObject({ category: "fix", page: undefined });
 
     fireEvent.change(screen.getByLabelText("Sort releases"), { target: { value: "oldest" } });
@@ -198,7 +202,7 @@ describe("ChangelogPage", () => {
     expect(screen.getByRole("heading", { level: 2, name: "1.0.0" })).toBeTruthy();
   });
 
-  it("highlights only newly added unreleased entries until the next visit under StrictMode", async () => {
+  it("marks only newly added unreleased entries until the next visit under StrictMode", async () => {
     data.manifest.checkpoints.unshift({
       kind: "unreleased",
       id: "unreleased@def123456789",
@@ -221,9 +225,11 @@ describe("ChangelogPage", () => {
       </StrictMode>,
     );
     const newEntry = screen.getByText("Added after visit").closest("li");
-    expect(newEntry?.className).toContain("border-accent-500");
-    expect(within(newEntry as HTMLElement).getByText("New")).toBeTruthy();
-    expect(screen.getByText("Already seen").closest("li")?.className).not.toContain("border-accent-500");
+    if (!newEntry) throw new Error("The new entry must render in a list row.");
+    expect(within(newEntry).getByText("New")).toBeTruthy();
+    const seenEntry = screen.getByText("Already seen").closest("li");
+    if (!seenEntry) throw new Error("The seen entry must render in a list row.");
+    expect(within(seenEntry).queryByText("New")).toBeNull();
 
     searchParams = { q: "Added after" };
     firstVisit.rerender(
@@ -231,7 +237,9 @@ describe("ChangelogPage", () => {
         <ChangelogPage />
       </StrictMode>,
     );
-    expect(screen.getByText("Added after visit").closest("li")?.className).toContain("border-accent-500");
+    const filteredEntry = screen.getByText("Added after visit").closest("li");
+    if (!filteredEntry) throw new Error("The filtered entry must render in a list row.");
+    expect(within(filteredEntry).getByText("New")).toBeTruthy();
 
     await waitFor(() => {
       expect(JSON.parse(window.localStorage.getItem("valet:changelog-seen:user-1") ?? "")).toMatchObject({
@@ -242,8 +250,155 @@ describe("ChangelogPage", () => {
     firstVisit.unmount();
 
     render(<ChangelogPage />);
-    expect(screen.getByText("Added after visit").closest("li")?.className).not.toContain("border-accent-500");
     expect(screen.queryAllByText("New")).toHaveLength(0);
+  });
+
+  it("labels the filters and keeps them in keyboard order", async () => {
+    const user = userEvent.setup();
+    render(<ChangelogPage />);
+
+    const filters = screen.getByRole("group", { name: "Changelog filters" });
+    const search = within(filters).getByLabelText("Search changes");
+    const category = within(filters).getByLabelText("Change type");
+    const sort = within(filters).getByLabelText("Sort releases");
+    expect(category).toBe(screen.getByRole("combobox", { name: "Change type" }));
+    expect(sort).toBe(screen.getByRole("combobox", { name: "Sort releases" }));
+    search.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(category);
+    await user.tab();
+    expect(document.activeElement).toBe(sort);
+  });
+
+  it("keeps long entry text, timestamps, and source links available", () => {
+    const entry = change("LongTitle".repeat(30), "feature", "long123456789");
+    entry.description = "A long description with all details preserved. ".repeat(20);
+    entry.authoredAt = "2026-09-09T10:00:00Z";
+    data.manifest.checkpoints[0].entries = [entry];
+    render(<ChangelogPage />);
+
+    const row = screen.getByRole("heading", { level: 4, name: entry.title }).closest("li");
+    if (!row) throw new Error("The long entry must render in a list row.");
+    expect(within(row).getByText(entry.description.trim()).textContent).toBe(entry.description);
+    expect(row.querySelector("time")?.getAttribute("datetime")).toBe(entry.authoredAt);
+    expect(within(row).getByRole("link", { name: "PR #42" }).getAttribute("href")).toContain("/pull/42");
+    expect(within(row).getByRole("link", { name: "Commit long123456789" }).getAttribute("href")).toContain("/commit/long123456789");
+  });
+
+  it("announces loading and load errors", () => {
+    changelogPending = true;
+    const view = render(<ChangelogPage />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Loading changelog");
+    expect(status.querySelector("svg")?.closest('[aria-hidden="true"]')).toBeTruthy();
+    expect(screen.queryByLabelText("Loading", { selector: ':not([aria-hidden="true"] *)' })).toBeNull();
+
+    changelogPending = false;
+    changelogError = true;
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByRole("alert").textContent).toBe("Could not load the changelog. Reload the page to try again.");
+  });
+
+  it("keeps filters available for no matches and handles an empty manifest", async () => {
+    const view = render(<ChangelogPage />);
+    const status = screen.getByRole("status");
+    expect(status.textContent?.trim()).toBe("");
+    searchParams = { q: "missing" };
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByRole("status")).toBe(status);
+    await waitFor(() => expect(status.textContent).toContain("No changes match these filters."));
+    expect(screen.getAllByText("No changes match these filters.")).toHaveLength(1);
+    expect(status.className).not.toContain("sr-only");
+    expect(screen.getByRole("group", { name: "Changelog filters" })).toBeTruthy();
+
+    data.manifest.checkpoints = [];
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByText("No release checkpoints are available for this build.")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Changelog filters" })).toBeNull();
+  });
+
+  it("registers an empty live region before a direct no-match URL populates it", () => {
+    vi.useFakeTimers();
+    try {
+      searchParams = { q: "missing" };
+      render(<StrictMode><ChangelogPage /></StrictMode>);
+      const status = screen.getByRole("status");
+      expect(status.textContent?.trim()).toBe("");
+      expect(screen.queryByText("No changes match these filters.")).toBeNull();
+      act(() => vi.runOnlyPendingTimers());
+      expect(screen.getByRole("status")).toBe(status);
+      expect(within(status).getByText("No changes match these filters.")).toBeTruthy();
+      expect(screen.getAllByText("No changes match these filters.")).toHaveLength(1);
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("merges the mixed color without removing font size or line height", () => {
+    const color = "text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
+    for (const size of ["text-xs", "text-sm"]) {
+      expect(cn(size, "leading-6 text-muted", color)).toBe(`${size} leading-6 ${color}`);
+    }
+    data.manifest.checkpoints[0].entries[0].authoredAt = "2026-09-09T10:00:00Z";
+    render(<ChangelogPage />);
+    const subtitle = screen.getByText("Changes in rolling builds and released versions.");
+    const running = screen.getByText("Running commit").parentElement;
+    const category = screen.getByRole("heading", { level: 3, name: "Features" });
+    const releaseDate = screen.getByRole("region", { name: "1.0.0" }).querySelector("time");
+    const row = screen.getByText("Repair login").closest("li");
+    const metadata = row?.querySelector("time")?.parentElement;
+    for (const [element, size] of [
+      [subtitle, "text-sm"], [running, "text-xs"], [category, "text-xs"],
+      [releaseDate, "text-sm"], [metadata, "text-xs"],
+    ] as const) {
+      expect(element?.classList.contains(size)).toBe(true);
+      expect(element?.classList.contains(color)).toBe(true);
+      expect(element?.classList.contains("text-muted")).toBe(false);
+    }
+    expect(subtitle.classList.contains("leading-6")).toBe(true);
+    const filters = screen.getByRole("group", { name: "Changelog filters" });
+    const labels = filters.querySelectorAll("label");
+    expect(labels).toHaveLength(3);
+    for (const label of labels) {
+      expect(label.classList.contains("text-xs")).toBe(true);
+      expect(label.classList.contains(color)).toBe(true);
+      expect(label.classList.contains("text-muted")).toBe(false);
+    }
+    const search = screen.getByLabelText("Search changes");
+    expect(search.classList.contains(`placeholder:${color}`)).toBe(true);
+    expect(search.classList.contains("placeholder:text-muted")).toBe(false);
+    expect(search.classList.contains("text-sm")).toBe(true);
+    expect(search.classList.contains("max-sm:text-base")).toBe(true);
+  });
+
+  it("distinguishes latest-known build information from releases", () => {
+    data.artifact.status = "latest-known";
+    render(<ChangelogPage />);
+    const note = screen.getByRole("note", { name: "Build information" });
+    expect(note.textContent).toContain("This build has no release checkpoint.");
+    expect(note.className).toContain("border-l-moss");
+    expect(note.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("keeps page overrides for palette colors, mobile focus, and short link targets", () => {
+    data.manifest.checkpoints[0].entries[0].sources.pullRequest = 7;
+    render(<ChangelogPage />);
+    const copy = screen.getByRole("button", { name: "Copy running commit" });
+    expect(copy.className).toContain("dark:text-ink");
+    expect(copy.className).toContain("dark:hover:bg-moss-wash");
+    expect(copy.className).not.toContain("dark:hover:bg-neutral");
+    const search = screen.getByLabelText("Search changes");
+    expect(search.className).toContain("max-sm:focus-visible:ring-moss");
+    expect(search.className).not.toContain("max-sm:focus-visible:ring-moss-wash");
+    expect(search.className).not.toContain("max-sm:focus-visible:ring-4");
+    const link = screen.getByRole("link", { name: "PR #7" });
+    expect(link.className).toContain("max-sm:min-h-11");
+    expect(link.className).toContain("max-sm:min-w-11");
+    for (const badge of screen.getAllByText("New")) {
+      expect(badge.className).toContain("border-moss");
+    }
+    expect(screen.getByRole("group", { name: "Changelog filters" }).className).toContain("[@container(min-width:48rem)]");
   });
 
   it("shows an unreleased build with its links and empty state", () => {
