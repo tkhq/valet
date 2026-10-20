@@ -7,7 +7,7 @@ import { isUnusableOAuthCredential } from "../services/credential-resolution.js"
 import { PgCredentialStore } from "./credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { PgQueryable } from "@valet/store-postgres";
-import { OAuthRefreshingCredentialStore } from "./oauth-refreshing-credential-store.js";
+import { OAuthRefreshingCredentialStore, refreshErrorText } from "./oauth-refreshing-credential-store.js";
 
 const OWNER: CredentialOwner = { type: "user", id: "u1" };
 const NOW = 1_800_000_000_000;
@@ -143,6 +143,46 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
     // A 400 from the token endpoint is a refusal: the row can be replaced.
     expect(persisted?.metadata?.refreshRefused).toBe(true);
+  });
+
+  it("keeps the provider's refusal text with the tokens masked", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "at-secret", refreshToken: "rt-secret", expiresAt: NOW - 1 });
+    fake.tokenFailure = 400;
+    // Greenhouse echoes a malformed refresh token back in its message.
+    fake.tokenFailureBody = { message: "refresh_token=rt-secret does not contain a valid client ID suffix" };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    const got = await store.get(OWNER, "linear");
+    const persisted = await inner.get(OWNER, "linear");
+    expect(persisted?.metadata?.refreshError).toBe(
+      'MCP PKCE token refresh failed: 400 {"message":"refresh_token=[redacted] does not contain a valid client ID suffix"}',
+    );
+    expect(got?.metadata?.refreshError).toBe(persisted?.metadata?.refreshError);
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("rt-secret");
+    errors.mockRestore();
+  });
+
+  it("clears the failure stamps after a good refresh", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", {
+      type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1,
+      metadata: { refreshFailedAt: NOW - 1000, refreshRefused: true, refreshError: "400 invalid_grant" },
+    });
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "linear");
+    expect((await inner.get(OWNER, "linear"))?.metadata).toBeUndefined();
+  });
+
+  it("masks token fields in form and JSON shapes and caps the length", () => {
+    expect(refreshErrorText(new Error("bad: access_token=abc&code=xyz"), [])).toBe("bad: access_token=[redacted]&code=[redacted]");
+    expect(refreshErrorText(new Error('{"refresh_token": "abc", "error": "invalid_grant"}'), []))
+      .toBe('{"refresh_token": "[redacted]", "error": "invalid_grant"}');
+    expect(refreshErrorText(new Error(`token sk-1 leaked`), ["sk-1", undefined])).toBe("token [redacted] leaked");
+    expect(refreshErrorText(new Error("x".repeat(400)), [])).toHaveLength(301);
   });
 
   it("does not mark a temporary refresh failure as a refusal", async () => {

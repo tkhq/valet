@@ -328,6 +328,7 @@ async function toSummary(
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    refreshError: typeof metadata?.refreshError === "string" ? metadata.refreshError : undefined,
     dead: isDeadConnection(stored, Date.now()) ? true : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
     onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,

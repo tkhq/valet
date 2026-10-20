@@ -1855,7 +1855,7 @@ describe("team credential scope (TKAI-205)", () => {
         accessToken: "team-gh",
         scope: "team",
         teamId: team.id,
-        metadata: { login: "octo", identityOnly: true, refreshFailedAt: 1700000000000 },
+        metadata: { login: "octo", identityOnly: true, refreshFailedAt: 1700000000000, refreshError: "400 invalid_grant" },
       }),
     });
     expect(putDirect.status).toBe(200);
@@ -1882,6 +1882,7 @@ describe("team credential scope (TKAI-205)", () => {
           login: "octo",
           identityOnly: true,
           refreshFailedAt: 1700000000000,
+          refreshError: "400 invalid_grant",
         }),
         expect.objectContaining({ service: "linear", type: "api_key", onepasswordRef: "op://vault/item/field" }),
       ]),

@@ -7,7 +7,8 @@
  * routes through here (its refresh lives in services/github-tokens.ts) —
  * findOAuthDeclaration excludes it. Refresh failure stamps
  * metadata.refreshFailedAt (the health field the credential summary
- * already whitelists) and returns the stamped credential: the caller gets
+ * already whitelists) and metadata.refreshError (the provider's redacted
+ * refusal text) and returns the stamped credential: the caller gets
  * the provider's own 401, the UI shows the unhealthy badge, and a team read
  * can pass over the row on the same read (`isDeadConnection`).
  */
@@ -19,6 +20,25 @@ import { mcpOauthClients } from "../schema/index.js";
 import { findOAuthDeclaration, refreshAuthorizationCodeToken } from "../services/integration-oauth.js";
 
 const REFRESH_BUFFER_MS = 60_000;
+/** The longest refusal text kept on a credential. */
+const REFRESH_ERROR_MAX = 300;
+
+/**
+ * The provider's refusal, safe to store on the credential and to log. It masks
+ * the credential's own tokens and any token-like field, because a provider may
+ * echo the request: Greenhouse answers a malformed refresh token with that
+ * token in its message.
+ */
+export function refreshErrorText(err: unknown, secrets: Array<string | undefined>): string {
+  let text = err instanceof Error ? err.message : String(err);
+  for (const secret of secrets) {
+    if (secret) text = text.split(secret).join("[redacted]");
+  }
+  text = text
+    .replace(/\b(refresh_token|access_token|id_token|client_secret|code)=[^&\s"']+/gi, "$1=[redacted]")
+    .replace(/("(?:refresh_token|access_token|id_token|client_secret)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"');
+  return text.length > REFRESH_ERROR_MAX ? `${text.slice(0, REFRESH_ERROR_MAX)}…` : text;
+}
 
 interface Deps {
   db: AppQueryable;
@@ -84,19 +104,22 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
         });
       }
     } catch (err) {
-      console.error(`credential refresh failed for ${service}:`, err);
+      // The provider's own words name the cause (expired, revoked, already
+      // used), so the credential keeps them for the Integrations page.
+      const reason = refreshErrorText(err, [stored.refreshToken, stored.accessToken]);
+      console.error(`credential refresh failed for ${service}: ${reason}`);
       // Only the provider refusing the grant (400 or 401) makes the row dead
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
       // failure and leaves the next read to retry.
       const refused = err instanceof OAuthTokenError && (err.status === 400 || err.status === 401);
       const stamped: StoredCredential = {
         ...stored,
-        metadata: { ...stored.metadata, refreshFailedAt: now, ...(refused ? { refreshRefused: true } : {}) },
+        metadata: { ...stored.metadata, refreshFailedAt: now, refreshError: reason, ...(refused ? { refreshRefused: true } : {}) },
       };
       return this.saveIfUnchanged(owner, service, stored, stamped);
     }
 
-    const { refreshFailedAt: _cleared, refreshRefused: _refused, ...restMetadata } = stored.metadata ?? {};
+    const { refreshFailedAt: _cleared, refreshRefused: _refused, refreshError: _error, ...restMetadata } = stored.metadata ?? {};
     const fresh: StoredCredential = {
       ...stored,
       accessToken: tokens.access_token,

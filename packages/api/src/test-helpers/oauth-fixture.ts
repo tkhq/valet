@@ -19,6 +19,8 @@ export interface FakeOAuthServer {
   tokenResponse: Record<string, unknown>;
   /** When set, the token endpoint returns this HTTP status with an error body. */
   tokenFailure?: number;
+  /** The error body a failure returns. Default: `{ error: "invalid_grant" }`. */
+  tokenFailureBody?: Record<string, unknown>;
   close(): Promise<void>;
 }
 
@@ -37,7 +39,7 @@ export function startFakeOAuthServer(opts?: {
 }): FakeOAuthServer {
   const registrations: FakeOAuthServer["registrations"] = [];
   const tokenRequests: FakeOAuthServer["tokenRequests"] = [];
-  const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number } = {
+  const state: { tokenResponse: Record<string, unknown>; tokenFailure?: number; tokenFailureBody?: Record<string, unknown> } = {
     tokenResponse: { access_token: "at-1", refresh_token: "rt-1", expires_in: 3600, token_type: "bearer" },
   };
 
@@ -70,7 +72,7 @@ export function startFakeOAuthServer(opts?: {
     for (const [k, v] of Object.entries(form)) if (typeof v === "string") entries[k] = v;
     tokenRequests.push(entries);
     if (state.tokenFailure) {
-      return c.json({ error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
+      return c.json(state.tokenFailureBody ?? { error: "invalid_grant" }, state.tokenFailure as ContentfulStatusCode);
     }
     return c.json(state.tokenResponse);
   });
@@ -95,6 +97,12 @@ export function startFakeOAuthServer(opts?: {
     },
     set tokenFailure(v) {
       state.tokenFailure = v;
+    },
+    get tokenFailureBody() {
+      return state.tokenFailureBody;
+    },
+    set tokenFailureBody(v) {
+      state.tokenFailureBody = v;
     },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
