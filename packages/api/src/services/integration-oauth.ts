@@ -85,13 +85,24 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
  * tool to `agent:content:read`). The advertised set is what the server
  * checks now, so requesting it keeps the token valid across upgrades.
  *
+ * When discovery returns no resource scope list (no metadata, or a failed
+ * read), the stored set stands in for it. A transient metadata failure
+ * then never re-registers the shared client with fewer scopes, which would
+ * stop every user's refresh. The cost: without metadata, removing a
+ * declared scope does not narrow the stored client.
+ *
  * A scopeless entry stays scopeless: those servers grant their default
  * scopes today, and adding scopes would re-register every bundled MCP
  * client and stop every connected user's refresh.
  */
-function requestedScopes(declared: string[], meta: AuthServerMetadata): string[] {
+function requestedScopes(
+  declared: string[],
+  meta: AuthServerMetadata,
+  stored: string[] | null | undefined,
+): string[] {
   if (declared.length === 0) return declared;
-  return normalizeScopes([...new Set([...declared, ...(meta.resource_scopes_supported ?? [])])]);
+  const advertised = meta.resource_scopes_supported ?? stored ?? [];
+  return normalizeScopes([...new Set([...declared, ...advertised])]);
 }
 
 /**
@@ -116,13 +127,13 @@ export async function ensureMcpOAuthClient(
   scopes?: string[],
 ): Promise<McpClientRow> {
   const declared = normalizeScopes(scopes);
+  const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
   let meta: AuthServerMetadata | undefined;
   let requested = declared;
   if (declared.length > 0) {
     meta = await discoverAuthServer(serverUrl);
-    requested = requestedScopes(declared, meta);
+    requested = requestedScopes(declared, meta, existing[0]?.registeredScopes);
   }
-  const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
   if (existing[0] && sameScopes(existing[0].registeredScopes, requested)) {
     if (requested.length === 0) {
       let advertised = existing[0].scopesSupported;

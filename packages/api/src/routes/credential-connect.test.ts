@@ -323,6 +323,23 @@ describe("GET /api/credentials/oauth/callback", () => {
     expect(fake.registrations).toHaveLength(1);
   });
 
+  it("mcp mode: the callback refuses a code when another connect replaced the client", async () => {
+    fake.resourceScopesSupported = ["agent:query:run"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const first = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+
+    // A server upgrade, then a second connect that re-registers client-2.
+    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+    await startConnect(api.baseUrl, "linear");
+    expect(fake.registrations).toHaveLength(2);
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(first)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?error=oauth_client_changed");
+    expect(fake.tokenRequests).toHaveLength(0);
+  });
+
   it("provider error param redirects to /integrations with the error code", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
     const authUrl = await startConnect(api.baseUrl, "linear");

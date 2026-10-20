@@ -58,6 +58,9 @@ interface OAuthConnectState {
   orgId?: string;
   service: string;
   codeVerifier?: string;
+  /** mcp mode: the dynamic client the authorize request used. The code
+   * belongs to it, so the callback refuses a different stored client. */
+  clientId?: string;
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
@@ -75,16 +78,18 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
+    if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (exp < nowMs) return null;
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
+      ...(typeof clientId === "string" ? { clientId } : {}),
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
     };
@@ -186,7 +191,11 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
-    const state = signState<OAuthConnectState>("integration-connect", { ...base, codeVerifier }, key);
+    const state = signState<OAuthConnectState>(
+      "integration-connect",
+      { ...base, codeVerifier, clientId: clientRow.clientId },
+      key,
+    );
     const url = buildAuthorizationUrl({
       authorizationEndpoint: clientRow.authorizationEndpoint,
       clientId: clientRow.clientId,
@@ -287,6 +296,10 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
       const clientRow = await getMcpOAuthClient({ db }, verified.service);
+      // A connect that re-registered the client after this authorize (a
+      // scope change) replaced it. The code belongs to the old client, and
+      // stored refreshes use the new one, so the user starts again.
+      if (clientRow.clientId !== verified.clientId) return c.redirect(`${landing}error=oauth_client_changed`, 302);
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,

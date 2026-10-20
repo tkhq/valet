@@ -126,6 +126,25 @@ describe("ensureMcpOAuthClient", () => {
     }
   });
 
+  it("keeps the stored client when the resource metadata cannot be read", async () => {
+    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:content:read", "agent:query:run"] });
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", ["agent:query:run"]);
+
+      // A transient 404 or 5xx on the resource metadata must not narrow the
+      // shared client: that would stop every connected user's refresh.
+      mb.resourceScopesSupported = undefined;
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(row.clientId).toBe("client-1");
+      expect(row.scopes).toEqual(["agent:content:read", "agent:query:run"]);
+      expect(mb.registrations).toHaveLength(1);
+    } finally {
+      await mb.close();
+    }
+  });
+
   it("requests no scope for a scopeless entry, even when the resource advertises scopes", async () => {
     const linear = await startFakeOAuthServer({ resourceScopesSupported: ["read", "write"] });
     try {
