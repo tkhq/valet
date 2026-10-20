@@ -502,9 +502,22 @@ async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisD
   // `intent`: the work finished, and aborting it now could fail the settle.
   const open = new Set(checkpoints.filter((cp) => cp.status === 'intent').map((cp) => cp.nodeId));
   const seen = new Set(checkpoints.map((cp) => cp.nodeId));
-  for (const wait of [...run.waitingOn, ...parkedThisDrive]) if (open.has(wait.nodeId) || !seen.has(wait.nodeId)) add(wait);
+  // A foreach item checkpoint (keyed by the body's id) can stay `intent`
+  // after its foreach finished, such as an item the foreach aborted. Its
+  // work is live only while the owning foreach checkpoint is `intent`.
+  const definition = run.definition as WorkflowDefinition;
+  const foreachOf = new Map(definition.nodes.flatMap((n) => (n.type === 'foreach' ? [[n.body.id, n.id] as const] : [])));
+  const ownerOpen = (nodeId: string): boolean => {
+    const owner = foreachOf.get(nodeId);
+    if (owner === undefined) return true;
+    const ownerCheckpoint = checkpoints.find((cp) => cp.nodeId === owner && cp.iteration === ITERATION);
+    return ownerCheckpoint === undefined || ownerCheckpoint.status === 'intent';
+  };
+  for (const wait of [...run.waitingOn, ...parkedThisDrive]) {
+    if ((open.has(wait.nodeId) || !seen.has(wait.nodeId)) && ownerOpen(wait.nodeId)) add(wait);
+  }
   for (const cp of checkpoints) {
-    if (cp.status !== 'intent' || !cp.effects) continue;
+    if (cp.status !== 'intent' || !cp.effects || !ownerOpen(cp.nodeId)) continue;
     const { sessionId, receipt, childRunId } = cp.effects;
     if (typeof sessionId === 'string' && typeof receipt === 'object' && receipt !== null) {
       const threadId: unknown = Reflect.get(receipt, 'threadId');

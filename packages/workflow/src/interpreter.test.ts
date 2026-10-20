@@ -1212,6 +1212,52 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     expect(engine.abort).not.toHaveBeenCalled();
   });
 
+  it('settles a cancel without aborting an item that a finished foreach left in intent', async () => {
+    // The foreach finished, but one item checkpoint stays `intent` with its
+    // receipt (an item the foreach aborted). Its abort fails; the cancel must
+    // still settle, because that work is not live.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId?: string) => {
+        if (queueItemId === 'queue-3') throw new Error('abort queue-3 failed');
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('agent') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'each', type: 'foreach', items: '{{trigger.data.rows}}', body: { id: 'item', type: 'orchestrator', prompt: 'Handle the row.' } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'each' }],
+    };
+    await store.createRun('run-foreach-left', runParams(), definition, 'v1');
+    const seedAttempt = await claimAttempt(store, 'run-foreach-left');
+    const put = async (nodeId: string, iteration: number, status: 'intent' | 'completed', effects?: Record<string, unknown>) => {
+      await store.putIntent({ runId: 'run-foreach-left', nodeId, iteration, status: 'intent', attempt: seedAttempt, createdAt: clock.now(), ...(effects ? { effects } : {}) });
+      if (status === 'completed') {
+        await store.completeCheckpoint('run-foreach-left', nodeId, iteration, seedAttempt, {
+          runId: 'run-foreach-left', nodeId, iteration, status: 'completed', attempt: seedAttempt, createdAt: clock.now(), result: { items: [] },
+        });
+      }
+    };
+    await put('each', 0, 'completed');
+    await put('item', 2, 'intent', { sessionId: 'session-item', receipt: { threadId: 'thread-item', queueItemId: 'queue-3' } });
+    expect((await driveUntilPark('run-foreach-left', seedAttempt, { store, engine, clock: clock.now, executors })).status).toBe('parked');
+
+    await store.insertSignal({ runId: 'run-foreach-left', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+    const park = await driveUntilPark('run-foreach-left', await claimAttempt(store, 'run-foreach-left'), { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-agent');
+    expect(engine.abort).not.toHaveBeenCalledWith('session-item', 'thread-item', 'queue-3');
+  });
+
   it('does not abort a submission that finished before a later drive reaches stop', async () => {
     // The first drive parks on the agent and saves its wait on the run. In
     // the second drive the agent completes and the stop ends the run. The
