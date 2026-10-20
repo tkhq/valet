@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator eval e2e e2e-clean \
+        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator eval e2e e2e-clean post-deploy \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -216,6 +216,9 @@ eval: ## Run the eval suite through the engine (real LLM). EVAL_ARGS="--filter x
 
 e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--doctor|--only <ids>|--json|--verbose"
 	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)
+
+post-deploy: ## Run real user journeys against a deployed Valet (runbook: docs/testing/post-deploy-journeys.md). POST_DEPLOY_ARGS="--list|--only <ids>|--json|--sweep"
+	$(PNPM) exec tsx scripts/post-deploy.ts $(POST_DEPLOY_ARGS)
 
 e2e-clean: ## Sweep state leaked by crashed e2e runs. Idempotent. NOTE: removes ALL local valet-sandbox-* containers, including dev-local session sandboxes (they are recreated on demand).
 	@echo "$(YELLOW)Removing valet sandbox containers…$(NC)"

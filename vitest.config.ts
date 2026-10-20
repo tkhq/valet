@@ -30,11 +30,12 @@ export default defineConfig({
       },
       'packages/engine',
       'packages/web',
-      // The `make e2e` runner's pure library (step table, scorecard).
+      // The `make e2e` runner's pure library (step table, scorecard) and the
+      // post-deploy journeys' pure library (polling, report).
       {
         test: {
           name: 'scripts',
-          include: ['scripts/e2e/*.test.ts'],
+          include: ['scripts/e2e/*.test.ts', 'scripts/post-deploy/*.test.ts'],
         },
       },
     ],

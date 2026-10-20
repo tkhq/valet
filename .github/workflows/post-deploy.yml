@@ -1,0 +1,96 @@
+name: Post-deploy journeys
+
+# Runs scripts/post-deploy.ts against Turnkey dev after a dev-v2 push reaches
+# it. CI publishes the images, Flux rolls them out, and dev reports the commit
+# at /api/health. This job waits for CI, then the script waits for that build.
+# Runbook: docs/testing/post-deploy-journeys.md
+#
+# The job does nothing until the VALET_POST_DEPLOY_API_KEY secret exists.
+
+on:
+  push:
+    branches: [dev-v2]
+  workflow_dispatch:
+
+permissions:
+  # The event journey creates and deletes one throwaway branch.
+  contents: write
+  # Read this commit's CI run.
+  actions: read
+
+# A newer push replaces the wait for an older one.
+concurrency:
+  group: post-deploy-journeys
+  cancel-in-progress: true
+
+jobs:
+  journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      VALET_API_KEY: ${{ secrets.VALET_POST_DEPLOY_API_KEY }}
+    steps:
+      - name: Decide whether to run
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$VALET_API_KEY" ]; then
+            echo "::notice::Add the VALET_POST_DEPLOY_API_KEY repository secret to run the post-deploy journeys."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Nothing rolls out unless CI passes on this commit.
+          for _ in $(seq 1 120); do
+            run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow CI --commit "$GITHUB_SHA" --event push --limit 1 --json status,conclusion --jq '.[0] // {}')
+            if [ "$(jq -r '.status // ""' <<<"$run")" = completed ]; then
+              conclusion=$(jq -r '.conclusion' <<<"$run")
+              if [ "$conclusion" = success ]; then
+                echo "run=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::CI ended $conclusion on this commit, so nothing rolled out. No journeys ran."
+                echo "run=false" >> "$GITHUB_OUTPUT"
+              fi
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::CI did not finish on this commit within 60 minutes."
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      # pnpm version comes from package.json "packageManager".
+      - uses: pnpm/action-setup@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+        if: steps.gate.outputs.run == 'true'
+
+      - name: Run the journeys
+        if: steps.gate.outputs.run == 'true'
+        env:
+          VALET_EXPECT_BUILD: ${{ github.event_name == 'push' && github.sha || '' }}
+          VALET_JOURNEY_GITHUB_REPO: ${{ github.repository }}
+          VALET_JOURNEY_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          pnpm exec tsx scripts/post-deploy.ts | tee post-deploy-report.txt
+
+      - name: Add the report to the job summary
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          if [ -f post-deploy-report.txt ]; then
+            { echo '```'; cat post-deploy-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
