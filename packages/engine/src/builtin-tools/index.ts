@@ -758,12 +758,13 @@ export const askApprovalTool = defineTool({
     if (isUnattendedWorkflowRefusal(resolution)) {
       return {
         text:
-          `not asked: "${args.title}". This is an unattended workflow run, so Valet sent no approval request and nobody can approve. ` +
+          `not asked: "${args.title}". This is an unattended run (a workflow, an automated event, or a schedule), so Valet sent no approval request and nobody can approve. ` +
           "Do not do the action. Do not ask again, and do not ask anyone in a message. " +
           "Do not say that you asked for approval or that approval is pending. " +
-          "In your result, say that the action did not run because a workflow run cannot ask for approval. " +
-          "Also say the fix: to approve it on each run, the workflow's owner can add an Approval step before this step " +
-          "and remove the request for approval from this step's prompt.",
+          "In your result, say that the action did not run because an unattended run cannot ask for approval. " +
+          "Also say the fix. In a workflow, to approve it on each run, its owner can add an Approval step before this step " +
+          "and remove the request for approval from this step's prompt. For an event subscription or a schedule, remove the " +
+          "request for approval from its prompt, and allow the action by policy in Settings if the action needs approval.",
       };
     }
     return {
@@ -816,9 +817,9 @@ export const askQuestionTool = defineTool({
     if (isUnattendedWorkflowRefusal(resolution)) {
       return {
         text:
-          `No one can answer "${args.question}": this is an unattended workflow run. ` +
+          `No one can answer "${args.question}": this is an unattended run (a workflow, an automated event, or a schedule). ` +
           "Do not send, change, or delete anything that depends on the answer. " +
-          "Say in the result what was missing, so the workflow's author can fix the workflow. " +
+          "Say in the result what was missing, so its author can fix the workflow, subscription, or schedule. " +
           "Continue with the rest of the work, and say what you assumed.",
       };
     }

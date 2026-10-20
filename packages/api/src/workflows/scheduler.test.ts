@@ -115,10 +115,14 @@ describe("WorkflowScheduler fire ownership", () => {
       createdBy: "original-creator", createdAt: 100, updatedAt: 200,
     });
     const actors: string[] = [];
+    const unattended: Array<boolean | undefined> = [];
     const scheduler = new WorkflowScheduler({
       db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
-      deliverToOrchestrator: async (args) => { actors.push(args.actorUserId); }, now: () => 1000,
+      deliverToOrchestrator: async (args) => { actors.push(args.actorUserId); unattended.push(args.unattended); },
+      now: () => 1000,
     });
     await scheduler.tick();
     expect(actors).toEqual(["team:team-1"]);
+    // No person waits on a scheduled prompt, so it must not park on a question.
+    expect(unattended).toEqual([true]);
   });

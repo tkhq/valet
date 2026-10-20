@@ -1,6 +1,7 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
+import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -109,6 +110,20 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
       expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(presence ? { presence } : null);
+    }
+  });
+
+  it("marks an unattended delivery so its turn refuses questions instead of parking the thread", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    for (const [dispatchId, unattended] of [["unattended-event", true], ["attended-event", undefined]] as const) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+        signal: { kind: "signal", signalType: "test", body: dispatchId },
+        dispatchId, mismatchReason: "test", ...(unattended ? { unattended } : {}),
+      });
+      const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
+      const metadata = result.rows[0]?.metadata;
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : null);
     }
   });
 
@@ -386,6 +401,92 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     signalType: "app_mention",
     body,
     attributes: {},
+  });
+
+  it("ends an unattended delivery that asks a question instead of parking its thread", async () => {
+    // The incident: an event delivery asked a question, waited for days, and
+    // every later delivery on its thread queued behind it.
+    const deps = { db: testDb.appDb, engineHost };
+    const pending = async () => ((await testDb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_decision_gates
+      WHERE status = 'pending'`)) as { rows: Array<{ n: number }> }).rows[0]!.n;
+    const settled = async (dispatchId: string) => ((await testDb.appDb.execute(sql`SELECT status FROM engine_queue_items
+      WHERE dispatch_id = ${dispatchId}`)) as { rows: Array<{ status: string }> }).rows[0]?.status === "settled";
+    const asks = () => faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which post should I triage?" }, { id: "ask-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Nothing to triage."),
+    ]);
+
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events", unattended: true,
+      signal: signal("bot post"), dispatchId: "unattended-ask", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => settled("unattended-ask"), { timeout: 15_000 }).toBe(true);
+    expect(await pending()).toBe(0);
+
+    // A signal on an automated delivery thread with no flag, such as a delegated
+    // task's follow-up or an item queued before this change, is unattended too.
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "slack-events:C1",
+      signal: signal("child settled"), dispatchId: "thread-rule-ask", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => settled("thread-rule-ask"), { timeout: 15_000 }).toBe(true);
+    expect(await pending()).toBe(0);
+
+    // Without the flag, the same question parks the thread.
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "mentions",
+      signal: signal("a person asks"), dispatchId: "attended-ask", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => pending(), { timeout: 15_000 }).toBe(1);
+    expect(await settled("attended-ask")).toBe(false);
+  });
+
+  it("lets a task that an automated delivery starts ask in the inbox", async () => {
+    // A task does not wait for its child, so the child's question never holds
+    // the shared thread. Only a workflow task makes the child unattended too.
+    const spawned: Array<boolean | undefined> = [];
+    const host = new EngineHost({
+      engineStore: new PgSessionStore(testDb.pgdb),
+      sandboxProvider: new VirtualSandboxProvider(),
+      eventStream: new PgEventStream(testDb.pgdb),
+      engineCredentials: new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key")),
+      db: testDb.appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [],
+      childSpawner: async (_req, ctx) => {
+        spawned.push(ctx.unattendedWorkflow);
+        return { childSessionId: `child-${spawned.length}`, queueItemId: `child-item-${spawned.length}` };
+      },
+    });
+    const deps = { db: testDb.appDb, engineHost: host };
+    const delegates = () => faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("task", { prompt: "Approve the pull request." }, { id: "task-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Started a task."),
+    ]);
+    const settled = async (dispatchId: string) => ((await testDb.appDb.execute(sql`SELECT status FROM engine_queue_items
+      WHERE dispatch_id = ${dispatchId}`)) as { rows: Array<{ status: string }> }).rows[0]?.status === "settled";
+    try {
+      for (const [threadKey, unattended] of [["events", true], ["slack-events:C1", undefined], ["signal:workflow:wfrun_1", undefined]] as const) {
+        delegates();
+        await deliverToAssistantThread(deps, {
+          orgId: ORG, owner: OWNER, actorUserId: USER, threadKey, signal: signal("delegate"), dispatchId: threadKey,
+          mismatchReason: "event_target_mismatch", ...(unattended ? { unattended } : {}),
+        });
+        await expect.poll(() => settled(threadKey), { timeout: 15_000 }).toBe(true);
+      }
+      // A workflow task handed to an assistant thread.
+      delegates();
+      const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+      const thread = await session.createThread("workflow-task");
+      const receipt = await thread.submitPrompt("report", { metadata: { [UNATTENDED_WORKFLOW_KEY]: true } });
+      await thread.awaitResult(receipt.queueItemId);
+      expect(spawned).toEqual([undefined, undefined, true, true]);
+    } finally {
+      await host.destroyAll();
+    }
   });
 
   it("delivers into the owner's singleton and persists the initiating actor", async () => {
