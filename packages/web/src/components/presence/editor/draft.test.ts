@@ -7,22 +7,24 @@ import {
   addCondition,
   applyLinePatch,
   bodyFromDraft,
+  type Draft,
   draftFromLine,
   draftFromRoutine,
-  exampleSteps,
+  draftThread,
+  type EditorMode,
   hasCreatorScope,
   lineFromCreate,
   newDraft,
+  toggleEvent,
   removeCondition,
   routineFromCreate,
   saveBlocker,
   scheduleCron,
   scheduleFromCron,
   setService,
+  setThreadLink,
   suggestedName,
-  toggleEvent,
-  type Draft,
-  type EditorMode,
+  exampleSteps,
 } from "./draft";
 
 const SERVICES: CatalogService[] = [
@@ -432,5 +434,19 @@ describe("small editor gaps (E10)", () => {
     draft = toggleEvent(toggleEvent(draft, "slack.app_mention", SERVICES), "slack.app_mention", SERVICES);
     expect(draft.creatorScopeId).toBeNull();
     expect(hasCreatorScope(draft)).toBe(true);
+  });
+});
+
+// Review of PR #986: the thread summary names the channel as the sentence
+// does: the saved label, else the places name, else the raw id.
+describe("draftThread channel words", () => {
+  const followed = { ...setThreadLink(newDraft({ timezone: "UTC" }), "https://acme.slack.com/archives/C123ABC/p1750000000123456"), threadFollow: true };
+
+  it("names the channel from the places list when the link gave only an id", () => {
+    expect(draftThread(followed, { channels: { C123ABC: "rollout" } })?.channelLabel).toBe("#rollout");
+  });
+
+  it("keeps the raw id when nothing names the channel", () => {
+    expect(draftThread(followed)?.channelLabel).toBe("C123ABC");
   });
 });

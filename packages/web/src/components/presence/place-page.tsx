@@ -66,7 +66,7 @@ export function PlaceBody({ data, onLineAdded }: {
 }) {
   const { place, listeners, threads, activity } = data;
   const [adding, setAdding] = useState(false);
-  const sentence = usePresenceSentenceParts(listeners, knownThreadTitles(threads));
+  const sentence = usePresenceSentenceParts(listeners, knownThreadTitles(threads), [place]);
   const appearances = listeners.filter(hasAppearance);
   const recent = activity.slice(0, RECENT_ROWS);
   return (

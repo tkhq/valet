@@ -29,10 +29,12 @@ import type { SectionId } from "./section";
 import { parseSlackThreadLink, slackThreadFilterRows } from "./slack-thread-link";
 import type { Routine } from "../routine-helpers";
 import {
+  channelWords,
   followsSlackThread,
   isCreatorScopeFilter,
   partsText,
   type RoutineLike,
+  type SentenceNames,
   type SentencePart,
 } from "../sentences";
 import {
@@ -430,14 +432,18 @@ export function setThreadLink(draft: Draft, link: string): Draft {
   return { ...draft, threadLink: link, conditions: [...slackThreadFilterRows(thread), ...rest] };
 }
 
-/** The thread a thread-follow draft names, from its conditions. */
-export function draftThread(draft: Draft): { channel: string; channelLabel: string; threadTs: string } | null {
+/**
+ * The thread a thread-follow draft names, from its conditions. `channelLabel`
+ * is the channel's words (`channelWords`): the saved label, else the name
+ * from `names`, else the raw id, as the sentence names it.
+ */
+export function draftThread(draft: Draft, names: SentenceNames = {}): { channel: string; channelLabel: string; threadTs: string } | null {
   const ts = draft.conditions.find((row) => row.field === "thread_ts" && row.op === "eq" && row.value.trim().length > 0);
   if (ts === undefined) return null;
   const channel = draft.conditions.find((row) => row.field === "channel" && row.op === "eq");
   return {
     channel: channel?.value ?? "",
-    channelLabel: channel?.label?.trim() || channel?.value || "",
+    channelLabel: channel === undefined ? "" : channelWords(channel.value, channel.label, names),
     threadTs: ts.value.trim(),
   };
 }

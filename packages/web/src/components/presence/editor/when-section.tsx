@@ -18,7 +18,7 @@ import { selectsSlackMention, hasChannelScopeFilter } from "~/lib/slack-mention"
 import { cn } from "~/lib/cn";
 import { formatDateTime } from "~/lib/format-when";
 import { ServiceGlyph, ServiceMark, SERVICE_NAMES, glyphColor } from "../service-mark";
-import { eventLabel, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
+import { channelWords, eventLabel, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
 import { BAD_THREAD_LINK, parseSlackThreadLink } from "./slack-thread-link";
 import {
   addCondition,
@@ -47,16 +47,21 @@ const OP_WORDS: Readonly<Record<FilterOp, string>> = {
   regex: "matches",
 };
 
-/** A condition in words: `repository is acme/api`, `channel is #a or #b`. */
-export function conditionWords(row: UiFilterRow): string {
+/**
+ * A condition in words: `repository is acme/api`, `channel is #a or #b`. An
+ * exact channel takes its name from `names` when it has no label
+ * (`channelWords`), the same words the sentence shows.
+ */
+export function conditionWords(row: UiFilterRow, names: SentenceNames = {}): string {
   const field = fieldLabel(row.field).toLowerCase();
+  const exactChannel = row.field === "channel" && (row.op === "eq" || row.op === "in");
   let value: string;
   if (row.op === "in") {
     const values = row.value.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
     const labels = row.inLabels !== undefined && row.inLabels.values.join(",") === values.join(",") ? row.inLabels.labels : values;
-    value = labels.join(" or ");
+    value = values.map((v, i) => (exactChannel ? channelWords(v, labels[i], names) : labels[i] ?? v)).join(" or ");
   } else {
-    value = row.label?.trim() || row.value;
+    value = exactChannel ? channelWords(row.value, row.label, names) : row.label?.trim() || row.value;
   }
   return `${field} ${OP_WORDS[row.op]} ${value}`;
 }
@@ -156,7 +161,7 @@ export function WhenSection({
             <SlackListenFor draft={draft} onChange={onChange} locked={mode.kind !== "create"} />
           )}
           {draft.threadFollow ? (
-            <ThreadLink draft={draft} onChange={onChange} />
+            <ThreadLink draft={draft} onChange={onChange} names={names} />
           ) : (
             <Events
               draft={draft}
@@ -214,9 +219,9 @@ export function threadFollowHint(
 }
 
 /** The thread's link. A link that parses sets the channel and thread conditions. */
-function ThreadLink({ draft, onChange }: { draft: Draft; onChange: (next: Draft) => void }) {
+function ThreadLink({ draft, onChange, names }: { draft: Draft; onChange: (next: Draft) => void; names: SentenceNames }) {
   const bad = draft.threadLink.trim().length > 0 && parseSlackThreadLink(draft.threadLink) === null;
-  const thread = draftThread(draft);
+  const thread = draftThread(draft, names);
   return (
     <div className="grid gap-1">
       <label htmlFor="editor-thread-link" className="text-xs text-muted">Paste the thread's link</label>
@@ -315,7 +320,7 @@ function Conditions({ draft, mode, onChange, services, names }: {
       <p id="editor-when-only" className="mb-1.5 text-xs text-muted">Only when</p>
       <div className="flex flex-wrap items-center gap-1.5">
         {rows.map((row) => {
-          const words = conditionWords(row);
+          const words = conditionWords(row, names);
           const place = service !== undefined && SENTENCE_PLACE_FIELD_SET.has(row.field);
           return (
             <span key={row.id} className="inline-flex items-center gap-1.5 rounded-full bg-ink-wash py-0.5 pl-2 pr-1 text-[13px] text-ink">

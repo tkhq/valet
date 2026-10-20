@@ -93,10 +93,15 @@ export type SentencePart =
   | { kind: "workflow"; text: string; id: string }
   | { kind: "person"; text: string };
 
-/** The people a sentence may name. `members` maps a user id to a display name; `me` is the viewer's user id. */
+/**
+ * The people and places a sentence may name. `members` maps a user id to a
+ * display name; `me` is the viewer's user id. `channels` maps a Slack channel
+ * id to its name without `#`, for a channel filter saved without a label.
+ */
 export interface SentenceNames {
   members?: Readonly<Record<string, string>>;
   me?: string;
+  channels?: Readonly<Record<string, string>>;
 }
 
 /** A text part. */
@@ -494,15 +499,44 @@ const ANY_PLACE: Readonly<Record<SentenceService, string>> = {
 /** Filter fields that name who sent the event. */
 const SENDER_FIELDS: readonly string[] = ["user", "sender", "creator"];
 
-/** Each value of a filter with the words a reader sees for it. */
-function filterEntries(filter: EventSubscriptionFilterWire): { value: string; label: string }[] {
+/** The ops whose value is a whole channel id, so a channel name can stand in for it. */
+const EXACT_OPS: readonly EventSubscriptionFilterWire["op"][] = ["eq", "in"];
+
+/**
+ * The words for one Slack channel value: its saved label, else its name
+ * from `names.channels` (`#incidents`), else the raw id. The editor saves a
+ * channel's id as its label when it has no name (`labels[i] ?? id`), so a
+ * label equal to the value is no label. The lookup is by own property: a
+ * saved value such as `constructor` must not read a method off the map's
+ * prototype. The sentence, the editor's condition chips, and its thread
+ * summary all name a channel through this one function, so they agree.
+ */
+export function channelWords(value: string, label: string | undefined, names: SentenceNames = {}): string {
+  if (hasText(label) && label.trim() !== value) return label;
+  const channels = names.channels;
+  const channel = channels !== undefined && Object.hasOwn(channels, value) ? channels[value] : undefined;
+  return hasText(channel) ? `#${channel}` : value;
+}
+
+/**
+ * Each value of a filter with the words a reader sees for it: the filter's
+ * own label, then for a Slack channel its name (`channelWords`), then the
+ * raw value. Only an exact match (`eq`, `in`) takes the name: a `prefix`,
+ * `contains`, or `regex` value is a pattern over the id, and `starts with
+ * #proj-valet` would describe a match that never runs.
+ */
+function filterEntries(filter: EventSubscriptionFilterWire, names: SentenceNames = {}): { value: string; label: string }[] {
+  const named = (value: string, label: string | undefined): string =>
+    filter.field === "channel" && EXACT_OPS.includes(filter.op) ? channelWords(value, label, names) : hasText(label) ? label : value;
   if (Array.isArray(filter.value)) {
-    return filter.value.map((v, i) => {
-      const label = filter.labels?.[i];
-      return { value: v, label: hasText(label) ? label : v };
-    });
+    return filter.value.map((v, i) => ({ value: v, label: named(v, filter.labels?.[i]) }));
   }
-  return [{ value: filter.value, label: hasText(filter.label) ? filter.label : filter.value }];
+  return [{ value: filter.value, label: named(filter.value, filter.label) }];
+}
+
+/** Each value of a filter as the words a reader sees for it. See `filterEntries`. */
+export function filterLabels(filter: EventSubscriptionFilterWire, names: SentenceNames = {}): string[] {
+  return filterEntries(filter, names).map((entry) => entry.label.trim());
 }
 
 /**
@@ -518,9 +552,13 @@ function placeSubject(field: string, value: string): string {
 }
 
 /** A place filter's values as place tokens joined by "or". */
-export function placeParts(service: SentenceService, filter: EventSubscriptionFilterWire): SentencePart[] {
+export function placeParts(
+  service: SentenceService,
+  filter: EventSubscriptionFilterWire,
+  names: SentenceNames = {},
+): SentencePart[] {
   return joinPartsOr(
-    filterEntries(filter).map(({ value, label }) => [
+    filterEntries(filter, names).map(({ value, label }) => [
       { kind: "place", text: label, service, subject: placeSubject(filter.field, value) },
     ]),
   );
@@ -542,18 +580,22 @@ function fieldWords(field: string): string {
   return FIELD_WORDS[field] ?? field.replace(/_/g, " ");
 }
 
-function presencePlace(service: SentenceService | null, filters: readonly EventSubscriptionFilterWire[]): SentencePart[] | null {
+function presencePlace(
+  service: SentenceService | null,
+  filters: readonly EventSubscriptionFilterWire[],
+  names: SentenceNames,
+): SentencePart[] | null {
   if (service === null) return null;
   for (const field of SENTENCE_PLACE_FIELDS[service]) {
     const filter = filters.find((f) => f.field === field && isPlaceFilter(f));
-    if (filter && filterEntries(filter).length > 0) return placeParts(service, filter);
+    if (filter && filterEntries(filter).length > 0) return placeParts(service, filter, names);
   }
   // A place field with another op narrows the place without naming one:
   // `on a repository that starts with acme/`, never `on any repository`.
   for (const field of SENTENCE_PLACE_FIELDS[service]) {
     const filter = filters.find((f) => f.field === field);
     if (filter && filterEntries(filter).length > 0) {
-      const values = filterEntries(filter).map((entry) => entry.label).join(" or ");
+      const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
       return [text(`${article(fieldWords(field))} that ${opWords(filter.op)} ${values}`)];
     }
   }
@@ -681,11 +723,11 @@ export function presenceWhenParts(
   const withPlace = options.place ?? true;
   if (followsSlackThread(sub)) {
     const channel = sub.filters.find((f) => f.field === "channel" && (f.op === "eq" || f.op === "in"));
-    const where = channel === undefined || !withPlace ? [] : [text(" in "), ...placeParts("slack", channel)];
+    const where = channel === undefined || !withPlace ? [] : [text(" in "), ...placeParts("slack", channel, names)];
     return tidy([text("someone replies in the Slack thread"), ...where]);
   }
   const service = serviceOf(sub.eventKeys);
-  const place = withPlace ? presencePlace(service, sub.filters) : null;
+  const place = withPlace ? presencePlace(service, sub.filters, names) : null;
   const where = place === null ? [] : [text(` ${service === "github" ? "on" : "in"} `), ...place];
   const sender = senderFilter(sub.eventKeys, sub.filters);
   const mention = sub.eventKeys.some(isMentionKey);
@@ -1121,8 +1163,8 @@ function opWords(op: EventSubscriptionFilterWire["op"]): string {
 }
 
 /** One filter that is not the place as a phrase after `Only`: `the main branch`, `from alice`. */
-function conditionInWords(filter: EventSubscriptionFilterWire): string {
-  const values = filterEntries(filter).map((entry) => entry.label).join(" or ");
+function conditionInWords(filter: EventSubscriptionFilterWire, names: SentenceNames): string {
+  const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
   if (BRANCH_FIELDS.has(filter.field) && (filter.op === "eq" || filter.op === "in")) return `the ${values} branch`;
   if (SENDER_FIELDS.includes(filter.field) || filter.field === "author" || filter.field === "actor") return `from ${values}`;
   if (LABEL_FIELDS.has(filter.field)) return `with the label ${values}`;
@@ -1137,10 +1179,14 @@ function conditionInWords(filter: EventSubscriptionFilterWire): string {
  * another op is a condition), the creator scope the server adds,
  * and a followed Slack thread are not conditions here: the title says them.
  */
-export function whenExplanation(filters: readonly EventSubscriptionFilterWire[], keys: readonly string[]): string {
+export function whenExplanation(
+  filters: readonly EventSubscriptionFilterWire[],
+  keys: readonly string[],
+  names: SentenceNames = {},
+): string {
   const conditions = filters.filter((f) => !isPlaceFilter(f) && !isCreatorScopeFilter(f) && f.field !== "thread_ts");
   if (conditions.length === 0) return anyEvent(keys);
-  return `Only ${joinAnd(conditions.map(conditionInWords))}.`;
+  return `Only ${joinAnd(conditions.map((filter) => conditionInWords(filter, names)))}.`;
 }
 
 /** The name a line appears as. A line that sets only an avatar appears as Valet. */

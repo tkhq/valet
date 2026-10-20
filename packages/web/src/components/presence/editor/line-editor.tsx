@@ -278,7 +278,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
   // The When in words, for the summary, the suggested name, and the example.
   const unnamed = bodyFromDraft(draft, mode);
   // A followed Slack thread reads as the reply it waits for (Part H step 3).
-  const followed = draft.threadFollow ? draftThread(draft) : null;
+  const followed = draft.threadFollow ? draftThread(draft, names) : null;
   const threadWhen = followed !== null && followed.channelLabel.length > 0
     ? `a reply in one Slack thread in ${followed.channelLabel}`
     : "a reply in one Slack thread";
@@ -428,6 +428,7 @@ function EditorSheet({ onOpenChange, mode: openedMode, onSaved, onCloseAutoFocus
     onSave: () => save(),
     onSaveAnyway: () => save(true),
     onDone: done,
+    names,
     confirmingDiscard: confirming,
     onKeepEditing: () => setConfirming(false),
     onDiscard: close,
