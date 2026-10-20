@@ -209,6 +209,7 @@ pluginsRouter.get("/", async (c) => {
         scopes: decl.scopes,
         connectLabel: decl.connectLabel,
         configKeys: decl.configKeys,
+        oauthOnly: decl.oauthOnly,
         // `org` means an organization credential resolves for this owner.
         // Only a team catalog treats it as connected. A personal catalog
         // must not offer to disconnect an organization-owned credential.

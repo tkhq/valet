@@ -77,6 +77,10 @@ export interface CredentialDeclaration {
   connectLabel?: string;
   /** How the connect UI obtains this credential via OAuth. Absent = manual token entry only. Only valid on `type: "oauth2"`. */
   oauth?: OAuthDeclaration;
+  /** The provider accepts only tokens from the `oauth` sign-in, so the
+   * connect UI offers no token entry and `PUT /api/credentials` refuses a
+   * pasted token. Pylon's MCP server is one. Only valid with `oauth`. */
+  oauthOnly?: true;
   /** Deployment/org prerequisite for offering this credential. Absent = the
    * credential is self-sufficient (a personal token works with no org setup)
    * and the service is always offered. `orgCredential: true` = the org-scoped
@@ -869,6 +873,9 @@ export function validateValetPlugin(
     }
     if (cred.service !== undefined && typeof cred.service !== "string") {
       issues.push({ path: `${path}.service`, message: "must be a string when present" });
+    }
+    if (cred.oauthOnly !== undefined && (cred.oauthOnly !== true || cred.oauth === undefined)) {
+      issues.push({ path: `${path}.oauthOnly`, message: "must be true, and only with oauth" });
     }
     if (cred.oauth !== undefined) {
       const oauth = asRecord(cred.oauth, `${path}.oauth`, issues);

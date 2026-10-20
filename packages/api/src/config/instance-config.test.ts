@@ -412,6 +412,14 @@ describe("mcpServers validation", () => {
     );
   });
 
+  it("accepts oauthOnly on an oauth entry and rejects it on any other mode", () => {
+    const ok = parseInstanceConfig(base("  - name: pylon\n    url: https://mcp.usepylon.com\n    auth: oauth\n    oauthOnly: true"), path);
+    expect(ok.mcpServers?.[0]?.oauthOnly).toBe(true);
+    expect(() => parseInstanceConfig(base("  - name: x\n    url: https://x.example/mcp\n    auth: api_key\n    oauthOnly: true"), path)).toThrow(
+      'mcpServers[0].oauthOnly is only valid when auth is "oauth". Remove it, or set auth: oauth.',
+    );
+  });
+
   it("rejects an empty scopes list as inert", () => {
     const yaml = base("  - name: x\n    url: https://x.example/mcp\n    auth: oauth\n    scopes: []");
     expect(() => parseInstanceConfig(yaml, path)).toThrow(

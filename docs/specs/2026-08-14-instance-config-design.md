@@ -454,6 +454,7 @@ mcpServers:
     auth: oauth                 # required; none | oauth | api_key | bearer
     scopes:                     # oauth only: scopes for the authorize request
       - crm:read
+    oauthOnly: true             # oauth only: the server takes no pasted token
     tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
     authQueryParam: API_KEY     # api_key/bearer only: send token as query param
     connectLabel: Acme API key  # api_key only: connect-UI copy
@@ -482,6 +483,12 @@ Auth modes:
   (integration-oauth design); connected credentials cannot be upgraded by
   refresh either way — the user must disconnect and reconnect after
   scopes change.
+  The connect UI also offers "Enter a token instead", and the pasted token
+  goes to `url` as a bearer token. Set `oauthOnly: true` when the server
+  accepts only its own OAuth tokens, as Pylon's does. The connect UI then
+  offers no token entry, the save route refuses a pasted token, and a
+  rejected account is told to disconnect and sign in (integration-oauth
+  design, "OAuth-only services").
 - **`api_key`** — per-user manual token entry in the connect UI.
 - **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
   The file never holds secrets, so the entry names the env var. A `bearer`
@@ -497,12 +504,13 @@ Rules:
   `mcp-config:` prefix so a config entry can never silently dedupe against
   a bundled plugin.
 - Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
-  `bearer`, `scopes` outside `oauth`, `connectLabel` outside `api_key`,
+  `bearer`, `scopes` and `oauthOnly` outside `oauth`, `connectLabel` outside `api_key`,
   `authQueryParam` outside `api_key`/`bearer`).
 - `displayName` is the human-readable name the connect UI shows as the
   card title (and in the default `connectLabel` for `api_key` entries).
   When absent, the synthesized plugin title-cases `name`
-  ("grafana-cloud" → "Grafana Cloud"). The wire carries it as
+  ("grafana-cloud" → "Grafana Cloud"). Credential rejection messages from
+  `mcpActionPlugin` use the same name. The wire carries it as
   `PluginSummary.displayName`; the web client prefers it over its own
   id-derived label.
 - `riskLevel` is the per-service default. Explicit MCP tool annotations

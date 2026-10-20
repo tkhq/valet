@@ -24,9 +24,10 @@ const githubMutateAsync = vi.fn().mockResolvedValue({ url: "https://github.com/l
 let teams: TeamSummary[] = [];
 let orgStatus: GetGithubOrgStatusResponse | undefined;
 let githubConnectError: Error | null = null;
+let connectError: Error | null = null;
 
 vi.mock("~/api/integrations", () => ({
-  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
+  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: connectError }),
 }));
 
 vi.mock("~/api/repos", () => ({
@@ -109,6 +110,7 @@ beforeEach(() => {
   teams = [];
   orgStatus = { configured: true, installationCount: 1, suspendedCount: 0 };
   githubConnectError = null;
+  connectError = null;
   connectMutateAsync.mockClear();
   githubMutateAsync.mockClear();
 });
@@ -310,6 +312,25 @@ describe("the choice reaches the connect call", () => {
     show(gmail());
     fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
     expect(screen.getByLabelText("Access token")).toBeTruthy();
+  });
+
+  it("offers no token entry on an OAuth-only service", () => {
+    show(gmail({ service: "pylon", oauthOnly: true }), "Pylon");
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Enter a token instead" })).toBeNull();
+  });
+
+  it("reads out the server's sentence when a token save fails, not the request line", () => {
+    // `Error.message` is only the request line; the payload names the fix.
+    connectError = new ApiError(400, "PUT /credentials/gmail → 400", {
+      error: "Gmail rejected this token. Paste a current token, or sign in with Gmail.",
+    });
+    show(gmail());
+    fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("Gmail rejected this token. Paste a current token, or sign in with Gmail.");
+    expect(alert.textContent).not.toContain("PUT");
   });
 
   it("reads out the server's sentence when the org has no App, not the request line", () => {
