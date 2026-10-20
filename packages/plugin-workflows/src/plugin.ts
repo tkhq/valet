@@ -7,10 +7,16 @@ const workflowsMd = readFileSync(fileURLToPath(new URL("../skills/workflows/SKIL
 
 const troubleshootingMd = readFileSync(fileURLToPath(new URL("../skills/workflow-troubleshooting/SKILL.md", import.meta.url)), "utf8");
 
+const subscriptionsMd = readFileSync(fileURLToPath(new URL("../skills/event-subscriptions/SKILL.md", import.meta.url)), "utf8");
+
 const plugin: ValetPlugin = {
   name: "workflows",
   version: "0.1.0",
-  skills: [loadSkillFromMarkdown(workflowsMd, "plugin", "workflows"), loadSkillFromMarkdown(troubleshootingMd, "plugin", "workflow-troubleshooting")],
+  skills: [
+    loadSkillFromMarkdown(workflowsMd, "plugin", "workflows"),
+    loadSkillFromMarkdown(troubleshootingMd, "plugin", "workflow-troubleshooting"),
+    loadSkillFromMarkdown(subscriptionsMd, "plugin", "event-subscriptions"),
+  ],
   templates: workflowTemplates,
 };
 
