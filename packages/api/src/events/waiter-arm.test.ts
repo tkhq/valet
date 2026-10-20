@@ -439,6 +439,62 @@ describe("armDeps", () => {
     expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/C001"] });
   });
 
+  /** conversations.info answers `channel` for every token, as Slack does for a DM or group DM both tokens are in. */
+  function infoAlways(channel: Record<string, unknown>) {
+    return vi.fn(async () => new Response(JSON.stringify({ ok: true, channel })));
+  }
+
+  /** The owner may see every channel, so R3 passes and R4 decides. */
+  const ownerSeesAll = () => async () => true;
+
+  it("R4: a DM with the bot arms, though Slack sends no is_member for a DM", async () => {
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxp-user" } }), {
+      fetch: infoAlways({ id: "D0BQQF5MBQB", is_im: true, user: "U-OWNER" }),
+      slackApiUrl: "https://slack.test/api",
+      channelVisibility: ownerSeesAll,
+    });
+    expect(await d.readSlackChannel("D0BQQF5MBQB")).toEqual({ ok: true, isPrivate: true, isMember: true });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/D0BQQF5MBQB", on: [{ key: "slack.message" }] }));
+    expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/D0BQQF5MBQB"] });
+  });
+
+  it("R4: a DM read with the bot token alone arms", async () => {
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxb-bot" } }), {
+      fetch: infoAlways({ id: "D0BQQF5MBQB", is_im: true, user: "U-OWNER" }),
+      slackApiUrl: "https://slack.test/api",
+      channelVisibility: ownerSeesAll,
+    });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/D0BQQF5MBQB", on: [{ key: "slack.message" }] }));
+    expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/D0BQQF5MBQB"] });
+  });
+
+  it("R4: a group DM with the bot arms", async () => {
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxp-user" } }), {
+      fetch: infoAlways({ id: "G0MPIM001", name: "mpdm-owner--valet--pat-1", is_mpim: true, is_private: true }),
+      slackApiUrl: "https://slack.test/api",
+      channelVisibility: ownerSeesAll,
+    });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/G0MPIM001", on: [{ key: "slack.message" }] }));
+    expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/G0MPIM001"] });
+  });
+
+  it("R4: a private channel the bot is not in still refuses and names the channel", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      new Headers(init?.headers).get("Authorization") === "Bearer xoxb-bot"
+        ? new Response(JSON.stringify({ ok: false, error: "channel_not_found" }))
+        : new Response(JSON.stringify({ ok: true, channel: { id: "C0SECRET", name: "secret", is_private: true, is_member: true } })));
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxp-user" } }), {
+      fetch: fetchImpl,
+      slackApiUrl: "https://slack.test/api",
+      channelVisibility: ownerSeesAll,
+    });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/C0SECRET", on: [{ key: "slack.message" }] }));
+    expect(result).toEqual({
+      ok: false,
+      text: "[wait_for_event] Valet is not in #secret, so it does not receive its messages. Invite @Valet to the channel, then wait again.",
+    });
+  });
+
   it("a personal session on a private channel passes R3 only when channelVisibility says the owner may see it", async () => {
     const subject = { subject: "https://acme.slack.com/archives/C001", on: [{ key: "slack.message" }] };
     for (const visible of [true, false]) {

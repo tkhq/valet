@@ -478,6 +478,10 @@ D1 errata (Task 11):
 - R4 also covers a channel that `conversations.info` reports as
   `channel_not_found`, because the bot cannot see a private channel it is
   not in. The text names `<#C…>` when Slack gives no channel name.
+- R4 counts a DM (`is_im`) or a group DM (`is_mpim`) as joined when the
+  bot token's `conversations.info` read succeeds. Slack sends no
+  `is_member` for these conversations, and the bot token reads only the
+  ones the bot is in. A wait on the bot's DM with its owner arms.
 - R3 for Linear needs the session's own Linear credential. The org's
   app-actor token (`grant = client_credentials`) does not count.
 - R5 also refuses `github.pull_request.checks_completed` unless the

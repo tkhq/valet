@@ -440,21 +440,27 @@ export function armDeps(
       if (body?.ok !== true) return { ok: false, reason: body?.error === "channel_not_found" ? "not_found" : "error" };
       const channel = asRecord(body.channel);
       if (!channel) return { ok: false, reason: "error" };
-      const isPrivate = channel.is_private === true || channel.is_im === true || channel.is_mpim === true;
+      const isDirect = channel.is_im === true || channel.is_mpim === true;
+      const isPrivate = channel.is_private === true || isDirect;
       const name = typeof channel.name === "string" ? channel.name : undefined;
       // R4 is the bot's membership, so it is read with the org's bot token.
-      // The session's read above decides only R3.
+      // The session's read above decides only R3. Slack sends no
+      // `is_member` for a DM or a group DM. The bot token can read only the
+      // DMs and group DMs it is in, so a successful read is membership.
+      const memberOf = (info: Record<string, unknown>) =>
+        info.is_member === true || info.is_im === true || info.is_mpim === true;
       const bot = credentialSecret(await slackOrg());
       if (!bot) return { ok: false, reason: "error" };
-      let isMember = channel.is_member === true;
+      let isMember = memberOf(channel);
       if (bot !== own.token) {
         const botBody = await jsonOf(await slack("conversations.info", bot, { channel: channelId }));
         if (botBody?.ok !== true) {
-          // The bot cannot see a private channel it is not in.
+          // The bot cannot see a private channel, DM, or group DM it is not in.
           if (botBody?.error !== "channel_not_found") return { ok: false, reason: "error" };
           isMember = false;
         } else {
-          isMember = asRecord(botBody.channel)?.is_member === true;
+          const botChannel = asRecord(botBody.channel);
+          isMember = botChannel !== undefined && memberOf(botChannel);
         }
       }
       return { ok: true, isPrivate, isMember, ...(name ? { name } : {}) };
