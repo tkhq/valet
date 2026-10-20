@@ -352,6 +352,21 @@ describe("Ask Valet conversations", () => {
     expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(working.threadId);
   });
 
+  it("reopens a conversation while background work it started is still open", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const waiting = await open({ fresh: true });
+    await use(waiting);
+    const now = Date.now();
+    await api.providers.engineStore.createWakeup({
+      id: "wk_ask_valet", sessionId: waiting.sessionId, threadId: waiting.threadId, kind: "timer", status: "pending",
+      reason: "check the deploy", prompt: "check the deploy", fireAt: now + 3_600_000,
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
+    });
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(waiting);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[waiting.threadId, true]]);
+  });
+
   it("leaves archived conversations out of the latest one and Recent", async () => {
     api = await bootTestApi();
     const { open, list } = conversations("user");

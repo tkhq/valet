@@ -7,6 +7,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAss
 import { canViewAssistantOwner } from "../assistants/access.js";
 import { assistantConversationKey, isAssistantConversationOf, storedThreadRef, threadVisibility } from "../services/thread-access.js";
 import { viewerOf } from "./_thread-access.js";
+import { selectWork } from "../engine/wakeups-admin.js";
 import { agentSessions, assistantExecutions, assistants, childWatches, sessionThreads } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
 import { clearIntegrationLimit, loadIntegrationLimit } from "../assistants/integration-limit.js";
@@ -92,8 +93,9 @@ async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSes
 /** The viewer's Ask Valet conversations, the most recently used first. A
  * conversation starts with its first message; until then it is empty.
  * Activity recording is best effort, so any entry also marks it as started.
- * An archived conversation is left out. A running turn, a pending approval, or
- * child work that has not settled makes a conversation busy. */
+ * An archived conversation is left out. A conversation is busy while its own
+ * thread or any work it started is open: a running or queued turn, a pending
+ * approval, a child session, a timer, process, watch, event wait, or hold. */
 async function assistantConversations(c: Context<AppEnv>, scope: { sessionIds: string[]; anchors: Set<string> }): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
   const { db, engineStore, engineHost } = c.var.providers;
   const threads = (await Promise.all(scope.sessionIds.map(id => engineStore.listThreads(id)))).flat()
@@ -102,14 +104,20 @@ async function assistantConversations(c: Context<AppEnv>, scope: { sessionIds: s
   const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt,
     archivedAt: sessionThreads.archivedAt }).from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
   const waiting = new Set((await Promise.all(scope.sessionIds.map(id => engineStore.listDecisionGates(id, undefined, "pending")))).flat().map(gate => gate.threadId));
-  const children = new Set((await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId }).from(childWatches)
-    .where(and(inArray(childWatches.parentSessionId, scope.sessionIds), eq(childWatches.settled, false)))).map(row => `${row.sessionId}\u0000${row.threadId}`));
+  const children = (await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId }).from(childWatches)
+    .where(and(inArray(childWatches.parentSessionId, scope.sessionIds), eq(childWatches.settled, false))));
+  const background = (await Promise.all(scope.sessionIds.map(async sessionId => {
+    const [wakeups, leases, submissions] = await Promise.all([engineStore.listWakeups(sessionId, ["pending", "running"]),
+      engineStore.listActiveLeases(sessionId), engineStore.listUnsettledSubmissions(sessionId)]);
+    return [...selectWork({ wakeups, leases }, {}), ...submissions].map(work => ({ sessionId, threadId: work.threadId }));
+  }))).flat();
+  const open = new Set([...children, ...background].map(work => `${work.sessionId}\u0000${work.threadId}`));
   return threads.filter(thread => meta.get(thread.id)?.archivedAt == null).map((thread) => {
     const row = meta.get(thread.id);
     return { sessionId: thread.sessionId, threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
       lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null || thread.activeLeafEntryId !== undefined,
       busy: engineHost.liveSession(thread.sessionId)?.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id)
-        || children.has(`${thread.sessionId}\u0000${thread.id}`) };
+        || open.has(`${thread.sessionId}\u0000${thread.id}`) };
   }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
 }
 
