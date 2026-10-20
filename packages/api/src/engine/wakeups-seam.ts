@@ -393,7 +393,8 @@ export function buildWakeupsSeam(
         ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
-        return await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+        const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+        return { ...result, ...(checked.warning ? { warning: checked.warning } : {}) };
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
         throw err;

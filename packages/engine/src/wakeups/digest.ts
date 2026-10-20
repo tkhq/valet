@@ -46,7 +46,7 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
     occurredAt: stripNul(digest.occurredAt),
     dedupeKey: stripNul(digest.dedupeKey),
   };
-  const optional = ["status", "previousStatus", "url", "actor", "derive"] as const;
+  const optional = ["status", "previousStatus", "url", "actor", "derive", "head_sha"] as const;
   for (const field of optional) {
     const value = digest[field];
     if (value !== undefined) out[field] = stripNul(value);

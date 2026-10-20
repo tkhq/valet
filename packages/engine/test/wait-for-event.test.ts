@@ -261,6 +261,14 @@ describe("waitForEventTool", () => {
     expect(result.text).toBe(refused);
   });
 
+  it("includes an ingress-readiness warning in the arm tool result", async () => {
+    const warning = "GitHub App delivery readiness could not be checked.";
+    const armEvent = vi.fn(async () => ({ wakeup: eventWakeup(), warning }));
+    const result = await waitForEventTool.execute(VALID, makeCtx({ armEvent }));
+    expect(result.text).toMatch(/^waiting wk_/);
+    expect(result.text).toContain(`Warning: ${warning}`);
+  });
+
   it("arms with the validated request, the origin, and the turn's credentials, and returns the D2 text", async () => {
     const wakeup = eventWakeup();
     const armEvent = vi.fn(async (_threadId: string, _req: ArmEventRequest) => ({ wakeup }));

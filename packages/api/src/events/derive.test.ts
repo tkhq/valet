@@ -40,6 +40,8 @@ function githubFixture(opts: { conclusion?: string; statusCode?: number } = {}):
       return Response.json({ total_count: 1, check_runs: [{ status: "completed", conclusion: opts.conclusion ?? "failure", completed_at: "2026-10-15T12:00:00Z" }] });
     }
     if (url.pathname.endsWith("/status")) return Response.json({ state: "pending", statuses: [] });
+    if (url.pathname.endsWith("/check-suites")) return Response.json({ check_suites: [] });
+    if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [] });
     return new Response("not found", { status: 404 });
   };
   return { fetch: impl, calls };
@@ -66,6 +68,7 @@ describe("runDerive", () => {
     expect(out.digest.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure:2026-10-15T12:00:00.000Z`);
     expect(out.digest.url).toBe("https://github.com/acme/lean-proofs/pull/42");
     expect(out.digest.derive).toBeUndefined();
+    expect(out.digest.head_sha).toBe(HEAD);
     expect(rec.points).toEqual([{ key: KEY, result: "event" }]);
   });
 
@@ -75,6 +78,18 @@ describe("runDerive", () => {
     const out = await runDerive([githubPlugin], "org-1", digest({ subjects: [PR_SUBJECT, "github:acme/lean-proofs@bbbb000000000000000000000000000000000002"] }), PR_SUBJECT, ctx(stub.fetch), rec.record);
     expect(out).toEqual({ result: "null" });
     expect(rec.points).toEqual([{ key: KEY, result: "null" }]);
+  });
+
+  it.each([401, 403])("marks HTTP %s permission errors for source consumption", async (statusCode) => {
+    const stub = githubFixture({ statusCode });
+    expect(await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(stub.fetch))).toMatchObject({ result: "error", consumeSource: true });
+  });
+
+  it("retains rate-limited sources for retry instead of consuming them as permission errors", async () => {
+    const limited: typeof fetch = async () => new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+    const out = await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(limited));
+    expect(out).toMatchObject({ result: "error" });
+    expect(out.result === "error" && out.consumeSource).not.toBe(true);
   });
 
   it("maps a 502 to an error result (keep the digest)", async () => {

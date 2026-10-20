@@ -324,7 +324,9 @@ function knownPull(owner: string, repo: string, number: string): { url: string; 
 export function startAcmeGithub(runs: GithubRuns): GithubFixture {
   const notFound: GithubFixtureResponse = { status: 404, body: { message: "Not Found" } };
   return startGithubFixture({
-    getApp: () => ({ body: { id: Number(APP_ID), slug: APP_SLUG, owner: { login: "acme", id: 5000, type: "Organization" } } }),
+    getApp: () => ({ body: { id: Number(APP_ID), slug: APP_SLUG, events: githubPlugin.triggers?.map((trigger) => trigger.id.slice("github.".length)) ?? [], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read", issues: "read" }, owner: { login: "acme", id: 5000, type: "Organization" } } }),
+    getRepoInstallation: (owner, repo) => owner === "acme" && Object.keys(KNOWN_PULLS).some((key) => key.startsWith(`${repo}/`))
+      ? { body: { id: Number(INSTALLATION), suspended_at: null, events: githubPlugin.triggers?.map((trigger) => trigger.id.slice("github.".length)) ?? [], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read", issues: "read" } } } : notFound,
     createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3_600_000).toISOString() } }),
     getUser: () => ({ body: { login: "ada", id: 1001 } }),
     getUserByLogin: (login) => (login === `${APP_SLUG}[bot]` ? { body: { login, id: Number(APP_ID), type: "Bot" } } : notFound),

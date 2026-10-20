@@ -9,7 +9,7 @@ import {
   wakeupsLimitRefusal,
   wakeupsUnavailable,
 } from "../wakeups/validate.js";
-import { DEFAULT_WATCH_MIN_INTERVAL_MS, JOB_LOG_CAPPED_MARKER } from "../wakeups/types.js";
+import { DEFAULT_WATCH_MIN_INTERVAL_MS, EVENT_DELIVERED_MAX_KEYS, JOB_LOG_CAPPED_MARKER } from "../wakeups/types.js";
 import type { EventClause, Lease, Wakeup, WakeupsSeam } from "../wakeups/types.js";
 import type { ToolContext, ToolResult } from "../types.js";
 
@@ -294,6 +294,7 @@ export const waitForEventTool = defineTool({
     "event keys in `on`, then end your turn. An `event.matched` signal starts your next turn. The sandbox may " +
     "hibernate while you wait. Arm the wait before the action that triggers it, for example before `git push`. " +
     "`once` (default true) ends the wait at the first match; `once: false` streams every match until `max_hours`. " +
+    `One waiter admits at most ${EVENT_DELIVERED_MAX_KEYS} output digests. Create a new wait for more outputs. ` +
     "Recipes: CI on a pull request: subject the PR URL, on " +
     '[{ "key": "github.check_run.completed", "status": ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, ' +
     '{ "key": "github.pull_request.checks_completed" }], once false. ' +
@@ -331,7 +332,7 @@ export const waitForEventTool = defineTool({
     const clauses = validation.value.on.map(clauseText).join(", ");
     const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
     return {
-      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.`,
+      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${result.warning ? `\nWarning: ${result.warning}` : ""}`,
     };
   },
 });

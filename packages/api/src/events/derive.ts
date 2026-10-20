@@ -9,7 +9,7 @@
  * records exactly one result per call.
  */
 import { eq } from "drizzle-orm";
-import { recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
+import { DerivePermissionError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { resolveInstallationApiToken, type GitHubTokenDeps } from "../services/github-tokens.js";
@@ -18,7 +18,7 @@ import { toDigest } from "./waiter-match.js";
 export type RunDeriveResult =
   | { result: "event"; digest: EventMatchDigest }
   | { result: "null" }
-  | { result: "error"; error: unknown };
+  | { result: "error"; error: unknown; consumeSource?: boolean };
 
 function findDerived(plugins: ValetPlugin[], key: string): DerivedEventDef | undefined {
   for (const plugin of plugins) {
@@ -53,7 +53,7 @@ export function sourceEventFromDigest(digest: EventMatchDigest): NormalizedEvent
  * - `event`: the derived condition holds; deliver `digest` in place of the source digest.
  * - `null`: the condition does not hold yet; drop the source digest and send no signal.
  * - `error`: a provider read failed or timed out, or no plugin declares the key.
- *   Keep the source digest (Review Focus 4).
+ *   Permission denials consume the source; other errors keep it for retry.
  *
  * A digest with no `derive` mark is an `error` and makes no provider call (INV-E9).
  */
@@ -84,7 +84,7 @@ export async function runDerive(
     return { result: "event", digest: toDigest(derived) };
   } catch (error) {
     record(key, "error");
-    return { result: "error", error };
+    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}) };
   }
 }
 

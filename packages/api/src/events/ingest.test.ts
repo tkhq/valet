@@ -1,4 +1,5 @@
 import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type Wakeup } from "@valet/engine";
+import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -88,24 +89,54 @@ describe("ingestEvent event waiter matching", () => {
     expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-1"]);
     expect(nudge).toHaveBeenCalledTimes(1);
     const stages = await stagesOf();
-    expect(stages).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "1 event waiter matched." });
+    expect(stages).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "Direct matches: 1. Buffered derivation sources: 0. Append failures: 0." });
     // The waiter stage holds metadata only.
     expect(JSON.stringify(stages)).not.toContain("Looks good");
   });
 
-  it("succeeds when the waiter's session is gone, and adds no stage for a waiter that is no candidate", async () => {
+  it("records no_candidates when the waiter session is gone", async () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => null }));
     expect(result).toMatchObject({ skipped: true });
     expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-    expect((await stagesOf()).map((s) => s.stage)).not.toContain("waiter_match");
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
     expect(nudge).not.toHaveBeenCalled();
   });
 
-  it("adds no waiter_match stage when no running waiter shares a subject", async () => {
+  it("records no_candidates when no running waiter shares a subject", async () => {
     const elsewhere = { ...message("Ev-9"), subjects: ["slack:T001", "slack:T001/C777"], refs: { channel: "C777" } };
     await ingest(elsewhere, waiterDeps());
-    expect((await stagesOf()).map((s) => s.stage)).not.toContain("waiter_match");
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
     expect(nudge).not.toHaveBeenCalled();
+  });
+
+  it("reports direct matches separately from buffered derivation sources", async () => {
+    const subject = "github:acme/lean-proofs#42";
+    store = new InMemorySessionStore();
+    await store.createWakeup({ ...waiter(), subjects: [subject], eventMatch: { clauses: [{ key: "github.check_run.completed" }, { key: "github.pull_request.checks_completed" }], once: false, self: [] } });
+    const event: NormalizedEvent = { key: "github.check_run.completed", dedupeKey: "gh-1", occurredAt: "2026-10-15T00:00:00Z", refs: {}, summary: "CI", payload: {}, subjects: [subject, `github:acme/lean-proofs@${"a".repeat(40)}`] };
+    await ingestEvent({ db: db.appDb, plugins: [githubPlugin], waiters: waiterDeps({ plugins: [githubPlugin] }) }, { orgId: ORG, service: "github", event });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "Direct matches: 1. Buffered derivation sources: 1. Append failures: 0." });
+  });
+
+  it("records a candidate evaluation failure without changing ingestion", async () => {
+    await ingest(message("Ev-1"), waiterDeps({ sessionOrg: async () => { throw new Error("db down"); } }));
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
+  });
+
+  it("keeps successful append counts when another waiter evaluation fails", async () => {
+    await store.createWakeup({ ...waiter(), id: "wk_2", sessionId: "s-broken" });
+    await ingest(message("Ev-partial"), waiterDeps({ sessionOrg: async (id) => {
+      if (id === "s-broken") throw new Error("lookup failed");
+      return { orgId: ORG, ownerType: "team", ownerId: "team-1" };
+    } }));
+    expect((await store.getWakeup("wk_1"))?.eventBuffer).toHaveLength(1);
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 1. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
+  });
+
+  it("records a failed append in receipt diagnostics", async () => {
+    vi.spyOn(store, "appendEventMatch").mockRejectedValueOnce(new Error("db down"));
+    await ingest(message("Ev-1"), waiterDeps());
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 1." });
   });
 
   it("appends a redelivered event once", async () => {
@@ -125,7 +156,8 @@ describe("ingestEvent event waiter matching", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await ingest(message("Ev-1"), waiterDeps({ engineStore: broken }));
     expect({ ...result, eventId: "" }).toEqual({ ...baseline, eventId: "" });
-    expect(await stagesOf()).toEqual(baselineStages);
+    expect((await stagesOf()).filter((s) => s.stage !== "waiter_match")).toEqual(baselineStages);
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
     expect(failed).toHaveBeenCalledTimes(1);
     expect(errors).toHaveBeenCalled();
     errors.mockRestore();
@@ -149,7 +181,8 @@ describe("ingestEvent event waiter matching", () => {
     const result = await ingest(message("Ev-1"), waiterDeps({ engineStore: broken }));
     expect(result).toMatchObject({ duplicate: false, deliveries: 1 });
     expect({ ...result, eventId: "" }).toEqual({ ...baseline, eventId: "" });
-    expect(await stagesOf()).toEqual(baselineStages);
+    expect((await stagesOf()).filter((s) => s.stage !== "waiter_match")).toEqual(baselineStages);
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." });
     expect(failed).toHaveBeenCalledTimes(1);
     errors.mockRestore();
   });
@@ -190,7 +223,7 @@ describe("ingestEvent event waiter matching", () => {
       expect(result).toMatchObject({ skipped: true });
       expect(lookups).toHaveBeenCalledTimes(1);
       expect((await store.getWakeup("wk_lin"))?.eventBuffer).toEqual([]);
-      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
+      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0." });
       expect(failed).not.toHaveBeenCalled();
     });
 
@@ -198,7 +231,7 @@ describe("ingestEvent event waiter matching", () => {
       const result = await ingest(message("Ev-slow"), boundedDeps({ providerTimeoutMs: 50, channelVisibility: () => never }));
       expect(result).toMatchObject({ skipped: true });
       expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
-      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
+      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0." });
     });
   });
 
@@ -274,7 +307,7 @@ describe("ingestEvent event waiter matching", () => {
     await ingest(message("Ev-c1"), waiterDeps(), deliverable);
     expect(await deliveryStamps()).toEqual([{ kind: "skip", reason: "claimed by thread t-1" }]);
     expect((await store.getWakeup("wk_1"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["Ev-c1"]);
-    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "1 event waiter matched." });
+    expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "matched", detail: "Direct matches: 1. Buffered derivation sources: 0. Append failures: 0." });
   });
 
   it("never stamps a workflow delivery (INV-D7)", async () => {

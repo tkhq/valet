@@ -114,6 +114,16 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM memory_files WHERE owner_id = 'recover'");
   });
 
+  it("adds source replay state to an existing waiter without changing its delivered keys", async () => {
+    await db.query("ALTER TABLE engine_wakeups DROP COLUMN event_source_seen");
+    await db.query(`INSERT INTO engine_wakeups(id, session_id, thread_id, kind, status, reason, created_at, updated_at, event_seen)
+      VALUES ('legacy-waiter', 'session', 'thread', 'event', 'running', 'CI', 1, 1, '["completion"]')`);
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT event_seen, event_source_seen FROM engine_wakeups WHERE id = 'legacy-waiter'")).rows)
+      .toEqual([{ event_seen: '["completion"]', event_source_seen: null }]);
+    await db.query("DELETE FROM engine_wakeups WHERE id = 'legacy-waiter'");
+  });
+
   it("repairs a missing legacy behavior column before the boot report", async () => {
     await db.query("ALTER TABLE assistants DROP COLUMN behavior");
     await expect(applyAppMigrations(db)).resolves.toBeUndefined();

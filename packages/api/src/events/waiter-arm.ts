@@ -21,7 +21,7 @@ import {
 import { identityForUser } from "../channels/identity-links.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
-import { loadAppConfig } from "../services/github-app.js";
+import { githubAppRepositoryAccess, githubIngressConfig, loadAppConfig, type GithubIngressConfig } from "../services/github-app.js";
 import { slackBotUserIdOf } from "../services/slack-bot-identity.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { installationResolvesFor } from "../services/github-tokens.js";
@@ -61,12 +61,14 @@ export interface ArmDeps {
   plugins: ValetPlugin[];
   /** R7: whether the org has the service connected. */
   serviceConnected(service: string): Promise<boolean>;
-  /** R2: whether the org's GitHub App installation covers the owner. */
-  githubInstallationCovers(owner: string): Promise<boolean>;
+  /** R2: installation coverage of the repository. Null means the read is inconclusive. */
+  githubInstallationCovers(owner: string, repo: string): Promise<boolean | null>;
+  /** Granted installation subscriptions and permissions, or null when unreadable. */
+  githubIngressConfig(owner: string, repo: string, refresh?: boolean): Promise<GithubIngressConfig | null>;
   /** The team id of the org's connected Slack workspace, or null. */
   slackTeamId(): Promise<string | null>;
   /** R3 for GitHub. `pullRequest` is set for a `#n` target. */
-  readGithub(target: GithubTarget): Promise<{ readable: boolean; pullRequest?: boolean }>;
+  readGithub(target: GithubTarget): Promise<{ readable: boolean; pullRequest?: boolean; sha?: string }>;
   /** R3 and R4 for Slack. */
   readSlackChannel(channelId: string): Promise<SlackChannelRead>;
   /** R3 for Slack: the session's channel visibility rule. */
@@ -91,7 +93,7 @@ export interface ArmContext {
  * names the subject that direct clauses need (spec Part C).
  */
 export type ArmCheckResult =
-  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string }
+  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string; warning?: string }
   | { ok: false; text: string };
 
 const SERVICE_NAMES: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear" };
@@ -177,12 +179,32 @@ function clauseRefusal(plugins: ValetPlugin[], parsed: ParsedSubject, clauses: r
   return null;
 }
 
+const GITHUB_EVENT_PERMISSIONS: Record<string, readonly string[]> = {
+  check_run: ["checks"], check_suite: ["checks"], workflow_run: ["actions"], status: ["statuses"],
+  pull_request: ["pull_requests"], pull_request_review: ["pull_requests"], pull_request_review_comment: ["pull_requests"],
+  pull_request_review_thread: ["pull_requests"], release: ["contents"],
+  issues: ["issues"], issue_comment: ["issues", "pull_requests"], push: ["contents"], create: ["contents"], delete: ["contents"],
+};
+
+/** Expand catalog globs and derived keys before checking webhook delivery. */
+function githubSourceFamilies(plugins: ValetPlugin[], clauses: readonly EventClause[]): string[] {
+  const derived = plugins.flatMap((p) => p.derivedEvents ?? []);
+  const catalog = catalogForService(plugins, "github");
+  const keys = clauses.flatMap((clause) => {
+    const exact = derived.find((entry) => entry.key === clause.key);
+    if (exact) return exact.sources;
+    return catalog.filter((entry) => !derived.some((d) => d.key === entry.key) && keyMatches(clause.key, entry.key))
+      .map((entry) => entry.key);
+  });
+  return [...new Set(keys.map((key) => key.split(".")[1]!))];
+}
+
 /** A provider call bounded by `ms`. A timeout or a throw yields `fallback`. */
 async function bounded<T>(work: () => Promise<T>, ms: number, fallback: T): Promise<T> {
   try {
     return await withTimeout(work(), ms, fallback);
   } catch (err) {
-    console.warn("[wait_for_event] an arm check read failed; it counts as a refusal:", err);
+    console.warn("[wait_for_event] an arm check read failed; using its fallback:", err);
     return fallback;
   }
 }
@@ -212,13 +234,42 @@ export async function checkArm(
   }
 
   let subject = parsed.subject;
+  let warning: string | undefined;
   if (parsed.service === "github") {
     const { owner, repo } = parsed.target;
-    if (!(await bounded(() => deps.githubInstallationCovers(owner), ms, false))) {
-      return { ok: false, text: R2(owner, repo) };
+    const coverage = await bounded(() => deps.githubInstallationCovers(owner, repo), ms, null);
+    if (coverage === false) return { ok: false, text: R2(owner, repo) };
+    if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
+    let config = await bounded(() => deps.githubIngressConfig(owner, repo), ms, null);
+    const missingSettings = (settings: GithubIngressConfig): string[] => {
+      const missing: string[] = [];
+      for (const family of githubSourceFamilies(deps.plugins, req.on)) {
+        if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
+        if (!settings.events.includes(family)) missing.push(`event ${family}`);
+        const permissions = GITHUB_EVENT_PERMISSIONS[family];
+        if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
+          missing.push(`permission ${permissions.join(" or ")}: read`);
+        }
+      }
+      return [...new Set(missing)];
+    };
+    // A just-approved installation must not receive a stale cached refusal.
+    if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
+    if (config) {
+      const missing = missingSettings(config);
+      if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
+    } else {
+      warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
     }
     const read = await bounded(() => deps.readGithub(parsed.target), ms, { readable: false });
-    if (!read.readable) return { ok: false, text: R3(subject) };
+    if (!read.readable && (parsed.target.sha === undefined || parsed.target.sha.length === 40)) return { ok: false, text: R3(subject) };
+    if (parsed.target.sha !== undefined) {
+      if ((!read.readable || !read.sha || !/^[0-9a-f]{40}$/i.test(read.sha)) && parsed.target.sha.length !== 40) {
+        return { ok: false, text: "[wait_for_event] The commit SHA could not be resolved. Give the full 40-character SHA. Then wait again." };
+      }
+      const sha = read.sha && /^[0-9a-f]{40}$/i.test(read.sha) ? read.sha : parsed.target.sha;
+      subject = `github:${owner}/${repo}@${sha.toLowerCase()}`;
+    }
     const needsPr = req.on.find((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key));
     if (needsPr && read.pullRequest === false) return { ok: false, text: R5_PULL_REQUEST(needsPr.key) };
   } else if (parsed.service === "slack") {
@@ -259,9 +310,9 @@ export async function checkArm(
   const derivedKeys = new Set(deps.plugins.flatMap((plugin) => (plugin.derivedEvents ?? []).map((def) => def.key)));
   if (parsed.service === "github" && parsed.target.number !== undefined && req.on.some((clause) => derivedKeys.has(clause.key))) {
     const repoSubject = `github:${parsed.target.owner}/${parsed.target.repo}`;
-    return { ok: true, subjects: [subject, repoSubject], self: [...new Set(self)], primarySubject: subject };
+    return { ok: true, subjects: [subject, repoSubject], self: [...new Set(self)], primarySubject: subject, ...(warning ? { warning } : {}) };
   }
-  return { ok: true, subjects: [subject], self: [...new Set(self)] };
+  return { ok: true, subjects: [subject], self: [...new Set(self)], ...(warning ? { warning } : {}) };
 }
 
 /** The providers `armDeps` reads. */
@@ -327,7 +378,7 @@ export function armDeps(
   const slackApi = opts.slackApiUrl ?? "https://slack.com/api";
   const linearApi = opts.linearApiUrl ?? (env.LINEAR_API_URL || "https://api.linear.app");
   const store: CredentialStore = providers.engineCredentials;
-  const appDeps = { db: providers.db, credentials: store, env };
+  const appDeps = { db: providers.db, credentials: store, env, apiUrl: githubApi, fetchImpl: http };
   const accessDeps = { db: providers.db, engineCredentials: store, ...(providers.onePassword ? { onePassword: providers.onePassword } : {}) };
 
   let orgSlack: ReturnType<typeof orgSlackCredential> | undefined;
@@ -408,10 +459,13 @@ export function armDeps(
       return false;
     },
 
-    async githubInstallationCovers(owner) {
-      // Owner coverage only. R3's read with the session's credential
-      // catches a repository the installation leaves out.
-      return (await installationResolvesFor(appDeps, session.orgId, owner, { strictOwner: true })).ok;
+    async githubInstallationCovers(owner, repo) {
+      if (!(await installationResolvesFor(appDeps, session.orgId, owner, { strictOwner: true })).ok) return false;
+      return githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`);
+    },
+
+    githubIngressConfig(owner, repo, refresh) {
+      return githubIngressConfig(appDeps, session.orgId, owner, repo, refresh);
     },
 
     async slackTeamId() {
@@ -427,6 +481,10 @@ export function armDeps(
         : target.sha !== undefined ? `${base}/commits/${target.sha}` : base;
       const res = await github(path, own.token);
       if (!res.ok) return { readable: false };
+      if (target.sha !== undefined) {
+        const sha = (await jsonOf(res))?.sha;
+        return { readable: true, ...(typeof sha === "string" ? { sha } : {}) };
+      }
       if (target.number === undefined) return { readable: true };
       // GitHub numbers pull requests and issues in one sequence. An issue
       // read of a pull request carries `pull_request`.

@@ -98,6 +98,9 @@ export interface GithubFixtureHandlers {
   listCheckRuns?: (owner: string, repo: string, sha: string, query: Record<string, string>) => GithubFixtureResponse;
   /** `GET /repos/:owner/:repo/commits/:sha/status`, the combined status. */
   getCombinedStatus?: (owner: string, repo: string, sha: string) => GithubFixtureResponse;
+  getRepoInstallation?: (owner: string, repo: string) => GithubFixtureResponse;
+  listCheckSuites?: () => GithubFixtureResponse;
+  listWorkflowRuns?: () => GithubFixtureResponse;
   /** `GET /users/:login`. */
   getUserByLogin?: (login: string) => GithubFixtureResponse;
 }
@@ -167,6 +170,9 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   getPull: () => ({ status: 404, body: { message: "Not Found" } }),
   listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
   getCombinedStatus: () => ({ body: { state: "pending", statuses: [] } }),
+  getRepoInstallation: () => ({ status: 404, body: { message: "Not Found" } }),
+  listCheckSuites: () => ({ body: { total_count: 0, check_suites: [] } }),
+  listWorkflowRuns: () => ({ body: { total_count: 0, workflow_runs: [] } }),
   getUserByLogin: () => ({ status: 404, body: { message: "Not Found" } }),
 };
 
@@ -417,6 +423,25 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     const { owner, repo, sha } = c.req.param();
     record(c, { owner, repo, sha });
     const { status, body } = handlers.getCombinedStatus(owner, repo, sha);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/installation", (c) => {
+    const { owner, repo } = c.req.param();
+    record(c, { owner, repo });
+    const { status, body } = handlers.getRepoInstallation(owner, repo);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/check-suites", (c) => {
+    record(c, c.req.param());
+    const { status, body } = handlers.listCheckSuites();
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/actions/runs", (c) => {
+    record(c, c.req.param());
+    const { status, body } = handlers.listWorkflowRuns();
     return c.json(body as object, status ?? 200);
   });
 

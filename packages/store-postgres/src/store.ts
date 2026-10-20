@@ -2,7 +2,8 @@ import {
   boundEventDigest,
   ConflictError,
   EVENT_BUFFER_MAX_DIGESTS,
-  EVENT_SEEN_MAX_KEYS,
+  EVENT_DELIVERED_MAX_KEYS,
+  EVENT_SOURCE_SEEN_MAX_KEYS,
   NotFoundError,
   PendingCapError,
   recordEventWaiterBufferFull,
@@ -1577,7 +1578,7 @@ export class PgSessionStore implements SessionStore {
     // tell a refusal at the cap from the other refusals.
     const r = await this.db.query(
       `WITH cur AS (
-         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, COALESCE(event_seen, '[]')::jsonb AS seen
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) AS delivered_count, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
            FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
        ),
        u AS (
@@ -1586,9 +1587,11 @@ export class PgSessionStore implements SessionStore {
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
             AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
+                 (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
                              WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
-            AND NOT COALESCE(event_seen, '[]')::jsonb @> jsonb_build_array($2::jsonb->'dedupeKey')
+            AND NOT (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) @> jsonb_build_array($2::jsonb->'dedupeKey')
          RETURNING id
        )
        SELECT EXISTS (SELECT 1 FROM u) AS appended,
@@ -1596,19 +1599,22 @@ export class PgSessionStore implements SessionStore {
                        WHERE jsonb_array_length(cur.buf) >= $4
                          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
                                           WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
-                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full`,
-      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS],
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full,
+              EXISTS (SELECT 1 FROM cur WHERE NOT $2::jsonb ? 'derive' AND cur.delivered_count +
+                (SELECT count(*) FROM jsonb_array_elements(cur.buf) e WHERE NOT e ? 'derive') >= $5) AS exhausted`,
+      [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS],
     );
     const row = r.rows[0];
     if (row?.appended === true) return true;
     if (row?.full === true) recordEventWaiterBufferFull();
+    if (row?.exhausted === true) console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
     return false;
   }
 
-  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean> {
-    // One statement: the buffer keeps every digest not named in $2, so a
-    // digest appended after the caller's read survives. The seen list drops
-    // the named keys, appends them as the newest, and keeps the newest $4.
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number, mode: "delivered" | "source" = "delivered"): Promise<boolean> {
+    // Column names come only from this closed choice, never from caller input.
+    const seenColumn = mode === "source" ? "event_source_seen" : "event_seen";
+    // One statement preserves concurrent appends and records replay state.
     const keys = [...new Set(dedupeKeys)];
     const r = await this.db.query(
       `UPDATE engine_wakeups
@@ -1616,20 +1622,23 @@ export class PgSessionStore implements SessionStore {
                 SELECT COALESCE(jsonb_agg(b.e ORDER BY b.ord), '[]'::jsonb)::text
                   FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) WITH ORDINALITY AS b(e, ord)
                  WHERE NOT (b.e->>'dedupeKey' = ANY($2::text[]))),
-              event_seen = (
+              ${seenColumn} = (
                 SELECT COALESCE(jsonb_agg(k.key ORDER BY k.pos), '[]'::jsonb)::text
                   FROM (SELECT a.key, a.pos, row_number() OVER (ORDER BY a.pos DESC) AS rn
                           FROM (SELECT s.key, s.ord AS pos
-                                  FROM jsonb_array_elements_text(COALESCE(event_seen, '[]')::jsonb) WITH ORDINALITY AS s(key, ord)
+                                  FROM jsonb_array_elements_text(COALESCE(${seenColumn}, '[]')::jsonb) WITH ORDINALITY AS s(key, ord)
                                  WHERE NOT (s.key = ANY($2::text[]))
                                 UNION ALL
                                 SELECT n.key, 1000000000 + n.ord
                                   FROM unnest($2::text[]) WITH ORDINALITY AS n(key, ord)) a) k
-                 WHERE k.rn <= $4),
+                 WHERE ($4::integer IS NULL OR k.rn <= $4)),
               updated_at = $3
         WHERE id = $1 AND kind = 'event'
+          AND ($4::integer IS NOT NULL OR
+            (SELECT count(*) FROM jsonb_array_elements_text(COALESCE(event_seen, '[]')::jsonb) s(key) WHERE NOT s.key = ANY($2::text[])) + cardinality($2::text[])
+              <= GREATEST($5, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb)))
        RETURNING id`,
-      [id, keys, updatedAt, EVENT_SEEN_MAX_KEYS],
+      [id, keys, updatedAt, mode === "source" ? EVENT_SOURCE_SEEN_MAX_KEYS : null, EVENT_DELIVERED_MAX_KEYS],
     );
     return r.rows.length > 0;
   }
@@ -1774,8 +1783,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
        origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
-       event_seen)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`,
+       event_seen, event_source_seen)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
     [
       w.id,
       w.sessionId,
@@ -1806,6 +1815,7 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       w.subjects ? [...w.subjects] : null,
       jsonOrNull(w.eventBuffer),
       jsonOrNull(w.eventSeen),
+      jsonOrNull(w.eventSourceSeen),
     ],
   );
 }

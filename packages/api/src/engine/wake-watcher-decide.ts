@@ -596,6 +596,7 @@ export function digestBlock(d: EventMatchDigest): string {
 
 /** One entry of the `digests` signal attribute: the digest without its text. */
 export interface EventDigestEntry {
+  head_sha?: string;
   key: string;
   status?: string;
   actor?: string;
@@ -606,6 +607,7 @@ export interface EventDigestEntry {
 function digestEntry(d: EventMatchDigest): EventDigestEntry {
   return {
     key: d.key,
+    ...(d.head_sha !== undefined ? { head_sha: d.head_sha } : {}),
     ...(d.status !== undefined ? { status: d.status } : {}),
     ...(d.actor !== undefined ? { actor: d.actor } : {}),
     summary: d.summary,

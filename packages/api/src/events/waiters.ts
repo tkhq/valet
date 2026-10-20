@@ -113,6 +113,7 @@ export async function evaluateWaiterCandidates(
   orgId: string,
   service: string,
   event: NormalizedEvent,
+  onError?: () => void,
 ): Promise<WaiterCandidate[]> {
   const subjects = event.subjects ?? [];
   if (subjects.length === 0) return [];
@@ -173,6 +174,7 @@ export async function evaluateWaiterCandidates(
       const candidate = await evaluateOne(waiter);
       if (candidate) candidates.push(candidate);
     } catch (error) {
+      onError?.();
       metrics.failed();
       console.error(`[event-waiters] matching failed for waiter ${waiter.id}`, error);
     }
@@ -183,7 +185,7 @@ export async function evaluateWaiterCandidates(
 /**
  * Appends the digests of every accepted candidate whose decision is not
  * `suppress` (spec Part E, steps 5 and 6), then nudges the WakeWatcher
- * once. Returns the number of waiters that got a new digest. A redelivered
+ * once. Returns counts of waiters, direct matches, sources, and failures. A redelivered
  * event that a waiter already holds or already delivered does not count
  * (INV-E4). A failed append for one waiter is logged and counted, and the
  * other waiters still append.
@@ -193,7 +195,8 @@ export async function appendWaiterDigests(
   service: string,
   candidates: ReadonlyArray<WaiterCandidate>,
   decisions: ReadonlyMap<string, WaiterDecision> = new Map(),
-): Promise<number> {
+): Promise<WaiterAppendResult> {
+  const result: WaiterAppendResult = { waiters: 0, direct: 0, sources: 0, errors: 0 };
   const metrics = metricsOf(deps);
   const appended: string[] = [];
   for (const candidate of candidates) {
@@ -201,27 +204,39 @@ export async function appendWaiterDigests(
     try {
       let any = false;
       for (const digest of candidate.digests) {
-        if (await deps.engineStore.appendEventMatch(candidate.waiter.id, digest, deps.now())) any = true;
+        if (await deps.engineStore.appendEventMatch(candidate.waiter.id, digest, deps.now())) {
+          any = true;
+          if (digest.derive) result.sources++;
+          else result.direct++;
+        }
       }
       if (any) {
         appended.push(candidate.waiter.id);
         metrics.matched(service);
       }
     } catch (error) {
+      result.errors++;
       metrics.failed();
       console.error(`[event-waiters] matching failed for waiter ${candidate.waiter.id}`, error);
     }
   }
   if (appended.length > 0) deps.nudge?.(appended);
-  return appended.length;
+  return { ...result, waiters: appended.length };
 }
 
-/** The receipt stage for a matching pass (spec Part E, step 7). Metadata only. */
-export function waiterMatchStage(count: number): { stage: string; outcome: string; detail: string } {
+export interface WaiterAppendResult {
+  waiters: number;
+  direct: number;
+  sources: number;
+  errors: number;
+}
+
+/** Counts newly buffered direct matches and derivation sources separately. */
+export function waiterMatchStage(result: WaiterAppendResult): { stage: string; outcome: string; detail: string } {
   return {
     stage: "waiter_match",
-    outcome: count > 0 ? "matched" : "none",
-    detail: `${count} event ${count === 1 ? "waiter" : "waiters"} matched.`,
+    outcome: result.errors > 0 ? "failed" : result.waiters > 0 ? "matched" : "none",
+    detail: `Direct matches: ${result.direct}. Buffered derivation sources: ${result.sources}. Append failures: ${result.errors}.`,
   };
 }
 

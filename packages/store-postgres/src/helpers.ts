@@ -755,6 +755,8 @@ export interface WakeupRow {
   event_buffer: string | null;
   /** `event`: a JSON array of delivered dedupe keys, oldest first. */
   event_seen: string | null;
+  /** `event`: a bounded JSON array of consumed derivation source keys. */
+  event_source_seen: string | null;
 }
 
 /**
@@ -811,6 +813,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     subjects: asStringArrayOrNull(raw.subjects, "subjects"),
     event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
     event_seen: asStringOrNull(raw.event_seen, "event_seen"),
+    event_source_seen: asStringOrNull(raw.event_source_seen, "event_source_seen"),
   };
 }
 
@@ -904,7 +907,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
 function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
   if (!isRecord(v)) throw new Error(`${field} is not an object`);
   if (!isStringArray(v.subjects)) throw new Error(`${field}.subjects is not a string array`);
-  const optional = ["status", "previousStatus", "url", "actor", "text", "derive"] as const;
+  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha"] as const;
   const out: EventMatchDigest = {
     key: reqString(v, "key", field),
     subjects: v.subjects,
@@ -981,6 +984,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...(row.subjects !== null ? { subjects: row.subjects } : {}),
     ...(row.match_json !== null ? { eventMatch: parseEventMatchJson(row.match_json) } : {}),
     ...(row.event_buffer !== null ? { eventBuffer: parseEventBufferJson(row.event_buffer) } : {}),
+    ...(row.event_source_seen !== null ? { eventSourceSeen: parseEventSeenJson(row.event_source_seen) } : {}),
     ...(row.event_seen !== null ? { eventSeen: parseEventSeenJson(row.event_seen) } : {}),
   };
 }

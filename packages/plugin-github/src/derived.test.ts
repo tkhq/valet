@@ -7,12 +7,33 @@ import { checksCompleted, latestCompletedAt } from "./derived.js";
 
 const HEAD = "aaaa000000000000000000000000000000000001";
 const OLD = "bbbb000000000000000000000000000000000002";
-const API = "https://api.github.com";
 const PR_SUBJECT = "github:acme/lean-proofs#42";
 
 interface CheckRun { status: string; conclusion: string | null; completed_at?: string }
+interface SuiteState {
+  status: string;
+  latest_check_runs_count?: number;
+  id?: number;
+  conclusion?: string;
+  app?: { id?: number; slug?: string };
+}
+interface WorkflowState {
+  status: string;
+  event?: string;
+  conclusion?: string;
+  workflow_id?: number;
+  id?: number;
+  run_number?: number;
+  run_attempt?: number;
+}
 interface Fixture {
   head?: string;
+  finalHead?: string;
+  suites?: SuiteState[];
+  workflows?: WorkflowState[];
+  suitePages?: SuiteState[][];
+  workflowPages?: WorkflowState[][];
+  statusPages?: { state: string }[][];
   /** Check-run pages, in order. */
   pages?: CheckRun[][];
   combined?: { state: string; statuses: { state: string; updated_at?: string }[] };
@@ -26,6 +47,7 @@ function stubFetch(fixture: Fixture): { fetch: typeof fetch; calls: string[]; si
   const auth: (string | null)[] = [];
   const pages = fixture.pages ?? [[]];
   const total = pages.reduce((n, p) => n + p.length, 0);
+  let headReads = 0;
   const impl: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const pathAndQuery = `${url.pathname}${url.search}`;
@@ -36,7 +58,7 @@ function stubFetch(fixture: Fixture): { fetch: typeof fetch; calls: string[]; si
       return new Response("bad gateway", { status: fixture.failPath.status });
     }
     if (url.pathname === "/repos/acme/lean-proofs/pulls/42") {
-      return Response.json({ number: 42, html_url: "https://github.com/acme/lean-proofs/pull/42", head: { sha: fixture.head ?? HEAD } });
+      return Response.json({ number: 42, html_url: "https://github.com/acme/lean-proofs/pull/42", head: { sha: ++headReads > 1 ? fixture.finalHead ?? fixture.head ?? HEAD : fixture.head ?? HEAD } });
     }
     const runs = url.pathname.match(/^\/repos\/acme\/lean-proofs\/commits\/([0-9a-f]+)\/check-runs$/);
     if (runs) {
@@ -44,8 +66,10 @@ function stubFetch(fixture: Fixture): { fetch: typeof fetch; calls: string[]; si
       return Response.json({ total_count: total, check_runs: pages[page - 1] ?? [] });
     }
     if (url.pathname.match(/^\/repos\/acme\/lean-proofs\/commits\/[0-9a-f]+\/status$/)) {
-      return Response.json(fixture.combined ?? { state: "pending", statuses: [] });
+      return Response.json(fixture.statusPages ? { statuses: fixture.statusPages[Number(url.searchParams.get("page")) - 1] ?? [] } : fixture.combined ?? { state: "pending", statuses: [] });
     }
+    if (url.pathname.endsWith("/check-suites")) return Response.json({ check_suites: fixture.suitePages?.[Number(url.searchParams.get("page")) - 1] ?? fixture.suites ?? [] });
+    if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: fixture.workflowPages?.[Number(url.searchParams.get("page")) - 1] ?? fixture.workflows ?? [] });
     return new Response("not found", { status: 404 });
   };
   return { fetch: impl, calls, signals, auth };
@@ -93,6 +117,8 @@ describe("checksCompleted (spec B1)", () => {
     it("returns null while one check run is in_progress", async () => {
       const stub = stubFetch({ pages: [[...ok(2), { status: "in_progress", conclusion: null }]], combined: { state: "pending", statuses: [] } });
       expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+      expect(stub.calls).toHaveLength(2);
+      expect(stub.calls[1]).toContain("/check-runs?");
     });
 
     it("returns status success when all runs succeed and there are no statuses", async () => {
@@ -126,6 +152,117 @@ describe("checksCompleted (spec B1)", () => {
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
   });
 
+  it.each(["queued", "in_progress", "requested", "waiting", "pending"])("waits for %s suites before a later check exists", async (status) => {
+    const early = stubFetch({ pages: [ok(1)], suites: [{ status }] });
+    expect(await checksCompleted.derive(ctxWith(early.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    const later = stubFetch({ pages: [[...ok(1), { status: "queued", conclusion: null }]] });
+    expect(await checksCompleted.derive(ctxWith(later.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+  });
+
+  it("ignores a zero-run queued App suite", async () => {
+    const stub = stubFetch({ pages: [ok(1)], suites: [{ status: "queued", latest_check_runs_count: 0 }] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("ignores an Actions suite when filters skip every workflow", async () => {
+    const stub = stubFetch({ pages: [ok(1)], suites: [{ status: "queued", latest_check_runs_count: 0, app: { slug: "github-actions" } }] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("ignores an unrelated push deploy waiting for environment approval", async () => {
+    const stub = stubFetch({ pages: [ok(1)], workflows: [{ status: "waiting", event: "push" }] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("stops on a pending run before reading another page", async () => {
+    const stub = stubFetch({ pages: [[{ status: "queued", conclusion: null }, ...ok(99)], ok(1)] });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    expect(stub.calls).toHaveLength(2);
+  });
+
+  it("stops on pending statuses before suites and workflows", async () => {
+    const stub = stubFetch({ pages: [ok(1)], combined: { state: "pending", statuses: [{ state: "pending" }] } });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    expect(stub.calls).toHaveLength(3);
+  });
+
+  it("waits for a workflow that has not created its checks", async () => {
+    const stub = stubFetch({ pages: [ok(1)], workflows: [{ status: "queued", event: "pull_request" }] });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+  });
+
+  it.each(["suitePages", "workflowPages"] as const)("reads pending work on later %s pages", async (field) => {
+    const stub = stubFetch({ pages: [ok(1)], [field]: [Array.from({ length: 100 }, () => ({ status: "completed", event: "pull_request" })), [{ status: "waiting", event: "pull_request" }]] });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    expect(stub.calls.some((path) => path.includes(field === "suitePages" ? "check-suites?" : "actions/runs?") && path.endsWith("page=2"))).toBe(true);
+  });
+
+  it("refuses a partial status snapshot at the pagination safety limit", async () => {
+    const stub = stubFetch({ pages: [ok(1)], statusPages: Array.from({ length: 20 }, () => Array.from({ length: 100 }, () => ({ state: "success" }))) });
+    await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toThrow("too many statuses pages");
+  });
+
+  it.each([false, true])("ignores superseded cancelled runs and suites regardless of response order (reverse=%s)", async (reverse) => {
+    const workflows: WorkflowState[] = [
+      { workflow_id: 1, id: 10, run_number: 1, run_attempt: 1, event: "pull_request", status: "completed", conclusion: "cancelled" },
+      { workflow_id: 1, id: 20, run_number: 2, run_attempt: 1, event: "pull_request", status: "completed", conclusion: "success" },
+    ];
+    const suites: SuiteState[] = [
+      { app: { id: 1 }, id: 10, latest_check_runs_count: 1, status: "completed", conclusion: "cancelled" },
+      { app: { id: 1 }, id: 20, latest_check_runs_count: 1, status: "completed", conclusion: "success" },
+    ];
+    const stub = stubFetch({ pages: [ok(1)], workflows: reverse ? workflows.reverse() : workflows, suites: reverse ? suites.reverse() : suites });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("uses the newest attempt of a rerun with the same workflow run id", async () => {
+    const stub = stubFetch({ pages: [ok(1)], workflows: [
+      { workflow_id: 1, id: 20, run_number: 2, run_attempt: 1, event: "pull_request", status: "completed", conclusion: "cancelled" },
+      { workflow_id: 1, id: 20, run_number: 2, run_attempt: 2, event: "pull_request", status: "completed", conclusion: "success" },
+    ] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("keeps failures of the latest run of another workflow", async () => {
+    const stub = stubFetch({ pages: [ok(1)], workflows: [
+      { workflow_id: 1, id: 10, event: "pull_request", status: "completed", conclusion: "failure" },
+      { workflow_id: 2, id: 20, event: "pull_request_target", status: "completed", conclusion: "success" },
+    ] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+  });
+
+  it("keeps the latest suite failure of a different App", async () => {
+    const stub = stubFetch({ pages: [ok(1)], suites: [
+      { app: { id: 1 }, id: 10, latest_check_runs_count: 1, status: "completed", conclusion: "failure" },
+      { app: { id: 2 }, id: 20, latest_check_runs_count: 1, status: "completed", conclusion: "success" },
+    ] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+  });
+
+  it.each(["suitePages", "workflowPages"] as const)("selects the latest record across %s before deciding terminality", async (field) => {
+    const old = { app: { id: 1 }, workflow_id: 1, id: 10, event: "pull_request", status: "queued", latest_check_runs_count: 1 };
+    const current = { ...old, id: 20, status: "completed", conclusion: "success" };
+    const stub = stubFetch({ pages: [ok(1)], [field]: [Array.from({ length: 100 }, () => old), [current]] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("drops a completion when the head changes during the reads", async () => {
+    const stub = stubFetch({ pages: [ok(1)], finalHead: OLD });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    expect(stub.calls.at(-1)).toBe("/repos/acme/lean-proofs/pulls/42");
+  });
+
+  it("waits for pending contexts even when the combined result is failure", async () => {
+    const stub = stubFetch({ pages: [ok(1)], combined: { state: "failure", statuses: [{ state: "failure" }, { state: "pending" }] } });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+  });
+
+  it("reads pending contexts beyond the first status page", async () => {
+    const stub = stubFetch({ pages: [ok(1)], statusPages: [Array.from({ length: 100 }, () => ({ state: "failure" })), [{ state: "pending" }]] });
+    expect(await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
+    expect(stub.calls).toContain(`/repos/acme/lean-proofs/commits/${HEAD}/status?per_page=100&page=2`);
+  });
+
   it("gives a CI re-run on the same SHA a new dedupe key (B1 step 5)", async () => {
     const first = stubFetch({ pages: [[{ status: "completed", conclusion: "failure", completed_at: "2026-10-15T12:05:00Z" }]], combined: { state: "pending", statuses: [] } });
     const rerun = stubFetch({ pages: [[{ status: "completed", conclusion: "failure", completed_at: "2026-10-15T13:40:00Z" }]], combined: { state: "pending", statuses: [] } });
@@ -152,7 +289,7 @@ describe("checksCompleted (spec B1)", () => {
     expect(event?.status).toBe("failure");
     expect(stub.calls).toContain(`/repos/acme/lean-proofs/commits/${HEAD}/check-runs?per_page=100&page=1`);
     expect(stub.calls).toContain(`/repos/acme/lean-proofs/commits/${HEAD}/check-runs?per_page=100&page=2`);
-    expect(stub.calls).toContain(`/repos/acme/lean-proofs/commits/${HEAD}/status`);
+    expect(stub.calls).toContain(`/repos/acme/lean-proofs/commits/${HEAD}/status?per_page=100&page=1`);
   });
 
   it("builds the derived event's subjects, summary, and url payload", async () => {
@@ -167,7 +304,7 @@ describe("checksCompleted (spec B1)", () => {
   it("sends the app token and a timeout signal on every request", async () => {
     const stub = stubFetch({ pages: [ok(1)], combined: { state: "pending", statuses: [] } });
     await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD));
-    expect(stub.calls.length).toBe(3);
+    expect(stub.calls.length).toBe(6);
     expect(stub.auth.every((a) => a === "Bearer ghs_test")).toBe(true);
     expect(stub.signals.every((s) => s instanceof AbortSignal)).toBe(true);
   });

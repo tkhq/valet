@@ -323,7 +323,7 @@ export async function githubAppRepositoryAccess(
   deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl">,
   orgId: string,
   repository: string,
-): Promise<boolean> {
+): Promise<boolean | null> {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) return false;
   const config = await loadAppConfig(deps, orgId);
   if (!config) return false;
@@ -339,6 +339,90 @@ export async function githubAppRepositoryAccess(
     throw new Error("GitHub App repository access could not be verified.");
   }
   return body.suspended_at === null;
+}
+
+/** Granted installation delivery configuration. A missing value means readiness is unknown. */
+export interface GithubIngressConfig {
+  events: string[];
+  permissions: Record<string, unknown>;
+  pendingApproval?: boolean;
+}
+
+const INGRESS_CONFIG_TTL_MS = 60_000;
+const ingressConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<GithubIngressConfig | null> }>>();
+
+function permissionLevel(value: unknown): number {
+  return value === "admin" ? 3 : value === "write" ? 2 : value === "read" ? 1 : 0;
+}
+
+/** Cache the installation read briefly across arm calls. Unknown configuration permits arming with a warning. */
+export async function githubIngressConfig(
+  deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
+  orgId: string,
+  owner: string,
+  repo: string,
+  refresh = false,
+): Promise<GithubIngressConfig | null> {
+  let config: GithubAppConfig | null;
+  try {
+    config = await loadAppConfig(deps, orgId);
+  } catch {
+    console.warn("[github-app] ingress configuration credential read failed");
+    return null;
+  }
+  if (!config) return null;
+  const now = (deps.now ?? Date.now)();
+  const key = `${orgId}:${config.appId}:${githubApiUrl(deps)}:${owner}/${repo}`;
+  let cache = ingressConfigs.get(deps.credentials);
+  if (!cache) {
+    cache = new Map();
+    ingressConfigs.set(deps.credentials, cache);
+  }
+  const cached = cache.get(key);
+  if (!refresh && cached && cached.until > now) return cached.value;
+  const value = (async (): Promise<GithubIngressConfig | null> => {
+    try {
+      const headers = appJwtHeaders(mintAppJwt(config));
+      const res = await githubFetch(deps)(`${githubApiUrl(deps)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`, {
+        headers, signal: AbortSignal.timeout(2_500),
+      });
+      if (!res.ok) {
+        console.warn("[github-app] granted ingress configuration read failed", { status: res.status });
+        return null;
+      }
+      const body: unknown = await res.json();
+      if (!isRecord(body) || !Array.isArray(body.events) || !body.events.every((e) => typeof e === "string") ||
+          !isRecord(body.permissions) || Array.isArray(body.permissions)) {
+        console.warn("[github-app] granted ingress configuration response is invalid");
+        return null;
+      }
+      const events = body.events;
+      const grantedPermissions = body.permissions;
+      // Requested settings only explain a grant mismatch. They never prove readiness.
+      let pendingApproval = false;
+      try {
+        const requested = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, { headers, signal: AbortSignal.timeout(1_000) });
+        if (requested.ok) {
+          const app: unknown = await requested.json();
+          if (isRecord(app)) {
+            const permissions = isRecord(app.permissions) ? app.permissions : {};
+            pendingApproval = (Array.isArray(app.events) && app.events.some((event) => !events.includes(event))) ||
+              Object.entries(permissions).some(([name, level]) => permissionLevel(level) > permissionLevel(grantedPermissions[name]));
+          }
+        } else {
+          console.warn("[github-app] requested ingress configuration read failed", { status: requested.status });
+        }
+      } catch {
+        console.warn("[github-app] requested ingress configuration read failed");
+      }
+      return { events: body.events, permissions: body.permissions, ...(pendingApproval ? { pendingApproval } : {}) };
+    } catch {
+      console.warn("[github-app] granted ingress configuration read failed");
+      return null;
+    }
+  })();
+  cache.set(key, { until: now + INGRESS_CONFIG_TTL_MS, value });
+  return value;
 }
 
 // ── Credential verification (`GET /app`) ─────────────────────────────────

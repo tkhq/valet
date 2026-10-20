@@ -358,22 +358,24 @@ export async function ingestEvent(
     const waiters = deps.waiters;
     let candidates: WaiterCandidate[] = [];
     let claims: ClaimDecision | null = null;
+    let waiterEvaluationFailed = false;
     if (waiters) {
       let twin: NormalizedEvent | null = null;
       // A failed evaluation leaves the candidate set partial, so no claim
       // resolves on it and every accepted waiter appends (INV-D6).
       let evaluated = false;
       try {
-        candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
+        candidates = await evaluateWaiterCandidates(waiters, orgId, service, event, () => { waiterEvaluationFailed = true; });
         twin = await conversationalTwinOf(deps.plugins, waiters, orgId, service, event);
         // Both halves of a mention choose over the waiters that accept
         // either half (Part C step 8).
         if (twin) {
-          candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin));
+          candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin, () => { waiterEvaluationFailed = true; }));
         }
-        evaluated = true;
+        evaluated = !waiterEvaluationFailed;
       } catch (error) {
         recordWaiterMatchFailure(waiters);
+        waiterEvaluationFailed = true;
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
       }
       if (evaluated && candidates.some((c) => c.accepted)) {
@@ -394,12 +396,24 @@ export async function ingestEvent(
     // Appends the waiters' digests per the claim decisions, then records
     // the stage. Without decisions, every accepted waiter appends.
     const appendDigests = async (decisions: ClaimDecision["waiters"] | undefined): Promise<void> => {
-      if (!waiters || candidates.length === 0) return;
+      if (!waiters) return;
+      if (candidates.length === 0) {
+        await appendReceiptStage(deps.db, receiptId, waiterEvaluationFailed
+          ? { stage: "waiter_match", outcome: "failed", detail: "Direct matches: 0. Buffered derivation sources: 0. Append failures: 0. Evaluation failed. Check the API logs." }
+          : { stage: "waiter_match", outcome: "no_candidates", detail: "No candidate waits found." });
+        return;
+      }
       try {
         const appended = await appendWaiterDigests(waiters, service, candidates, decisions);
-        await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
+        const stage = waiterMatchStage(appended);
+        if (waiterEvaluationFailed) {
+          stage.outcome = "failed";
+          stage.detail += " Evaluation failed. Check the API logs.";
+        }
+        await appendReceiptStage(deps.db, receiptId, stage);
       } catch (error) {
         recordWaiterMatchFailure(waiters);
+        await appendReceiptStage(deps.db, receiptId, { stage: "waiter_match", outcome: "failed", detail: "Could not save matches for this wait. Check the API logs." });
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter append failed`, error);
       }
     };
