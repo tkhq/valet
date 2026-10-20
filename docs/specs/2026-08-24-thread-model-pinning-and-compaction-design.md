@@ -164,6 +164,23 @@ summarizer prompt.
   default (full model id in the tooltip).
 - The message list renders a compaction divider for messages with
   `compaction`: a rule with token counts and a collapsible summary.
+- Added 2026-10-20: the composer shows a context meter beside the send
+  button. `Thread.contextUsage` measures like the proactive trigger: the
+  usage-anchored estimate (`estimateLiveContextTokens`) against
+  `usableTokens` of the thread's model, so a full meter means the next turn
+  compacts first. A thread that has not loaded its transcript is read from
+  the store with `entriesToAgentMessages` and stays unloaded, so the read
+  never wakes a sandbox. Outside a turn, the budget model comes from the
+  host resolver for the thread's spec; a failed resolution falls back to
+  `effectiveModelLenient`, because the turn path fails loud for the same
+  spec. `GET /api/threads/:threadId/context` (also under
+  `/api/sessions/:id/threads/:threadId/context`) returns `{ context: null }`
+  for a model with no context window. Thread guests cannot read it. The web
+  client refetches the reading on `turn_end`, `compaction_end`, and
+  `model_switched`. The meter turns amber at 80%. Its popover names the
+  token counts and the model, says whether automatic compaction is on, and
+  has a Compact now button that sends `/compact`. The button waits while a
+  turn runs.
 
 ### 9. Oversized inbound input spills to a file; an un-compactable tail fails loud
 

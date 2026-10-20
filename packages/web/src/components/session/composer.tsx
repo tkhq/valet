@@ -38,6 +38,7 @@ import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip"
 import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
 import { stepHistory, usePromptHistory } from "./prompt-history";
+import { ContextMeter } from "./context-meter";
 import {
   acceptImages,
   filesFromClipboard,
@@ -1106,6 +1107,7 @@ export function Composer({
                 {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
+            {!guest && threadId && <ContextMeter sessionId={sessionId} threadId={threadId} working={working} />}
             {working && queueState?.activeItemId && (
               <Button
                 type="button"

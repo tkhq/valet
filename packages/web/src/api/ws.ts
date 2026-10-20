@@ -12,6 +12,7 @@ import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/r
 import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
+import { qkThreadContext } from "./thread-context";
 
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
@@ -190,6 +191,13 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         if (wire.type === "turn_end") {
           void qc.invalidateQueries(threadListFilters(sessionId));
           for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
+        }
+        // The context meter's reading moves when a turn ends, a compaction
+        // rewrites the transcript, or the model (and so the budget) changes.
+        if (wire.type === "turn_end" || wire.type === "compaction_end" || wire.type === "model_switched") {
+          void qc.invalidateQueries({
+            queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
+          });
         }
         if (wire.type === "thread.activity") {
           qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
