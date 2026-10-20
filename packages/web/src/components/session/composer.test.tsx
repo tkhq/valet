@@ -20,6 +20,8 @@ const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
 const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const sendState: { pending: boolean; sessions?: string[] } = { pending: false };
+// Sessions whose stop request is in flight.
+const abortState: { sessions: string[] } = { sessions: [] };
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 const addUserMessage = vi.fn(() => "user-opt-1");
 const setMessageQueueItemId = vi.fn();
@@ -45,8 +47,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useSendPrompt: (sessionId: string) => ({ isPending: sendState.pending && (sendState.sessions ?? [sessionId]).includes(sessionId), mutateAsync: sendMutateAsync }),
-    useAbortThread: () => ({
-      isPending: false,
+    useAbortThread: (sessionId: string) => ({
+      isPending: abortState.sessions.includes(sessionId),
       mutateAsync: abortMutateAsync,
       mutate: abortMutate,
     }),
@@ -127,6 +129,7 @@ beforeEach(() => {
   queueStateRef.current = undefined;
   sendState.pending = false;
   sendState.sessions = undefined;
+  abortState.sessions = [];
   useComposerPrefillStore.setState({ text: null });
   // Drafts live in a module-global store keyed by (session, thread) — the
   // same key across tests would leak one test's draft into the next.
@@ -873,6 +876,52 @@ describe("Composer beside the Ask Valet dock", () => {
     sendState.pending = false;
     rerender();
     expect(document.activeElement).toBe(dock);
+  });
+
+  it("keeps a body Escape with the page while the page's stop is pending", () => {
+    queueStateRef.current = queueState("followup");
+    const { rerender } = renderPageAndDock({ dockSession: "orchestrator:dock" });
+    abortMutate.mockClear();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["page"]);
+    abortState.sessions = ["orchestrator:user-1"];
+    rerender();
+    abortMutate.mockClear();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(abortMutate).not.toHaveBeenCalled();
+  });
+
+  it("stops the dock's turn on Escape from a page control when the page has no composer", () => {
+    queueStateRef.current = queueState("followup");
+    renderPageAndDock({ withPage: false });
+    const control = document.body.appendChild(document.createElement("button"));
+    act(() => control.focus());
+    abortMutate.mockClear();
+    fireEvent.keyDown(control, { key: "Escape" });
+    control.remove();
+    expect(abortMutate.mock.calls.map(([target]) => target.threadId)).toEqual(["dock"]);
+  });
+
+  it("returns focus to the page composer after Send now settles", () => {
+    const queryClient = new QueryClient();
+    const queued: StreamMessage[] = [{ id: "message-1", sessionId: "orchestrator:user-1", threadId: "page", role: "user",
+      content: "Queued question", parts: [], createdAt: 1, queueItemId: "q-1" }];
+    const tree = () => <QueryClientProvider client={queryClient}>
+      <main><Composer sessionId="orchestrator:user-1" threadId="page" agentStatus="streaming" queuedMessages={queued} queuedItemCount={1} /></main>
+      <aside data-ask-valet-dock=""><Composer sessionId="orchestrator:dock" threadId="dock" agentStatus="idle" queuedMessages={[]} queuedItemCount={0} /></aside>
+    </QueryClientProvider>;
+    const view = render(tree());
+    const [page, dock] = screen.getAllByRole("textbox", { name: "Message" }) as HTMLTextAreaElement[];
+    act(() => page!.focus());
+    act(() => dock!.focus());
+    act(() => dock!.blur());
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+    sendState.pending = true;
+    sendState.sessions = ["orchestrator:user-1"];
+    view.rerender(tree());
+    sendState.pending = false;
+    view.rerender(tree());
+    expect(document.activeElement).toBe(page);
   });
 
   it("leaves a pending memory prefill to the page composer that mounts after the dock", () => {

@@ -529,6 +529,7 @@ export function Composer({
 
   async function promoteQueuedItem(itemId: string, messageId: string) {
     if (send.isPending || !threadId) return;
+    lastUsedComposer = identity.current;
     setSubmitError(null);
     setPromotingItemId(itemId);
     try {
@@ -717,11 +718,17 @@ export function Composer({
   useEffect(() => {
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      // Focus picks the area: the Ask Valet dock or the page beside it.
-      if (e.target instanceof Element && e.target !== document.body && inAskValetDock(e.target) !== inAskValetDock(inputRef.current)) return;
+      // Focus picks the area: the Ask Valet dock or the page beside it. A
+      // page without a composer leaves Escape to the dock.
+      const inDock = inAskValetDock(inputRef.current);
+      if (e.target instanceof Element && e.target !== document.body && inAskValetDock(e.target) !== inDock
+        && !(inDock && pageComposers === 0)) return;
       const targetItemId = queueState?.activeItemId;
-      if (!working || !threadId || !targetItemId || abortPending) return;
+      if (!working || !threadId) return;
+      // A running turn keeps Escape while its stop is pending or before its
+      // item id arrives, so the event never falls through to the dock.
       e.preventDefault();
+      if (!targetItemId || abortPending) return;
       setSubmitError(null);
       abortMutate(
         { threadId, targetItemId },
@@ -735,6 +742,11 @@ export function Composer({
     target.addEventListener("keydown", onEscape as EventListener);
     return () => target.removeEventListener("keydown", onEscape as EventListener);
   }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
+  useEffect(() => {
+    if (inAskValetDock(inputRef.current)) return;
+    pageComposers += 1;
+    return () => { pageComposers -= 1; };
+  }, []);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {
@@ -1082,6 +1094,8 @@ export function Composer({
 
 /** The composer the person focused or sent from last. See the send-settle focus effect. */
 let lastUsedComposer: object | undefined;
+/** Mounted composers outside the Ask Valet dock. See the Escape effect. */
+let pageComposers = 0;
 
 function apiErrorDetail(err: unknown, fallback: string): string {
   const payload =
