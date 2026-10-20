@@ -1,6 +1,5 @@
-import { Check, Copy, Share2 } from "lucide-react";
-import { useCopyToClipboard } from "~/lib/use-copy";
-import { PathLabel, ToolBody } from "./tool-shell";
+import { Share2 } from "lucide-react";
+import { CopyButton, PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
 /**
@@ -30,20 +29,6 @@ function getArgs(args: unknown): { path: string; revoke: boolean } {
     path: typeof a.path === "string" ? a.path : typeof a.key === "string" ? a.key : "",
     revoke: a.revoke === true,
   };
-}
-
-function CopyButton({ value }: { value: string }) {
-  const { copied, copy } = useCopyToClipboard();
-  return (
-    <button
-      type="button"
-      onClick={() => void copy(value)}
-      className="rounded p-1 text-muted hover:text-moss"
-      aria-label="Copy share link"
-    >
-      {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-    </button>
-  );
 }
 
 export const memShareRenderer: ToolRenderer = {
@@ -88,7 +73,8 @@ export const memShareRenderer: ToolRenderer = {
           >
             {share.url}
           </a>
-          <CopyButton value={share.url} />
+          {/* The link is the result, so its copy button stays visible. */}
+          <CopyButton getText={() => share.url} label="Copy share link" className="opacity-100" />
         </div>
         {share.audience && <p className="text-[11px] text-muted">{share.audience}</p>}
       </ToolBody>

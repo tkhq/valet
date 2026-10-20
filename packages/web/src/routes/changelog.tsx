@@ -5,7 +5,7 @@ import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
 import { Pager } from "~/components/pager";
-import { Badge, Spinner, pageClass } from "~/components/primitives";
+import { Badge, Select, Spinner, pageClass } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import {
   CHANGELOG_CATEGORIES,
@@ -195,31 +195,29 @@ export function ChangelogPage() {
               aria-label="Search changes"
               className="bg-paper"
             />
-            <select
+            <Select
               aria-label="Filter by change type"
               value={category}
               onChange={(event) => {
                 const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
                 go({ category: next, page: undefined });
               }}
-              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
             >
               <option value="all">All change types</option>
               {CHANGELOG_CATEGORIES.map((value) => (
                 <option key={value} value={value}>{CATEGORY[value].label}</option>
               ))}
-            </select>
-            <select
+            </Select>
+            <Select
               aria-label="Sort releases"
               value={sort}
               onChange={(event) =>
                 go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
               }
-              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
             >
               <option value="newest">Newest first</option>
               <option value="oldest">Oldest first</option>
-            </select>
+            </Select>
           </div>
         )}
 

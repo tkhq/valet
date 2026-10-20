@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, Callout, ConfirmDialog, Input, Spinner, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { useDeleteSlackApp, useSaveSlackCredential, useSlackApp } from "~/api/settings";
 
@@ -136,12 +136,12 @@ function SetupCards({
 
         <div className="space-y-4 px-6 py-5">
           {socketMode && (
-            <div className="rounded border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-ink dark:border-amber-700/60 dark:bg-amber-950/40">
+            <Callout tone="warning" className="text-xs leading-relaxed">
               This deployment has no public URL, so the manifest enables Socket Mode and Slack
               delivers events over a socket instead of a webhook. Socket Mode needs one extra
               credential: an app-level token, asked for below. To use webhooks instead, set
               VALET_PUBLIC_URL (e.g. a tunnel) and reload this page before creating the app.
-            </div>
+            </Callout>
           )}
 
           <div className="max-w-xs space-y-1.5">
@@ -403,7 +403,7 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
       </details>
 
       {data.missingScopes.length > 0 && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
+        <Callout tone="warning" className="px-5 py-4">
           <div className="text-sm font-medium text-ink">Missing scopes</div>
           <p className="mt-0.5 text-xs leading-relaxed text-muted">
             The installed app did not grant these scopes, and each one costs a feature. Open the
@@ -419,7 +419,7 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
               </li>
             ))}
           </ul>
-        </div>
+        </Callout>
       )}
     </div>
   );

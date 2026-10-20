@@ -16,32 +16,19 @@
 import { useId, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { errorText } from "~/lib/error-text";
+import { useCopyToClipboard } from "~/lib/use-copy";
 import { useCreateApiKey, type CreatedApiKey } from "~/api/api-keys";
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  async function handleCopy() {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="ml-auto shrink-0 text-xs text-muted hover:text-ink border border-line rounded px-2 py-0.5"
-    >
-      {copied ? "Copied" : "Copy"}
-    </button>
-  );
-}
+import { Button } from "~/components/primitives";
 
 function CodeBlock({ label, code }: { label: string; code: string }) {
+  const { copied, copy } = useCopyToClipboard();
   return (
     <div className="mb-4 min-w-0 max-w-full">
       <div className="flex items-center gap-2 mb-1">
         <span className="min-w-0 break-words text-xs font-semibold uppercase tracking-wide text-muted">{label}</span>
-        <CopyButton text={code} />
+        <Button size="sm" variant="secondary" className="ml-auto shrink-0" onClick={() => void copy(code)}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
       </div>
       <pre tabIndex={0} aria-label={`${label} setup snippet`} className="w-full min-w-0 max-w-full whitespace-pre text-xs font-mono bg-paper-muted border border-line rounded p-3 overflow-x-auto">
         {code}
@@ -315,6 +302,7 @@ interface KeyDisplayProps {
 function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: KeyDisplayProps) {
   const key = apiKey.key ?? "";
   const mode = settingsQuery.data?.mode;
+  const { copied, copy } = useCopyToClipboard();
 
   return (
     <div className="min-w-0 max-w-full space-y-6">
@@ -335,7 +323,9 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
           <code tabIndex={0} aria-label="New proxy key" className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm font-mono bg-paper-muted border border-line rounded px-2 py-1 text-ink select-all">
             {key}
           </code>
-          <CopyButton text={key} />
+          <Button size="sm" variant="secondary" className="shrink-0" onClick={() => void copy(key)}>
+            {copied ? "Copied" : "Copy"}
+          </Button>
         </div>
         {/* The panel renders under the API keys section of the same page:
             `/settings/api-keys`, or a team's API keys and proxy tab. */}
@@ -473,8 +463,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
           {creation.error && (
             <p role="alert" className="mb-3 text-sm text-danger-600">{errorText(creation.error)}</p>
           )}
-          <button
-            type="button"
+          <Button
             onClick={() => {
               if (creation.canCreate && !creation.isPending) creation.create(setCreatedKey);
             }}
@@ -488,10 +477,10 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
             aria-disabled={!creation.canCreate || undefined}
             disabled={creation.isPending}
             aria-describedby={blocked ? blockedHelpId : undefined}
-            className={`rounded px-4 py-2 text-sm bg-moss text-white disabled:opacity-50 ${creation.canCreate ? "hover:bg-moss/90" : "opacity-50"}`}
+            className="aria-disabled:opacity-50"
           >
             {creation.isPending ? "Creating…" : "Create proxy key"}
-          </button>
+          </Button>
         </div>
 
         {settingsQuery.data && <SetupGuide mode={settingsQuery.data.mode} team={team} />}

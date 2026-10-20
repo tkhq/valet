@@ -17,9 +17,8 @@
  */
 import type { SkillSummary } from "@valet/api/wire";
 import { SkillUsage } from "./skill-usage";
-import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Spinner, pageClass } from "~/components/primitives";
+import { BackLink, Spinner, pageClass } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { Section } from "~/components/settings/section";
 
@@ -56,9 +55,7 @@ export function SkillDocument({
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={pageClass}>
-        <Link to="/skills" className="inline-flex min-h-11 items-center text-xs text-muted underline-offset-2 hover:underline">
-          ← Skills
-        </Link>
+        <BackLink to="/skills">Skills</BackLink>
 
         <div className="mt-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
           <div>

@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
-import { Spinner, pageClass } from "~/components/primitives";
+import { Dialog, DialogContent, DialogTitle, PageHeader, Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
-import { Dialog, DialogContent, DialogTitle } from "~/components/primitives";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
@@ -176,11 +175,11 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={cn(pageClass, "[&>*]:max-w-3xl")}>
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <h1 className="text-2xl font-medium text-ink">Integrations</h1>
-          {/* The box stays up through an empty match — hiding it would leave
-              the search with no box to clear it in. */}
-          {!isLoading && !error && showSearch && (
+        <PageHeader
+          title="Integrations"
+          // The box stays up through an empty match — hiding it would leave
+          // the search with no box to clear it in.
+          actions={!isLoading && !error && showSearch && (
             <div className="w-full sm:w-56">
               <SearchInput
                 value={query}
@@ -195,7 +194,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
               />
             </div>
           )}
-        </div>
+        />
         {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays

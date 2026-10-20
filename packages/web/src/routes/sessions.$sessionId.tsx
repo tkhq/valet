@@ -1,6 +1,6 @@
 import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
-import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { createFileRoute, Navigate } from "@tanstack/react-router";
+import { BackLink } from "~/components/primitives";
 import { useSession, useThreads } from "~/api/queries";
 import { defaultThreadId } from "~/lib/thread-default";
 import { usePageTitle } from "~/lib/page-title";
@@ -115,13 +115,8 @@ export function SessionDetailPage({ sessionId, search, onSearchChange }: {
 
 function ChildBreadcrumb({ threadId }: { threadId: string }) {
   return (
-    <Link
-      to="/threads/$threadId"
-      params={{ threadId }}
-      className="flex items-center gap-1.5 border-b border-line bg-neutral-50 px-4 py-2 text-xs text-muted hover:text-moss dark:bg-neutral-900/40"
-    >
-      <ArrowLeft className="h-3 w-3" aria-hidden />
-      Back to originating thread
-    </Link>
+    <div className="border-b border-line bg-neutral-50 px-4 sm:py-2 dark:bg-neutral-900/40">
+      <BackLink to="/threads/$threadId" params={{ threadId }}>Originating thread</BackLink>
+    </div>
   );
 }

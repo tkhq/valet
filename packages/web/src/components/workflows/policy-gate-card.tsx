@@ -16,10 +16,12 @@ import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
+  Callout,
   cardClass,
   ConfirmDialog,
   Input,
   Spinner,
+  Time,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
@@ -82,7 +84,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   }
 
   return (
-    <div className="rounded-md border border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40 p-4 space-y-3">
+    <Callout tone="warning" className="space-y-3 p-4">
       {/* Header */}
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-200 dark:bg-amber-900/60">
@@ -225,7 +227,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         <div className="space-y-1">
           {gate.timeoutAt != null && (
             <div className="text-[11px] text-muted">
-              Gate times out {new Date(gate.timeoutAt).toLocaleString()}.
+              Gate times out <Time ts={gate.timeoutAt} format="absolute" />.
             </div>
           )}
           {is409AlreadyResolved && (
@@ -240,6 +242,6 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           )}
         </div>
       )}
-    </div>
+    </Callout>
   );
 }

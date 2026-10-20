@@ -15,6 +15,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Label,
+  Select,
   Textarea,
 } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -176,12 +177,12 @@ export function DoSection({
       {draft.doKind === "workflow" && (
         <div className="grid gap-1">
           <Label htmlFor={`${id}-workflow`}>Workflow</Label>
-          <select
+          <Select
             id={`${id}-workflow`}
             value={draft.workflowId}
             disabled={stored || fixedWorkflow}
             onChange={(e) => onChange({ ...draft, workflowId: e.target.value })}
-            className="min-h-11 w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
+            className="w-full min-w-0 truncate"
           >
             <option value="">Pick a workflow</option>
             {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
@@ -189,7 +190,7 @@ export function DoSection({
             {fixedWorkflowId !== undefined && !workflows.some((w) => w.id === fixedWorkflowId) && (
               <option value={fixedWorkflowId}>{fixedWorkflowName}</option>
             )}
-          </select>
+          </Select>
           {fixedWorkflow && (
             <p className="text-xs text-muted">
               This {routine ? "routine" : "line"} starts {fixedWorkflowName}. To pick another workflow, add the {routine ? "routine" : "line"} from Presence.

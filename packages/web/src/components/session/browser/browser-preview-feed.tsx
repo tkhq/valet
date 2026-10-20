@@ -4,7 +4,7 @@ import {
   useBrowserFrame,
   useBrowserStatus,
 } from "~/api/browser";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Select, Spinner } from "~/components/primitives";
 import { BrowserPageImage } from "./browser-page-image";
 
 export function BrowserPreviewFeed({
@@ -89,28 +89,29 @@ export function BrowserPreviewFeed({
     <div className="flex min-h-0 flex-1 flex-col">
       {showMetadata && selected && (
         <div className="flex shrink-0 items-center gap-2 border-y border-line px-3 py-1.5">
-          <select
+          <Select
+            size="sm"
             aria-label="Preview page"
             value={selected.id}
             onChange={(event) => {
               onChoose(event.target.value);
               setDecodeError(false);
             }}
-            className="min-w-0 flex-1 rounded bg-paper py-1 text-xs text-ink focus-visible:outline-moss"
+            className="min-w-0 flex-1"
           >
             {runtime?.tabs.map((tab) => (
               <option key={tab.id} value={tab.id}>
                 {tab.title || tab.url || "Untitled page"}
               </option>
             ))}
-          </select>
+          </Select>
           {choice && (
             <Button
               variant="ghost"
               size="sm"
               aria-label="Follow active tab"
               title="Follow active tab"
-              className="h-7 shrink-0 px-2 text-[10px]"
+              className="shrink-0"
               onClick={() => onChoose(undefined)}
             >
               Follow active

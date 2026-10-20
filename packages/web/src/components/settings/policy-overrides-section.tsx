@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { MODE_LABELS, RISK_LABELS, POLICY_SELECT_CLASS } from "./policy-presentation";
+import { MODE_LABELS, RISK_LABELS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
 import type { ActionPolicyOverrideWire, PutPolicyOverrideRequest, ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Label } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Label, Select } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import {
   apiErrorMessage,
@@ -172,35 +172,35 @@ export function PolicyOverridesEditor({ overrides, title, description, canEdit, 
           {targetKind === "riskLevel" && (
             <div>
               <Label htmlFor="override-risk">Risk level</Label>
-              <select
+              <Select
                 id="override-risk"
                 value={riskLevel}
                 onChange={(e) => setRiskLevel(e.target.value as RiskLevelWire)}
-                className={`mt-1 ${POLICY_SELECT_CLASS}`}
+                className="mt-1 w-full min-w-0"
               >
                 {RISK_LEVELS.map((r) => (
                   <option key={r} value={r}>
                     {RISK_LABELS[r]}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           )}
 
           <div>
             <Label htmlFor="override-mode">Mode</Label>
-            <select
+            <Select
               id="override-mode"
               value={mode}
               onChange={(e) => setMode(e.target.value as ApprovalModeWire)}
-              className={`mt-1 ${POLICY_SELECT_CLASS}`}
+              className="mt-1 w-full min-w-0"
             >
               {MODES.map((m) => (
                 <option key={m} value={m}>
                   {MODE_LABELS[m]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
 
           {error && <p className="text-sm text-danger-500">{error}</p>}

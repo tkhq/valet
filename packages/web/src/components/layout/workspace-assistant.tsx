@@ -3,13 +3,11 @@ import { AppPageHintContext } from "~/lib/app-page-hint";
 import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Sparkles } from "lucide-react";
 import { qk } from "~/api/queries";
 import { api } from "~/api/client";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { AssistantPanel } from "~/components/session/assistant-panel";
 import { prefillComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
-import { Button } from "~/components/primitives";
 
 type Conversation = { sessionId: string; threadId: string };
 type Assistant = { open: (prompt?: string) => void; panel: ReactNode; close: () => void; isOpen: boolean };
@@ -90,11 +88,6 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
       <AppPageHintContext.Provider value={readAppPageHint({ pathname, workspace })}><AssistantPanel title={`Valet · ${scope.teamId ? "Team workspace" : "Personal"}`} sessionId={conversation?.sessionId} threadId={conversation?.threadId} error={errors[workspace]} onRetry={() => void open()} onClose={close} onOpen={() => { if (conversation) { close(); void navigate({ to: "/chat", search: { workspace, thread: conversation.threadId } }); } }} scopeNotice={scope.teamId ? "Only you can see this conversation." : undefined} /></AppPageHintContext.Provider>
     </aside> : null;
   return <Context.Provider value={{ open: (prompt) => { void open(prompt); }, panel, close, isOpen: visible }}>{children}</Context.Provider>;
-}
-
-export function WorkspaceAssistantButton() {
-  const assistant = useWorkspaceAssistant();
-  return <Button size="sm" variant="ghost" aria-label="Ask Valet" onClick={() => assistant.open()}><Sparkles className="h-4 w-4" /><span className="hidden sm:inline">Ask Valet</span></Button>;
 }
 
 export function WorkspaceAssistantDock() { return useWorkspaceAssistant().panel; }

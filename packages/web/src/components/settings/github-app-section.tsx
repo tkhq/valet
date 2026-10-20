@@ -4,7 +4,8 @@ import type {
   GithubAppInstallationSummary,
   PostGithubAppManifestResponse,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea } from "~/components/primitives";
+import { Badge, Button, Callout, ConfirmDialog, Input, Select, Spinner, Switch, Textarea } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { errorText } from "~/lib/error-text";
 import { livePollInterval } from "~/lib/live-poll";
 import { relativeTime } from "~/lib/relative-time";
@@ -244,7 +245,8 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
                         className="flex items-center justify-between gap-3 text-xs text-ink"
                       >
                         <span className="truncate">{perm.label}</span>
-                        <select
+                        <Select
+                          size="sm"
                           value={permissions[perm.key] ?? ""}
                           aria-label={`${perm.label} permission`}
                           onChange={(e) => {
@@ -255,12 +257,10 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
                               return next;
                             });
                           }}
-                          className={
-                            "w-20 shrink-0 rounded-md border border-line px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss " +
-                            ((permissions[perm.key] ?? "") === ""
-                              ? "bg-paper text-muted"
-                              : "bg-moss-wash font-medium text-ink")
-                          }
+                          className={cn(
+                            "w-20 shrink-0",
+                            (permissions[perm.key] ?? "") === "" ? "text-muted" : "bg-moss-wash font-medium text-ink",
+                          )}
                         >
                           <option value="">none</option>
                           {perm.levels.map((level) => (
@@ -268,7 +268,7 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
                               {level}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       </label>
                     ))}
                   </div>
@@ -582,7 +582,7 @@ function ConfiguredCard({
           on an account — the step people miss, because GitHub's creation
           flow ends without prompting for it. Loud on purpose. */}
       {uninstalled && app && (
-        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
+        <Callout tone="warning" className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
           <div className="min-w-0">
             <div className="text-sm font-medium text-ink">One step left — install the App</div>
             {/* Both webhook modes now pick the install up on their own: with
@@ -600,7 +600,7 @@ function ConfiguredCard({
               Install on GitHub
             </a>
           </Button>
-        </div>
+        </Callout>
       )}
 
       <div className="space-y-3 rounded-md border border-line p-4">

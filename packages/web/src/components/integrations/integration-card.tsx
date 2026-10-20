@@ -38,9 +38,9 @@ export function CardHeading({
       <>
         <div className="flex min-h-8 items-center gap-3">
           <ServiceIcon slug={slug} label={title} size="sm" />
-          <span className="min-w-0 shrink truncate text-sm font-medium text-ink sm:max-w-[40%]">{title}</span>
+          <span className="min-w-0 shrink truncate text-sm font-medium text-ink sm:max-w-[40%]" title={title}>{title}</span>
           {state}
-          <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block">{description}</span>
+          <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block" title={description}>{description}</span>
           {right && <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>}
         </div>
         {/* pl-9 starts the note under the name, past the 24px mark and its gap. */}
@@ -54,7 +54,7 @@ export function CardHeading({
         <ServiceIcon slug={slug} label={title} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium text-ink">{title}</span>
+            <span className="truncate text-sm font-medium text-ink" title={title}>{title}</span>
             {state}
           </div>
           {description && <p className="mt-0.5 text-pretty text-xs leading-relaxed text-muted">{description}</p>}
