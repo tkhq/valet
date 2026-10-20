@@ -3555,6 +3555,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** `metadata.refreshError`: the provider's answer to the last failed
+   * refresh, with tokens masked (`refreshErrorText`). It names the cause,
+   * such as an expired or revoked grant. Cleared by the next good refresh. */
+  refreshError?: string;
   /** True when the provider refused the refresh token and the access token is
    * past expiry (`isDeadConnection`). Any team member may reconnect a dead
    * team connection. */

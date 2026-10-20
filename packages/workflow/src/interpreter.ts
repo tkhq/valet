@@ -25,8 +25,9 @@
  *   6. else execute the runnable nodes (deterministic definition order);
  *      a `stop` node's `terminate` signal short-circuits to two-phase
  *      settle once the current wave finishes; parked nodes' wait
- *      conditions accumulate and `parkRun` once the wave has no more
- *      newly-runnable work; otherwise loop again
+ *      conditions accumulate for the rest of this drive, and a parked node
+ *      is not run again in it, so the other nodes keep going; `parkRun`
+ *      only when nothing else is runnable; otherwise loop again
  */
 
 import { markSpanError, withSpan } from '@valet/engine';
@@ -220,6 +221,16 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   /** Every template finding this drive segment has seen, for the span attributes. */
   const driveDiagnostics: TemplatePathDiagnostic[] = [];
 
+  /**
+   * Nodes that parked in this drive, with what each waits on. A parked node
+   * is not run again in this drive, so independent work keeps going: an
+   * approval on one branch must not hold a ready step on another branch
+   * until the approval resolves. The run parks with every wait once nothing
+   * else can run.
+   */
+  const parked = new Map<string, RunWaitCondition[]>();
+  const parkedWaits = (): RunWaitCondition[] => [...parked.values()].flat();
+
   while (true) {
     const run = await store.getRun(runId);
     if (!run) throw new Error(`workflow run not found: ${runId}`);
@@ -251,17 +262,34 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     const cancelSignal = signals.find((s) => s.signalType === 'cancel');
     if (cancelSignal) {
-      return await cancelRun(run, attempt, deps);
+      return await cancelRun(run, attempt, deps, parkedWaits());
     }
 
     const graph = compile(definition);
+
+    // A stop that ran in an earlier drive still ends the run. Its terminate
+    // signal lived only in that drive's memory, so a drive that failed after
+    // the stop's checkpoint (an abort or a read before the settle) would
+    // otherwise leave the run parked on its other branches.
+    const stopped = definition.nodes
+      .map((n) => (n.type === 'stop' ? executedStop(cpAll.get(n.id)) : undefined))
+      .find((status) => status !== undefined);
+    if (stopped) {
+      const failed = stopped === 'failed' || hasDominatingFailure(cpAll, graph);
+      return await terminateSettle(deps, run.runId, attempt, await inFlightWaits(store, run, parkedWaits()), failed ? 'failed' : 'completed');
+    }
+
     const templateContext = buildTemplateContext(definition, cpAll, graph);
 
     const skippedAny = await propagateSkips(store, run, definition, graph, cpAll, attempt, clock);
     if (skippedAny) continue; // re-derive the runnable set with the new skips visible
 
-    const runnable = computeRunnable(definition, graph, cpAll, templateContext);
+    const runnable = computeRunnable(definition, graph, cpAll, templateContext).filter((node) => !parked.has(node.id));
 
+    if (runnable.length === 0 && parked.size > 0) {
+      const waits = parkedWaits();
+      return await parkAndReturn(store, run, attempt, waits, earliestTimerWake(waits));
+    }
     if (runnable.length === 0) {
       const allTerminal = definition.nodes.every((n) => isSettled(cpAll, n.id));
       if (allTerminal) {
@@ -368,6 +396,7 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
           );
         }
         waitingOn.push(...outcome.waitingOn);
+        parked.set(node.id, outcome.waitingOn);
         continue;
       }
       if ((outcome.status === 'completed' || outcome.status === 'failed') && outcome.terminate) {
@@ -377,11 +406,17 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 
     if (terminate) {
       const finalOutcome = sawFailure ? 'failed' : terminate;
-      return await terminateSettle(deps, run.runId, attempt, waitingOn, finalOutcome);
+      return await terminateSettle(deps, run.runId, attempt, await inFlightWaits(store, run, parkedWaits()), finalOutcome);
     }
     if (waitingOn.length > 0) {
-      const wakeAt = earliestTimerWake(waitingOn);
-      return await parkAndReturn(store, run, attempt, waitingOn, wakeAt);
+      // Another node in this wave finished: run what it unblocked before
+      // parking. When every node in the wave parked, park now.
+      const progressed = runnable.some((node) => outcomeById.get(node.id)?.status !== 'parked');
+      if (!progressed) {
+        const waits = parkedWaits();
+        return await parkAndReturn(store, run, attempt, waits, earliestTimerWake(waits));
+      }
+      continue;
     }
 
     // Otherwise loop again: this wave's completions may unblock more nodes.
@@ -406,23 +441,132 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
   }
 }
 
+/**
+ * The status of a stop the stop executor ran, read from its checkpoint: the
+ * executor writes its `StopResult` (with `outcome`) on both a completed and a
+ * failed stop. A stop that failed before it ran, such as an unresolved
+ * template under `onUnresolvedPath: "fail"`, is an ordinary failed node and
+ * does not end the run.
+ */
+function executedStop(cp: NodeCheckpoint | undefined): 'completed' | 'failed' | undefined {
+  if (!cp || (cp.status !== 'completed' && cp.status !== 'failed')) return undefined;
+  const outcome: unknown = typeof cp.result === 'object' && cp.result !== null ? Reflect.get(cp.result, 'outcome') : undefined;
+  return outcome === 'success' || outcome === 'failure' ? cp.status : undefined;
+}
+
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
-async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps): Promise<RunParkState> {
+async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps, parkedThisDrive: RunWaitCondition[]): Promise<RunParkState> {
+  await abortInFlight(deps, run.runId, await inFlightWaits(deps.store, run, parkedThisDrive));
+  return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
+}
+
+/**
+ * Abort each submission and cancel each child run before the run settles.
+ * `inFlightWaits` already drops work that finished, so every wait here is
+ * live. One failed abort does not skip the aborts after it, but the first
+ * failure is rethrown: the run must not settle while live work it could not
+ * stop keeps running. The drive fails and a later claim retries the stop.
+ */
+async function abortInFlight(deps: InterpreterDeps, runId: string, waits: RunWaitCondition[]): Promise<void> {
   const { store, engine, clock } = deps;
-  for (const wait of run.waitingOn) {
-    if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
-    }
-    if (wait.kind === 'run') {
-      await cancelChildRun(store, wait.runId, clock);
+  let firstError: unknown;
+  for (const wait of waits) {
+    try {
+      if (wait.kind === 'submission') await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
+      if (wait.kind === 'run') await cancelChildRun(store, wait.runId, clock);
+    } catch (err) {
+      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed:`, err);
+      firstError ??= err;
     }
   }
-  return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
+  if (firstError !== undefined) throw firstError;
+}
+
+/**
+ * Abort what a run that is about to settle `failed` after repeated drive
+ * failures may still have in flight. A drive keeps going after a node parks,
+ * so a later throw in the same drive leaves that node's work live with no
+ * saved wait; its intent checkpoint still names it. Best-effort: the run
+ * settles `failed` either way, so a failed abort is logged, not rethrown.
+ */
+export async function abortPoisonedRun(deps: Pick<InterpreterDeps, 'store' | 'engine' | 'clock'>, runId: string): Promise<void> {
+  const run = await deps.store.getRun(runId);
+  if (!run) return;
+  const waits = await inFlightWaits(deps.store, run, []);
+  for (const wait of waits) {
+    try {
+      if (wait.kind === 'submission') await deps.engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
+      if (wait.kind === 'run') await cancelChildRun(deps.store, wait.runId, deps.clock);
+    } catch (err) {
+      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" before the failed settle failed:`, err);
+    }
+  }
+}
+
+/**
+ * Every submission and child run the run may still have in flight: its
+ * saved waits, the waits nodes parked in this drive before the run saved
+ * them, and what each unfinished node's intent checkpoint records. A drive
+ * keeps running other nodes after one parks, so a cancel or a stop can come
+ * before the run saves its waits; the checkpoints also cover a host crash
+ * in that window.
+ */
+async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisDrive: RunWaitCondition[]): Promise<RunWaitCondition[]> {
+  const waits = new Map<string, RunWaitCondition>();
+  const add = (wait: RunWaitCondition): void => {
+    if (wait.kind === 'submission') waits.set(`submission:${wait.queueItemId}`, wait);
+    else if (wait.kind === 'run') waits.set(`run:${wait.runId}`, wait);
+  };
+  const checkpoints = await store.getCheckpoints(run.runId);
+  // A saved wait is stale once its node has checkpoints and none is still
+  // `intent`: the work finished, and aborting it now could fail the settle.
+  const open = new Set(checkpoints.filter((cp) => cp.status === 'intent').map((cp) => cp.nodeId));
+  const seen = new Set(checkpoints.map((cp) => cp.nodeId));
+  // A foreach item checkpoint (keyed by the body's id) can stay `intent`
+  // after its foreach finished, such as an item the foreach aborted. Its
+  // work is live only while the owning foreach checkpoint is `intent`.
+  const definition = run.definition as WorkflowDefinition;
+  const foreachOf = new Map(definition.nodes.flatMap((n) => (n.type === 'foreach' ? [[n.body.id, n.id] as const] : [])));
+  const ownerOpen = (nodeId: string): boolean => {
+    const owner = foreachOf.get(nodeId);
+    if (owner === undefined) return true;
+    const ownerCheckpoint = checkpoints.find((cp) => cp.nodeId === owner && cp.iteration === ITERATION);
+    return ownerCheckpoint === undefined || ownerCheckpoint.status === 'intent';
+  };
+  // An intent checkpoint that records its dispatched work names that work
+  // exactly. Its node's saved waits are then covered by the receipts: the
+  // foreach items share one node id, so a saved wait for an item that
+  // finished matches no live receipt and is dropped.
+  const withReceipts = new Set<string>();
+  for (const cp of checkpoints) {
+    if (cp.status !== 'intent' || !cp.effects || !ownerOpen(cp.nodeId)) continue;
+    const { sessionId, receipt, childRunId } = cp.effects;
+    if (typeof sessionId === 'string' && typeof receipt === 'object' && receipt !== null) {
+      const threadId: unknown = Reflect.get(receipt, 'threadId');
+      const queueItemId: unknown = Reflect.get(receipt, 'queueItemId');
+      if (typeof threadId === 'string' && typeof queueItemId === 'string') {
+        add({ kind: 'submission', nodeId: cp.nodeId, sessionId, threadId, queueItemId });
+        withReceipts.add(cp.nodeId);
+      }
+    }
+    if (typeof childRunId === 'string') {
+      add({ kind: 'run', nodeId: cp.nodeId, runId: childRunId });
+      withReceipts.add(cp.nodeId);
+    }
+  }
+  for (const wait of [...run.waitingOn, ...parkedThisDrive]) {
+    if (!ownerOpen(wait.nodeId)) continue;
+    // No checkpoint yet, or an open node that records no receipt: keep the wait.
+    if (!seen.has(wait.nodeId) || (open.has(wait.nodeId) && !withReceipts.has(wait.nodeId))) add(wait);
+  }
+  return [...waits.values()];
 }
 
 /** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */
 async function cancelChildRun(store: WorkflowStore, childRunId: string, clock: () => number): Promise<void> {
+  // An intent records the child id before the child run is created.
+  if ((await store.getRun(childRunId)) === null) return;
   await store.insertSignal({
     runId: childRunId,
     signalId: 'cancel',
@@ -461,15 +605,7 @@ async function terminateSettle(
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
 ): Promise<RunParkState> {
-  const { store, engine, clock } = deps;
-  for (const wait of waitingOn) {
-    if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
-    }
-    if (wait.kind === 'run') {
-      await cancelChildRun(store, wait.runId, clock);
-    }
-  }
+  await abortInFlight(deps, runId, waitingOn);
   return await twoPhaseSettle(deps, runId, attempt, outcome);
 }
 

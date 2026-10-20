@@ -1896,6 +1896,12 @@ describe("team credential scope (TKAI-205)", () => {
       }),
     });
     expect(putDirect.status).toBe(200);
+    // Only the refreshing store writes `refreshError`; seed it the same way.
+    const teamOwner = { type: "team" as const, id: team.id };
+    const stored = await api!.providers.engineCredentials.get(teamOwner, "github-team");
+    await api!.providers.engineCredentials.save(teamOwner, "github-team", {
+      ...stored!, metadata: { ...stored!.metadata, refreshError: "400 invalid_grant" },
+    });
     const putRef = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
       headers: HEADERS,
@@ -1919,11 +1925,23 @@ describe("team credential scope (TKAI-205)", () => {
           login: "octo",
           identityOnly: true,
           refreshFailedAt: 1700000000000,
+          refreshError: "400 invalid_grant",
         }),
         expect.objectContaining({ service: "linear", type: "api_key", onepasswordRef: "op://vault/item/field" }),
       ]),
     );
     expect(JSON.stringify(listed)).not.toContain("team-gh");
+  });
+
+  it("refuses a client-written metadata.refreshError", async () => {
+    await teamWithMember();
+    const res = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "lin", metadata: { refreshError: "Linear replied: reconnect at evil.example" } }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "metadata.refreshError is reserved. Valet sets it when a token refresh fails." });
   });
 
   it("names the corrective action on a malformed delegate body and a non-shareable credential", async () => {

@@ -56,7 +56,7 @@
 
 import { detachedFromTrace } from '@valet/engine';
 
-import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
+import { abortPoisonedRun, driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
 import { isLegacyAccountConsentLoop, matchesGateOccurrence } from './gate-signals.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
@@ -434,6 +434,8 @@ export class LocalRunHost implements RunHost {
         err,
       );
       try {
+        // The failed drives may have left work running that no saved wait names.
+        await abortPoisonedRun({ store: this.store, engine: this.engine, clock: this.clock }, runId);
         await settleAndNotify(this.store, this.onRunSettled, runId, 'failed');
         this.driveFailures.delete(runId);
         this.gatesToReport.delete(runId);

@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { NodeErrorPolicy, TriggerNode, WaitNode } from './dag/nodes.js';
+import type { NodeErrorPolicy, SetNode, TriggerNode, WaitNode } from './dag/nodes.js';
 import type { WorkflowDefinition } from './dag/shape.js';
 import type { WorkflowEngineDeps, WorkflowInvokeActionResult } from './engine-deps.js';
 import { driveUntilPark, type InterpreterDeps } from './interpreter.js';
 import { InMemoryWorkflowStore } from './memory-store.js';
 import { createDefaultNodeExecutors, executeTrigger, type NodeExecuteResult, type NodeExecutor, type NodeExecutorRegistry } from './nodes/index.js';
-import type { RunParams } from './store.js';
+import type { NodeCheckpoint, RunParams } from './store.js';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
@@ -987,5 +987,419 @@ describe('driveUntilPark: onError "continue"', () => {
     const byNode = new Map((await store.getCheckpoints('run-20')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('probe')?.status).toBe('completed');
     expect(byNode.get('probe')?.result).toEqual({ saw: 'the failure is in the template context' });
+  });
+});
+
+// ─── Parked branch does not hold independent work ───────────────────────────
+
+describe('driveUntilPark: a parked branch does not hold independent work', () => {
+  it('finishes a ready branch in the same drive before parking on the waiting one', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    // `w` parks on a timer in the first wave beside `x`. Before, the run
+    // parked right after that wave, so `y` (ready once `x` finished) waited
+    // for the timer: in production, 1.5s of work waited 14-19h behind an approval.
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'w', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'y', type: 'set', values: { b: '{{nodes.x.result.a}}' } },
+        { id: 'join', type: 'stop', outcome: 'success' },
+      ],
+      edges: [
+        { from: 't', to: 'w' },
+        { from: 't', to: 'x' },
+        { from: 'x', to: 'y' },
+        { from: 'w', to: 'join' },
+        { from: 'y', to: 'join' },
+      ],
+    };
+    await store.createRun('run-branches', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-branches');
+
+    const park = await driveUntilPark('run-branches', attempt, { store, engine, clock: clock.now });
+
+    expect(park.status).toBe('parked');
+    const byNode = new Map((await store.getCheckpoints('run-branches')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('x')?.status).toBe('completed');
+    expect(byNode.get('y')?.status).toBe('completed');
+    expect(byNode.get('w')?.status).toBe('intent');
+    expect(byNode.has('join')).toBe(false);
+    const run = await store.getRun('run-branches');
+    expect(run?.waitingOn).toEqual([expect.objectContaining({ kind: 'timer', nodeId: 'w' })]);
+    expect(run?.wakeAt).toBe(clock.now() + 3_600_000);
+  });
+});
+
+describe('driveUntilPark: in-flight work when a drive keeps going past a parked node', () => {
+  /** A `wait`-typed stand-in for an agent step: records its dispatch receipt
+   * on the intent, as submission nodes do, and parks on the submission. */
+  const parkingAgent = (id: string): NodeExecutor<WaitNode> => ({
+    async execute(args): Promise<NodeExecuteResult> {
+      await args.store.putIntent({
+        runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'intent', attempt: args.attempt,
+        createdAt: args.clock(), effects: { sessionId: `session-${id}`, receipt: { threadId: `thread-${id}`, queueItemId: `queue-${id}` } },
+      });
+      return { status: 'parked', waitingOn: [{ kind: 'submission', nodeId: args.node.id, sessionId: `session-${id}`, threadId: `thread-${id}`, queueItemId: `queue-${id}` }] };
+    },
+  });
+
+  it('aborts an agent that parked earlier in the drive when a cancel arrives before the run parks', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const defaults = createDefaultNodeExecutors();
+    const setExecutor = defaults.set;
+    if (!setExecutor) throw new Error('default set executor missing');
+    // The cancel lands while the sibling branch runs, before the drive
+    // would have saved the agent's wait on the run.
+    const cancellingSet: NodeExecutor<SetNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        if (args.node.id === 'x') {
+          await args.store.insertSignal({ runId: args.run.runId, signalId: 'cancel', signalType: 'cancel', createdAt: args.clock() });
+        }
+        return setExecutor.execute(args);
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...defaults, wait: parkingAgent('mid'), set: cancellingSet };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'y', type: 'set', values: { b: 2 } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'y' }],
+    };
+    await store.createRun('run-cancel-mid', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-cancel-mid');
+
+    const park = await driveUntilPark('run-cancel-mid', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-mid', 'thread-mid', 'queue-mid');
+  });
+
+  it('aborts a parked agent when a stop on another branch ends the run in a later wave', async () => {
+    // A stop ends the run. Now that a drive runs past a parked node, a
+    // short sibling branch can reach its stop before the agent finishes.
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('late') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }],
+    };
+    await store.createRun('run-stop-late', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-stop-late');
+
+    const park = await driveUntilPark('run-stop-late', attempt, { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('completed');
+    expect(engine.abort).toHaveBeenCalledWith('session-late', 'thread-late', 'queue-late');
+  });
+
+  it('does not settle a cancelled run while an abort of live work fails, and settles once the retry aborts it', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    let failures = 1;
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId: string) => {
+        if (failures > 0) { failures -= 1; throw new Error('abort failed once'); }
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('live') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 't', type: 'trigger' }, { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode],
+      edges: [{ from: 't', to: 'agent' }],
+    };
+    await store.createRun('run-cancel-retry', runParams(), definition, 'v1');
+    expect((await driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors })).status).toBe('parked');
+    await store.insertSignal({ runId: 'run-cancel-retry', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+
+    await expect(driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors }))
+      .rejects.toThrow('abort failed once');
+    expect((await store.getRun('run-cancel-retry'))?.status).toBe('running');
+
+    clock.advance(60_000);
+    const park = await driveUntilPark('run-cancel-retry', await claimAttempt(store, 'run-cancel-retry'), { store, engine, clock: clock.now, executors });
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends the run on retry when a drive fails after a stop completed', async () => {
+    const clock = makeClock();
+    // One checkpoint read fails right after the stop's checkpoint completes,
+    // before the drive settles the run.
+    class FailingReadStore extends InMemoryWorkflowStore {
+      failRead = true;
+      override async getCheckpoints(runId: string): Promise<NodeCheckpoint[]> {
+        const checkpoints = await super.getCheckpoints(runId);
+        if (this.failRead && checkpoints.some((cp) => cp.nodeId === 'end' && cp.status === 'completed')) {
+          this.failRead = false;
+          throw new Error('checkpoint read failed');
+        }
+        return checkpoints;
+      }
+    }
+    const store = new FailingReadStore(clock.now);
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('approval') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'approval', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'approval' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }],
+    };
+    await store.createRun('run-stop-retry', runParams(), definition, 'v1');
+    await expect(driveUntilPark('run-stop-retry', await claimAttempt(store, 'run-stop-retry'), { store, engine, clock: clock.now, executors }))
+      .rejects.toThrow('checkpoint read failed');
+
+    clock.advance(60_000);
+    const park = await driveUntilPark('run-stop-retry', await claimAttempt(store, 'run-stop-retry'), { store, engine, clock: clock.now, executors });
+    expect(park.outcome).toBe('completed');
+    expect(engine.abort).toHaveBeenCalledWith('session-approval', 'thread-approval', 'queue-approval');
+  });
+
+  it('keeps the run going when a stop failed before it ran', async () => {
+    // Under `onUnresolvedPath: "fail"`, a stop whose message names a missing
+    // value fails like any node. It never ran, so it must not end the run on
+    // a later drive or abort the agent on another branch.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('kept') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success', message: '{{nodes.x.result.nope}}' },
+        { id: 'y', type: 'set', values: { b: 2 } },
+        { id: 'z', type: 'set', values: { c: 3 } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }, { from: 'x', to: 'y' }, { from: 'y', to: 'z' }],
+      policy: { onUnresolvedPath: 'fail' },
+    };
+    await store.createRun('run-stop-unran', runParams(), definition, 'v1');
+    for (let drive = 0; drive < 2; drive++) {
+      const park = await driveUntilPark('run-stop-unran', await claimAttempt(store, 'run-stop-unran'), { store, engine, clock: clock.now, executors });
+      expect(park.status).toBe('parked');
+    }
+    const byNode = new Map((await store.getCheckpoints('run-stop-unran')).map((cp) => [cp.nodeId, cp.status]));
+    expect(byNode.get('end')).toBe('failed');
+    expect(byNode.get('z')).toBe('completed');
+    expect(engine.abort).not.toHaveBeenCalled();
+  });
+
+  it('settles a cancel without aborting an item that a finished foreach left in intent', async () => {
+    // The foreach finished, but one item checkpoint stays `intent` with its
+    // receipt (an item the foreach aborted). Its abort fails; the cancel must
+    // still settle, because that work is not live.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId?: string) => {
+        if (queueItemId === 'queue-3') throw new Error('abort queue-3 failed');
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('agent') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'each', type: 'foreach', items: '{{trigger.data.rows}}', body: { id: 'item', type: 'orchestrator', prompt: 'Handle the row.' } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'each' }],
+    };
+    await store.createRun('run-foreach-left', runParams(), definition, 'v1');
+    const seedAttempt = await claimAttempt(store, 'run-foreach-left');
+    const put = async (nodeId: string, iteration: number, status: 'intent' | 'completed', effects?: Record<string, unknown>) => {
+      await store.putIntent({ runId: 'run-foreach-left', nodeId, iteration, status: 'intent', attempt: seedAttempt, createdAt: clock.now(), ...(effects ? { effects } : {}) });
+      if (status === 'completed') {
+        await store.completeCheckpoint('run-foreach-left', nodeId, iteration, seedAttempt, {
+          runId: 'run-foreach-left', nodeId, iteration, status: 'completed', attempt: seedAttempt, createdAt: clock.now(), result: { items: [] },
+        });
+      }
+    };
+    await put('each', 0, 'completed');
+    await put('item', 2, 'intent', { sessionId: 'session-item', receipt: { threadId: 'thread-item', queueItemId: 'queue-3' } });
+    expect((await driveUntilPark('run-foreach-left', seedAttempt, { store, engine, clock: clock.now, executors })).status).toBe('parked');
+
+    await store.insertSignal({ runId: 'run-foreach-left', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+    const park = await driveUntilPark('run-foreach-left', await claimAttempt(store, 'run-foreach-left'), { store, engine, clock: clock.now, executors });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-agent');
+    expect(engine.abort).not.toHaveBeenCalledWith('session-item', 'thread-item', 'queue-3');
+  });
+
+  it('cancels the live foreach items without aborting a finished one that shares their node id', async () => {
+    // Items 0 and 2 are still `intent`; item 1 finished. All three saved
+    // waits name the body node, so only the receipts tell them apart.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId?: string) => {
+        if (queueItemId === 'queue-1') throw new Error('abort reached a settled submission');
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'each', type: 'foreach', items: '{{trigger.data.rows}}', body: { id: 'item', type: 'orchestrator', prompt: 'Handle the row.' } },
+      ],
+      edges: [{ from: 't', to: 'each' }],
+    };
+    await store.createRun('run-foreach-mixed', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-foreach-mixed');
+    const receipt = (i: number) => ({ sessionId: `session-${i}`, receipt: { threadId: `thread-${i}`, queueItemId: `queue-${i}` } });
+    const wait = (i: number) => ({ kind: 'submission' as const, nodeId: 'item', sessionId: `session-${i}`, threadId: `thread-${i}`, queueItemId: `queue-${i}` });
+    await store.putIntent({ runId: 'run-foreach-mixed', nodeId: 'each', iteration: 0, status: 'intent', attempt, createdAt: clock.now() });
+    for (const i of [0, 1, 2]) {
+      await store.putIntent({ runId: 'run-foreach-mixed', nodeId: 'item', iteration: i, status: 'intent', attempt, createdAt: clock.now(), effects: receipt(i) });
+    }
+    await store.completeCheckpoint('run-foreach-mixed', 'item', 1, attempt, {
+      runId: 'run-foreach-mixed', nodeId: 'item', iteration: 1, status: 'completed', attempt, createdAt: clock.now(), effects: receipt(1), result: 'done',
+    });
+    await store.parkRun('run-foreach-mixed', attempt, [wait(0), wait(1), wait(2)]);
+    await store.insertSignal({ runId: 'run-foreach-mixed', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+
+    const park = await driveUntilPark('run-foreach-mixed', await claimAttempt(store, 'run-foreach-mixed'), { store, engine, clock: clock.now });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-0', 'thread-0', 'queue-0');
+    expect(engine.abort).toHaveBeenCalledWith('session-2', 'thread-2', 'queue-2');
+    expect(engine.abort).not.toHaveBeenCalledWith('session-1', 'thread-1', 'queue-1');
+  });
+
+  it('does not abort a submission that finished before a later drive reaches stop', async () => {
+    // The first drive parks on the agent and saves its wait on the run. In
+    // the second drive the agent completes and the stop ends the run. The
+    // saved wait is stale by then: aborting it reaches a settled submission,
+    // and an abort that fails must not keep a completed run from settling.
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = {
+      ...makeFakeEngineDeps(),
+      abort: vi.fn(async () => {
+        throw new Error('abort reached a settled submission');
+      }),
+    };
+    const parking = parkingAgent('done');
+    const agent: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        if (args.existingCheckpoint?.status !== 'intent') return parking.execute(args);
+        await args.store.completeCheckpoint(args.run.runId, args.node.id, args.iteration, args.attempt, {
+          runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'completed', attempt: args.attempt,
+          createdAt: args.clock(), result: { done: true }, effects: args.existingCheckpoint.effects,
+        });
+        return { status: 'completed', result: { done: true } };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: agent };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 'agent', to: 'end' }],
+    };
+    await store.createRun('run-stop-after-done', runParams(), definition, 'v1');
+
+    const first = await driveUntilPark('run-stop-after-done', await claimAttempt(store, 'run-stop-after-done'), { store, engine, clock: clock.now, executors });
+    expect(first.status).toBe('parked');
+    const second = await driveUntilPark('run-stop-after-done', await claimAttempt(store, 'run-stop-after-done'), { store, engine, clock: clock.now, executors });
+
+    expect(second.outcome).toBe('completed');
+    expect(engine.abort).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { end: 'stop', outcome: 'completed' },
+    { end: 'cancel', outcome: 'cancelled' },
+  ] as const)('settles $outcome after a $end and aborts the current work behind a stale wait', async ({ end, outcome }) => {
+    // Like a foreach whose first item finished while a later one still
+    // runs: the agent stays `intent`, so the wait saved for its first
+    // submission still counts as live. Aborting that finished submission is
+    // a no-op in the engine (`requestAbort` skips settled items), so the run
+    // settles and the agent's current work is aborted too.
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = { ...makeFakeEngineDeps(), abort: vi.fn(async () => undefined) };
+    const defaults = createDefaultNodeExecutors();
+    const timer = defaults.wait;
+    if (!timer) throw new Error('default wait executor missing');
+    const agent: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        if (args.node.id !== 'agent') return timer.execute(args);
+        const step = args.existingCheckpoint === undefined ? 'first' : 'second';
+        const receipt = { threadId: 'thread-agent', queueItemId: `queue-${step}` };
+        await args.store.putIntent({
+          runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'intent', attempt: args.attempt,
+          createdAt: args.clock(), effects: { sessionId: 'session-agent', receipt },
+        });
+        return { status: 'parked', waitingOn: [{ kind: 'submission', nodeId: args.node.id, sessionId: 'session-agent', ...receipt }] };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...defaults, wait: agent };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'timer', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'timer' }, { from: 'timer', to: 'end' }],
+    };
+    const runId = `run-abort-fails-${end}`;
+    await store.createRun(runId, runParams(), definition, 'v1');
+
+    const first = await driveUntilPark(runId, await claimAttempt(store, runId), { store, engine, clock: clock.now, executors });
+    expect(first.waitingOn).toContainEqual(expect.objectContaining({ kind: 'submission', queueItemId: 'queue-first' }));
+    clock.advance(3_600_000);
+    if (end === 'cancel') await store.insertSignal({ runId, signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+    const second = await driveUntilPark(runId, await claimAttempt(store, runId), { store, engine, clock: clock.now, executors });
+
+    expect(second.outcome).toBe(outcome);
+    // A cancel lands before the agent runs again, so its intent still names
+    // the first submission. A stop comes after the agent dispatched a second
+    // one; the intent then names only that, and the stale first is skipped.
+    if (end === 'cancel') expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-first');
+    if (end === 'stop') {
+      expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-second');
+      expect(engine.abort).not.toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-first');
+    }
   });
 });
