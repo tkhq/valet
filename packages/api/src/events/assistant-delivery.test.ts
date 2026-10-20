@@ -464,6 +464,45 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     expect(await settled("attended-ask")).toBe(false);
   });
 
+  it("lets a default-policy Slack mention ask on its rule thread and keeps a reaction there unattended", async () => {
+    // A rule with no stored policy lands a mention on `sub:<rule>:<delivery>`.
+    // The dispatcher leaves `unattended` unset for a channel conversation, so
+    // the person who mentioned the assistant must be able to answer it.
+    const deps = { db: testDb.appDb, engineHost };
+    const pending = async () => ((await testDb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_decision_gates
+      WHERE status = 'pending'`)) as { rows: Array<{ n: number }> }).rows[0]!.n;
+    const settled = async (dispatchId: string) => ((await testDb.appDb.execute(sql`SELECT status FROM engine_queue_items
+      WHERE dispatch_id = ${dispatchId}`)) as { rows: Array<{ status: string }> }).rows[0]?.status === "settled";
+    const asks = () => faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which deploy?" }, { id: "ask-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Nothing to check."),
+    ]);
+    const conversational = async (key: string) => {
+      const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+      return (await session.threadByKey(key))?.toThreadData().metadata?.conversational;
+    };
+
+    // A reaction on a rule thread with no conversation stays unattended.
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "sub:rule-reactions" }, unattended: true,
+      signal: signal("eyes on a post"), dispatchId: "event:reaction-1", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => settled("event:reaction-1"), { timeout: 15_000 }).toBe(true);
+    expect(await pending()).toBe(0);
+    expect(await conversational("sub:rule-reactions")).toBeUndefined();
+
+    asks();
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "sub:rule-mentions:delivery-1" },
+      signal: { ...signal("is the deploy green?"), origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const } },
+      dispatchId: "event:mention-1", mismatchReason: "event_target_mismatch",
+    });
+    await expect.poll(() => pending(), { timeout: 15_000 }).toBe(1);
+    expect(await settled("event:mention-1")).toBe(false);
+    expect(await conversational("sub:rule-mentions:delivery-1")).toBe(true);
+  });
+
   it("lets a task that an automated delivery starts ask in the inbox", async () => {
     // A task does not wait for its child, so the child's question never holds
     // the shared thread. Only a workflow task makes the child unattended too.

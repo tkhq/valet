@@ -25,6 +25,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 import type { DestinationReason } from "./destination.js";
 import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
+import { CONVERSATIONAL_THREAD_KEY } from "./automated-threads.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -377,6 +378,10 @@ async function deliverToAssistantThreadInner(
       throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
     }
   }
+  // A person waits on an attended delivery, so its thread is a conversation
+  // from now on, even if an unattended delivery opened it
+  // (`isAutomatedDeliveryThread`). Record it before the turn is admitted.
+  if (!args.unattended) await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
   const metadata = {
     ...(args.presence ? { presence: args.presence } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),

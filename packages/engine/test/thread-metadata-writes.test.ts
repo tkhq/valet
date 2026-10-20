@@ -47,4 +47,17 @@ describe("thread metadata writes", () => {
       expect((await store.getThread(session.id, thread.id))?.metadata?.slackChannels).toEqual(["T1/CPRIV"]);
     } finally { faux.unregister(); }
   });
+
+  it("sets a metadata flag through the patch path without dropping other values", async () => {
+    const faux = registerFauxProvider({ provider: "metadata-flag" });
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "user", id: "alice" }, workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [] });
+      const thread = await session.createThread("sub:rule-1:delivery-1");
+      await Promise.all([thread.addToMetadataList("slackChannels", "T1/C1"), thread.setMetadataFlag("conversational")]);
+      await thread.setMetadataFlag("conversational");
+      expect((await store.getThread(session.id, thread.id))?.metadata).toMatchObject({ slackChannels: ["T1/C1"], conversational: true });
+    } finally { faux.unregister(); }
+  });
 });

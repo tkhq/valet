@@ -5376,7 +5376,7 @@ export class Thread {
    * gate opens. A task that a delivery delegates can still ask in the inbox. */
   private isUnattendedTurn(): boolean {
     return this.isUnattendedWorkflowTask() || this.runningItem?.metadata?.[UNATTENDED_DELIVERY_KEY] === true
-      || (!this.isUserPrompt() && this.session.options.automatedThread?.({ id: this.id, key: this.key }) === true);
+      || (!this.isUserPrompt() && this.session.options.automatedThread?.({ id: this.id, key: this.key, metadata: this.threadMetadata }) === true);
   }
 
   private buildTools(includeRestricted = false): AgentTool[] {
@@ -5465,6 +5465,15 @@ export class Thread {
       const items = Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
       return items.includes(value) ? undefined : { ...current, [key]: [...items, value] };
     }, "before-save");
+  }
+
+  /**
+   * Set `metadata[key]` to `true` and persist it. A flag already set is a
+   * no-op. Hosts use it to record a lasting fact about a thread, such as
+   * that a person now takes part in it.
+   */
+  async setMetadataFlag(key: string): Promise<void> {
+    await this.patchThreadMetadata((current) => current?.[key] === true ? undefined : { ...current, [key]: true }, "before-save");
   }
 
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {

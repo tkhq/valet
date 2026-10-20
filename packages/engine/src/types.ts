@@ -2847,8 +2847,9 @@ export interface CreateSessionOptions {
   unattendedThread?: (thread: { id: string; key: string }) => boolean;
   /** True for a thread only automated deliveries write to, such as an events
    * thread. `requestDecision` refuses decisions on its turns that a person did
-   * not type, but a task that such a turn delegates can still ask. */
-  automatedThread?: (thread: { id: string; key: string }) => boolean;
+   * not type, but a task that such a turn delegates can still ask. The host
+   * reads `metadata` to tell such a thread from a conversation. */
+  automatedThread?: (thread: { id: string; key: string; metadata?: Record<string, unknown> }) => boolean;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
