@@ -184,10 +184,18 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect(refreshErrorText(new Error(`token sk-1 leaked`), ["sk-1", undefined])).toBe("token [redacted] leaked");
     expect(refreshErrorText(new Error("x".repeat(400)), [])).toHaveLength(301);
     // An escaped JSON message, and a value with no closing quote.
-    expect(refreshErrorText(new Error('{"message":"bad client_secret=\\"abc12345\\""}'), [])).toBe('{"message":"bad client_secret=\\"[redacted]\\""}');
+    expect(refreshErrorText(new Error('{"message":"bad client_secret=\\"abc12345\\""}'), [])).toBe('{"message":"bad client_secret=\\"[redacted]"}');
     expect(refreshErrorText(new Error('400 {"access_token":"abcdefgh12345'), [])).toBe('400 {"access_token":"[redacted]');
     // A cut-off start of a known secret at the end of the text.
     expect(refreshErrorText(new Error("failed: tok-12345678"), ["tok-1234567890abcdef"])).toBe("failed: [redacted]");
+    // Escaped, cut-off and URL-encoded echoes of a known secret.
+    const secret = "AbC/def+GhI/jkl0123456789xyzQRS=";
+    expect(refreshErrorText(new Error('{"refresh_token":"AbC\\/def+GhI\\/jkl0123456789xyzQRS="}'), [secret])).toBe('{"refresh_token":"[redacted]"}');
+    expect(refreshErrorText(new Error("Invalid client secret 'AbC\\/def+GhI\\/jkl0123456789xyzQRS='"), [secret])).toBe("Invalid client secret '[redacted]'");
+    expect(refreshErrorText(new Error('400 {"error":"bad","hint":"AbC\\/def+GhI\\/jkl01'), [secret])).toBe('400 {"error":"bad","hint":"[redacted]');
+    expect(refreshErrorText(new Error(`unknown token ${encodeURIComponent(secret)}`), [secret])).toBe("unknown token [redacted]");
+    // An unknown escaped value in a token field.
+    expect(refreshErrorText(new Error('{"refresh_token":"Zz\\/yy\\/xx12345"}'), [])).toBe('{"refresh_token":"[redacted]"}');
     // Prose that only mentions a code stays readable.
     expect(refreshErrorText(new Error("error code: invalid_grant"), [])).toBe("error code: invalid_grant");
   });
@@ -220,6 +228,19 @@ describe("OAuthRefreshingCredentialStore", () => {
     await store.get(OWNER, "linear");
     const reason = (await inner.get(OWNER, "linear"))?.metadata?.refreshError;
     expect(reason).toBe('MCP PKCE token refresh failed: 400 {"refresh_token":"[redacted]');
+    vi.restoreAllMocks();
+  });
+
+  it("keeps no provider reply for an error that is not the token endpoint's answer", async () => {
+    const inner = memoryStore();
+    await inner.save(OWNER, "widget", { type: "oauth2", accessToken: "at", refreshToken: "rt", expiresAt: NOW - 1 });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // No client id or secret in env: the refresh throws before any request.
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: authCodePlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "widget");
+    const persisted = await inner.get(OWNER, "widget");
+    expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
+    expect(persisted?.metadata?.refreshError).toBeUndefined();
     vi.restoreAllMocks();
   });
 

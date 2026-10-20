@@ -27,16 +27,29 @@ const SECRET_PREFIX_MIN = 8;
 /** A token field and its value: `refresh_token=x`, `"access_token": "x`,
  * `client_secret=\"x\"`. The value may have no closing quote, because the
  * upstream error keeps only the first 200 characters of the body. */
-const TOKEN_FIELD = /(\b(?:refresh_token|access_token|id_token|client_secret)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"'\\&,;}]*/gi;
+const TOKEN_FIELD = /(\b(?:refresh_token|access_token|id_token|client_secret)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)(?:\\.|[^\s"'\\&,;}])*/gi;
 /** An authorization code, in form shape only: prose such as "error code: 400" stays. */
 const CODE_FIELD = /\b(code=)[^\s"'\\&,;}]*/gi;
 
-/** Masks `secret` wherever it appears, and a cut-off start of it at the end of
- * the text, where the upstream 200-character cap can split it. */
+/** The forms a provider may echo a secret in: raw, JSON-escaped (with and
+ * without `\/`), and URL-encoded. Longest first, so no form masks part of
+ * another. */
+function secretForms(secret: string): string[] {
+  const json = JSON.stringify(secret).slice(1, -1);
+  const forms = new Set([secret, json, json.replace(/\//g, "\\/"), encodeURIComponent(secret), new URLSearchParams({ v: secret }).toString().slice(2)]);
+  return [...forms].sort((a, b) => b.length - a.length);
+}
+
+/** Masks every form of `secret` wherever it appears, and a cut-off start of a
+ * form at the end of the text, where the upstream 200-character cap can split it. */
 function maskSecret(text: string, secret: string): string {
-  const masked = text.split(secret).join("[redacted]");
-  for (let k = Math.min(secret.length - 1, masked.length); k >= SECRET_PREFIX_MIN; k--) {
-    if (masked.endsWith(secret.slice(0, k))) return `${masked.slice(0, -k)}[redacted]`;
+  const forms = secretForms(secret);
+  let masked = text;
+  for (const form of forms) masked = masked.split(form).join("[redacted]");
+  for (const form of forms) {
+    for (let k = Math.min(form.length - 1, masked.length); k >= SECRET_PREFIX_MIN; k--) {
+      if (masked.endsWith(form.slice(0, k))) return `${masked.slice(0, -k)}[redacted]`;
+    }
   }
   return masked;
 }
@@ -122,18 +135,27 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     } catch (err) {
       // The provider's own words name the cause (expired, revoked, already
       // used), so the credential keeps them for the Integrations page.
-      // An authorization_code refresh sends the app's client secret, so a
-      // provider can echo that too.
+      // Only a token endpoint's answer is the provider's reply. Its body can
+      // echo the request, and an authorization_code refresh sends the app's
+      // client secret, so the stored and logged text is masked. Any other
+      // error (DNS, TLS, missing config) is logged whole with its cause.
       const clientSecret = found.oauth.mode === "mcp" ? undefined : this.deps.env[found.oauth.clientSecretEnv];
-      const reason = refreshErrorText(err, [stored.refreshToken, stored.accessToken, clientSecret]);
-      console.error(`credential refresh failed for ${service}: ${reason}`);
+      const reason = err instanceof OAuthTokenError
+        ? refreshErrorText(err, [stored.refreshToken, stored.accessToken, clientSecret])
+        : undefined;
+      if (reason !== undefined) console.error(`credential refresh failed for ${service}: ${reason}`);
+      else console.error(`credential refresh failed for ${service}:`, err);
       // Only the provider refusing the grant (400 or 401) makes the row dead
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
       // failure and leaves the next read to retry.
       const refused = err instanceof OAuthTokenError && (err.status === 400 || err.status === 401);
       const stamped: StoredCredential = {
         ...stored,
-        metadata: { ...stored.metadata, refreshFailedAt: now, refreshError: reason, ...(refused ? { refreshRefused: true } : {}) },
+        metadata: {
+          ...stored.metadata, refreshFailedAt: now,
+          ...(reason !== undefined ? { refreshError: reason } : {}),
+          ...(refused ? { refreshRefused: true } : {}),
+        },
       };
       return this.saveIfUnchanged(owner, service, stored, stamped);
     }

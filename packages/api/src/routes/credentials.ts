@@ -481,6 +481,12 @@ credentialsRouter.put("/:service", async (c) => {
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
     return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
   }
+  // `metadata.refreshError` is the provider's masked answer to a failed
+  // refresh (`OAuthRefreshingCredentialStore`). The Integrations page shows it
+  // as the provider's reply, so only the server writes it.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "refreshError" in body.metadata) {
+    return c.json({ error: "metadata.refreshError is reserved. Valet sets it when a token refresh fails." }, 400);
+  }
   // `metadata.githubId` links a personal GitHub App installation to the
   // member who owns that GitHub account (`services/github-app.ts`). Only the
   // GitHub connect callback writes it, from GitHub's `GET /user`.
