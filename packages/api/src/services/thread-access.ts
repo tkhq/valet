@@ -540,6 +540,35 @@ export function sharedWithWholeTeamSql(orgId: string, key: SQL, channels?: SQL):
 const CHANNEL_CHECK_CONCURRENCY = 5;
 
 /**
+ * SQL: one row per given thread, with the inputs `visibleThreadIds` decides
+ * from. Each distinct session walks its parent chain once. Pass at least one
+ * thread.
+ */
+export function visibleThreadRowsSql(threads: ReadonlyArray<{ sessionId: string; threadId: string }>): SQL {
+  const values = sql.join(threads.map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `);
+  // `linked`: the session names the thread that started it. Its chain is the
+  // governing key and the recorded channels from that thread up.
+  // `walked` is MATERIALIZED because PostgreSQL inlines a CTE that is read
+  // once. Inlined, the two recursive walks run again for each thread row.
+  return sql`WITH t(session_id, thread_id) AS (VALUES ${values}),
+    chain AS (
+      SELECT s.session_id, (es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL) AS linked,
+        es.parent_session_id, es.parent_thread_id
+      FROM (SELECT DISTINCT session_id FROM t) s LEFT JOIN engine_sessions es ON es.id = s.session_id
+    ),
+    walked AS MATERIALIZED (
+      SELECT chain.session_id, chain.linked,
+        CASE WHEN chain.linked THEN ${governingKeyWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 2)} END AS chain_key,
+        CASE WHEN chain.linked THEN ${slackChannelsWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 1)} END AS chain_channels
+      FROM chain
+    )
+    SELECT t.session_id, t.thread_id, (et.id IS NOT NULL) AS found, et.key, walked.linked, walked.chain_key, walked.chain_channels,
+      CASE WHEN et.id IS NULL THEN NULL ELSE ${ownSlackChannelsSql(sql`et.metadata`)} END AS own_channels
+    FROM t JOIN walked ON walked.session_id = t.session_id
+    LEFT JOIN engine_threads et ON et.session_id = t.session_id AND et.id = t.thread_id`;
+}
+
+/**
  * Of the given threads, the ones (`<session>:<thread>`) the viewer may see.
  * The answer for each thread is the answer `threadVisibility` gives for the
  * thread's governing key and recorded channels. The batch reads them in one
@@ -554,25 +583,7 @@ export async function visibleThreadIds(
 ): Promise<Set<string>> {
   const pairs = new Map(threads.map((t) => [`${t.sessionId}:${t.threadId}`, t]));
   if (session.ownerType !== "team" || pairs.size === 0) return new Set(pairs.keys());
-  const values = sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `);
-  // `linked`: the session names the thread that started it. Its chain is the
-  // governing key and the recorded channels from that thread up.
-  const result = await deps.db.execute(sql`WITH t(session_id, thread_id) AS (VALUES ${values}),
-    chain AS (
-      SELECT s.session_id, (es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL) AS linked,
-        es.parent_session_id, es.parent_thread_id
-      FROM (SELECT DISTINCT session_id FROM t) s LEFT JOIN engine_sessions es ON es.id = s.session_id
-    ),
-    walked AS (
-      SELECT chain.session_id, chain.linked,
-        CASE WHEN chain.linked THEN ${governingKeyWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 2)} END AS chain_key,
-        CASE WHEN chain.linked THEN ${slackChannelsWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 1)} END AS chain_channels
-      FROM chain
-    )
-    SELECT t.session_id, t.thread_id, (et.id IS NOT NULL) AS found, et.key, walked.linked, walked.chain_key, walked.chain_channels,
-      CASE WHEN et.id IS NULL THEN NULL ELSE ${ownSlackChannelsSql(sql`et.metadata`)} END AS own_channels
-    FROM t JOIN walked ON walked.session_id = t.session_id
-    LEFT JOIN engine_threads et ON et.session_id = t.session_id AND et.id = t.thread_id`) as {
+  const result = await deps.db.execute(visibleThreadRowsSql([...pairs.values()])) as {
     // Raw SQL rows are untyped; the SELECT names these columns.
     rows: Array<{
       session_id: string; thread_id: string; found: boolean; key: string | null; linked: boolean | null;

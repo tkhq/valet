@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds } from "./thread-access.js";
+import { cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -362,6 +362,35 @@ it("batches a list of threads with the same answers as one check per thread", as
   const other = await visibleThreadIds(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "other" }, pairs);
   expect(other.has("root:r-web") && other.has("root:r-pub")).toBe(true);
   expect(other.has("root:r-priv") || other.has("child-priv:c-a") || other.has("child-mine:m-a") || other.has("root:r-slack")).toBe(false);
+});
+
+/** Each `Recursive Union` node of an EXPLAIN (ANALYZE, FORMAT JSON) plan, with how many times it ran. */
+function recursiveWalkLoops(node: unknown): number[] {
+  if (Array.isArray(node)) return node.flatMap(recursiveWalkLoops);
+  if (typeof node !== "object" || node === null) return [];
+  const own = "Node Type" in node && node["Node Type"] === "Recursive Union" && "Actual Loops" in node && typeof node["Actual Loops"] === "number"
+    ? [node["Actual Loops"]] : [];
+  return [...own, ...Object.values(node).flatMap(recursiveWalkLoops)];
+}
+
+it("walks a linked session's parent chain once for all its threads", async () => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+    ('p-t', 'walk-parent', 'web:default', 'idle', 'steer', 1, 1)`);
+  await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+    ('walk-child', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'walk-parent', 'p-t', 1, 1)`);
+  const threads = Array.from({ length: 6 }, (_, i) => ({ sessionId: "walk-child", threadId: `c-${i}` }));
+  for (const t of threads) {
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES (${t.threadId}, ${t.sessionId}, ${`web:${t.threadId}`}, 'idle', 'steer', 1, 1)`);
+  }
+  const explained = await db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) ${visibleThreadRowsSql(threads)}`) as { rows: Array<Record<string, unknown>> };
+  const raw = explained.rows[0]?.["QUERY PLAN"];
+  const plan: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+  // One governing-key walk and one channel walk, each run once for the one
+  // session. Inlining `walked` runs each walk once per thread instead.
+  expect(recursiveWalkLoops(plan)).toEqual([1, 1]);
 });
 
 it("hides a batched thread whose channel check fails", async () => {
