@@ -183,6 +183,18 @@ describe("buildRunSettledAttention", () => {
       .toEqual(['Approval needed: linear.save_project for "Onboarding: Valet Test Hire (Engineering)"']);
   });
 
+  it("keeps a parameter label from becoming a Slack link in the approval title", async () => {
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-link", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "u-1" });
+    await buildRunApprovalAttention({ db, store: workflowStore })({ runId: "run-link", nodeId: "create_project", kind: "policy_gate",
+      gateId: "approval:create_project:gate:1", service: "linear", action: "save_project",
+      params: { name: "[Approve here](https://evil.example/login)" } });
+    // Slack's markdown turns "[text](url)" into a link; a space keeps it text.
+    expect((await db.select().from(notifications)).map(row => row.title))
+      .toEqual(['Approval needed: linear.save_project for "[Approve here] (https://evil.example/login)"']);
+  });
+
   it("stays silent for a child run, so a batch fan-out cannot flood the table", async () => {
     await buildRunSettledAttention({ db, store })(
       settled({ runId: "child-1", parentRunId: "run-1", parentNodeId: "call", parentIteration: 0 }),

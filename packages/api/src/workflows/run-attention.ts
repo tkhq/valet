@@ -38,10 +38,12 @@ export function workflowApprovalHref(runId: string, nodeId: string): string {
 }
 
 /** Names the action and, when its parameters have one, what it would change,
- * so two waiting approvals for one action read differently. */
+ * so two waiting approvals for one action read differently. A parameter can
+ * come from a webhook or a model. Slack renders the title as markdown, so a
+ * space after "]" keeps "[text](url)" from becoming a disguised link. */
 function policyGateTitle(info: { service?: string; action?: string; params?: unknown }): string {
-  const label = actionParamsLabel(info.params);
-  return `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}${label ? ` for "${label.value}"` : ""}`;
+  const label = actionParamsLabel(info.params)?.value.replaceAll("](", "] (");
+  return `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}${label ? ` for "${label}"` : ""}`;
 }
 
 /** Routes an account gate to its lender and other gates to the run's audience. */

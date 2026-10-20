@@ -12,6 +12,7 @@ import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision, restrictivePolicyAnywhere, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
 import { parsePath } from "../policies/matchers.js";
+import { isRiskLevel } from "../policies/admin.js";
 import { isDeadConnection } from "../services/credential-resolution.js";
 import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
@@ -290,10 +291,11 @@ function dynamicActionGranted(rows: PolicyResolutionRows, service: string, actio
     { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }));
 }
 
-/** The Tool step a run is parked on, and the policy source that held it. */
+/** The Tool step action a run is parked on, with the risk the run read and
+ * the policy source that held it. */
 export interface ParkedToolGate {
-  nodeId: string;
   actionId: string;
+  riskLevel: string | undefined;
   provenance: string | undefined;
 }
 
@@ -301,12 +303,38 @@ export interface ParkedToolGate {
 const DEFAULT_SOURCES: ReadonlySet<string> = new Set(["risk_default", "plugin_default"]);
 
 /** A Tool step's dynamic action has no risk to read before a run, so the
- * review reports it as "unknown". A run that parked on it read the risk.
- * When a default held it, the run's approval card can grant that action. */
-function grantsParkedGate(node: WorkflowNodePermissionWire, parked: ParkedToolGate): boolean {
+ * review reports it as "unknown". The review lists a foreach body under the
+ * foreach's id, and a grant covers the action in every step, so this
+ * matches by action. */
+function isParkedDynamicStep(node: WorkflowNodePermissionWire, parked: ParkedToolGate): boolean {
   const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
-  return node.nodeId === parked.nodeId && node.mode === "unknown" && node.agentStep !== true
-    && actionId === parked.actionId && parked.provenance !== undefined && DEFAULT_SOURCES.has(parked.provenance);
+  return node.mode === "unknown" && node.agentStep !== true && actionId === parked.actionId;
+}
+
+/** True when a default, not a rule a person wrote, held the parked action
+ * and still holds it. The gate recorded its source when the run parked, so
+ * this reads the rules again: an org or team rule or an override added
+ * since refuses the grant. A rule on any parameter counts, because later
+ * runs can pass other values. */
+async function defaultHoldsParkedGate(
+  deps: WorkflowPermissionDeps,
+  owner: WorkflowOwner,
+  summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId">,
+  service: string,
+  parked: ParkedToolGate,
+): Promise<boolean> {
+  if (parked.provenance === undefined || !DEFAULT_SOURCES.has(parked.provenance) || !isRiskLevel(parked.riskLevel)) return false;
+  const rows = await loadPolicyRows(deps.db, {
+    orgId: owner.orgId,
+    workflowId: summary.id,
+    userId: summary.ownerType === "user" ? summary.ownerId : owner.userId,
+    teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
+  });
+  // Without grants, the decision names the rule or default that applies.
+  const decision = resolvePolicyDecision({ ...rows, grants: [], workflowGrants: [] },
+    { service, actionId: parked.actionId, riskLevel: parked.riskLevel, params: {}, partialParams: true, appliesIn: "workflow", now: Date.now() },
+    deps.actionPluginByService?.get(service)?.actionPlugin.defaultApprovalMode);
+  return DEFAULT_SOURCES.has(decision.provenance.source);
 }
 
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
@@ -332,9 +360,12 @@ export async function prepareWorkflowPermissions(
   for (const node of analysis) {
     if (needsGrant(node) && node.actionId !== null) {
       gating.set(node.actionId, node.service);
-    } else if (parked && grantsParkedGate(node, parked)) {
-      gating.set(parked.actionId, node.service);
     }
+  }
+  // A run's approval card can also grant the dynamic action it parked on.
+  const parkedStep = parked && analysis.find((node) => isParkedDynamicStep(node, parked));
+  if (parked && parkedStep && await defaultHoldsParkedGate(deps, owner, summary, parkedStep.service, parked)) {
+    gating.set(parked.actionId, parkedStep.service);
   }
 
   let targets: string[];
