@@ -65,6 +65,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
+# TEMPORARY (2026-10-20 eMudhra CA compromise): distrust the two affected roots
+# in the system store, and point Node at it. Removal condition is documented in
+# docker/distrust-compromised-roots.sh. Node's bundled store still trusts the
+# emSign root, and `--use-system-ca` only ADDS the system store to it, so
+# `--use-openssl-ca` is required. NODE_EXTRA_CA_CERTS still works (additive).
+# The managed Chromium ignores the system store, so a Chrome policy distrusts
+# the roots for it. The Bun-compiled `valet` binary is not shipped in this image.
+COPY docker/distrust-compromised-roots.sh /usr/local/sbin/distrust-compromised-roots.sh
+RUN /usr/local/sbin/distrust-compromised-roots.sh --chromium-policy
+ENV NODE_OPTIONS=--use-openssl-ca
+
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
