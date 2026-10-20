@@ -78,7 +78,7 @@ function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
  * a team any private execution the viewer owns. Governing threads in the root
  * are anchors, not conversations. */
 async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSessionId: string) {
-  if (owner.type !== "team") return { sessionIds: [helperSessionId], anchors: new Set<string>(), sharedRoot: undefined };
+  if (owner.type !== "team") return { sessionIds: [helperSessionId], anchors: new Set<string>() };
   const { db } = c.var.providers;
   const root = await findDefaultAssistant(db, c.var.user.orgId, owner);
   const rows = root ? await db.select({ sessionId: assistantExecutions.sessionId, key: assistantExecutions.conversationKey,
@@ -86,7 +86,7 @@ async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSes
     .innerJoin(agentSessions, eq(agentSessions.id, assistantExecutions.sessionId))
     .where(and(eq(assistantExecutions.assistantId, root.id), sql`${agentSessions.status} <> 'deleted'`)) : [];
   const own = rows.filter(row => isAssistantConversationOf(row.key, c.var.user.id)).map(row => row.sessionId);
-  return { sessionIds: [...new Set([helperSessionId, ...own])], anchors: new Set(rows.map(row => row.governingThreadId)), sharedRoot: root?.sessionId };
+  return { sessionIds: [...new Set([helperSessionId, ...own])], anchors: new Set(rows.map(row => row.governingThreadId)) };
 }
 
 /** The viewer's Ask Valet conversations, the most recently used first. A
@@ -119,24 +119,26 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   const scope = await conversationScope(c, owner, helper.sessionId);
   const conversations = await assistantConversations(c, scope);
   const latest = conversations.find(item => item.started);
-  // An empty conversation is reused, so opening the panel without a message
-  // saves no new thread and an empty one never counts as the latest. One on
-  // the shared root never stands in for a fresh conversation.
-  const empty = conversations.find(item => !item.started && item.sessionId !== scope.sharedRoot);
-  let reuse = empty;
+  // In a team, only a private execution keeps a person's conversations to
+  // them. Any other team session (the root or a retained older runtime) is shared.
+  const shared = (sessionId: string) => owner.type === "team" && !sessionId.startsWith("execution:");
+  // Reopening the panel reuses an empty conversation, so opening it without a
+  // message saves no new thread. An empty conversation never counts as the
+  // latest. New chat and a contextual prompt always start a new thread.
+  const empty = conversations.find(item => !item.started && !shared(item.sessionId));
+  let reuse: typeof empty;
   if (request.fresh !== true) reuse = latest ?? empty;
-  else if (request.unlessBusy === true && latest?.busy) reuse = latest;
+  else if (request.unlessBusy === true) reuse = latest?.busy ? latest : empty;
   if (reuse) return c.json({ sessionId: reuse.sessionId, threadId: reuse.threadId } satisfies EnsureWorkspaceConversationResponse);
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
   // Without `fresh`, the first conversation keeps the older per-person key, so
   // concurrent opens agree on one thread. Fresh conversations share the
   // person's private helper, which keeps their memory and working files. After
-  // an upgrade, a team member's helper can be the shared root, so their fresh
+  // an upgrade, a team member's helper can be a shared session, so their fresh
   // conversations get a private per-person execution instead.
   const key = request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`;
-  const sharedHelper = owner.type === "team" && !helper.sessionId.startsWith("execution:");
-  const target = request.fresh === true && sharedHelper
+  const target = request.fresh === true && shared(helper.sessionId)
     ? await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}:private`)
     : helper;
   const data = await target.session.toData();

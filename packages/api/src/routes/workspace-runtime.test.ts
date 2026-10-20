@@ -244,7 +244,7 @@ describe("Ask Valet conversations", () => {
     await use(first);
     const fresh = await open({ fresh: true });
     expect(fresh.threadId).not.toBe(first.threadId);
-    expect(await open({ fresh: true })).toEqual(fresh);
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(fresh);
     expect(await open()).toEqual(first);
     const keys = (await api.providers.engineStore.listThreads(first.sessionId)).map(thread => thread.key);
     expect(keys).toContain("app-assistant:local-user");
@@ -337,6 +337,39 @@ describe("Ask Valet conversations", () => {
     expect(second.threadId).not.toBe(first.threadId);
     expect(second.sessionId).toBe(first.sessionId);
     expect(await assistantMemoryNamespace(api.providers.db, second.sessionId, "memory-team", "local-org")).toBe(first.sessionId);
+  });
+
+  it("starts New chat in a new thread even when the shown conversation is empty", async () => {
+    api = await bootTestApi();
+    const { open } = conversations("user");
+    const shown = await open({ fresh: true, unlessBusy: true });
+    const newChat = await open({ fresh: true });
+    expect(newChat.threadId).not.toBe(shown.threadId);
+    // Reopening the panel still reuses the newest empty conversation.
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(newChat);
+  });
+
+  it("keeps fresh conversations off a retained legacy runtime", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(teams).values({ id: "retained-ask", orgId: "local-org", name: "Retained", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "retained-ask", userId: "local-user", role: "admin" });
+    const owner = { type: "team" as const, id: "retained-ask" };
+    // The singleton migration retained an older shared runtime with this person's empty conversation.
+    const old = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    const legacy = await old.session.createThread("app-assistant:local-user");
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: old.assistant.id, sessionId: old.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: old.sessionId, conversationKey: legacy.key });
+    await db.update(assistants).set({ ownerId: `${owner.id}:retired:${old.assistant.id}` }).where(eq(assistants.id, old.assistant.id));
+    engineHost.evictCache(old.sessionId);
+    const { open } = conversations("retained-ask");
+    expect((await open()).sessionId).toBe(old.sessionId);
+    for (const request of [{ fresh: true }, { fresh: true, unlessBusy: true }]) {
+      const fresh = await open(request);
+      expect(fresh.sessionId).toMatch(/^execution:/);
+      expect(fresh.threadId).not.toBe(legacy.id);
+    }
   });
 
   it("replaces a deleted private execution of a legacy team member", async () => {
