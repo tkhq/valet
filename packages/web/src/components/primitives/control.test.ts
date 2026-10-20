@@ -20,6 +20,13 @@ const OVERRIDE_ALLOWED: Record<string, string> = {
   "components/session/browser/browser-overlay.tsx": "The floating preview keeps 44px touch targets in its fixed 48px header.",
   "components/session/composer.tsx": "The composer's round buttons match its 44px input.",
   "components/layout/top-nav.tsx": "The phone layout's menu button keeps a 44px target until md, where the desktop bar replaces it.",
+  "components/presence/editor/do-section.tsx": "An inline text action sits in the line of text under its field.",
+  "components/presence/editor/name-section.tsx": "An inline text action sits in the line of text under its field.",
+  "components/presence/editor/section.tsx": "The Change action sits on the baseline of the section's sentence.",
+  "components/presence/editor/when-section.tsx": "The add-condition action sits on the baseline of the condition chips.",
+  "components/presence/place-row.tsx": "The overflow menu button lines up with the place name's first line.",
+  "components/presence/presence-line.tsx": "Inline text actions sit in the line's status sentence.",
+  "components/presence/routine-row.tsx": "Inline text actions sit in the routine's row of text.",
 };
 
 const TEXT_INPUT_TYPES = new Set(["", "text", "search", "email", "url", "number", "date", "month", "password", "tel", "time", "datetime-local"]);
