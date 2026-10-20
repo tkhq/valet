@@ -87,10 +87,15 @@ For a native integration, the host credential resolver MUST try, in order:
 | org | app token |
 
 - A non-native service keeps today's order and MUST NOT reach an app token.
-- The app tier applies to members only. An external sender (a channel
-  sender with no Valet account) never receives the app identity. Its reads
-  stop before the app token, are not counted as a fallback, and get what
-  they got before this policy: the team's own connection, or nothing.
+- The row-backed app tier (`linear:app`) applies to members only. An
+  external sender (a channel sender with no Valet account) never receives
+  that app token. Its reads stop before the app token, are not counted as
+  a fallback, and get what they got before this policy: the team's own
+  connection, or nothing. GitHub installation tokens (`github` in a team
+  session, `github:installation`) and the Slack org bot row keep their
+  existing behavior for external senders. This policy did not add them,
+  and a team session that answers a channel uses them to reach its
+  repository and to reply in that channel.
 - An explicit choice still wins over the default: a repository binding
   `session_repos.auth`, or a workflow node `credential: "app" | "user"`.
 
