@@ -125,6 +125,87 @@ Edges may carry `"when"` (an expression) to gate a branch.
 
 Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the workspace assistant's saved model. Its result includes `threadId` in both dispatch-only and settled modes. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
 
+## Step reference
+
+<!-- step-reference:start (generated from packages/workflow/src/dag/step-reference.ts; run scripts/workflows/write-step-reference.mjs to update) -->
+Every step has `id` and `type`. A step accepts only the fields listed for its type, and a save refuses any other field.
+
+- `trigger`:
+  - `dataSchema` (optional): object of run inputs, each `{ type, required?, default?, description?, enum? }`; `type` is one of "string", "number", "integer", "boolean", "object", "array"
+- `set`:
+  - `values` (required): object of names to values; a value may be a template
+- `if`:
+  - `conditions` (required): array of at least one `{ left, dataType, operation, right? }` (see Conditions below)
+  - `combinator` (optional): "and" (default) or "or"
+- `wait`:
+  - `mode` (required): "duration"
+  - `duration` (required): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"
+- `approval`:
+  - `prompt` (required): text the approver reads
+  - `summary` (optional): one line for the approval card
+  - `details` (optional): extra data the card shows
+  - `timeout` (optional): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"; how long the step waits for a decision
+  - `onDeny` (optional): "fail" (default) or "skip"
+- `session`:
+  - `mode` (required): "start", always
+  - `prompt` (required): the task for the agent
+  - `title` (optional): a title for the agent's session
+  - `model` (optional): a size tier (`xs`, `s`, `m`, `l`, `xl`) or an approved model id
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `maxModelCalls` (optional): an integer from 1 to 500
+  - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
+  - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
+- `orchestrator`:
+  - `prompt` (required): the task for the workspace assistant
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `maxModelCalls` (optional): an integer from 1 to 500
+  - `wait` (optional): omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on
+  - `toolScope` (optional): `{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use
+- `tool`:
+  - `service` (required): the plugin service, such as "github"
+  - `action` (required): the action name, such as "create_issue"
+  - `params` (required): object of the action's parameters (`{}` when it takes none); a value may be a template
+  - `summary` (optional): one line that the approval card shows
+  - `credential` (optional): "auto" (default), "app", or "user"
+  - `onError` (optional): "fail" (default) or "continue"
+  - `onDeny` (optional): "fail" (default) or "skip", when an approval is denied or times out
+  - `approvalTimeout` (optional): a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"
+- `llm`:
+  - `model` (required): a size tier (`xs`, `s`, `m`, `l`, `xl`) or an approved model id
+  - `prompt` (required): the prompt; it may use templates
+  - `system` (optional): a system prompt
+  - `outputSchema` (optional): a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`
+  - `temperature` (optional): a number from 0 to 2
+  - `maxOutputTokens` (optional): a positive integer
+  - `reasoning` (optional): one of "minimal", "low", "medium", "high", "xhigh", "max"; omit it for the owner's default
+  - `onError` (optional): "fail" (default) or "continue"
+- `workflow`:
+  - `workflowId` (required): the id of a workflow with the same owner
+  - `input` (optional): becomes the called run's `trigger.data`; it may use templates
+  - `onError` (optional): "fail" (default) or "continue"
+- `foreach`:
+  - `items` (required): a template that resolves to an array, such as "{{nodes.list.result.output.tasks}}"
+  - `body` (required): ONE inline step object, never a list of node ids; its type is one of "llm", "tool", "set", "orchestrator", "session", "workflow"; it has its own unique `id`, no edges, and no `onError`
+  - `maxItems` (optional): a positive integer; without it, a list of more than 100 entries fails the step
+  - `concurrency` (optional): an integer from 1 to 10
+  - `itemAlias` (optional): the name the body reads the entry by (default "item")
+  - `indexAlias` (optional): the name the body reads the position by (default "index")
+  - `onItemError` (optional): "fail" (default), "skip", or "collect"
+- `stop`:
+  - `outcome` (optional): "success" (default) or "failure"; not the run outcome ("completed", "failed", "cancelled")
+  - `output` (optional): the run's result; it may use templates
+  - `message` (optional): a message for the run
+
+**Conditions.** `left` is an expression without braces, such as `nodes.check.result.output.count`. `dataType` is one of "string", "number", "date", "boolean", "array", "object". `right` is the value to compare, when the operation takes one. An `if` step's outgoing edges carry `"fromOutput": "true"` or `"fromOutput": "false"`. The operations for each `dataType`:
+
+- `string`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `equals`, `notEquals`, `contains`, `doesNotContain`, `startsWith`, `endsWith`, `matchesRegex`
+- `number`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `equals`, `notEquals`, `greaterThan`, `lessThan`, `greaterThanOrEqual`, `lessThanOrEqual`
+- `date`: `exists`, `doesNotExist`, `equals`, `notEquals`, `after`, `before`, `afterOrEqual`, `beforeOrEqual`
+- `boolean`: `exists`, `doesNotExist`, `isTrue`, `isFalse`, `equals`, `notEquals`
+- `array`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`, `contains`, `doesNotContain`, `lengthEquals`, `lengthGreaterThan`, `lengthLessThan`
+- `object`: `exists`, `doesNotExist`, `isEmpty`, `isNotEmpty`
+<!-- step-reference:end -->
+
 ## Templates: reading data between nodes
 
 Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill into objects and arrays: `{{nodes.fetch.result.runs[0].id}}`.

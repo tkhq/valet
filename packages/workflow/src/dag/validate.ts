@@ -98,7 +98,7 @@ const SUPPORTED_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
 ]);
 
 /** Node types allowed as a foreach body (decision 1: no nested foreach/if/approval/stop). */
-const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
+export const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
   'llm',
   'tool',
   'set',
@@ -108,7 +108,7 @@ const FOREACH_BODY_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>([
 ]);
 
 /** Allowed keys per node type — the unknown-key lint's ground truth. */
-const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
+export const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   trigger: ['id', 'type', 'dataSchema'],
   set: ['id', 'type', 'values'],
   if: ['id', 'type', 'combinator', 'conditions'],
@@ -153,7 +153,7 @@ const KEY_ALIASES: Partial<Record<DagNodeType, Record<string, string>>> = {
 /** `integer` is a documented alias for `number` (`normalizeInputType` in
  * `trigger-input.ts` collapses it) — JSON Schema habits make authors write
  * it, so the linter accepts it. */
-const INPUT_DEFINITION_TYPES: ReadonlySet<string> = new Set([
+export const INPUT_DEFINITION_TYPES: ReadonlySet<string> = new Set([
   'string',
   'number',
   'integer',
@@ -180,7 +180,7 @@ const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user
 
 /** Node types that carry `onError` (batch-fanout design decision 3). */
 /** The reasoning levels an llm node may name (the engine's `REASONING_LEVELS`). */
-const LLM_REASONING_LEVELS: readonly string[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const LLM_REASONING_LEVELS: readonly string[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>(['llm', 'tool', 'workflow']);
 
@@ -196,7 +196,7 @@ const TRIGGER_PAYLOAD_KEYS: ReadonlySet<string> = new Set([
   'metadata',
 ]);
 
-const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
+export const IF_DATA_TYPES: ReadonlySet<string> = new Set(['string', 'number', 'date', 'boolean', 'array', 'object']);
 const IF_CONDITION_KEYS: readonly string[] = ['left', 'dataType', 'operation', 'right'];
 
 export function validateWorkflowDefinition(
