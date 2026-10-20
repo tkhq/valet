@@ -294,6 +294,89 @@ it("denies unresolved source pairs instead of treating them as shared", async ()
   expect(await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, sources)).toEqual(new Set());
 });
 
+/** The answer `visibleThreadIds` gave before it batched: two walks and one check per thread. */
+async function perThreadVisible(a: TestApi, viewer: { orgId: string; userId: string }, pairs: Array<{ sessionId: string; threadId: string }>): Promise<Set<string>> {
+  const shown = new Set<string>();
+  for (const pair of pairs) {
+    const result = await a.providers.db.execute(sql`SELECT ${governingThreadKeySql(sql`${pair.sessionId}`, sql`${pair.threadId}`, "parent link")} AS key,
+      ${threadSlackChannelsSql(sql`${pair.sessionId}`, sql`${pair.threadId}`)} AS channels`) as { rows: Array<{ key: string | null; channels: string[] | null }> };
+    const row = result.rows[0];
+    const ref = { key: row?.key ?? null, metadata: { [SLACK_CHANNELS_METADATA_KEY]: row?.channels ?? [] } };
+    if (await threadVisibility(a.providers, { ownerType: "team" }, viewer)(ref)) shown.add(`${pair.sessionId}:${pair.threadId}`);
+  }
+  return shown;
+}
+
+it("batches a list of threads with the same answers as one check per thread", async () => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await connectSlack(api, { CBATCHPRIV: ["UMEMBER"] });
+  await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+  await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CBATCHPUB", isPrivate: false, checkedAt: Date.now() });
+  const priv = JSON.stringify({ [SLACK_CHANNELS_METADATA_KEY]: ["CBATCHPRIV"] });
+  const pub = JSON.stringify({ [SLACK_CHANNELS_METADATA_KEY]: ["CBATCHPUB"] });
+  // A chain of ten sessions is deeper than either walk reads.
+  const deep = Array.from({ length: 10 }, (_, i) => i);
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at, metadata) VALUES
+    ('r-web', 'root', 'web:default', 'idle', 'steer', 1, 1, NULL),
+    ('r-priv', 'root', 'sub:rule-1', 'idle', 'steer', 1, 1, ${priv}),
+    ('r-pub', 'root', 'sub:rule-2', 'idle', 'steer', 1, 1, ${pub}),
+    ('r-mine', 'root', 'app-assistant:member', 'idle', 'steer', 1, 1, NULL),
+    ('r-slack', 'root', 'slack:CBATCHPRIV:1.1', 'idle', 'steer', 1, 1, NULL),
+    ('c-a', 'child-priv', 'web:default', 'idle', 'steer', 1, 1, NULL),
+    ('c-b', 'child-priv', 'sub:rule-3', 'idle', 'steer', 1, 1, ${pub}),
+    ('m-a', 'child-mine', 'web:default', 'idle', 'steer', 1, 1, ${pub}),
+    ('g-a', 'grandchild', 'web:default', 'idle', 'steer', 1, 1, NULL),
+    ('o-a', 'orphan', 'web:default', 'idle', 'steer', 1, 1, NULL),
+    ('x-a', 'execution:loose', 'web:default', 'idle', 'steer', 1, 1, NULL)`);
+  await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+    ('child-priv', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'root', 'r-priv', 1, 1),
+    ('child-mine', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'root', 'r-mine', 1, 1),
+    ('grandchild', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'child-priv', 'c-b', 1, 1),
+    ('orphan', 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', 'gone', 'gone-thread', 1, 1)`);
+  for (const i of deep) {
+    const metadata = i === 0 ? priv : null;
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at, metadata)
+      VALUES (${`d${i}-t`}, ${`deep-${i}`}, ${i === 0 ? "app-assistant:member" : "web:default"}, 'idle', 'steer', 1, 1, ${metadata})`);
+    if (i > 0) {
+      await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at)
+        VALUES (${`deep-${i}`}, 'team', 'team-1', 'member', 'local-org', '/', 'child', 'running', ${`deep-${i - 1}`}, ${`d${i - 1}-t`}, 1, 1)`);
+    }
+  }
+  const pairs = [
+    ...["r-web", "r-priv", "r-pub", "r-mine", "r-slack", "r-missing"].map((threadId) => ({ sessionId: "root", threadId })),
+    { sessionId: "child-priv", threadId: "c-a" }, { sessionId: "child-priv", threadId: "c-b" }, { sessionId: "child-priv", threadId: "c-missing" },
+    { sessionId: "child-mine", threadId: "m-a" }, { sessionId: "grandchild", threadId: "g-a" }, { sessionId: "orphan", threadId: "o-a" },
+    { sessionId: "execution:loose", threadId: "x-a" },
+    ...deep.map((i) => ({ sessionId: `deep-${i}`, threadId: `d${i}-t` })),
+  ];
+  for (const userId of ["member", "other"]) {
+    const viewer = { orgId: "local-org", userId };
+    const batched = await visibleThreadIds(api.providers, { ownerType: "team" }, viewer, pairs);
+    expect([...batched].sort()).toEqual([...await perThreadVisible(api, viewer, pairs)].sort());
+  }
+  // Spot checks, so the comparison cannot pass with both sides empty.
+  const member = await visibleThreadIds(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "member" }, pairs);
+  expect(member.has("root:r-priv") && member.has("grandchild:g-a") && member.has("child-mine:m-a")).toBe(true);
+  expect(member.has("orphan:o-a") || member.has("root:r-missing") || member.has("execution:loose:x-a")).toBe(false);
+  const other = await visibleThreadIds(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "other" }, pairs);
+  expect(other.has("root:r-web") && other.has("root:r-pub")).toBe(true);
+  expect(other.has("root:r-priv") || other.has("child-priv:c-a") || other.has("child-mine:m-a") || other.has("root:r-slack")).toBe(false);
+});
+
+it("hides a batched thread whose channel check fails", async () => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+    ('t-slack', 'root', 'slack:CNEVERSEEN:1.1', 'idle', 'steer', 1, 1),
+    ('t-web', 'root', 'web:default', 'idle', 'steer', 1, 1)`);
+  const shown = await visibleThreadIds(api.providers, { ownerType: "team" }, { orgId: "local-org", userId: "member" },
+    [{ sessionId: "root", threadId: "t-slack" }, { sessionId: "root", threadId: "t-web" }]);
+  expect([...shown]).toEqual(["root:t-web"]);
+});
+
 /**
  * Rule threads (`sub:`, `subject:`, `schedule:`) carry no channel in their
  * key. A delivery records its Slack channel on the thread

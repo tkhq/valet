@@ -40,6 +40,7 @@ import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, slackChannelPrivacy } from "../schema/index.js";
+import { mapBounded } from "../lib/bounded-map.js";
 /** The Slack conversation a thread key names, DMs and group DMs included,
  * legacy channel-only keys, a channel's events thread (`slackEventsThreadKey`),
  * and a channel's subject thread (`subject:slack:<team>/<channel>`). */
@@ -73,8 +74,24 @@ function gatingChannels(key: string | null | undefined, recorded: readonly strin
  * thread with private content carries that content too.
  */
 export function threadSlackChannelsSql(sessionId: SQL, threadId: SQL): SQL {
+  return slackChannelsWalkSql(sessionId, threadId, 0);
+}
+
+/** A thread's own recorded Slack channels, as `text[]`, read the way `threadSlackChannelsSql` reads each thread. */
+function ownSlackChannelsSql(metadata: SQL): SQL {
+  return sql`(SELECT COALESCE(array_agg(DISTINCT c.value), '{}'::text[]) FROM jsonb_array_elements_text(CASE
+      WHEN ${metadata} IS NOT NULL AND jsonb_typeof(${metadata}::jsonb -> ${SLACK_CHANNELS_METADATA_KEY}) = 'array'
+      THEN ${metadata}::jsonb -> ${SLACK_CHANNELS_METADATA_KEY} ELSE '[]'::jsonb END) AS c(value))`;
+}
+
+/**
+ * `threadSlackChannelsSql` from a start row at `startDepth`. The walk stops
+ * at depth 8, so a walk that starts at a parent thread (depth 1) reads the
+ * same rows as the child thread's walk reads above it.
+ */
+function slackChannelsWalkSql(sessionId: SQL, threadId: SQL, startDepth: 0 | 1): SQL {
   return sql`(WITH RECURSIVE up(sid, tid, depth) AS (
-      SELECT ${sessionId}::text, ${threadId}::text, 0
+      SELECT ${sessionId}::text, ${threadId}::text, ${sql.raw(String(startDepth))}
       UNION ALL
       SELECT es.parent_session_id, es.parent_thread_id, up.depth + 1 FROM up
       JOIN engine_sessions es ON es.id = up.sid
@@ -216,8 +233,17 @@ const UNKNOWN_THREAD_KEY = "app-assistant:";
  * so the answer is `UNKNOWN_THREAD_KEY`.
  */
 export function governingThreadKeySql(sessionId: SQL, threadId: SQL, from: "thread" | "parent link" = "thread"): SQL {
+  return governingKeyWalkSql(sessionId, threadId, from === "parent link" ? 1 : 0);
+}
+
+/**
+ * `governingThreadKeySql` from a start row at `startDepth`. The walk stops at
+ * depth 8, so a walk that starts at a child's parent link (depth 2) reads
+ * the same rows as the walk of each thread of the child reads above it.
+ */
+function governingKeyWalkSql(sessionId: SQL, threadId: SQL, startDepth: 0 | 1 | 2): SQL {
   return sql`(WITH RECURSIVE up(sid, tid, depth) AS (
-      SELECT ${sessionId}::text, ${threadId}::text, ${sql.raw(from === "parent link" ? "1" : "0")}
+      SELECT ${sessionId}::text, ${threadId}::text, ${sql.raw(String(startDepth))}
       UNION ALL
       SELECT es.parent_session_id, es.parent_thread_id, up.depth + 1 FROM up
       JOIN engine_sessions es ON es.id = up.sid
@@ -510,24 +536,79 @@ export function sharedWithWholeTeamSql(orgId: string, key: SQL, channels?: SQL):
       AND p.is_private = false AND p.checked_at > ${freshPublic})))`;
 }
 
-/** Of the given threads, the ones (`<session>:<thread>`) the viewer may see. */
+/** How many Slack channel checks one batch runs at once. */
+const CHANNEL_CHECK_CONCURRENCY = 5;
+
+/**
+ * Of the given threads, the ones (`<session>:<thread>`) the viewer may see.
+ * The answer for each thread is the answer `threadVisibility` gives for the
+ * thread's governing key and recorded channels. The batch reads them in one
+ * query, and walks each child session's parent chain once, not once per
+ * thread: every thread of a child shares the chain above it. Then each
+ * distinct Slack channel is checked once. A thread that cannot be resolved,
+ * or whose channel check fails, is not shown.
+ */
 export async function visibleThreadIds(
   deps: AccessDeps, session: { ownerType: string }, viewer: ThreadViewer,
   threads: ReadonlyArray<{ sessionId: string; threadId: string }>,
 ): Promise<Set<string>> {
   const pairs = new Map(threads.map((t) => [`${t.sessionId}:${t.threadId}`, t]));
   if (session.ownerType !== "team" || pairs.size === 0) return new Set(pairs.keys());
-  const result = await deps.db.execute(sql`SELECT t.session_id, t.thread_id, ${governingThreadKeySql(sql`t.session_id`, sql`t.thread_id`, "parent link")} AS key,
-      ${threadSlackChannelsSql(sql`t.session_id`, sql`t.thread_id`)} AS channels
-    FROM (VALUES ${sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `)}) AS t(session_id, thread_id)`) as {
-    rows: Array<{ session_id: string; thread_id: string; key: string | null; channels: string[] | null }>;
+  const values = sql.join([...pairs.values()].map((t) => sql`(${t.sessionId}::text, ${t.threadId}::text)`), sql`, `);
+  // `linked`: the session names the thread that started it. Its chain is the
+  // governing key and the recorded channels from that thread up.
+  const result = await deps.db.execute(sql`WITH t(session_id, thread_id) AS (VALUES ${values}),
+    chain AS (
+      SELECT s.session_id, (es.parent_session_id IS NOT NULL AND es.parent_thread_id IS NOT NULL) AS linked,
+        es.parent_session_id, es.parent_thread_id
+      FROM (SELECT DISTINCT session_id FROM t) s LEFT JOIN engine_sessions es ON es.id = s.session_id
+    ),
+    walked AS (
+      SELECT chain.session_id, chain.linked,
+        CASE WHEN chain.linked THEN ${governingKeyWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 2)} END AS chain_key,
+        CASE WHEN chain.linked THEN ${slackChannelsWalkSql(sql`chain.parent_session_id`, sql`chain.parent_thread_id`, 1)} END AS chain_channels
+      FROM chain
+    )
+    SELECT t.session_id, t.thread_id, (et.id IS NOT NULL) AS found, et.key, walked.linked, walked.chain_key, walked.chain_channels,
+      CASE WHEN et.id IS NULL THEN NULL ELSE ${ownSlackChannelsSql(sql`et.metadata`)} END AS own_channels
+    FROM t JOIN walked ON walked.session_id = t.session_id
+    LEFT JOIN engine_threads et ON et.session_id = t.session_id AND et.id = t.thread_id`) as {
+    // Raw SQL rows are untyped; the SELECT names these columns.
+    rows: Array<{
+      session_id: string; thread_id: string; found: boolean; key: string | null; linked: boolean | null;
+      chain_key: string | null; chain_channels: string[] | null; own_channels: string[] | null;
+    }>;
   };
-  const refs = new Map(result.rows.map((row) => [`${row.session_id}:${row.thread_id}`,
-    { key: row.key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: row.channels ?? [] } }]));
-  const visible = threadVisibility(deps, session, viewer);
+  const decided = new Map<string, boolean>();
+  const gated = new Map<string, string[]>();
+  for (const row of result.rows) {
+    const id = `${row.session_id}:${row.thread_id}`;
+    if (!pairs.has(id)) continue;
+    // As `governingThreadKeySql` reads it from the thread up: the top of a
+    // child's chain, else the thread's own key. A missing thread, or an
+    // execution with no parent link, has an unknown audience.
+    const linked = row.linked === true;
+    const key = linked ? row.chain_key
+      : !row.found || row.session_id.startsWith("execution:") ? UNKNOWN_THREAD_KEY : row.key;
+    if (isPersonalThreadKey(key)) {
+      const owner = privateThreadOwner(key);
+      decided.set(id, owner !== undefined && owner === viewer.userId);
+      continue;
+    }
+    const recorded = recordedSlackChannels({
+      [SLACK_CHANNELS_METADATA_KEY]: [...(row.own_channels ?? []), ...(linked ? row.chain_channels ?? [] : [])],
+    });
+    gated.set(id, gatingChannels(key, recorded));
+  }
+  const canSee = channelVisibility(deps, viewer);
+  const channels = [...new Set([...gated.values()].flat())];
+  // A failed check is an unknown audience: the channel counts as hidden.
+  const seen = await mapBounded(channels, CHANNEL_CHECK_CONCURRENCY, (channelId) => canSee(`slack:${channelId}`).catch(() => false));
+  const visibleChannel = new Map(channels.map((channelId, index) => [channelId, seen[index] === true]));
+  for (const [id, gating] of gated) decided.set(id, gating.every((channelId) => visibleChannel.get(channelId) === true));
   const shown = new Set<string>();
   // A missing source is an unknown audience, never evidence of shared access.
-  for (const [id, ref] of refs) if (pairs.has(id) && await visible(ref)) shown.add(id);
+  for (const [id, visible] of decided) if (visible) shown.add(id);
   return shown;
 }
 
