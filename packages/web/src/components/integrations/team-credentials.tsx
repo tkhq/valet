@@ -164,6 +164,9 @@ export function TeamCredentials({
                         {!row.referenceBroken && badge && (
                           <p className="text-danger-500">{repairNote(row, health, canMutate, nameFor)}</p>
                         )}
+                        {!row.referenceBroken && badge && row.refreshError && (
+                          <p className="break-words text-muted">{displayName(row.service)} replied: {row.refreshError}</p>
+                        )}
                       </div>
                       <div className="flex shrink-0 gap-2">
                       {canReconnect && (

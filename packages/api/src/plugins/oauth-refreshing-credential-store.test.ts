@@ -7,7 +7,7 @@ import { isUnusableOAuthCredential } from "../services/credential-resolution.js"
 import { PgCredentialStore } from "./credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { PgQueryable } from "@valet/store-postgres";
-import { OAuthRefreshingCredentialStore } from "./oauth-refreshing-credential-store.js";
+import { OAuthRefreshingCredentialStore, refreshErrorText } from "./oauth-refreshing-credential-store.js";
 
 const OWNER: CredentialOwner = { type: "user", id: "u1" };
 const NOW = 1_800_000_000_000;
@@ -143,6 +143,105 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
     // A 400 from the token endpoint is a refusal: the row can be replaced.
     expect(persisted?.metadata?.refreshRefused).toBe(true);
+  });
+
+  it("keeps the provider's refusal text with the tokens masked", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "at-secret", refreshToken: "rt-secret", expiresAt: NOW - 1 });
+    fake.tokenFailure = 400;
+    // Greenhouse echoes a malformed refresh token back in its message.
+    fake.tokenFailureBody = { message: "refresh_token=rt-secret does not contain a valid client ID suffix" };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+
+    const got = await store.get(OWNER, "linear");
+    const persisted = await inner.get(OWNER, "linear");
+    expect(persisted?.metadata?.refreshError).toBe(
+      'MCP PKCE token refresh failed: 400 {"message":"refresh_token=[redacted] does not contain a valid client ID suffix"}',
+    );
+    expect(got?.metadata?.refreshError).toBe(persisted?.metadata?.refreshError);
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("rt-secret");
+    errors.mockRestore();
+  });
+
+  it("clears the failure stamps after a good refresh", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", {
+      type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1,
+      metadata: { refreshFailedAt: NOW - 1000, refreshRefused: true, refreshError: "400 invalid_grant" },
+    });
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "linear");
+    expect((await inner.get(OWNER, "linear"))?.metadata).toBeUndefined();
+  });
+
+  it("masks token fields in form and JSON shapes and caps the length", () => {
+    expect(refreshErrorText(new Error("bad: access_token=abc&code=xyz"), [])).toBe("bad: access_token=[redacted]&code=[redacted]");
+    expect(refreshErrorText(new Error('{"refresh_token": "abc", "error": "invalid_grant"}'), []))
+      .toBe('{"refresh_token": "[redacted]", "error": "invalid_grant"}');
+    expect(refreshErrorText(new Error(`token sk-1 leaked`), ["sk-1", undefined])).toBe("token [redacted] leaked");
+    expect(refreshErrorText(new Error("x".repeat(400)), [])).toHaveLength(301);
+    // An escaped JSON message, and a value with no closing quote.
+    expect(refreshErrorText(new Error('{"message":"bad client_secret=\\"abc12345\\""}'), [])).toBe('{"message":"bad client_secret=\\"[redacted]"}');
+    expect(refreshErrorText(new Error('400 {"access_token":"abcdefgh12345'), [])).toBe('400 {"access_token":"[redacted]');
+    // A cut-off start of a known secret at the end of the text.
+    expect(refreshErrorText(new Error("failed: tok-12345678"), ["tok-1234567890abcdef"])).toBe("failed: [redacted]");
+    // Escaped, cut-off and URL-encoded echoes of a known secret.
+    const secret = "AbC/def+GhI/jkl0123456789xyzQRS=";
+    expect(refreshErrorText(new Error('{"refresh_token":"AbC\\/def+GhI\\/jkl0123456789xyzQRS="}'), [secret])).toBe('{"refresh_token":"[redacted]"}');
+    expect(refreshErrorText(new Error("Invalid client secret 'AbC\\/def+GhI\\/jkl0123456789xyzQRS='"), [secret])).toBe("Invalid client secret '[redacted]'");
+    expect(refreshErrorText(new Error('400 {"error":"bad","hint":"AbC\\/def+GhI\\/jkl01'), [secret])).toBe('400 {"error":"bad","hint":"[redacted]');
+    expect(refreshErrorText(new Error(`unknown token ${encodeURIComponent(secret)}`), [secret])).toBe("unknown token [redacted]");
+    // An unknown escaped value in a token field.
+    expect(refreshErrorText(new Error('{"refresh_token":"Zz\\/yy\\/xx12345"}'), [])).toBe('{"refresh_token":"[redacted]"}');
+    // Prose that only mentions a code stays readable.
+    expect(refreshErrorText(new Error("error code: invalid_grant"), [])).toBe("error code: invalid_grant");
+  });
+
+  it("masks the app's client secret that an authorization_code refusal echoes", async () => {
+    const inner = memoryStore();
+    await inner.save(OWNER, "widget", { type: "oauth2", accessToken: "at", refreshToken: "rt-widget", expiresAt: NOW - 1 });
+    fake.tokenFailure = 401;
+    fake.tokenFailureBody = { message: "Invalid client secret 'shared-app-secret-123'" };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, {
+      db: testDb.appDb, plugins: authCodePlugins(), env: { X_ID: "cid", X_SECRET: "shared-app-secret-123" }, now: () => NOW,
+    });
+    await store.get(OWNER, "widget");
+    const reason = (await inner.get(OWNER, "widget"))?.metadata?.refreshError;
+    expect(reason).toContain("Invalid client secret '[redacted]'");
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("shared-app-secret-123");
+    errors.mockRestore();
+  });
+
+  it("masks a long refresh token that the 200-character error cap cuts off", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    const longToken = `rt-${"a1b2c3d4".repeat(33)}`;
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "at", refreshToken: longToken, expiresAt: NOW - 1 });
+    fake.tokenFailure = 400;
+    fake.tokenFailureBody = { refresh_token: longToken };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "linear");
+    const reason = (await inner.get(OWNER, "linear"))?.metadata?.refreshError;
+    expect(reason).toBe('MCP PKCE token refresh failed: 400 {"refresh_token":"[redacted]');
+    vi.restoreAllMocks();
+  });
+
+  it("keeps no provider reply for an error that is not the token endpoint's answer", async () => {
+    const inner = memoryStore();
+    await inner.save(OWNER, "widget", { type: "oauth2", accessToken: "at", refreshToken: "rt", expiresAt: NOW - 1 });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // No client id or secret in env: the refresh throws before any request.
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: authCodePlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "widget");
+    const persisted = await inner.get(OWNER, "widget");
+    expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
+    expect(persisted?.metadata?.refreshError).toBeUndefined();
+    vi.restoreAllMocks();
   });
 
   it("does not mark a temporary refresh failure as a refusal", async () => {
