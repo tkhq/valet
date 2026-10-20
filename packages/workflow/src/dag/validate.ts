@@ -176,16 +176,46 @@ const INPUT_DEFINITION_KEYS: readonly string[] = [
 /** Typed as `ReadonlySet<string>` on purpose: the runtime input is
  * LLM-authored JSON, so the guard must reject values `ToolCredentialMode`
  * cannot hold. */
-const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
+export const TOOL_CREDENTIAL_MODES: ReadonlySet<string> = new Set(['auto', 'app', 'user']);
 
-/** Node types that carry `onError` (batch-fanout design decision 3). */
 /** The reasoning levels an llm node may name (the engine's `REASONING_LEVELS`). */
 export const LLM_REASONING_LEVELS: readonly string[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
+/** Node types that carry `onError` (batch-fanout design decision 3). */
 const ERROR_POLICY_NODE_TYPES: ReadonlySet<DagNodeType> = new Set<DagNodeType>(['llm', 'tool', 'workflow']);
 
 /** Same reason as `TOOL_CREDENTIAL_MODES`: reject what `NodeErrorPolicy` cannot hold. */
-const NODE_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'continue']);
+export const NODE_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'continue']);
+
+// The value tables and bounds below are the validator's truth for one field
+// each. The step reference (`step-reference.ts`) renders from them, so a
+// change here changes the `workflows` skill's generated block, and the api
+// test that holds the shipped skill to that block fails until it is rewritten.
+
+/** What an `approval` step, or a tool step's policy gate, does on a denial or a timeout. */
+export const DENY_POLICIES: ReadonlySet<string> = new Set(['fail', 'skip']);
+/** What one failed `foreach` entry does to the step. */
+export const ITEM_ERROR_POLICIES: ReadonlySet<string> = new Set(['fail', 'skip', 'collect']);
+/** How an `if` step joins its conditions. */
+export const IF_COMBINATORS: ReadonlySet<string> = new Set(['and', 'or']);
+/** A `stop` step's outcome. It is not the run outcome (`completed`, `failed`, `cancelled`). */
+export const STOP_OUTCOMES: ReadonlySet<string> = new Set(['success', 'failure']);
+/** The one `mode` a `wait` step accepts. */
+export const WAIT_MODE = 'duration';
+/** The one `mode` a `session` step accepts. */
+export const SESSION_MODE = 'start';
+/** The range an `llm` step's `temperature` must be in. */
+export const LLM_TEMPERATURE_RANGE = { min: 0, max: 2 } as const;
+/** The most `foreach` entries that run at the same time. */
+export const FOREACH_MAX_CONCURRENCY = 10;
+/** The longest list a `foreach` step without `maxItems` accepts. A longer list fails the step. */
+export const FOREACH_DEFAULT_MAX_ITEMS = 100;
+
+/** A choice list for an error message: `"a" or "b"`, `"a", "b", or "c"`. */
+function choiceList(values: Iterable<string>): string {
+  const quoted = [...values].map((value) => JSON.stringify(value));
+  return quoted.length <= 2 ? quoted.join(' or ') : `${quoted.slice(0, -1).join(', ')}, or ${quoted[quoted.length - 1]}`;
+}
 
 /** The fixed keys of a `WorkflowTriggerPayload` — see `shape.ts`. */
 const TRIGGER_PAYLOAD_KEYS: ReadonlySet<string> = new Set([
@@ -485,8 +515,8 @@ function validateNodeFields(
       validateIfNode(node, label, refCtx, errors);
       break;
     case 'wait':
-      if (node.mode !== 'duration') {
-        errors.push(`${label}: wait.mode must be the string "duration"`);
+      if (node.mode !== WAIT_MODE) {
+        errors.push(`${label}: wait.mode must be the string ${JSON.stringify(WAIT_MODE)}`);
       }
       if (typeof node.duration !== 'string' || parseDurationMs(node.duration) === null) {
         errors.push(
@@ -506,15 +536,15 @@ function validateNodeFields(
       if (node.timeout !== undefined && (typeof node.timeout !== 'string' || parseDurationMs(node.timeout) === null)) {
         errors.push(`${label}: unparseable approval.timeout ${JSON.stringify(node.timeout)}`);
       }
-      if (node.onDeny !== undefined && node.onDeny !== 'fail' && node.onDeny !== 'skip') {
-        errors.push(`${label}: approval.onDeny must be "fail" or "skip", got ${JSON.stringify(node.onDeny)}`);
+      if (node.onDeny !== undefined && !DENY_POLICIES.has(node.onDeny)) {
+        errors.push(`${label}: approval.onDeny must be ${choiceList(DENY_POLICIES)}, got ${JSON.stringify(node.onDeny)}`);
       }
       checkJsonTemplates(label, 'details', node.details, refCtx, errors);
       break;
     case 'session':
       checkToolScope(node.toolScope, label, errors);
-      if (node.mode !== 'start') {
-        errors.push(`${label}: session.mode must be the string "start"`);
+      if (node.mode !== SESSION_MODE) {
+        errors.push(`${label}: session.mode must be the string ${JSON.stringify(SESSION_MODE)}`);
       }
       if (!isNonEmptyString(node.prompt)) {
         errors.push(`${label}: session.prompt must be a non-empty string`);
@@ -531,8 +561,8 @@ function validateNodeFields(
       checkModelCalls(label, 'session', node.maxModelCalls, errors);
       break;
     case 'stop':
-      if (node.outcome !== undefined && node.outcome !== 'success' && node.outcome !== 'failure') {
-        errors.push(`${label}: stop.outcome must be "success" or "failure", got ${JSON.stringify(node.outcome)}`);
+      if (node.outcome !== undefined && !STOP_OUTCOMES.has(node.outcome)) {
+        errors.push(`${label}: stop.outcome must be ${choiceList(STOP_OUTCOMES)}, got ${JSON.stringify(node.outcome)}`);
       }
       if (node.message !== undefined && typeof node.message === 'string') {
         checkTemplate(label, 'message', node.message, refCtx, errors);
@@ -553,8 +583,13 @@ function validateNodeFields(
       if (node.system !== undefined && typeof node.system === 'string') {
         checkTemplate(label, 'system', node.system, refCtx, errors);
       }
-      if (node.temperature !== undefined && (typeof node.temperature !== 'number' || node.temperature < 0 || node.temperature > 2)) {
-        errors.push(`${label}: llm.temperature must be a number between 0 and 2`);
+      if (
+        node.temperature !== undefined &&
+        (typeof node.temperature !== 'number' ||
+          node.temperature < LLM_TEMPERATURE_RANGE.min ||
+          node.temperature > LLM_TEMPERATURE_RANGE.max)
+      ) {
+        errors.push(`${label}: llm.temperature must be a number between ${LLM_TEMPERATURE_RANGE.min} and ${LLM_TEMPERATURE_RANGE.max}`);
       }
       if (node.maxOutputTokens !== undefined && !isPositiveInteger(node.maxOutputTokens)) {
         errors.push(`${label}: llm.maxOutputTokens must be a positive integer`);
@@ -606,7 +641,7 @@ function validateNodeFields(
       }
       if (node.credential !== undefined && !TOOL_CREDENTIAL_MODES.has(node.credential)) {
         errors.push(
-          `${label}: tool.credential must be "auto", "app" or "user", got ${JSON.stringify(node.credential)} — ` +
+          `${label}: tool.credential must be ${choiceList(TOOL_CREDENTIAL_MODES)}, got ${JSON.stringify(node.credential)} — ` +
             `"app" makes the action run as the installed application, "user" as the workflow owner`,
         );
       }
@@ -616,8 +651,8 @@ function validateNodeFields(
       // fields are checked the same way the approval node's are — one rule
       // for one meaning. They are separate from `onError` above: a gate
       // refusing is a decision, not a failure.
-      if (node.onDeny !== undefined && node.onDeny !== 'fail' && node.onDeny !== 'skip') {
-        errors.push(`${label}: tool.onDeny must be "fail" or "skip", got ${JSON.stringify(node.onDeny)}`);
+      if (node.onDeny !== undefined && !DENY_POLICIES.has(node.onDeny)) {
+        errors.push(`${label}: tool.onDeny must be ${choiceList(DENY_POLICIES)}, got ${JSON.stringify(node.onDeny)}`);
       }
       if (
         node.approvalTimeout !== undefined &&
@@ -638,14 +673,14 @@ function checkErrorPolicy(label: string, type: DagNodeType, policy: unknown, err
   if (policy === undefined) return;
   if (typeof policy === 'string' && NODE_ERROR_POLICIES.has(policy)) return;
   errors.push(
-    `${label}: ${type}.onError must be "fail" or "continue", got ${JSON.stringify(policy)} — ` +
+    `${label}: ${type}.onError must be ${choiceList(NODE_ERROR_POLICIES)}, got ${JSON.stringify(policy)} — ` +
       `"continue" records the failure and still runs the nodes downstream of it`,
   );
 }
 
 function validateIfNode(node: IfNode, label: string, refCtx: RefContext, errors: string[]): void {
-  if (node.combinator !== undefined && node.combinator !== 'and' && node.combinator !== 'or') {
-    errors.push(`${label}: if.combinator must be "and" or "or", got ${JSON.stringify(node.combinator)}`);
+  if (node.combinator !== undefined && !IF_COMBINATORS.has(node.combinator)) {
+    errors.push(`${label}: if.combinator must be ${choiceList(IF_COMBINATORS)}, got ${JSON.stringify(node.combinator)}`);
   }
   if (!Array.isArray(node.conditions)) {
     errors.push(
@@ -723,8 +758,8 @@ function validateForeachNode(
   if (node.indexAlias !== undefined && RESERVED_ALIAS_NAMES.has(node.indexAlias)) {
     errors.push(`${label}: foreach.indexAlias must not be ${JSON.stringify(node.indexAlias)} (shadows the template context)`);
   }
-  if (node.onItemError !== undefined && !['fail', 'skip', 'collect'].includes(node.onItemError)) {
-    errors.push(`${label}: foreach.onItemError must be "fail", "skip", or "collect"`);
+  if (node.onItemError !== undefined && !ITEM_ERROR_POLICIES.has(node.onItemError)) {
+    errors.push(`${label}: foreach.onItemError must be ${choiceList(ITEM_ERROR_POLICIES)}`);
   }
 
   if (!isPlainObject(node.body) || typeof node.body.type !== 'string') {
@@ -747,7 +782,7 @@ function validateForeachNode(
     if (ERROR_POLICY_NODE_TYPES.has(node.body.type) && hasKey(node.body, 'onError')) {
       errors.push(
         `${label}: foreach.body must not set onError — use foreach.onItemError ` +
-          `("fail", "skip" or "collect") to choose what a failed item does`,
+          `(${choiceList(ITEM_ERROR_POLICIES)}) to choose what a failed item does`,
       );
     }
   }
@@ -778,8 +813,8 @@ function validateForeachNode(
   if (node.concurrency !== undefined) {
     if (!isPositiveInteger(node.concurrency)) {
       errors.push(`${label}: foreach.concurrency must be a positive integer`);
-    } else if (node.concurrency > 10) {
-      errors.push(`${label}: foreach.concurrency must be <= 10`);
+    } else if (node.concurrency > FOREACH_MAX_CONCURRENCY) {
+      errors.push(`${label}: foreach.concurrency must be <= ${FOREACH_MAX_CONCURRENCY}`);
     }
   }
 }

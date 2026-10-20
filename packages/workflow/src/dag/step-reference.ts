@@ -4,16 +4,36 @@
  *
  * Agents read the skill before they draft a workflow, and a field the skill
  * never shows is a field they guess. The validator holds the truth in
- * `ALLOWED_KEYS` and its enum tables, so this module renders from those
- * tables and a test holds `STEP_FIELDS` to exactly `ALLOWED_KEYS`. A new
- * field fails that test until it is documented here. The skill embeds the
- * rendered text between markers, and a second test (in the api package,
- * which ships the skill) holds the two equal.
+ * `ALLOWED_KEYS`, its value tables, and its bounds, so every allowed value
+ * and limit below renders from those exports, never from a copy. A test
+ * holds `STEP_FIELDS` to exactly `ALLOWED_KEYS`, so a new field fails until
+ * it is documented here. The skill embeds the rendered text between markers,
+ * and a second test (in the api package, which ships the skill) holds the
+ * two equal, so a changed value table fails until the skill is rewritten.
+ *
+ * Defaults are the one hand-written part: the interpreter applies them in
+ * each node's executor. `oneOf` refuses a default that is not in its table.
  */
 import { allowedIfOperations, type IfDataType } from './if-operations.js';
 import type { DagNodeType } from './nodes.js';
 import { MAX_STEP_MODEL_CALLS } from './step-budget.js';
-import { FOREACH_BODY_TYPES, IF_DATA_TYPES, INPUT_DEFINITION_TYPES, LLM_REASONING_LEVELS } from './validate.js';
+import {
+  DENY_POLICIES,
+  FOREACH_BODY_TYPES,
+  FOREACH_DEFAULT_MAX_ITEMS,
+  FOREACH_MAX_CONCURRENCY,
+  IF_COMBINATORS,
+  IF_DATA_TYPES,
+  INPUT_DEFINITION_TYPES,
+  ITEM_ERROR_POLICIES,
+  LLM_REASONING_LEVELS,
+  LLM_TEMPERATURE_RANGE,
+  NODE_ERROR_POLICIES,
+  SESSION_MODE,
+  STOP_OUTCOMES,
+  TOOL_CREDENTIAL_MODES,
+  WAIT_MODE,
+} from './validate.js';
 
 /** One field of one step type: whether a save needs it, and its value shape. */
 export interface StepField {
@@ -22,8 +42,25 @@ export interface StepField {
 }
 
 const list = (values: Iterable<string>): string => [...values].map((value) => `"${value}"`).join(", ");
+
+/**
+ * The allowed values of one field, with its default marked:
+ * `"fail" (default) or "continue"`, `"fail" (default), "skip", or "collect"`.
+ * Throws when `defaultValue` is not in `values`, so a validator change that
+ * drops a default fails the step-reference tests.
+ */
+export function oneOf(values: Iterable<string>, defaultValue: string): string {
+  const all = [...values];
+  if (!all.includes(defaultValue)) {
+    throw new Error(`step reference: default ${JSON.stringify(defaultValue)} is not one of ${list(all)}`);
+  }
+  const quoted = all.map((value) => (value === defaultValue ? `"${value}" (default)` : `"${value}"`));
+  return quoted.length <= 2 ? quoted.join(" or ") : `${quoted.slice(0, -1).join(", ")}, or ${quoted[quoted.length - 1]}`;
+}
+
 const DURATION = 'a duration: a number and a unit, such as "30s", "5m", "2h", or "1d"';
-const ON_ERROR = '"fail" (default) or "continue"';
+const ON_ERROR = oneOf(NODE_ERROR_POLICIES, "fail");
+const ON_DENY = oneOf(DENY_POLICIES, "fail");
 const OUTPUT_SCHEMA = "a JSON Schema object; the parsed reply is at `nodes.<id>.result.output`";
 const TOOL_SCOPE = "`{ tools?, actions? }`: native tool names and exact `service.action` ids the step may use";
 const WAIT = 'omit it to wait for the step to finish; `{ mode: "none" }` starts it and moves on';
@@ -38,10 +75,10 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
   },
   if: {
     conditions: { required: true, shape: "array of at least one `{ left, dataType, operation, right? }` (see Conditions below)" },
-    combinator: { required: false, shape: '"and" (default) or "or"' },
+    combinator: { required: false, shape: oneOf(IF_COMBINATORS, "and") },
   },
   wait: {
-    mode: { required: true, shape: '"duration"' },
+    mode: { required: true, shape: `"${WAIT_MODE}"` },
     duration: { required: true, shape: DURATION },
   },
   approval: {
@@ -49,10 +86,10 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
     summary: { required: false, shape: "one line for the approval card" },
     details: { required: false, shape: "extra data the card shows" },
     timeout: { required: false, shape: `${DURATION}; how long the step waits for a decision` },
-    onDeny: { required: false, shape: '"fail" (default) or "skip"' },
+    onDeny: { required: false, shape: ON_DENY },
   },
   session: {
-    mode: { required: true, shape: '"start", always' },
+    mode: { required: true, shape: `"${SESSION_MODE}", always` },
     prompt: { required: true, shape: "the task for the agent" },
     title: { required: false, shape: "a title for the agent's session" },
     model: { required: false, shape: "a size tier (`xs`, `s`, `m`, `l`, `xl`) or an approved model id" },
@@ -73,9 +110,9 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
     action: { required: true, shape: 'the action name, such as "create_issue"' },
     params: { required: true, shape: "object of the action's parameters (`{}` when it takes none); a value may be a template" },
     summary: { required: false, shape: "one line that the approval card shows" },
-    credential: { required: false, shape: '"auto" (default), "app", or "user"' },
+    credential: { required: false, shape: oneOf(TOOL_CREDENTIAL_MODES, "auto") },
     onError: { required: false, shape: ON_ERROR },
-    onDeny: { required: false, shape: '"fail" (default) or "skip", when an approval is denied or times out' },
+    onDeny: { required: false, shape: `${ON_DENY}, when an approval is denied or times out` },
     approvalTimeout: { required: false, shape: DURATION },
   },
   llm: {
@@ -83,7 +120,7 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
     prompt: { required: true, shape: "the prompt; it may use templates" },
     system: { required: false, shape: "a system prompt" },
     outputSchema: { required: false, shape: OUTPUT_SCHEMA },
-    temperature: { required: false, shape: "a number from 0 to 2" },
+    temperature: { required: false, shape: `a number from ${LLM_TEMPERATURE_RANGE.min} to ${LLM_TEMPERATURE_RANGE.max}` },
     maxOutputTokens: { required: false, shape: "a positive integer" },
     reasoning: { required: false, shape: `one of ${list(LLM_REASONING_LEVELS)}; omit it for the owner's default` },
     onError: { required: false, shape: ON_ERROR },
@@ -96,14 +133,14 @@ export const STEP_FIELDS: Record<DagNodeType, Record<string, StepField>> = {
   foreach: {
     items: { required: true, shape: 'a template that resolves to an array, such as "{{nodes.list.result.output.tasks}}"' },
     body: { required: true, shape: `ONE inline step object, never a list of node ids; its type is one of ${list(FOREACH_BODY_TYPES)}; it has its own unique \`id\`, no edges, and no \`onError\`` },
-    maxItems: { required: false, shape: "a positive integer; without it, a list of more than 100 entries fails the step" },
-    concurrency: { required: false, shape: "an integer from 1 to 10" },
+    maxItems: { required: false, shape: `a positive integer; without it, a list of more than ${FOREACH_DEFAULT_MAX_ITEMS} entries fails the step` },
+    concurrency: { required: false, shape: `an integer from 1 to ${FOREACH_MAX_CONCURRENCY}` },
     itemAlias: { required: false, shape: 'the name the body reads the entry by (default "item")' },
     indexAlias: { required: false, shape: 'the name the body reads the position by (default "index")' },
-    onItemError: { required: false, shape: '"fail" (default), "skip", or "collect"' },
+    onItemError: { required: false, shape: oneOf(ITEM_ERROR_POLICIES, "fail") },
   },
   stop: {
-    outcome: { required: false, shape: '"success" (default) or "failure"; not the run outcome ("completed", "failed", "cancelled")' },
+    outcome: { required: false, shape: `${oneOf(STOP_OUTCOMES, "success")}; not the run outcome ("completed", "failed", "cancelled")` },
     output: { required: false, shape: "the run's result; it may use templates" },
     message: { required: false, shape: "a message for the run" },
   },
