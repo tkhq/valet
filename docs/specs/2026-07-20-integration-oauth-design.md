@@ -283,3 +283,15 @@ Limits:
 - Results stay in process memory. Each api replica probes on its own, and a restart forgets them.
 - A run that gets a 401 or 403 does not update the probe. The run's own error names the fix (`authRejectionMessage`).
 - A server that publishes no `securitySchemes` and gates scopes only at call time is not detected before a call.
+
+### Step-up for insufficient scope (2026-10-20)
+
+An MCP server answers a call that needs a scope the token lacks with HTTP 403 and `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. The MCP authorization specification ("Scope Challenge Handling") says a client that acts for a person should re-authorize with the added scopes and retry. Valet does this for the person's own connection through the existing connect route:
+
+- `rejectionMessage` in the MCP action plugin handles a missing scope that the integration's config does not declare. Reconnecting cannot fix that, because a reconnect requests only the declared scopes. For the caller's own connection on an `auth: oauth` config entry, the message links to `/api/credentials/:service/connect?addScopes=<held and missing>`. It says to approve the request on the provider's screen and then ask for a retry. Every other connection (team, app, organization, vault, or another member's shared account) keeps the admin fix: add the scope to the integration's config. A declared scope that the server did not grant keeps the account's reconnect message.
+- The connect route accepts `addScopes` for an MCP sign-in to the caller's own connection only. It refuses a malformed list (RFC 6749 scope tokens, at most 32) and any `addScopes` with `teamId`. The authorize request asks for the declared scopes plus the added ones, and the signed state carries that set, so a token response that names no `scope` stores it. The callback keeps the existing connection unless the new grant holds every scope it holds plus every added one, and it swaps with `compareAndSwap`, so a narrower grant or an older sign-in finishing after a newer one never replaces a wider grant. The kept case redirects with `step_up_not_granted`.
+- The shared registered client keeps its declared scope set. A provider that refuses scopes beyond the client's registration returns an error to `/integrations`; the fix is then the integration's config.
+
+No team step-up. A team connection is shared, so a member who signs in with added scopes replaces it with their own account, and the whole team then acts as that member. Review found that a link alone could make that swap happen without a Valet warning, because the provider may skip its consent screen. A team step-up needs a Valet confirmation page that shows who the team will act as before the sign-in starts. Until then, a team connection's missing scope is an admin fix, which also covers every member at once.
+
+Limits: the person retries by asking again; the turn does not wait for the grant. An unattended run gets the same message. The link is relative, so it opens in the web app, not in Slack. The health probe's missing-scope note is unchanged and still says to ask an admin.

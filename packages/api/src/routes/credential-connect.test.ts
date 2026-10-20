@@ -12,7 +12,7 @@ import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
-import { verifyOAuthConnectState } from "./credential-connect.js";
+import { parseAddScopes, verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
 import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
@@ -151,6 +151,65 @@ describe("GET /api/credentials/:service/connect", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("step-up: the authorize request asks for the declared scopes plus the added ones", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.get("location") ?? "").searchParams.get("scope")).toBe("agent:content:read agent:query:run");
+  });
+
+  it("step-up: refuses malformed scopes, and any scopes for a team connection", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const bad = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent('read "quoted"')}`, { redirect: "manual" });
+    expect(bad.status).toBe(400);
+    // A team connection is shared: a member's sign-in would make the team act as that member.
+    const team = await fetch(`${api.baseUrl}/api/credentials/linear/connect?scope=team&teamId=any-team&addScopes=write`, { redirect: "manual" });
+    expect(team.status).toBe(400);
+    expect(parseAddScopes(" b a  b ")).toEqual(["a", "b"]);
+  });
+
+  it("step-up: a token response without scope stores the requested set on the caller's connection", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const started = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=read+write`, { redirect: "manual" });
+    const state = new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    fake.tokenResponse = { access_token: "stepped-up", expires_in: 3600 };
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear")).toMatchObject({
+      accessToken: "stepped-up", scopes: ["read", "write"],
+    });
+  });
+
+  async function startStepUpConnect(baseUrl: string, addScopes: string) {
+    const started = await fetch(`${baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent(addScopes)}`, { redirect: "manual" });
+    return new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  }
+
+  async function finishWith(baseUrl: string, state: string, scope: string, token: string) {
+    fake.tokenResponse = { access_token: token, expires_in: 3600, scope };
+    const res = await fetch(`${baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    return res.headers.get("location") ?? "";
+  }
+
+  it("step-up: keeps a working connection when the provider grants less than it holds", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "working", scopes: ["read", "write"] });
+    const state = await startStepUpConnect(api.baseUrl, "read write extra");
+    expect(await finishWith(api.baseUrl, state, "read", "narrow")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "working", scopes: ["read", "write"] });
+  });
+
+  it("step-up: an older sign-in does not roll back a newer, wider grant", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "start", scopes: ["read"] });
+    const older = await startStepUpConnect(api.baseUrl, "read extra");
+    const newer = await startStepUpConnect(api.baseUrl, "read extra write");
+    expect(await finishWith(api.baseUrl, newer, "read extra write", "newer")).toContain("connected=linear");
+    expect(await finishWith(api.baseUrl, older, "read extra", "older")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "newer", scopes: ["read", "extra", "write"] });
   });
 
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
