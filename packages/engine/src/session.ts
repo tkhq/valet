@@ -106,7 +106,7 @@ function withText(content: PromptContent, text: string): PromptContent {
  * `command_result` entry carries. Error variants name the corrective action,
  * per the repo's user-facing-error rule.
  */
-function formatPluginOutcome(
+export function formatPluginOutcome(
   outcome: InvokeActionResult,
   actionId: string,
 ): { ok: boolean; output: string } {
@@ -150,7 +150,7 @@ function formatPluginOutcome(
     case "denied-unattended":
       return {
         ok: false,
-        output: "This action needs approval, and no one can approve during an unattended workflow run. Move it to a tool step, which saving the workflow approves, or ask a team admin to allow it by policy.",
+        output: "This action needs approval, and an unattended workflow run cannot ask for it. Valet sent no approval request. To approve it on each run, move the action to a Tool step, which asks for approval on each run. To let it run without asking, use Review permissions on the workflow page, or ask a team admin to allow it by policy.",
       };
     case "denied-approval":
       return {
