@@ -7,7 +7,7 @@ import { routeTree } from "./routeTree.gen";
 import { applyStoredPalette, applyStoredTheme } from "./lib/theme";
 import { registerServiceWorker } from "./pwa/register";
 import { api } from "./api/client";
-import { setPublicOrigin } from "./lib/public-origin";
+import { loadPublicOrigin } from "./lib/public-origin";
 
 // Apply the persisted appearance choices (Settings → Appearance) before the
 // first React paint. The inline script in `index.html` has normally done
@@ -23,7 +23,7 @@ registerServiceWorker();
 
 // Generated file links name the deployment's public origin. Markdown opens
 // them on this hostname once the origin is known (lib/public-origin.ts).
-void api.getAuthConfig().then((config) => setPublicOrigin(config.publicOrigin ?? null), () => undefined);
+void loadPublicOrigin(() => api.getAuthConfig());
 
 const queryClient = new QueryClient({
   defaultOptions: {
