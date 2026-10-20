@@ -90,6 +90,18 @@ export function wrapAsWorkloadUser(shellCommand: string, browser = false): strin
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
+ * A caller NODE_OPTIONS replaces the image default (`--use-openssl-ca`), which
+ * would drop the eMudhra root distrust. Always prepend the flag so other
+ * options keep working. Do not test for an existing flag: a quoted value can
+ * contain the text. On Node 22.23.3 a duplicate `--use-openssl-ca` is accepted.
+ * `--use-openssl-ca --use-bundled-ca` makes Node exit at startup, so it fails
+ * closed. `--use-openssl-ca --use-system-ca` still rejects the bad roots.
+ */
+export function withTrustedCa(value: string): string {
+  return value.trim() === "" ? "--use-openssl-ca" : `--use-openssl-ca ${value}`;
+}
+
+/**
  * Builds the final `sh -c` payload for a command, folding in `opts.env` and
  * `opts.cwd`. The k8s exec API has no native env/workdir parameters (unlike
  * `docker exec --env`/`--workdir`) — both are synthesized as shell prefixes
@@ -105,7 +117,7 @@ export function buildShellCommand(command: string, opts?: ExecOpts): string {
       if (!ENV_NAME_RE.test(name)) {
         throw new Error(`buildShellCommand: invalid env var name ${JSON.stringify(name)}`);
       }
-      parts.push(`export ${name}=${shQuote(value)};`);
+      parts.push(`export ${name}=${shQuote(name === "NODE_OPTIONS" ? withTrustedCa(value) : value)};`);
     }
   }
   if (opts?.cwd) {
