@@ -3215,6 +3215,19 @@ export interface PluginServiceSummary {
     /** The grant carries identity only, with none of the scopes the
      * service's actions need. */
     identityOnly?: boolean;
+    /** The service's MCP server refused this credential when Valet listed
+     * its tools: a 401, or a 403 that names no missing scope. Set by the
+     * tool-list probe (`plugins/service-probe.ts`), not read from the row. */
+    rejected?: boolean;
+    /** OAuth scopes the MCP server needs that this credential's grant
+     * lacks, sorted. From a 403 `insufficient_scope` challenge on the tool
+     * listing, or from the listed tools' `securitySchemes`. Set by the
+     * probe. A reconnect requests the same declared scopes, so an admin
+     * adds these to the integration's scopes first. */
+    missingScopes?: string[];
+    /** How many listed tools need a scope in `missingScopes`. Absent when
+     * the server refused the listing itself. */
+    blockedTools?: number;
   };
   /**
    * The actions THIS credential unlocks, for the connect UI to state what a

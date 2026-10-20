@@ -16,8 +16,12 @@
  * (`expiresAt`, `metadata.login`, `metadata.identityOnly`,
  * `metadata.refreshFailedAt`). `connected` alone is set membership in the
  * credential store, so an expired or revoked token reads as connected while
- * `list_tools` hides the service. Health says otherwise, from what the
- * credential row already knows — this route calls no vendor.
+ * `list_tools` hides the service. Health says otherwise.
+ *
+ * A connected dynamic (MCP) service is also listed live, TTL-cached, for its
+ * `toolCount`. The same listing adds the probe's health fields: the server
+ * refused the credential (`rejected`), or the grant lacks scopes some tools
+ * need (`missingScopes`). See `plugins/service-probe.ts`.
  */
 import { Hono } from "hono";
 import {
@@ -28,6 +32,7 @@ import {
   type StoredCredential,
 } from "@valet/engine";
 import { qualifiedActionId } from "../plugins/action-id.js";
+import type { ServiceProbe } from "../plugins/service-probe.js";
 import type { AppEnv } from "../env.js";
 import type {
   ListPluginsResponse,
@@ -84,8 +89,17 @@ function credentialHealth(stored: StoredCredential): PluginServiceSummary["healt
   };
 }
 
+/** The row's health plus whatever the live listing found. A probe that
+ * failed or found nothing adds no field. */
+function withProbe(
+  row: PluginServiceSummary["health"],
+  probe: ServiceProbe | undefined,
+): PluginServiceSummary["health"] {
+  return probe?.health ? { ...row, ...probe.health } : row;
+}
+
 pluginsRouter.get("/", async (c) => {
-  const { plugins, engineCredentials, actionPluginByService, dynamicToolCounts, db } = c.var.providers;
+  const { plugins, engineCredentials, actionPluginByService, serviceProbes, db } = c.var.providers;
   const teamId = c.req.query("teamId");
   let owner: CredentialOwner = { type: "user", id: c.var.user.id };
   if (teamId) {
@@ -128,16 +142,16 @@ pluginsRouter.get("/", async (c) => {
     }));
   }
 
-  // Connected dynamic services get a live-resolved tool count (TTL-cached,
-  // fail-soft — see plugins/dynamic-tool-count.ts). Resolved up front and
-  // concurrently so a slow MCP server costs one timeout, not one per row.
-  const toolCounts = new Map<string, number>();
+  // Connected dynamic services are listed live for a tool count and the
+  // probe's health fields (TTL-cached, fail-soft — see
+  // plugins/service-probe.ts). Probed up front and concurrently so a slow
+  // MCP server costs one timeout, not one per row.
+  const probes = new Map<string, ServiceProbe>();
   await Promise.all(
     [...connectedServices].map(async (service) => {
       const entry = actionPluginByService.get(service);
       if (!entry?.actionPlugin.resolveActions) return;
-      const count = await dynamicToolCounts.get(owner, service, entry.actionPlugin);
-      if (count !== undefined) toolCounts.set(service, count);
+      probes.set(service, await serviceProbes.get(owner, service, entry.actionPlugin));
     }),
   );
 
@@ -218,12 +232,12 @@ pluginsRouter.get("/", async (c) => {
         connect,
         connectBlockedBy,
         missingEnv: missingEnv.length > 0 ? missingEnv : undefined,
-        toolCount: toolCounts.get(service),
+        toolCount: probes.get(service)?.toolCount,
         // The slug is declared per plugin (`plugin.yaml`), so every service a
         // plugin declares shares its plugin's mark. A service that names
         // itself takes its own slug when one exists.
         iconSlug: pluginIconSlugs[service] ?? pluginIconSlugs[plugin.name],
-        health: health.get(service),
+        health: withProbe(health.get(service), probes.get(service)),
         actions: actionsByCredentialKey.get(service) ?? [],
       };
     }));

@@ -250,3 +250,34 @@ Real Postgres tests also hold a competing row mutation open until the conditiona
 - Config-declared MCP plugins pass their display name to `mcpActionPlugin`, so the message names "Pylon", not "pylon".
 
 The token form in `connect-dialog.tsx` shows a refused save's sentence through `errorText`. It showed `Error.message` before, which is only the request line ("PUT /credentials/gmail → 400").
+
+
+### MCP health probe (2026-10-20)
+
+Two provider-side changes reached users first through failed runs. Metabase 1.64 moved its read tools behind `agent:content:read`, which the configured entry did not request. Pylon's MCP server accepts only tokens from its own OAuth server, so a pasted token got 401 at tool discovery. In both cases the Integrations page showed Connected, because the credential row recorded nothing wrong. `oauthOnly` (above) now stops a new pasted Pylon token at save. The probe also finds a row saved before that change, and the next provider that changes what it accepts.
+
+`GET /api/plugins` already lists the tools of each connected MCP service, for `toolCount`. The probe reads the answer to that same `tools/list` call and adds no network call. `ServiceProbes` (`plugins/service-probe.ts`) replaces `DynamicToolCounts` and keeps its limits: one probe per owner, service, and token in 5 minutes, one probe in flight per key, and a 2.5-second timeout. The cache key includes a hash of the access token, so a reconnect probes again at once. A timeout, a network error, or any other failure caches nothing and changes no health field.
+
+`mcpActionPlugin` exposes the probe as `McpActionPlugin.probe`. It sends the same token with the same app-identity fallback as `resolveActions`. It returns one of three results:
+
+| Server answer | Result | `health` fields |
+|---|---|---|
+| 403 with `error="insufficient_scope"` whose `scope` names a scope the grant lacks | `insufficient_scope` | `missingScopes`: the challenge `scope` minus the granted scopes |
+| 401, or any other 403 | `rejected` | `rejected: true` |
+| Tool list | `listed` | `missingScopes` and `blockedTools`, from the tools' `securitySchemes` |
+
+A listing alone does not find the Metabase case: Metabase lists every tool whatever the token holds, and it refuses the call. Each tool also declares its scope in `securitySchemes` (draft SEP-1488). A tool is blocked when it declares schemes and the grant satisfies none of them. A `noauth` scheme is satisfied. An `oauth2` scheme is satisfied when the grant holds all of its scopes. The probe compares only against a known grant: `StoredCredential.scopes` when it is set. A pasted token stores no scopes, so the probe skips this check for it. An empty array is a known grant with no scopes.
+
+The web client maps the fields to two states in `service-health.ts`, after `refresh-failed` and `expired`:
+
+- `rejected` (danger, "Rejected"): the service refused the connection. The note tells the user to reconnect.
+- `missing-scope` (warning, "Missing scopes"): the note names the scopes and tells the user to ask an admin to add them, then reconnect. A reconnect alone requests the same declared scopes, so it cannot fix this state.
+
+Both states offer Reconnect. `missing-scope` is a warning, not a failure: an admin can leave a scope out on purpose, and the remaining tools still work. The state still says which tools cannot work, because the agent sees every listed tool.
+
+Limits:
+
+- The probe runs only when somebody loads a page that reads `/api/plugins`. No periodic sweep runs, because it would hold every user's and team's tokens in a background job.
+- Results stay in process memory. Each api replica probes on its own, and a restart forgets them.
+- A run that gets a 401 or 403 does not update the probe. The run's own error names the fix (`authRejectionMessage`).
+- A server that publishes no `securitySchemes` and gates scopes only at call time is not detected before a call.

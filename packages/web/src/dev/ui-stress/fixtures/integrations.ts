@@ -59,6 +59,13 @@ export const stressPlugins: ListPluginsResponse = {
     plugin("expired-service", [service("expired-service", { health: { expiresAt: NOW - DAY, login: "member-00" } })]),
     plugin("refresh-failed", [service("refresh-failed", { health: { refreshFailed: true, login: HEX_300 } })]),
     plugin("identity-only", [service("identity-only", { health: { identityOnly: true } })]),
+    plugin("rejected", [service("rejected", { health: { rejected: true } })]),
+    plugin("missing-scope", [service("missing-scope", {
+      health: {
+        missingScopes: Array.from({ length: 5 }, (_, i) => `agent:${unbroken("content", 60)}:read${i}`),
+        blockedTools: 42,
+      },
+    })]),
     plugin("needs-setup", [service("needs-setup", { connect: "unconfigured", connected: true, connectBlockedBy: "org" })]),
     plugin("org-provided", [service("org-provided", { connect: "org", connected: false })]),
     plugin("missing-env", [service("missing-env", {

@@ -61,7 +61,7 @@ import { productionEventWaiterDeriver } from "../events/derive.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
+import { ServiceProbes } from "../plugins/service-probe.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
@@ -618,7 +618,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     plugins,
     configMcpServers: opts.mcpServers ?? [],
     actionPluginByService,
-    dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
+    serviceProbes: new ServiceProbes({ credentials: engineCredentials }),
     prebuildService,
     scratchCaps,
   };

@@ -110,6 +110,29 @@ describe("IntegrationRow disconnect", () => {
     expect(screen.getByText("Linear replied: 400 invalid_grant")).toBeTruthy();
   });
 
+  it("names the missing scope the tool-list probe found and offers Reconnect", () => {
+    render(
+      <IntegrationDetail
+        plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { missingScopes: ["read"], blockedTools: 1 } }] }}
+      />,
+    );
+    expect(screen.getByText("Missing scopes")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "This connection does not hold the read scope, which 1 tool needs. Ask an admin to add read to this integration's scopes. Then select Reconnect.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reconnect Linear" })).toBeTruthy();
+  });
+
+  it("marks a connection the service refused as rejected", () => {
+    render(<IntegrationDetail plugin={{ ...PLUGIN, services: [{ ...SERVICE, health: { rejected: true } }] }} />);
+    expect(screen.getByText("Rejected")).toBeTruthy();
+    expect(
+      screen.getByText("The service refused this connection when Valet listed its tools. Select Reconnect to sign in again."),
+    ).toBeTruthy();
+  });
+
   it("does not offer Disconnect for an organization-provided Slack bot", () => {
     const orgSlack: PluginSummary = {
       ...PLUGIN,
