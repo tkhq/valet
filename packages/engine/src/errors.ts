@@ -163,9 +163,16 @@ export class TimeoutError extends Error {
 export class WorkspaceProvisioningError extends Error {
   readonly code = "workspace_provisioning";
 
-  constructor(public readonly timeoutMs: number) {
+  /**
+   * @param lastStartError Why the most recent start attempt failed, when one
+   *   did. A start that keeps failing otherwise looked like a slow start: each
+   *   call waited out its timeout and no log named the cause.
+   */
+  constructor(public readonly timeoutMs: number, public readonly lastStartError?: string) {
     super(
-      `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
+      lastStartError
+        ? `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms. The last start attempt failed: ${lastStartError.replace(/\.+$/, "")}. Retry the operation; if it fails the same way again, check the sandbox image and configuration.`
+        : `[workspace_provisioning] sandbox did not become ready within ${timeoutMs}ms; the workspace is still provisioning in the background — retry shortly.`,
     );
     this.name = "WorkspaceProvisioningError";
   }

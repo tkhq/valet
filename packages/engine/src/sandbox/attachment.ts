@@ -19,6 +19,7 @@ import {
   SandboxStartupError,
   SandboxUnavailableError,
   WorkspaceProvisioningError,
+  formatSandboxErrorCause,
   formatSandboxErrorLog,
 } from "../errors.js";
 import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
@@ -160,6 +161,8 @@ export class SandboxAttachment {
   private pendingRelease: { sandbox: Sandbox; provider: SandboxProvider } | null = null;
   private releaseInFlight: Promise<void> | null = null;
   private pendingReadyEpoch: number | null = null;
+  /** Why the most recent start attempt failed; cleared once a sandbox is ready. */
+  private lastStartError: string | undefined;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider, private readonly lifecycle?: SandboxLifecycle) {
     this.provider = provider;
@@ -390,7 +393,7 @@ export class SandboxAttachment {
 
       const timer = setTimeout(() => {
         this.waiters.delete(waiter);
-        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs));
+        waiter.reject(new WorkspaceProvisioningError(opts.timeoutMs, this.lastStartError));
       }, opts.timeoutMs);
       timer.unref?.();
 
@@ -783,6 +786,8 @@ export class SandboxAttachment {
 
   private async doResume(): Promise<void> {
     const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     const sandbox = this._sandbox;
     const provider = this.provider;
     // Wake folding (spec decision 3, wake-when-stale). Before waking the
@@ -942,6 +947,7 @@ export class SandboxAttachment {
         superseded = true;
         return;
       }
+      this.recordStartFailure(err, startEpoch, "resume");
       this._state = "error";
       this.emitStatus();
       // Same fast-fail rule as doProvision: a terminal SandboxStartupError
@@ -988,13 +994,15 @@ export class SandboxAttachment {
         if (ok) recordSandboxCreated();
         span.setAttribute("valet.sandbox.result_state", this._state);
         if (this._sandbox) span.setAttribute("valet.sandbox.id", this._sandbox.id);
-        if (!ok) markSpanError(span, `provision ended in state ${this._state}`);
+        if (!ok) markSpanError(span, this.lastStartError ?? `provision ended in state ${this._state}`);
       },
     );
   }
 
   private async doProvisionInner(): Promise<void> {
     const startEpoch = this._epoch;
+    // A new attempt: an earlier failure no longer explains a wait on this one.
+    this.lastStartError = undefined;
     // Set BEFORE any await, including provider.create. The api's per-org
     // capacity gate (gated-sandbox-provider.ts) depends on this ordering:
     // it counts `provisioning|ready` attachments and subtracts its own
@@ -1114,6 +1122,7 @@ export class SandboxAttachment {
       if (await this.finishReady(sandbox, startEpoch)) this.publishReady();
     } catch (err) {
       if (this.destroyed) return;
+      this.recordStartFailure(err, startEpoch, "create");
       this._state = "error";
       this.emitStatus();
       // Waiters are not force-failed here — a slow/failed provision still
@@ -1142,7 +1151,18 @@ export class SandboxAttachment {
     return true;
   }
 
+  /**
+   * The cause was dropped before: waiters timed out with a generic "retry
+   * shortly" and nothing recorded why the start failed. Keep it for the
+   * timeout message and the provision span, and log it once.
+   */
+  private recordStartFailure(err: unknown, epoch: number, phase: "create" | "resume"): void {
+    this.lastStartError = formatSandboxErrorCause(err);
+    console.error("SandboxAttachment: sandbox start failed", { phase, epoch, ...formatSandboxErrorLog(err) });
+  }
+
   private publishReady(): void {
+    this.lastStartError = undefined;
     this._state = "ready";
     this.emitStatus();
     this.flushWaiters();
