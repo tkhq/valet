@@ -80,6 +80,21 @@ describe('discoverAuthServer', () => {
     expect(meta.scopes_supported).toEqual(['agent:content:read', 'agent:query', 'agent:query:run']);
   });
 
+  it('returns the resource scopes when the metadata names no authorization server', async () => {
+    // RFC 9728 makes authorization_servers optional; the scopes still count.
+    mockFetchRoutes({
+      'https://mcp.example.com/.well-known/oauth-protected-resource/mcp': {
+        resource: 'https://mcp.example.com/mcp',
+        scopes_supported: ['new:read'],
+      },
+      'https://mcp.example.com/.well-known/oauth-authorization-server': AS_METADATA,
+    });
+
+    const meta = await discoverAuthServer('https://mcp.example.com/mcp');
+    expect(meta.resource_scopes_supported).toEqual(['new:read']);
+    expect(meta.authorization_endpoint).toBe(AS_METADATA.authorization_endpoint);
+  });
+
   it('falls back to AS metadata on the MCP origin when there is no protected-resource metadata', async () => {
     mockFetchRoutes({
       'https://mcp.example.com/.well-known/oauth-authorization-server/mcp': AS_METADATA,
