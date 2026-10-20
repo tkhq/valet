@@ -493,8 +493,11 @@ async function computeResult(
   // it: the org row is the app identity, which the pin never reads
   // (`buildCredentialProvider`), so without a person's credential the
   // action would run on a null one. That holds for a personal run too: its
-  // owner is the only person the pin can act as, so the run refuses with
-  // the connect fix instead of failing inside the action.
+  // owner is the only person the pin can act as, so the run refuses instead
+  // of failing inside the action. The refusal names the connect fix, or,
+  // for an org-managed service (`requires.orgCredential`) that has no
+  // personal account, the node's credential setting. Template install does
+  // not block on that pin, so this refusal is where the user learns the fix.
   const userPinnedNative = selection === "user" && appService !== undefined;
   const gated = declared !== null && (
     (ctx.owner.type === "team" && (mode !== "org" || userPinnedNative))
@@ -655,7 +658,9 @@ async function refuseRunWithoutCredential(
 
 /** The refusal for a native service pinned `"user"` in a personal run whose
  * owner has no credential for it. The template gallery and install gate
- * report the same block (`workflows/templates.ts#templateRequirements`). */
+ * report the same block (`workflows/templates.ts#templateRequirements`),
+ * except for an org-managed service: install does not block on that pin,
+ * and the gallery shows a note (`orgManagedPinCaveats`). */
 export function userPinnedPersonalRefusalMessage(service: string, opts: { orgManaged?: boolean } = {}): string {
   if (opts.orgManaged) {
     // The org connects this service for everyone (`requires.orgCredential`),

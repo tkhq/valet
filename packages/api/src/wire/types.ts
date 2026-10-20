@@ -2774,7 +2774,12 @@ export interface WorkflowTemplateRequirement {
   /** Credential service key, matching `PluginServiceSummary.service`. */
   service: string;
   connected: boolean;
-  /** A node pins this org-managed service to the caller's own account, which the product cannot connect; the node's credential setting is the fix. */
+  /**
+   * A node pins this org-managed service (`requires.orgCredential`) to a
+   * person's own account, which nobody can connect. It does not block
+   * install: `connected` reads as an unpinned node's would. Show a note, not
+   * a Connect control. After install, the node's credential setting is the fix.
+   */
   organizationManagedPin?: true;
   /**
    * Set when the plugin resolves its actions at run time (an MCP-backed

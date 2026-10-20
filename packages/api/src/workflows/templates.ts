@@ -392,7 +392,9 @@ function credentialServiceFor(
  * reads the org row, which is the app identity, so that service counts as
  * connected only when the caller has their own credential. The run refuses
  * the same node (`plugins/action-invoker.ts`,
- * `userPinnedPersonalRefusalMessage`). An absent set reads every pin as
+ * `userPinnedPersonalRefusalMessage`). An org-managed service has no
+ * personal account, so its pin reads `connectedServices` and carries
+ * `organizationManagedPin` instead. An absent set reads every pin as
  * `connectedServices` does.
  */
 export function templateRequirements(
@@ -413,12 +415,19 @@ export function templateRequirements(
     const { service, required, dynamic } = credentialServiceFor(entry);
     const userPinned = personalServices !== undefined && node.credential === "user"
       && nativeAppCredentialServiceFor(plugins, service) !== undefined;
-    const prior = byService.get(service);
-    if (prior && !(userPinned && prior.connected)) continue;
     const orgManagedPin = userPinned && orgManagedCredentialService(plugins, service);
+    const prior = byService.get(service);
+    if (prior && !(userPinned && (prior.connected || orgManagedPin))) continue;
+    // An org-managed service (`requires.orgCredential`) has no personal
+    // account to connect, so its pin cannot be judged by the caller's own
+    // set. It reads as an unpinned node does: connected when the
+    // organization row exists, unconfigured when it does not. The flag
+    // tells the reader that the node's credential setting needs a change
+    // after install, and the run refuses with that fix until it does.
+    const personal = userPinned && !orgManagedPin;
     byService.set(service, {
       service,
-      connected: required ? (userPinned ? personalServices.has(service) : connectedServices.has(service)) : true,
+      connected: required ? (personal ? personalServices.has(service) : connectedServices.has(service)) : true,
       ...(orgManagedPin ? { organizationManagedPin: true } : {}),
       ...(dynamic ? { dynamic: true } : {}),
       ...(unavailableServices.has(service) ? { unconfigured: true } : {}),
@@ -582,6 +591,13 @@ export function summarizeTemplate(
   const definition = validation.definition;
   const schedule = owned.template.schedule;
   const authored = owned.template.caveats ?? [];
+  const requires = templateRequirements(
+    definition,
+    actionPluginByService,
+    connectedServices,
+    unavailableServices,
+    personalServices,
+  );
   return {
     ok: true,
     value: {
@@ -593,13 +609,7 @@ export function summarizeTemplate(
         description: owned.template.description,
         steps: owned.template.steps,
         schedule: schedule ? { cron: schedule.cron, timezone: schedule.timezone ?? DEFAULT_TIMEZONE } : null,
-        requires: templateRequirements(
-          definition,
-          actionPluginByService,
-          connectedServices,
-          unavailableServices,
-          personalServices,
-        ),
+        requires,
         inputs: templateInputs(triggerDataSchema(definition)),
         // The author's own caveats come first: they carry knowledge the
         // definition cannot show. The derived ones follow, and cannot go
@@ -607,6 +617,7 @@ export function summarizeTemplate(
         caveats: [
           ...authored,
           ...templateCaveats(definition, actionPluginByService, schedule !== undefined, authored),
+          ...orgManagedPinCaveats(requires),
         ],
         // The org's answer is stamped by `listWorkflowTemplateSummaries`,
         // which holds the org environment. A summary taken without it is
@@ -634,6 +645,21 @@ export function summarizeTemplate(
  * (`WorkflowTemplateRequirement.unconfigured`): nobody but an admin can
  * connect it, and the card must say who can.
  */
+/**
+ * The note a card shows for each org-managed pin. Install succeeds, and
+ * the run refuses the node until its credential setting changes
+ * (`plugins/action-invoker.ts`, `userPinnedPersonalRefusalMessage`), so
+ * the card says that before install instead of offering a Connect control.
+ */
+export function orgManagedPinCaveats(requires: readonly WorkflowTemplateRequirement[]): string[] {
+  return requires
+    .filter((r) => r.organizationManagedPin === true)
+    .map((r) =>
+      `Pinned to your own account, but ${r.service} connects for the whole organization. ` +
+      `After install, change the node's credential setting to the app.`,
+    );
+}
+
 /**
  * Services a template may name but that a person cannot use yet.
  *
@@ -1104,20 +1130,11 @@ export async function installWorkflowTemplate(
     // it — only an admin can act, in Settings → Organization.
     const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
     const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
-    const orgManagedPins = unmet.filter((r) => r.organizationManagedPin === true).map((r) => r.service);
-    if (orgManagedPins.length > 0) {
-      return {
-        ok: false,
-        code: "not_connected",
-        // The org connects these services for everyone, so the Integrations
-        // page has no personal connect control; the node's credential
-        // setting is the fix.
-        error:
-          `This template pins ${orgManagedPins.join(" and ")} to your own account, but ${orgManagedPins.join(" and ")} connects for the whole organization. ` +
-          `Change those nodes' credential setting to the app, then install this template.`,
-      };
-    }
-    const unconnected = unmet.filter((r) => r.unconfigured !== true && r.organizationManagedPin !== true).map((r) => r.service);
+    // An org-managed pin (`organizationManagedPin`) does not block install:
+    // the install API cannot edit a node, so a refusal here names a fix
+    // nobody can take. Its requirement reads as an unpinned node's, so a
+    // missing organization row still takes the unconfigured path below.
+    const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
     if (unconfigured.length > 0) {
       return {
         ok: false,

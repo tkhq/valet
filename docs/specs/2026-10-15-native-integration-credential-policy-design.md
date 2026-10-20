@@ -310,5 +310,19 @@ deployment after merge.
     change the node's credential setting." The template gallery and the
     personal install gate report the same block: such a service counts as
     connected only through the caller's own credential
-    (`templateRequirements`), so the card offers Connect. Team runs keep
-    the team refusal and team readiness above.
+    (`templateRequirements`), so the card offers Connect.
+
+    An org-managed service (`requires.orgCredential`, for example Slack's
+    org bot) has no personal account to connect. For it, the invoker
+    refuses with the node-setting fix: "This node uses your own slack
+    account, but slack connects for the whole organization, so there is no
+    personal account to connect. Change the node's credential setting to
+    the app, or use slack-user for your own account." The install API
+    cannot edit a node, so the personal install gate does not block on
+    this pin. The requirement reads as an unpinned node's: connected when
+    the organization row exists, unconfigured when it does not. A missing
+    organization row therefore still takes the organization-setup refusal.
+    The requirement carries `organizationManagedPin`, and the card shows a
+    note in place of Connect (`orgManagedPinCaveats`). After install, the
+    run refusal tells the user to change the node. Team runs keep the team
+    refusal and team readiness above.
