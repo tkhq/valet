@@ -450,6 +450,52 @@ describe("RoutinePage", () => {
     expect(listWorkflowRuns).not.toHaveBeenCalled();
   });
 
+  it("links its own thread from the title, Where, and the firing", async () => {
+    const own = { sessionId: "s-own", threadId: "t-own", title: "Morning summary", archived: false };
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000, lastFiredThread: own } })] });
+    wrap(<RoutinePage id="S1" />);
+    const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
+    const how = screen.getByRole("region", { name: "How it works" });
+    const timeline = screen.getByRole("region", { name: "Activity" });
+    for (const place of [title, how, timeline]) {
+      expect(within(place).getByRole("link", { name: /^its own thread\.?$/ }).getAttribute("href")).toBe("/threads/t-own");
+    }
+    expect(activityRows()).toEqual([expect.stringContaining("Fired → worked in its own thread")]);
+  });
+
+  it("shows an archived own thread as a disabled link", async () => {
+    const own = { sessionId: "s-own", threadId: "t-own", title: null, archived: true };
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000, lastFiredThread: own } })] });
+    wrap(<RoutinePage id="S1" />);
+    const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
+    for (const place of [title, screen.getByRole("region", { name: "How it works" }), screen.getByRole("region", { name: "Activity" })]) {
+      const link = within(place).getByRole("link");
+      expect(link.getAttribute("aria-disabled")).toBe("true");
+      expect(link.getAttribute("href")).toBeNull();
+    }
+  });
+
+  it("links a new-policy firing to the thread it landed on", async () => {
+    const landed = { sessionId: "s-new", threadId: "t-new", title: "Standup · 2026-10-20", archived: false };
+    listWorkflowTriggers.mockResolvedValue({
+      triggers: [routine("S2", { name: "Standup", detail: { thread: { mode: "new" }, lastFiredAt: Date.now() - 3_600_000, lastFiredThread: landed } })],
+    });
+    wrap(<RoutinePage id="S2" />);
+    const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Standup: work in a new thread each time." });
+    expect(within(title).queryByRole("link")).toBeNull();
+    const timeline = screen.getByRole("region", { name: "Activity" });
+    expect(within(timeline).getByRole("link", { name: "a new thread" }).getAttribute("href")).toBe("/threads/t-new");
+  });
+
+  it("keeps its own thread as plain text without a thread", async () => {
+    listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000 } })] });
+    wrap(<RoutinePage id="S1" />);
+    const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
+    for (const place of [title, screen.getByRole("region", { name: "How it works" }), screen.getByRole("region", { name: "Activity" })]) {
+      expect(within(place).queryByRole("link", { name: /^its own thread/ })).toBeNull();
+    }
+  });
+
   it("names the fix for a routine that is not in the list", async () => {
     wrap(<RoutinePage id="gone" />);
     expect(await screen.findByText("This page does not exist, or you cannot see it.")).toBeTruthy();

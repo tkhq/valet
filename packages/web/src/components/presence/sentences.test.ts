@@ -458,6 +458,47 @@ describe("scheduleZone", () => {
   });
 });
 
+/** The own thread of a routine, as the triggers list returns it. */
+const OWN_THREAD = { sessionId: "s-own", threadId: "t-own", title: "Morning summary", archived: false };
+
+describe("a routine's own thread", () => {
+  it("links its own thread in the sentence, Where, and the firing, with the words unchanged", () => {
+    const r = routine({ lastFiredThread: OWN_THREAD });
+    const token = { kind: "thread", text: "its own thread", sessionId: "s-own", threadId: "t-own" };
+    const sentence = routineSentenceParts(r, workflows, threads);
+    expect(sentence).toContainEqual(token);
+    expect(partsText(sentence)).toBe("Every day at 9:00, Morning summary: work in its own thread.");
+    const where = whereParts({ mode: "own" }, null, threads, r.detail.lastFiredThread);
+    expect(where).toEqual([{ kind: "text", text: "in " }, token]);
+    expect(partsText(where)).toBe("in its own thread");
+    const firing = firingParts(r, workflows, threads);
+    expect(firing).toEqual([{ kind: "text", text: "Fired → worked in " }, token]);
+  });
+
+  it("keeps the words of an archived thread and drops its link", () => {
+    const r = routine({ lastFiredThread: { ...OWN_THREAD, archived: true } });
+    expect(routineSentenceParts(r, workflows, threads)).toContainEqual({ kind: "thread", text: "its own thread", archived: true });
+    expect(partsText(firingParts(r, workflows, threads))).toBe("Fired → worked in its own thread");
+  });
+
+  it("links a new-policy firing to the thread it landed on, and not the sentence", () => {
+    const r = routine({ thread: { mode: "new" }, lastFiredThread: OWN_THREAD });
+    expect(firingParts(r, workflows, threads)).toEqual([
+      { kind: "text", text: "Fired → worked in " },
+      { kind: "thread", text: "a new thread", sessionId: "s-own", threadId: "t-own" },
+    ]);
+    expect(routineSentenceParts(r, workflows, threads).some((part) => part.kind === "thread")).toBe(false);
+  });
+
+  it("stays plain text without a thread", () => {
+    for (const r of [routine({}), routine({ lastFiredThread: null })]) {
+      expect(routineSentenceParts(r, workflows, threads).some((part) => part.kind === "thread")).toBe(false);
+      expect(firingParts(r, workflows, threads)).toEqual([{ kind: "text", text: "Fired → worked in its own thread" }]);
+    }
+    expect(whereParts({ mode: "own" }, null, threads)).toEqual([{ kind: "text", text: "in its own thread" }]);
+  });
+});
+
 describe("routineSentence", () => {
   it("own: work in its own thread", () => {
     expect(routineSentence(routine({ thread: { mode: "own" } }), workflows, threads)).toBe(
@@ -765,7 +806,10 @@ describe("sentence parts", () => {
         );
       }
     }
-    for (const r of [routine({}), routine({ thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } }), routine({ targetKind: "workflow" }, "wf-1")]) {
+    for (const r of [
+      routine({}), routine({ thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } }), routine({ targetKind: "workflow" }, "wf-1"),
+      routine({ lastFiredThread: OWN_THREAD }), routine({ lastFiredThread: { ...OWN_THREAD, archived: true } }),
+    ]) {
       expect(routineSentence(r, workflows, threads)).toBe(partsText(routineSentenceParts(r, workflows, threads)));
     }
   });

@@ -2,13 +2,15 @@
  * A sentence of Presence, as text with reference tokens: each place, thread,
  * workflow, and person the sentence names renders as a `Ref`. A place links
  * to its place page, a thread to its thread page when the sentence knows its
- * id, and a workflow to its editor. A person has no page.
+ * id (an archived thread shows as a disabled link), and a workflow to its
+ * editor. A person has no page.
  *
  * `links={false}` renders the tokens without links, for a sentence inside a
  * dialog that is still collecting input: a link there would close the
  * dialog and drop the reader's choices.
  */
 import { Fragment } from "react";
+import { ArchivedThreadLink } from "./archived-thread-link";
 import { Ref } from "./ref";
 import type { SentencePart } from "./sentences";
 
@@ -41,6 +43,9 @@ export function SentencePartView({ part, links = true, readAs }: { part: Sentenc
         ? <Ref kind="place" service={part.service} text={part.text} readAs={readAs} to="/presence/places/$subject" params={{ subject: part.subject }} />
         : <Ref kind="place" service={part.service} text={part.text} readAs={readAs} />;
     case "thread":
+      if (links && part.archived) {
+        return <ArchivedThreadLink><Ref kind="thread" text={part.text} readAs={readAs} /></ArchivedThreadLink>;
+      }
       return links && part.threadId !== undefined
         ? <Ref kind="thread" text={part.text} readAs={readAs} to="/threads/$threadId" params={{ threadId: part.threadId }} />
         : <Ref kind="thread" text={part.text} readAs={readAs} />;

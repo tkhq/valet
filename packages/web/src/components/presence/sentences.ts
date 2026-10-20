@@ -15,6 +15,7 @@ import type {
   EventSubscriptionWire,
   GetWorkflowTriggerCatalogResponse,
   LineActivityEntryWire,
+  WorkflowScheduleThreadRef,
 } from "@valet/api/wire";
 import { deliveryStatusLine } from "~/components/events/delivery-copy";
 import { zoneLongName } from "~/lib/time-zones";
@@ -84,12 +85,13 @@ export type SentenceService = "slack" | "github" | "linear";
  * One piece of a sentence. A text part is plain words. The other kinds name
  * a thing the reader can recognize, and a renderer shows each as a token
  * (`Ref`): a place (`#incidents`, `acme/api`), a thread, a workflow, or a
- * person. `subject` is the place key the places API reads.
+ * person. `subject` is the place key the places API reads. An `archived`
+ * thread renders as a disabled link: it keeps its words and opens nothing.
  */
 export type SentencePart =
   | { kind: "text"; text: string }
   | { kind: "place"; text: string; service: SentenceService; subject: string }
-  | { kind: "thread"; text: string; sessionId?: string; threadId?: string }
+  | { kind: "thread"; text: string; sessionId?: string; threadId?: string; archived?: true }
   | { kind: "workflow"; text: string; id: string }
   | { kind: "person"; text: string };
 
@@ -760,7 +762,23 @@ export interface RoutineLike {
     timezone?: string;
     targetKind: "workflow" | "assistant";
     thread?: AssistantThreadPolicy;
+    /** The thread the latest firing landed on, or the own thread before any
+     * firing. Absent or null when there is none, or the viewer may not open it. */
+    lastFiredThread?: WorkflowScheduleThreadRef | null;
   };
+}
+
+/**
+ * The words a routine uses for a thread (`its own thread`, `a new thread`)
+ * as a thread token that opens `ref`, or plain words without a thread. The
+ * words stay the same either way, so `partsText` does not change. An
+ * archived thread keeps its words and drops its link.
+ */
+function routineThreadParts(words: string, ref: WorkflowScheduleThreadRef | null | undefined): SentencePart[] {
+  if (ref === null || ref === undefined) return [text(words)];
+  return [ref.archived
+    ? { kind: "thread", text: words, archived: true }
+    : { kind: "thread", text: words, sessionId: ref.sessionId, threadId: ref.threadId }];
 }
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -834,7 +852,7 @@ export function routineDoesParts(routine: RoutineLike, workflows: WorkflowNames,
     // A routine has no subject; the server refuses `subject`, so it reads as `own`.
     case "subject":
     case "own":
-      return [text("work in its own thread")];
+      return tidy([text("work in "), ...routineThreadParts("its own thread", routine.detail.lastFiredThread)]);
   }
 }
 
@@ -1176,11 +1194,14 @@ export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "event
     : `Valet reads the event and acts in the thread. ${appears}`;
 }
 
-/** How it works, **Where**, as parts: the thread phrase with the thread as a token. */
+/** How it works, **Where**, as parts: the thread phrase with the thread as a
+ * token. `ownThread` is a routine's own thread: with it, `its own thread`
+ * opens that thread. */
 export function whereParts(
   policy: AssistantThreadPolicy,
   subjectKind: SubjectKind | null,
   threads: ThreadTitles,
+  ownThread?: WorkflowScheduleThreadRef | null,
 ): SentencePart[] {
   switch (policy.mode) {
     case "new":
@@ -1188,7 +1209,7 @@ export function whereParts(
     case "subject":
       return [text(`in one thread per ${subjectKind ?? "place"}`)];
     case "own":
-      return [text("in its own thread")];
+      return tidy([text("in "), ...routineThreadParts("its own thread", ownThread)]);
     case "existing":
       return [text("in "), ...pinnedThreadParts(threads, policy)];
   }
@@ -1386,7 +1407,8 @@ export function routineDoExplanation(routine: RoutineLike, workflows: WorkflowNa
 /**
  * One firing of a routine on its Activity (spec Part E step 2): `Fired →
  * worked in <thread>` for an assistant routine, `Fired → started <workflow>
- * run` for a workflow routine.
+ * run` for a workflow routine. The thread the firing landed on, when the
+ * routine knows it, opens from `its own thread` or `a new thread`.
  */
 export function firingParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   if (routine.detail.targetKind === "workflow") {
@@ -1399,6 +1421,6 @@ export function firingParts(routine: RoutineLike, workflows: WorkflowNames, thre
   const policy = routine.detail.thread ?? { mode: "own" };
   const where = policy.mode === "existing"
     ? pinnedThreadParts(threads, policy)
-    : [text(policy.mode === "new" ? "a new thread" : "its own thread")];
+    : routineThreadParts(policy.mode === "new" ? "a new thread" : "its own thread", routine.detail.lastFiredThread);
   return tidy([text("Fired → worked in "), ...where]);
 }
