@@ -33,6 +33,18 @@ describe("connectEvalPlaceholders", () => {
     expect(Object.values(env)).toEqual(envNames.map(() => "real"));
   });
 
+  it("removes the settings it set when a credential write fails", async () => {
+    const credentials = new InMemoryCredentialStore();
+    credentials.save = async () => {
+      throw new Error("write failed");
+    };
+    const env: Record<string, string | undefined> = {};
+    await expect(
+      connectEvalPlaceholders({ credentials, userId: user.id, orgId: org.id, services: ["gmail"], env }),
+    ).rejects.toThrow(/write failed/);
+    expect(env).toEqual({});
+  });
+
   it("refuses an MCP service and changes nothing", async () => {
     const credentials = new InMemoryCredentialStore();
     const env: Record<string, string | undefined> = {};

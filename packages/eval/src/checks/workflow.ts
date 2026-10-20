@@ -31,6 +31,8 @@ const VALIDATED_ACTIONS = new Set([...DRAFT_ACTIONS, "workflows.patch_workflow"]
 const LITERAL_DATE = /\b(?:19|20)\d\d-[01]\d-[0-3]\d\b/;
 /** A `trigger.data` read and the property path after it. */
 const TRIGGER_DATA_READ = /\btrigger\.data((?:\.[A-Za-z_$][\w$]*|\[[^\]]*\])*)/g;
+/** What a scheduled run puts in `trigger.data` besides its input (the scheduler's `{ scheduleName, cron, input }`). */
+const SCHEDULE_METADATA = new Set(["scheduleName", "cron"]);
 
 type Json = Record<string, unknown>;
 
@@ -169,11 +171,31 @@ function nodesOf(definition: unknown): Json[] {
   return definition.nodes.filter(isRecord);
 }
 
-function edgesOf(definition: unknown): Array<{ from: string; to: string }> {
+interface Edge {
+  from: string;
+  to: string;
+  fromOutput?: string;
+}
+
+function edgesOf(definition: unknown): Edge[] {
   if (!isRecord(definition) || !Array.isArray(definition.edges)) return [];
   return definition.edges.flatMap((edge) =>
-    isRecord(edge) && typeof edge.from === "string" && typeof edge.to === "string" ? [{ from: edge.from, to: edge.to }] : [],
+    isRecord(edge) && typeof edge.from === "string" && typeof edge.to === "string"
+      ? [{ from: edge.from, to: edge.to, ...(typeof edge.fromOutput === "string" ? { fromOutput: edge.fromOutput } : {}) }]
+      : [],
   );
+}
+
+/**
+ * True when the edge also runs after a person denies its source approval
+ * step. A denial fails the step, except with `onDeny: "skip"`: then the
+ * step completes with approved false, which runs its `"false"` edges and
+ * its edges without `fromOutput`.
+ */
+function runsOnDenial(edge: Edge, nodesById: Map<string, Json>): boolean {
+  if (nodesById.get(edge.from)?.type !== "approval") return false;
+  if (edge.fromOutput === "false") return true;
+  return edge.fromOutput === undefined && nodesById.get(edge.from)?.onDeny === "skip";
 }
 
 function stepId(node: Json): string {
@@ -205,10 +227,15 @@ function firstSegment(path: string): string {
   return match?.[1] ?? match?.[2] ?? "";
 }
 
-/** Node ids reachable from `start` along edges, `start` excluded unless a cycle returns to it. */
-function reachableFrom(start: string, edges: Array<{ from: string; to: string }>): Set<string> {
+/**
+ * Node ids reachable from `start` along edges, `start` excluded unless a
+ * cycle returns to it. From an approval step, only the edges that run
+ * after an approval count: a step on its denial branch does not run after
+ * the approval.
+ */
+function reachableFrom(start: string, edges: Edge[], nodesById: Map<string, Json>): Set<string> {
   const seen = new Set<string>();
-  const queue = edges.filter((edge) => edge.from === start).map((edge) => edge.to);
+  const queue = edges.filter((edge) => edge.from === start && !runsOnDenial(edge, nodesById)).map((edge) => edge.to);
   for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
     if (seen.has(id)) continue;
     seen.add(id);
@@ -255,8 +282,12 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
   for (const selector of check.approved_actions ?? []) {
     for (const unit of units) {
       if (unit.type !== "session" && unit.type !== "orchestrator") continue;
-      const scope = isRecord(unit.toolScope) && Array.isArray(unit.toolScope.actions) ? unit.toolScope.actions : [];
-      const covered = scope.filter((entry): entry is string => typeof entry === "string" && scopeCovers(entry, selector));
+      // Without `toolScope.actions`, an agent step can run every action (`actionInScope`).
+      if (!isRecord(unit.toolScope) || !Array.isArray(unit.toolScope.actions)) {
+        failures.push(`agent step "${stepId(unit)}" sets no toolScope.actions, so it can run ${selector}; an approved action belongs in a tool step`);
+        continue;
+      }
+      const covered = unit.toolScope.actions.filter((entry): entry is string => typeof entry === "string" && scopeCovers(entry, selector));
       if (covered.length > 0) {
         failures.push(`agent step "${stepId(unit)}" can run ${covered.join(", ")}; an approved action belongs in a tool step`);
       }
@@ -264,13 +295,14 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
   }
   if (check.order !== undefined) {
     const edges = edgesOf(definition);
+    const nodesById = new Map(nodes.map((node) => [stepId(node), node]));
     const [head, ...rest] = check.order;
     let previous = head;
     let current = nodes.filter((node) => selectorMatches(head, node)).map(stepId);
     if (current.length === 0) failures.push(`no step matches ${head}`);
     for (const selector of rest) {
       if (current.length === 0) break;
-      const reachable = new Set(current.flatMap((id) => [...reachableFrom(id, edges)]));
+      const reachable = new Set(current.flatMap((id) => [...reachableFrom(id, edges, nodesById)]));
       current = nodes.filter((node) => selectorMatches(selector, node) && reachable.has(stepId(node))).map(stepId);
       if (current.length === 0) failures.push(`no step that matches ${selector} runs after one that matches ${previous}`);
       previous = selector;
@@ -278,7 +310,7 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
   }
   if (check.schedule_input === true) {
     const reads = triggerDataReads(definition);
-    const outside = reads.filter((path) => firstSegment(path) !== "input");
+    const outside = reads.filter((path) => firstSegment(path) !== "input" && !SCHEDULE_METADATA.has(firstSegment(path)));
     if (!reads.some((path) => firstSegment(path) === "input")) failures.push("no step reads the schedule input at trigger.data.input");
     if (outside.length > 0) {
       failures.push(`steps read trigger.data${[...new Set(outside)].join(", trigger.data")}; schedule input is at trigger.data.input`);

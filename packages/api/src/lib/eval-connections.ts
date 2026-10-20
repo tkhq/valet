@@ -48,22 +48,28 @@ export async function connectEvalPlaceholders(params: {
     return actionPlugin.credentialService ?? service;
   });
   const envNames: string[] = [];
-  for (const credentialService of credentialServices) {
-    const oauth = findOAuthDeclaration(plugins, credentialService);
-    if (oauth !== null && oauth.oauth.mode !== "mcp") {
-      for (const name of [oauth.oauth.clientIdEnv, oauth.oauth.clientSecretEnv]) {
-        if (params.env[name]) continue;
-        params.env[name] = EVAL_PLACEHOLDER_SECRET;
-        envNames.push(name);
+  try {
+    for (const credentialService of credentialServices) {
+      const oauth = findOAuthDeclaration(plugins, credentialService);
+      if (oauth !== null && oauth.oauth.mode !== "mcp") {
+        for (const name of [oauth.oauth.clientIdEnv, oauth.oauth.clientSecretEnv]) {
+          if (params.env[name]) continue;
+          params.env[name] = EVAL_PLACEHOLDER_SECRET;
+          envNames.push(name);
+        }
       }
+      const declaration = findCredentialDeclaration(plugins, credentialService);
+      if (declaration?.requires?.orgCredential) {
+        const bot: StoredCredential = { type: "bot_token", accessToken: EVAL_PLACEHOLDER_SECRET };
+        await params.credentials.save({ type: "org", id: params.orgId }, credentialService, bot);
+      }
+      const own: StoredCredential = { type: declaration?.type ?? "api_key", accessToken: EVAL_PLACEHOLDER_SECRET };
+      await params.credentials.save({ type: "user", id: params.userId }, credentialService, own);
     }
-    const declaration = findCredentialDeclaration(plugins, credentialService);
-    if (declaration?.requires?.orgCredential) {
-      const bot: StoredCredential = { type: "bot_token", accessToken: EVAL_PLACEHOLDER_SECRET };
-      await params.credentials.save({ type: "org", id: params.orgId }, credentialService, bot);
-    }
-    const own: StoredCredential = { type: declaration?.type ?? "api_key", accessToken: EVAL_PLACEHOLDER_SECRET };
-    await params.credentials.save({ type: "user", id: params.userId }, credentialService, own);
+  } catch (err) {
+    // A failed credential write must not leave placeholder settings behind.
+    for (const name of envNames) delete params.env[name];
+    throw err;
   }
   return { envNames };
 }

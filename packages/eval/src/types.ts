@@ -232,14 +232,20 @@ export interface WorkflowDefinitionCheck {
   tool_steps?: string[];
   /**
    * Actions a person approves on each run. Each selector must match a tool
-   * step, and no agent step may list a matching action in `toolScope`.
+   * step. Every agent step must set `toolScope.actions` (an agent step
+   * without it can run every action), and no entry may match.
    */
   approved_actions?: string[];
-  /** Steps that match these selectors must occur in this order on one path. */
+  /**
+   * Steps that match these selectors must occur in this order on one path.
+   * A step on an approval step's denial branch (a `"false"` edge, or any
+   * edge with `onDeny: "skip"` and no `fromOutput`) does not run after it.
+   */
   order?: string[];
   /**
    * The workflow runs on a schedule: some step reads the schedule input,
-   * and every `trigger.data` read is under `trigger.data.input`.
+   * and every other `trigger.data` read is the scheduler's `scheduleName`
+   * or `cron`.
    */
   schedule_input?: boolean;
   /** Some template reads `trigger.timestamp`, and no step holds a literal date. */

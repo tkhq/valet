@@ -230,6 +230,16 @@ describe("workflow rules", () => {
     ]);
   });
 
+  it("treats an agent step without toolScope.actions as able to run an approved action", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, approved_actions: ["sheets.write_spreadsheet"] };
+    const unscoped = withNode(leadWorkflow(), "propose", { type: "orchestrator", model: undefined, prompt: "Propose a lead update." });
+    expect(workflowRuleFailures(unscoped, check)).toEqual([
+      'agent step "propose" sets no toolScope.actions, so it can run sheets.write_spreadsheet; an approved action belongs in a tool step',
+    ]);
+    const readsOnly = withNode(unscoped, "propose", { toolScope: { actions: ["gmail.*", "sheets.read_spreadsheet"] } });
+    expect(workflowRuleFailures(readsOnly, check)).toEqual([]);
+  });
+
   it("checks step order along edges", () => {
     const check: WorkflowDefinitionCheck = { ...CHECK, order: ["approval", "sheets.write_*", "sheets.read_spreadsheet"] };
     expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
@@ -249,10 +259,28 @@ describe("workflow rules", () => {
     ]);
   });
 
+  it("does not count a step on an approval's denial branch as after the approval", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, order: ["approval", "sheets.write_*", "sheets.read_spreadsheet"] };
+    const failure = "no step that matches sheets.write_* runs after one that matches approval";
+    const withGateEdge = (definition: Record<string, unknown>, edge: Record<string, unknown>): Record<string, unknown> => ({
+      ...definition,
+      edges: (definition.edges as Array<Record<string, unknown>>).map((e) => (e.from === "gate" ? { ...e, ...edge } : e)),
+    });
+
+    expect(workflowRuleFailures(withGateEdge(leadWorkflow(), { fromOutput: "false" }), check)).toEqual([failure]);
+    const skip = withNode(leadWorkflow(), "gate", { onDeny: "skip" });
+    expect(workflowRuleFailures(skip, check)).toEqual([failure]);
+    expect(workflowRuleFailures(withGateEdge(skip, { fromOutput: "true" }), check)).toEqual([]);
+  });
+
   it("requires schedule input reads under trigger.data.input", () => {
     const check: WorkflowDefinitionCheck = { ...CHECK, schedule_input: true };
     const scheduled = withNode(leadWorkflow(), "propose", { prompt: "Rates for {{trigger.data.input.symbols}}." });
     expect(workflowRuleFailures(scheduled, check)).toEqual([]);
+    const named = withNode(leadWorkflow(), "propose", {
+      prompt: "Rates for {{trigger.data.input.symbols}} from {{trigger.data.scheduleName}} ({{trigger.data.cron}}).",
+    });
+    expect(workflowRuleFailures(named, check)).toEqual([]);
     expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([
       "no step reads the schedule input at trigger.data.input",
       "steps read trigger.data.messageId; schedule input is at trigger.data.input",

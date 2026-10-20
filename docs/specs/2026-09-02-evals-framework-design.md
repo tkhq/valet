@@ -398,12 +398,20 @@ Every definition must pass these rules:
 
 A case adds rules with optional fields: `foreach` (a foreach step must
 exist), `tool_steps`, `approved_actions` (in a tool step and in no agent
-step's `toolScope`), `order` (steps occur in this order on one path),
-`schedule_input` (every `trigger.data` read is under
-`trigger.data.input`), `run_date` (a `trigger.timestamp` read and no
-literal date), and `declared_inputs` (each `trigger.data` field has a
-`dataSchema` entry). A selector with a dot is an action id glob for tool
-steps and foreach tool bodies. A selector without a dot is a step type.
+step's `toolScope.actions`; an agent step without `toolScope.actions` can
+run every action, so it fails the rule), `order` (steps occur in this
+order on one path), `schedule_input` (some read is under
+`trigger.data.input`, and every other `trigger.data` read is the
+scheduler's `scheduleName` or `cron`), `run_date` (a `trigger.timestamp`
+read and no literal date), and `declared_inputs` (each `trigger.data`
+field has a `dataSchema` entry). A selector with a dot is an action id
+glob for tool steps and foreach tool bodies. A selector without a dot is
+a step type.
+
+For `order`, a step on an approval step's denial branch does not run
+after the approval. A denial fails the approval step, except with
+`onDeny: "skip"`. Then the step completes with approved false and runs
+its `"false"` edges and its edges without `fromOutput`.
 
 Only the final definition decides pass or fail. The check reports repair
 effort and initial correctness apart, as metrics: `drafts`, `rejections`
