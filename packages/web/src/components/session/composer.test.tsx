@@ -18,6 +18,7 @@ import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
+const cancelQueuedMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const sendState: { pending: boolean; sessions?: string[] } = { pending: false };
 // Sessions whose stop request is in flight.
@@ -56,6 +57,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       isPending: false,
       mutateAsync: resumeMutateAsync,
     }),
+    useCancelQueuedItem: () => ({ isPending: false, mutateAsync: cancelQueuedMutateAsync }),
   };
 });
 
@@ -137,6 +139,7 @@ beforeEach(() => {
   sendMutateAsync.mockReset();
   sendMutateAsync.mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
   abortMutateAsync.mockClear();
+  cancelQueuedMutateAsync.mockClear();
   resumeMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
@@ -210,12 +213,19 @@ describe("Composer queued-message stack", () => {
     );
   });
 
-  it("keeps unresolved pending items visible after reload", () => {
+  it("keeps unresolved pending items visible after reload, each with Cancel", () => {
     queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1", "q-2"] };
     renderComposer("streaming", [], 2);
 
-    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
+    expect(screen.getAllByText("Queued message. It runs when the current turn ends.")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[1]!);
+    expect(cancelQueuedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", itemId: "q-2" });
+  });
+
+  it("counts pending items when the live queue state is not loaded", () => {
+    renderComposer("streaming", [], 2);
+    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
   });
 });
 

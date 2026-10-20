@@ -9,7 +9,7 @@ import { threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
-  abortThread, createThread, getThreadChannelActivity, listDecisions, listMessages,
+  abortThread, cancelQueuedItem, createThread, getThreadChannelActivity, listDecisions, listMessages,
   listThreads, loadDecisionSession, patchThread, readThreads, resolveDecision, resumeThread,
   sendPrompt, withdrawDecision,
 } from "./messages.js";
@@ -126,6 +126,7 @@ threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages, "content
 threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt, "content", "reply"));
 threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity, "content", "read"));
 threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));
+threadsRouter.post("/:threadId/queue/:itemId/cancel", c => inThread(c, cancelQueuedItem, "content"));
 threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));
 threadsRouter.post("/:threadId/decisions/:gateId/resolve", c => inThread(c, resolveDecision, "decision"));
