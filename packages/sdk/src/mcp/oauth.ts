@@ -111,8 +111,11 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
   for (const url of wellKnownUrls(base, 'oauth-protected-resource')) {
     const prm = (await fetchWellKnown(url)) as ProtectedResourceMetadata | null;
     // RFC 9728 makes authorization_servers optional, so the scopes count
-    // even when the document names no issuer.
-    resourceScopes ??= optStrArr(prm?.scopes_supported);
+    // even when the document names no issuer. They count only when the
+    // document describes this server (§3.3): a root document for another
+    // resource must not add its scopes.
+    const describesServer = typeof prm?.resource === 'string' && prm.resource.replace(/\/+$/, '') === base;
+    if (describesServer) resourceScopes ??= optStrArr(prm?.scopes_supported);
     const advertised = prm?.authorization_servers?.[0];
     if (typeof advertised === 'string' && advertised.length > 0) {
       issuer = advertised;
