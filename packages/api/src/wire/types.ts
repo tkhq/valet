@@ -953,8 +953,8 @@ export interface WorkspaceConversationSummary {
   /** The conversation runs a turn or waits for an approval. */
   busy: boolean;
 }
-/** `GET /api/workspaces/:workspace/conversations`: the viewer's Ask Valet
- * conversations, the most recently used first. */
+/** `GET /api/workspaces/:workspace/conversations`: every started Ask Valet
+ * conversation of the viewer, the most recently used first. */
 export interface ListWorkspaceConversationsResponse { conversations: WorkspaceConversationSummary[]; }
 
 /** The services a workspace's carried-over integration limit allows, or null for no limit. */

@@ -173,7 +173,9 @@ workspaceRuntimeRouter.get("/:workspace/conversations", async (c) => {
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const helper = await assistantConversationSession(c, owner);
   const started = (await assistantConversations(c, await conversationScope(c, owner, helper.sessionId))).filter(item => item.started);
-  const body: ListWorkspaceConversationsResponse = { conversations: started.slice(0, 20).map(({ started: _, ...item }) => item) };
+  // Every started conversation: Threads leaves them out, so Recent is the only
+  // way back to an older one. The menu scrolls.
+  const body: ListWorkspaceConversationsResponse = { conversations: started.map(({ started: _, ...item }) => item) };
   return c.json(body);
 });
 

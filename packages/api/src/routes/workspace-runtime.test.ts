@@ -367,6 +367,18 @@ describe("Ask Valet conversations", () => {
     expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[waiting.threadId, true]]);
   });
 
+  it("lists every started conversation in Recent", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const started: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const conversation = await open({ fresh: true });
+      await use(conversation);
+      started.push(conversation.threadId);
+    }
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([...started].reverse());
+  });
+
   it("leaves archived conversations out of the latest one and Recent", async () => {
     api = await bootTestApi();
     const { open, list } = conversations("user");
