@@ -12,6 +12,18 @@ Select general focus when the person changes to another task. Existing approval 
 
 Workflows are dag/v1 definitions: a flat list of `nodes` plus directed `edges`. Runs execute on the server's checkpointed interpreter — they park on waits/approvals and resume on signals. Users see workflows as node diagrams in chat and at `/workflows`.
 
+## Design the steps
+
+Split the job by what each part needs. A workflow that does everything in one agent step fails in ways that are hard to see.
+
+- Put an integration call with known inputs in a `tool` step. Put judgment in an `llm` step or an agent step (`session` or `orchestrator`). Put shell work, scripts, and data jobs with many calls in a `session` step.
+- Put every action that a person approves on each run in a `tool` step. Policy stops that step for approval on each run. For a sign-off that no action covers, add an `approval` step before the work. Never tell an agent step to ask for approval, to wait for a person, or to tell someone that an approval is ready: a run refuses the request, and nobody gets a card.
+- Publish a page or file from the step that writes it: `artifact_publish` with `path`, or `file_attach`. Pass only the URL, size, and hash to later steps. Never pass page content, base64, or chunks through a step's output, because a model copy corrupts them.
+- For a list of unknown size, list the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
+- Use `{{trigger.timestamp}}` for the run's date. Never write today's date into a prompt.
+- Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
+- After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
+
 ## Use the workflow tools, not raw API calls
 
 Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
@@ -138,7 +150,7 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 
 ## Working practices
 
-- Before you create a workflow, restate the plan in two or three lines: what starts it, what each step does, and where the result goes. If a gap would change the build, such as which event, channel, repo, or account to use, call `ask_question` once with the plan as `detail` and the likely answers as `options`. Otherwise, build it and list what you assumed.
+- Before you create a workflow, restate the plan in two or three lines: what starts it, what each step does and its step type (see Design the steps), and where the result goes. If a gap would change the build, such as which event, channel, repo, or account to use, call `ask_question` once with the plan as `detail` and the likely answers as `options`. Otherwise, build it and list what you assumed.
 - `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
