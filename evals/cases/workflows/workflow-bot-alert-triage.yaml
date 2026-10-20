@@ -1,0 +1,27 @@
+# Workflow authoring: event triage on bot messages in two Slack channels.
+# The issue for a high alert is an integration call with known inputs, so
+# the workflows skill puts it in a tool step.
+id: workflow-bot-alert-triage
+description: Draft an event-triggered workflow that rates bot alerts and opens a GitHub issue for high ones.
+drive: product
+session_type: orchestrator
+connected: [slack, github]
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Build a workflow that triages alerts that bots post in the Slack
+      channels #alerts-prod and #alerts-payments. It starts on each new bot
+      message in those two channels and ignores messages from people. It
+      rates each alert high, medium, or low. For a high alert, it opens an
+      issue in the GitHub repository acme/ops-alerts with the alert text and
+      the channel name. Save the workflow and its event trigger, but do not
+      run it.
+timeout_ms: 600000
+checks:
+  - type: tool_called
+    tool: workflows.save_workflow
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    tool_steps: ["github.create_issue"]

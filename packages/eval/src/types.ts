@@ -201,7 +201,50 @@ export type DeterministicCheck =
       expect_exit_code?: number;
       /** Command timeout in seconds. Default 120. */
       timeout_s?: number;
-    };
+    }
+  | WorkflowDefinitionCheck;
+
+/**
+ * Workflow-authoring check. Scores the workflow definition the agent
+ * drafted: the saved definition when the case saved one, else the last
+ * definition the agent sent to the save validator. Every definition must
+ * pass the save validator, give each stop step a `success` or `failure`
+ * outcome, give each `foreach` step one inline body and `maxItems`, and
+ * keep approval requests out of agent step prompts. The optional fields
+ * add case-specific rules.
+ *
+ * The check also reports metrics: the drafts sent to the validator, the
+ * validator rejections (repair effort), and whether the first draft was
+ * already correct (initial correctness).
+ *
+ * Selectors name steps. A selector with a dot is an action id glob that
+ * matches tool steps and `foreach` tool bodies (`sheets.write_*`). A
+ * selector without a dot is a step type (`approval`). `|` separates
+ * alternatives.
+ */
+export interface WorkflowDefinitionCheck {
+  type: "workflow_definition";
+  /** Require at least one `foreach` step. */
+  foreach?: boolean;
+  /** Each selector must match at least one tool step. */
+  tool_steps?: string[];
+  /**
+   * Actions a person approves on each run. Each selector must match a tool
+   * step, and no agent step may list a matching action in `toolScope`.
+   */
+  approved_actions?: string[];
+  /** Steps that match these selectors must occur in this order on one path. */
+  order?: string[];
+  /**
+   * The workflow runs on a schedule: some step reads the schedule input,
+   * and every `trigger.data` read is under `trigger.data.input`.
+   */
+  schedule_input?: boolean;
+  /** Some template reads `trigger.timestamp`, and no step holds a literal date. */
+  run_date?: boolean;
+  /** Every `trigger.data.<field>` read has a `dataSchema` entry on the trigger. */
+  declared_inputs?: boolean;
+}
 
 /** LLM-as-judge checks — score with a grading model, pass at score >= threshold. */
 export type JudgeCheck =
@@ -233,6 +276,7 @@ export const CHECK_TYPES = [
   "max_cost",
   "max_duration",
   "verify_command",
+  "workflow_definition",
   "judge_output",
   "judge_trajectory",
   "judge_equivalence",
@@ -246,6 +290,12 @@ export interface CheckResult {
   detail?: string;
   /** Judge score (1-5) for judge checks. */
   score?: number;
+  /**
+   * Measurements a check reports whether it passes or fails, such as the
+   * repair effort of a workflow draft. The scorecard prints them, and
+   * multi-run entries keep one set per run.
+   */
+  metrics?: Record<string, number | boolean>;
 }
 
 // ── Eval cases ──────────────────────────────────────────────────────────────
@@ -339,6 +389,13 @@ export interface EvalCase {
   mock_tools?: Record<string, MockToolSpec>;
   /** Credential services the case needs. Missing credentials → SKIP. */
   required_credentials?: string[];
+  /**
+   * Action services that look connected in a `drive: product` case, with
+   * placeholder credentials (`@valet/api/eval-connections`). The catalog
+   * then shows their action schemas, as it does for a person who connected
+   * them. Any call that reaches the real service fails on authentication.
+   */
+  connected?: string[];
   checks: Check[];
 }
 
@@ -359,6 +416,11 @@ export interface SamplingStats {
   tokensStd: number;
   /** Per-run recursive cost totals; absent when unpriced. */
   costPerRun?: number[];
+  /**
+   * Per-run check metrics, in run order: each run's `CheckResult.metrics`
+   * merged into one record. Absent when no check reports metrics.
+   */
+  metricsPerRun?: Array<Record<string, number | boolean>>;
 }
 
 /** Result of one case (one or more runs), as the scorecard reports it. */

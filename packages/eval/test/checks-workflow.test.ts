@@ -1,0 +1,312 @@
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { loadCases, parseEvalCase } from "../src/case-loader.js";
+import { runDeterministicCheck } from "../src/checks/deterministic.js";
+import { selectorMatches, workflowDrafts, workflowRuleFailures } from "../src/checks/workflow.js";
+import { evalGateAnswer, EVAL_QUESTION_ANSWER } from "../src/product-drive.js";
+import { formatMetrics } from "../src/scorecard.js";
+import type { ScorecardEntry, Trajectory, TrajectoryToolCall, WorkflowDefinitionCheck } from "../src/index.js";
+
+const CHECK: WorkflowDefinitionCheck = { type: "workflow_definition" };
+
+/** A valid lead-update workflow: approval, then a tool write, then a tool read. */
+function leadWorkflow(): Record<string, unknown> {
+  return {
+    version: "dag/v1",
+    nodes: [
+      { id: "start", type: "trigger", dataSchema: { messageId: { type: "string", required: true } } },
+      {
+        id: "propose",
+        type: "llm",
+        model: "s",
+        prompt: "Propose a lead update from message {{trigger.data.messageId}}.",
+        outputSchema: { type: "object", properties: { stage: { type: "string" } }, required: ["stage"] },
+      },
+      { id: "gate", type: "approval", prompt: "Apply stage {{nodes.propose.result.output.stage}}?" },
+      {
+        id: "write",
+        type: "tool",
+        service: "google_workspace",
+        action: "sheets.write_spreadsheet",
+        params: { spreadsheetId: "sheet-1", range: "Leads!D2", data: [["{{nodes.propose.result.output.stage}}"]] },
+      },
+      {
+        id: "verify",
+        type: "tool",
+        service: "google_workspace",
+        action: "sheets.read_spreadsheet",
+        params: { spreadsheetId: "sheet-1", range: "Leads!D2" },
+      },
+      { id: "done", type: "stop", outcome: "success" },
+    ],
+    edges: [
+      { from: "start", to: "propose" },
+      { from: "propose", to: "gate" },
+      { from: "gate", to: "write" },
+      { from: "write", to: "verify" },
+      { from: "verify", to: "done" },
+    ],
+  };
+}
+
+function withNode(definition: Record<string, unknown>, id: string, patch: Record<string, unknown>): Record<string, unknown> {
+  const nodes = (definition.nodes as Array<Record<string, unknown>>).map((node) => (node.id === id ? { ...node, ...patch } : node));
+  return { ...definition, nodes };
+}
+
+function saveCall(index: number, definition: unknown, ok: boolean): TrajectoryToolCall {
+  const text = ok ? "workflowId: wf_1" : "workflows.save_workflow failed: workflow definition failed validation";
+  return {
+    toolName: "call_tool",
+    callId: `c${index}`,
+    status: "completed",
+    index,
+    actionId: "workflows.save_workflow",
+    args: { tool_id: "workflows.save_workflow", params: { definition } },
+    result: { content: [{ type: "text", text }], details: { ok } },
+  };
+}
+
+function trajectory(toolCalls: TrajectoryToolCall[], metadata?: Record<string, unknown>): Trajectory {
+  return {
+    caseId: "t",
+    prompt: "p",
+    model: "m",
+    turns: [{ index: 0 }],
+    toolCalls,
+    finalOutput: "saved",
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+    durationMs: 1,
+    ...(metadata !== undefined ? { metadata } : {}),
+  };
+}
+
+describe("workflow drafts", () => {
+  it("reads definitions from call_tool and pinned calls and marks rejections", () => {
+    const pinned: TrajectoryToolCall = {
+      toolName: "workflows__validate_definition",
+      callId: "c2",
+      status: "completed",
+      index: 2,
+      actionId: "workflows.validate_definition",
+      args: { definition: leadWorkflow() },
+      result: { text: "valid: true", details: { ok: true } },
+    };
+    const drafts = workflowDrafts(trajectory([saveCall(0, { nodes: [] }, false), pinned]));
+    expect(drafts.map((draft) => [draft.callIndex, draft.rejected])).toEqual([
+      [0, true],
+      [2, false],
+    ]);
+  });
+});
+
+describe("workflow_definition", () => {
+  it("passes a correct draft and reports first-draft correctness", () => {
+    const r = runDeterministicCheck(CHECK, trajectory([saveCall(0, leadWorkflow(), true)]));
+    expect(r.pass).toBe(true);
+    expect(r.metrics).toEqual({ drafts: 1, rejections: 0, first_valid: true, first_correct: true, final_valid: true });
+  });
+
+  it("keeps repair effort apart from the final verdict", () => {
+    const broken = withNode(leadWorkflow(), "done", { outcome: "completed" });
+    const r = runDeterministicCheck(CHECK, trajectory([saveCall(0, broken, false), saveCall(1, leadWorkflow(), true)]));
+    expect(r.pass).toBe(true);
+    expect(r.metrics).toMatchObject({ drafts: 2, rejections: 1, first_valid: false, first_correct: false });
+    expect(r.detail).toContain("1 validator rejection");
+  });
+
+  it("scores the saved definition over the last draft", () => {
+    const broken = withNode(leadWorkflow(), "done", { outcome: "completed" });
+    const r = runDeterministicCheck(
+      CHECK,
+      trajectory([saveCall(0, leadWorkflow(), true)], { savedWorkflows: [{ id: "wf_1", definition: broken }] }),
+    );
+    expect(r.pass).toBe(false);
+    expect(r.detail).toContain("saved definition");
+    expect(r.detail).toContain('"completed"');
+  });
+
+  it("fails when the agent drafted nothing", () => {
+    const r = runDeterministicCheck(CHECK, trajectory([]));
+    expect(r.pass).toBe(false);
+    expect(r.metrics).toMatchObject({ drafts: 0, final_valid: false });
+  });
+});
+
+describe("workflow rules", () => {
+  it("flags a foreach without an inline body or maxItems", () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "each", type: "foreach", items: "{{trigger.data.items}}", body: ["draft"] },
+      ],
+      edges: [{ from: "start", to: "each" }],
+    };
+    expect(workflowRuleFailures(definition, CHECK)).toEqual([
+      'foreach step "each" has no inline body object',
+      'foreach step "each" sets no maxItems',
+    ]);
+  });
+
+  it("flags an agent prompt that asks for approval, including a foreach body", () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        {
+          id: "each",
+          type: "foreach",
+          items: "{{trigger.data.items}}",
+          maxItems: 10,
+          body: { id: "act", type: "orchestrator", prompt: "Ask the owner for approval, then update the row." },
+        },
+      ],
+      edges: [{ from: "start", to: "each" }],
+    };
+    expect(workflowRuleFailures(definition, CHECK)).toEqual(['agent step "act" tells its agent to get approval']);
+  });
+
+  it("requires approved actions in tool steps and out of agent scopes", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, approved_actions: ["sheets.write_spreadsheet"] };
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
+
+    const agentWrite = withNode(leadWorkflow(), "write", {
+      type: "orchestrator",
+      prompt: "Write the stage to the sheet.",
+      toolScope: { actions: ["sheets.*"] },
+    });
+    expect(workflowRuleFailures(agentWrite, check)).toEqual([
+      "no tool step runs sheets.write_spreadsheet",
+      'agent step "write" can run sheets.*; an approved action belongs in a tool step',
+    ]);
+  });
+
+  it("checks step order along edges", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, order: ["approval", "sheets.write_*", "sheets.read_spreadsheet"] };
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
+
+    const writeFirst = {
+      ...leadWorkflow(),
+      edges: [
+        { from: "start", to: "propose" },
+        { from: "propose", to: "write" },
+        { from: "write", to: "gate" },
+        { from: "gate", to: "verify" },
+        { from: "verify", to: "done" },
+      ],
+    };
+    expect(workflowRuleFailures(writeFirst, check)).toEqual([
+      "no step that matches sheets.write_* runs after one that matches approval",
+    ]);
+  });
+
+  it("requires schedule input reads under trigger.data.input", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, schedule_input: true };
+    const scheduled = withNode(leadWorkflow(), "propose", { prompt: "Rates for {{trigger.data.input.symbols}}." });
+    expect(workflowRuleFailures(scheduled, check)).toEqual([]);
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([
+      "no step reads the schedule input at trigger.data.input",
+      "steps read trigger.data.messageId; schedule input is at trigger.data.input",
+    ]);
+  });
+
+  it("requires trigger.timestamp and no literal date for the run date", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, run_date: true };
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual(["no step reads the run date from trigger.timestamp"]);
+    const dated = withNode(leadWorkflow(), "propose", { prompt: "Rates for 2026-10-20 and {{trigger.timestamp}}." });
+    expect(workflowRuleFailures(dated, check)).toEqual(["steps propose hold a literal date"]);
+  });
+
+  it("requires a dataSchema entry for each trigger.data field", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, declared_inputs: true };
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
+    const undeclared = withNode(leadWorkflow(), "start", { dataSchema: undefined });
+    expect(workflowRuleFailures(undeclared, check)).toEqual(["the trigger dataSchema does not declare messageId"]);
+  });
+
+  it("matches selectors against tool actions, foreach tool bodies, and step types", () => {
+    const tool = { id: "w", type: "tool", service: "github", action: "create_issue", params: {} };
+    expect(selectorMatches("github.create_*", tool)).toBe(true);
+    expect(selectorMatches("approval|github.create_issue", tool)).toBe(true);
+    expect(selectorMatches("github.create_issue", { id: "e", type: "foreach", items: "x", body: tool })).toBe(true);
+    expect(selectorMatches("approval", { id: "g", type: "approval" })).toBe(true);
+    expect(selectorMatches("github.create_issue", { id: "o", type: "orchestrator", prompt: "x" })).toBe(false);
+  });
+});
+
+describe("workflow case files", () => {
+  it("load from evals/cases/workflows", async () => {
+    const cases = await loadCases(join(import.meta.dirname, "../../../evals/cases/workflows"));
+    expect(cases.map((c) => c.id).sort()).toEqual([
+      "workflow-bot-alert-triage",
+      "workflow-onboarding-linear",
+      "workflow-sales-tracker",
+      "workflow-scheduled-refresh",
+    ]);
+    for (const c of cases) {
+      expect(c.drive).toBe("product");
+      expect(c.checks.some((check) => check.type === "workflow_definition")).toBe(true);
+    }
+  });
+
+  it("rejects connected outside the product drive", () => {
+    const raw = {
+      id: "x",
+      connected: ["github"],
+      turns: [{ role: "user", content: "hi" }],
+      checks: [{ type: "no_errors" }],
+    };
+    expect(() => parseEvalCase(raw, "x.yaml")).toThrow(/connected/);
+  });
+});
+
+describe("product-drive decision answers", () => {
+  it("answers a question with the fixed text and declines other cards", () => {
+    expect(evalGateAnswer({ id: "g1", type: "question", title: "Which repo?", actions: [{ id: "option-0" }] })).toEqual({
+      value: EVAL_QUESTION_ANSWER,
+    });
+    expect(
+      evalGateAnswer({
+        id: "g2",
+        type: "approval",
+        title: "Allow",
+        actions: [
+          { id: "approve", style: "primary" },
+          { id: "cancel" },
+        ],
+      }),
+    ).toEqual({ actionId: "cancel" });
+  });
+});
+
+describe("formatMetrics", () => {
+  const base: ScorecardEntry = { caseId: "c", status: "pass", durationMs: 1, checkResults: [] };
+
+  it("prints one run's metrics", () => {
+    const entry: ScorecardEntry = {
+      ...base,
+      checkResults: [{ check: CHECK, pass: true, metrics: { rejections: 2, first_correct: false } }],
+    };
+    expect(formatMetrics(entry)).toBe("rejections 2, first_correct no");
+  });
+
+  it("aggregates per-run metrics", () => {
+    const entry: ScorecardEntry = {
+      ...base,
+      sampling: {
+        runs: 2,
+        passes: 2,
+        threshold: 1,
+        tokensPerRun: [1, 1],
+        tokensMean: 1,
+        tokensStd: 0,
+        metricsPerRun: [
+          { rejections: 1, first_correct: true },
+          { rejections: 2, first_correct: false },
+        ],
+      },
+    };
+    expect(formatMetrics(entry)).toBe("per run: rejections mean 1.5, first_correct 1/2");
+  });
+});

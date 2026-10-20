@@ -29,6 +29,14 @@
       "types": "./src/lib/eval-flagged.ts",
       "import": "./src/lib/eval-flagged.ts"
     },
+    "./eval-connections": {
+      "types": "./src/lib/eval-connections.ts",
+      "import": "./src/lib/eval-connections.ts"
+    },
+    "./eval-workflows": {
+      "types": "./src/lib/eval-workflows.ts",
+      "import": "./src/lib/eval-workflows.ts"
+    },
     "./app": {
       "types": "./src/app.ts",
       "import": "./src/app.ts"

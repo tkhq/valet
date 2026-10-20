@@ -1,0 +1,37 @@
+# Workflow authoring: a sales activity tracker. One piece of evidence (an
+# email) updates one existing lead after a person approves the change.
+# Pattern: the internal s-versus-m trial drafted this kind of workflow once
+# per tier; both drafts used an invalid stop outcome copied from the skill.
+#
+# The sheet write runs at medium risk, which policy allows without asking,
+# so the per-run approval needs an approval step before a tool step that
+# writes. The read-back is a tool step after the write.
+id: workflow-sales-tracker
+description: Draft a lead tracker workflow that matches one email to a lead and applies an approved update.
+drive: product
+session_type: orchestrator
+connected: [gmail, google_workspace]
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Build a workflow that keeps our lead tracker current from sales email.
+      I start it by hand with one Gmail message id. The leads live in the
+      Google Sheet with id 1hQ7leadsPipelineSheet, tab "Leads", columns A to
+      F: Company, Contact, Email, Stage, Next step, Last touch, under one
+      header row. Each run reads that one email, finds the existing lead row
+      the email is about, and proposes new values for Stage, Next step, and
+      Last touch. I approve the proposed update on each run before anything
+      is written. Then the workflow writes the row and reads it back to check
+      that the sheet now holds the new values. Save the workflow, but do not
+      run it.
+timeout_ms: 600000
+checks:
+  - type: tool_called
+    tool: workflows.save_workflow
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    declared_inputs: true
+    approved_actions: ["sheets.write_spreadsheet|sheets.batch_write"]
+    order: ["approval", "sheets.write_spreadsheet|sheets.batch_write", "sheets.read_spreadsheet"]

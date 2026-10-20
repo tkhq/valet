@@ -74,13 +74,24 @@ Rules that keep cases trustworthy:
    (also outside the default run). Ground each one in a real session
    pattern and name the pattern in the case header comment. Run them
    with `make eval EVAL_ARGS="--cases evals/cases/long"`.
+7. Workflow-authoring cases go in `evals/cases/workflows/` (also outside
+   the default run). Each one asks the assistant to build and save a
+   workflow without running it, and scores the result with
+   `workflow_definition`. Run them with
+   `make eval EVAL_ARGS="--cases evals/cases/workflows"`.
 
 Check types: `tool_called`, `tool_not_called`, `tool_result_matches`,
 `tool_result_not_matches`, `tool_args_match`, `output_contains`,
 `output_not_contains`, `all_terminal`, `no_errors`, `max_turns`,
 `max_tokens`, `max_cost`, `max_duration`, `verify_command`,
-`judge_output`, `judge_trajectory`, `judge_equivalence`. Field details:
-`src/types.ts`.
+`workflow_definition`, `judge_output`, `judge_trajectory`,
+`judge_equivalence`. Field details: `src/types.ts`.
+
+`drive: product` cases can list action services in `connected:`. The
+harness gives each one a placeholder credential, so the assistant's
+catalog shows its action schemas. The harness answers decision cards
+itself: a typed answer for a question, the declining action for every
+other card.
 
 ## Compare models
 

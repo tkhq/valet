@@ -131,6 +131,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
         cost?: number;
         durationMs: number;
         error?: string;
+        metrics?: Record<string, number | boolean>;
       }
       const runOutcomes: RunOutcome[] = [];
       for (let runIndex = 0; runIndex < runCount; runIndex++) {
@@ -158,6 +159,8 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
         // Recursive totals: an orchestrator case's spend includes every
         // child session it spawned, not just the parent thread.
         const totals = aggregateUsage(result.trajectory);
+        const reported = checkResults.filter((r) => r.metrics !== undefined);
+        const metrics = reported.length > 0 ? Object.assign({}, ...reported.map((r) => r.metrics)) : undefined;
         runOutcomes.push({
           pass: result.outcome === "completed" && checkResults.every((r) => r.pass),
           checkResults,
@@ -166,6 +169,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
           ...(totals.cost !== undefined ? { cost: totals.cost.total } : {}),
           durationMs: result.trajectory.durationMs,
           ...(result.error !== undefined ? { error: result.error } : {}),
+          ...(metrics !== undefined ? { metrics } : {}),
         });
       }
 
@@ -201,6 +205,9 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 tokensMean,
                 tokensStd,
                 ...(anyCost ? { costPerRun: runOutcomes.map((r) => r.cost ?? 0) } : {}),
+                ...(runOutcomes.some((r) => r.metrics !== undefined)
+                  ? { metricsPerRun: runOutcomes.map((r) => r.metrics ?? {}) }
+                  : {}),
               },
             }
           : {}),

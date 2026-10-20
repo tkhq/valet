@@ -17,6 +17,38 @@ function fmtTokens(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+function fmtMetric(value: number | boolean): string {
+  return typeof value === "boolean" ? (value ? "yes" : "no") : String(value);
+}
+
+/**
+ * One line of check metrics. With per-run metrics, a boolean shows how
+ * many runs had it, and a number shows its mean across runs.
+ */
+export function formatMetrics(entry: ScorecardEntry): string | undefined {
+  const perRun = entry.sampling?.metricsPerRun;
+  if (perRun !== undefined && perRun.length > 0) {
+    const keys = [...new Set(perRun.flatMap((run) => Object.keys(run)))];
+    const parts = keys.map((key) => {
+      const values = perRun.map((run) => run[key]).filter((v) => v !== undefined);
+      if (values.every((v) => typeof v === "boolean")) {
+        return `${key} ${values.filter((v) => v === true).length}/${values.length}`;
+      }
+      const numbers = values.filter((v): v is number => typeof v === "number");
+      const mean = numbers.reduce((a, b) => a + b, 0) / Math.max(1, numbers.length);
+      return `${key} mean ${Number.isInteger(mean) ? mean : mean.toFixed(1)}`;
+    });
+    return `per run: ${parts.join(", ")}`;
+  }
+  const merged = Object.assign({}, ...entry.checkResults.flatMap((r) => (r.metrics !== undefined ? [r.metrics] : []))) as Record<
+    string,
+    number | boolean
+  >;
+  const keys = Object.keys(merged);
+  if (keys.length === 0) return undefined;
+  return keys.map((key) => `${key} ${fmtMetric(merged[key])}`).join(", ");
+}
+
 function statusLabel(entry: ScorecardEntry): string {
   return entry.status.toUpperCase().padEnd(4);
 }
@@ -49,6 +81,8 @@ export function formatScorecard(
     for (const result of entry.checkResults.filter((r) => !r.pass)) {
       lines.push(`       x ${result.check.type}: ${result.detail ?? "failed"}`);
     }
+    const metrics = formatMetrics(entry);
+    if (metrics !== undefined) lines.push(`       · ${metrics}`);
   }
 
   const passed = entries.filter((e) => e.status === "pass").length;

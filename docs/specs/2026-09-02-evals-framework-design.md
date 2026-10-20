@@ -48,6 +48,27 @@ Use `engine` for volume (deterministic checks, model comparison at scale).
 Use `product` for fidelity (the trajectory a user's session would produce).
 A production-behavior claim needs a product-drive case.
 
+The product driver also does these things for each case:
+
+- It saves the run's model as the person's default model before the
+  assistant session exists, so `--model` reaches the assistant. Before
+  2026-10-20 every product case ran on the host fallback tier `s`, and
+  `--model` changed only the trajectory label.
+- It answers each decision card, because nobody watches an eval run. An
+  `ask_question` card gets a fixed typed answer that leaves the choice to
+  the agent. Every other card (`allow_permissions`, a policy approval)
+  gets its declining action, such as "Not now" or "Deny". The answers go
+  into `metadata.decisions`.
+- It seeds placeholder connections for the action services a case lists
+  in `connected:` (`@valet/api/eval-connections`). The catalog then shows
+  their action schemas, as it does for a person who connected them. A
+  call that reaches the real service fails on authentication. A
+  placeholder cannot list the actions of an MCP integration such as
+  Linear, because the live server lists them. The driver refuses such a
+  service.
+- It records every saved workflow definition in
+  `metadata.savedWorkflows`, for the `workflow_definition` check.
+
 ## The case format
 
 Cases are YAML files in `evals/cases/`, one case per file, loaded and
@@ -160,7 +181,14 @@ Deterministic checks (`checks/deterministic.ts`) are pure functions:
 `all_terminal`, `no_errors`, `max_turns` (optional `per_submission`
 scope), `max_tokens`, `max_cost`, `max_duration`, and `verify_command`
 (builder cases, below). Compaction-elided tool results are reported as
-elision, not as a behavior mismatch.
+elision, not as a behavior mismatch. `workflow_definition` scores a
+drafted workflow (see "The workflow-authoring suite").
+
+A check result can carry `metrics`, measurements that it reports whether
+it passes or fails. The scorecard prints them under the case row. A
+multi-run entry keeps one set per run in `sampling.metricsPerRun`, and the
+scorecard prints the count of runs for a boolean and the mean for a
+number.
 
 LLM-as-judge checks (`checks/judge.ts`): `judge_output`,
 `judge_trajectory`, and `judge_equivalence` (needs a baseline). The judge
@@ -340,6 +368,101 @@ Empirical results from tuning (2026-09-03, single runs):
   work ran beside the suite. Re-run a lone `sandbox_unavailable` row
   before reading it as behavior.
 
+## The workflow-authoring suite
+
+`evals/cases/workflows/` holds product-drive cases that ask the assistant
+to build and save a workflow without running it. The suite measures the
+`workflows` skill and the model defaults, so a change to either is
+compared on the same briefs instead of judged from one trial. Like the
+hard and long suites, the directory is outside the default `make eval`
+load. Each case runs 3 times (`runs: 3`). Run one model per call:
+
+```bash
+make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-haiku-4-5"
+make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-sonnet-4-6"
+```
+
+The `workflow_definition` check finds the definitions the agent sent to
+`workflows.save_workflow` or `workflows.validate_definition` (the drafts).
+The final definition is the last one the case saved, else the last draft.
+Every definition must pass these rules:
+
+- The save validator: `validateDefinitionInput` with the bundled plugin
+  catalog (`@valet/api/eval-workflows`). The validator checks tool steps
+  against the real action schemas. There is no org, so the org's
+  approved-model list does not apply.
+- Each stop step's outcome is `success` or `failure`.
+- Each `foreach` step has one inline body object and `maxItems`.
+- No agent step prompt tells its agent to get approval. This is the same
+  heuristic that `preview_workflow` warns with.
+
+A case adds rules with optional fields: `foreach` (a foreach step must
+exist), `tool_steps`, `approved_actions` (in a tool step and in no agent
+step's `toolScope`), `order` (steps occur in this order on one path),
+`schedule_input` (every `trigger.data` read is under
+`trigger.data.input`), `run_date` (a `trigger.timestamp` read and no
+literal date), and `declared_inputs` (each `trigger.data` field has a
+`dataSchema` entry). A selector with a dot is an action id glob for tool
+steps and foreach tool bodies. A selector without a dot is a step type.
+
+Only the final definition decides pass or fail. The check reports repair
+effort and initial correctness apart, as metrics: `drafts`, `rejections`
+(validator rejections across save, validate, and patch calls),
+`first_valid`, `first_correct` (the first draft passes the validator and
+every rule), and `final_valid`.
+
+The cases:
+
+- `workflow-sales-tracker`: one email updates one existing lead in a
+  Google Sheet after a person approves the change, then the workflow
+  reads the row back. The sheet write is medium risk, which policy allows
+  without asking, so the case requires an approval step before a tool
+  step that writes, and a tool step that reads after it.
+- `workflow-scheduled-refresh`: a weekday schedule refreshes a JSON file
+  in a GitHub repository. The case requires schedule input reads at
+  `trigger.data.input` and the run date from `trigger.timestamp`.
+- `workflow-onboarding-linear`: a Linear project, its milestones, and a
+  role-dependent number of issues. The case requires a foreach step and
+  declared inputs. Linear is an MCP integration, so a scratch stack lists
+  no Linear actions, and the case does not require Linear tool steps.
+- `workflow-bot-alert-triage`: bot messages in two Slack channels start
+  the workflow, and a high alert opens a GitHub issue in a tool step.
+
+Results from 2026-10-20, 3 runs per case. The skill text is the one
+before PR #993. The s tier is `anthropic/claude-haiku-4-5` and the m tier
+is `anthropic/claude-sonnet-4-6`, the built-in tier defaults.
+
+| Case | Tier | Final correct | First draft correct | Rejections per run | Cost per run |
+|---|---|---|---|---|---|
+| sales-tracker | s | 3/3 | 0/3 | 1.0 | $0.11 |
+| sales-tracker | m | 3/3 | 0/3 | 1.7 | $0.49 |
+| scheduled-refresh | s | 0/3 | 0/3 | 1.3 | $0.08 |
+| scheduled-refresh | m | 3/3 | 0/3 | 1.0 | $0.64 |
+| onboarding-linear | s | 0/3 | 0/3 | 1.0 | $0.08 |
+| onboarding-linear | m | 0/3 | 0/3 | 1.0 | $0.39 |
+| bot-alert-triage | s | 3/3 | 0/3 | 1.3 | $0.10 |
+| bot-alert-triage | m | 3/3 | 0/3 | 1.3 | $0.55 |
+| all | s | 6/12 | 0/12 | 1.2 | $0.09 |
+| all | m | 9/12 | 0/12 | 1.2 | $0.52 |
+
+- No first draft on either tier was correct. Every first draft gave a
+  stop step the outcome `completed`, the value in the skill's own stop
+  example. Other repeated first-draft errors: an `if` step with
+  `condition` instead of `conditions`, a `session` step with a wrong
+  `mode`, and a foreach body that is not one inline object. Each run then
+  needed one or two validator rejections before a save.
+- The tiers separate on one case. In every s-tier run of
+  `workflow-scheduled-refresh`, the workflow read the schedule input at
+  `trigger.data.<field>`, which renders null at run time. The m tier read
+  `trigger.data.input.<field>`.
+- Neither tier set `maxItems` on the onboarding foreach steps.
+- An m-tier run cost about 5.7 times as much as an s-tier run.
+- In the first m-tier batch, 3 runs ended before any save because the
+  model's HTTP stream closed (error `terminated`). Both tiers ran at the
+  same time. The table uses a second batch of the two affected cases, run
+  alone. Read a `terminated` error as a transport failure, not as model
+  behavior.
+
 ## Known limitations
 
 - `mem_*` tools in engine-drive sessions are Map-backed stand-ins;
@@ -355,3 +478,5 @@ Empirical results from tuning (2026-09-03, single runs):
   as noise and the pass@3 cells and aggregate gaps as signal.
 - CI wiring is a follow-up: stabilize the suite first, then add a
   workflow (with pass@k, never single-run rows).
+- The workflow-authoring cases do not check the schedule's cron or the
+  event trigger's filters. A workflow can pass with a wrong schedule.
