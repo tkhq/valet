@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { canAccessSessionResources } from "../services/session-access.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, sessionThreads, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, childWatches, legacyAssistantRuntimes, legacyAssistantConversations, sessionThreads, teams, teamMembers } from "../schema/index.js";
 import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse, EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
@@ -337,6 +337,35 @@ describe("Ask Valet conversations", () => {
     expect(second.threadId).not.toBe(first.threadId);
     expect(second.sessionId).toBe(first.sessionId);
     expect(await assistantMemoryNamespace(api.providers.db, second.sessionId, "memory-team", "local-org")).toBe(first.sessionId);
+  });
+
+  it("reopens a conversation while its child work still runs", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const working = await open({ fresh: true });
+    await use(working);
+    await api.providers.db.insert(childWatches).values({ childSessionId: "child-running", queueItemId: "q-child", parentSessionId: working.sessionId,
+      parentThreadId: working.threadId, actorUserId: "local-user", orgId: "local-org", settled: false, createdAt: Date.now() });
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(working);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[working.threadId, true]]);
+    await api.providers.db.update(childWatches).set({ settled: true }).where(eq(childWatches.childSessionId, "child-running"));
+    expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(working.threadId);
+  });
+
+  it("leaves archived conversations out of the latest one and Recent", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const archived = await open({ fresh: true });
+    await use(archived);
+    await api.providers.db.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, archived.threadId));
+    const durable = await open();
+    expect(durable.threadId).not.toBe(archived.threadId);
+    expect((await list()).conversations).toEqual([]);
+    // An archived older conversation is not reopened either.
+    await use(durable);
+    await api.providers.db.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, durable.threadId));
+    expect([archived.threadId, durable.threadId]).not.toContain((await open()).threadId);
+    expect((await list()).conversations).toEqual([]);
   });
 
   it("starts New chat in a new thread even when the shown conversation is empty", async () => {

@@ -91,20 +91,25 @@ async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSes
 
 /** The viewer's Ask Valet conversations, the most recently used first. A
  * conversation starts with its first message; until then it is empty.
- * Activity recording is best effort, so any entry also marks it as started. */
+ * Activity recording is best effort, so any entry also marks it as started.
+ * An archived conversation is left out. A running turn, a pending approval, or
+ * child work that has not settled makes a conversation busy. */
 async function assistantConversations(c: Context<AppEnv>, scope: { sessionIds: string[]; anchors: Set<string> }): Promise<Array<WorkspaceConversationSummary & { started: boolean }>> {
   const { db, engineStore, engineHost } = c.var.providers;
   const threads = (await Promise.all(scope.sessionIds.map(id => engineStore.listThreads(id)))).flat()
     .filter(thread => isAssistantConversationOf(thread.key, c.var.user.id) && !scope.anchors.has(thread.id));
   if (!threads.length) return [];
-  const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt })
-    .from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
+  const meta = new Map((await db.select({ id: sessionThreads.id, title: sessionThreads.title, lastUserActivityAt: sessionThreads.lastUserActivityAt,
+    archivedAt: sessionThreads.archivedAt }).from(sessionThreads).where(inArray(sessionThreads.id, threads.map(thread => thread.id)))).map(row => [row.id, row]));
   const waiting = new Set((await Promise.all(scope.sessionIds.map(id => engineStore.listDecisionGates(id, undefined, "pending")))).flat().map(gate => gate.threadId));
-  return threads.map((thread) => {
+  const children = new Set((await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId }).from(childWatches)
+    .where(and(inArray(childWatches.parentSessionId, scope.sessionIds), eq(childWatches.settled, false)))).map(row => `${row.sessionId}\u0000${row.threadId}`));
+  return threads.filter(thread => meta.get(thread.id)?.archivedAt == null).map((thread) => {
     const row = meta.get(thread.id);
     return { sessionId: thread.sessionId, threadId: thread.id, ...(row?.title ? { title: row.title } : {}), createdAt: thread.createdAt,
       lastUserActivityAt: row?.lastUserActivityAt ?? thread.createdAt, started: row?.lastUserActivityAt != null || thread.activeLeafEntryId !== undefined,
-      busy: engineHost.liveSession(thread.sessionId)?.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id) };
+      busy: engineHost.liveSession(thread.sessionId)?.threadById(thread.id)?.runningItemId() !== undefined || waiting.has(thread.id)
+        || children.has(`${thread.sessionId}\u0000${thread.id}`) };
   }).sort((a, b) => b.lastUserActivityAt - a.lastUserActivityAt || b.createdAt - a.createdAt || a.threadId.localeCompare(b.threadId));
 }
 
@@ -137,8 +142,14 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   // person's private helper, which keeps their memory and working files. After
   // an upgrade, a team member's helper can be a shared session, so their fresh
   // conversations get a private per-person execution instead.
-  const key = request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`;
-  const target = request.fresh === true && shared(helper.sessionId)
+  const durableKey = `app-assistant:${c.var.user.id}`;
+  const durable = request.fresh === true ? null : await helper.session.threadByKey(durableKey);
+  // An archived older conversation stays archived: a new one takes its place.
+  const [durableRow] = durable ? await c.var.providers.db.select({ archivedAt: sessionThreads.archivedAt }).from(sessionThreads)
+    .where(eq(sessionThreads.id, durable.id)).limit(1) : [];
+  const newConversation = request.fresh === true || durableRow?.archivedAt != null;
+  const key = newConversation ? assistantConversationKey(c.var.user.id) : durableKey;
+  const target = newConversation && shared(helper.sessionId)
     ? await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}:private`)
     : helper;
   const data = await target.session.toData();
