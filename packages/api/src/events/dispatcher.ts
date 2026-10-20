@@ -79,6 +79,8 @@ export interface OrchestratorDeliverFn {
     inbound?: InboundChannelMessage;
     /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
     author?: PromptAuthor;
+    /** No person waits on the delivery (see `AssistantDeliveryArgs.unattended`). */
+    unattended?: boolean;
   }): Promise<void>;
 }
 
@@ -402,6 +404,9 @@ export class EventDispatcher {
           ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
           ...(inbound ? { inbound } : {}),
           ...(author ? { author } : {}),
+          // A mention or a PR comment is a person talking to Valet, who can
+          // answer a question there. Any other event has no one to answer.
+          ...(!origin && !prComment ? { unattended: true } : {}),
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The

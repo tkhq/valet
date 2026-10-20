@@ -242,7 +242,13 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     asserted against the event's org, mismatches drop-log
     (`event_target_mismatch`) and throw. A rule that carries prompt templates
     renders the body first (see "Orchestrator prompt templates" below); one
-    that carries none delivers the body described here unchanged.
+    that carries none delivers the body described here unchanged. A delivery
+    with no channel origin and no pull request comment has no person to
+    answer it, so it runs unattended: a question or an approval its turn asks
+    is refused at once, and the turn ends with what was missing. Without
+    this, one waiting question held back every later delivery on the same
+    thread. A mention or a pull request comment still lets the person
+    answer. An assistant-prompt schedule also runs unattended.
   - **signal** — insert into `workflow_signals` for runs waiting on
     `event:{key}` conditions. Dispatcher support exists but the CRUD validator
     rejects the target kind until a `waitForEvent`-style node parks on that

@@ -1,4 +1,4 @@
-import type { Presence } from "@valet/shared";
+import { UNATTENDED_WORKFLOW_KEY, type Presence } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
@@ -53,6 +53,12 @@ export interface AssistantDeliveryArgs {
   target?: { sessionId: string; threadId: string };
   signal: SignalContent;
   presence?: Presence;
+  /**
+   * No person waits on this delivery: an automated event or a schedule. Its
+   * turn refuses questions and approvals at once instead of parking the
+   * thread, so one stuck delivery cannot hold back the ones queued after it.
+   */
+  unattended?: boolean;
   dispatchId: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
@@ -200,9 +206,13 @@ async function deliverToAssistantThreadInner(
       LIMIT 1`) as { rows: Array<{ id: string }> };
     if (!result.rows.length) throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
   }
+  const metadata = {
+    ...(args.presence ? { presence: args.presence } : {}),
+    ...(args.unattended ? { [UNATTENDED_WORKFLOW_KEY]: true } : {}),
+  };
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
-    ...(args.presence ? { metadata: { presence: args.presence } } : {}),
+    ...(Object.keys(metadata).length ? { metadata } : {}),
     author: args.author ?? { id: args.actorUserId },
   });
   if (args.inbound) {

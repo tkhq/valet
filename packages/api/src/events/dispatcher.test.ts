@@ -397,6 +397,8 @@ describe("EventDispatcher", () => {
     expect(args.signal.body).toContain("who are you");
     expect(args.signal.body).not.toContain("{"); // no raw JSON dump
     expect(args.signal.attributes?.sender).toBe("U9");
+    // A person mentioned Valet and can answer a question in the thread.
+    expect(args.unattended).toBeUndefined();
 
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
@@ -440,6 +442,8 @@ describe("EventDispatcher", () => {
       expect(deliver.mock.calls[0][0].signal.body).toBe(
         "octocat opened acme/site (42): github.issues.opened",
       );
+      // No person waits on a GitHub event, so its turn cannot park on a question.
+      expect(deliver.mock.calls[0][0].unattended).toBe(true);
     });
 
     it("renders the system prompt above the body the rule would have delivered", async () => {

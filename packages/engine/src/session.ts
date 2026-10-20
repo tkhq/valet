@@ -150,7 +150,7 @@ export function formatPluginOutcome(
     case "denied-unattended":
       return {
         ok: false,
-        output: "This action needs approval, and an unattended workflow run cannot ask for it. Valet sent no approval request. To approve it on each run, move the action to a Tool step, which asks for approval on each run. To let it run without asking, use Review permissions on the workflow page, or ask a team admin to allow it by policy.",
+        output: "This action needs approval, and an unattended run (a workflow, an automated event, or a schedule) cannot ask for it. Valet sent no approval request. In a workflow, to approve it on each run, move the action to a Tool step, which asks for approval on each run; to let it run without asking, use Review permissions on the workflow page. For any run, a team admin can allow it by policy.",
       };
     case "denied-approval":
       return {
