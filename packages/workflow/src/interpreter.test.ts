@@ -1109,4 +1109,48 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     expect(park.outcome).toBe('completed');
     expect(engine.abort).toHaveBeenCalledWith('session-late', 'thread-late', 'queue-late');
   });
+
+  it('does not abort a submission that finished before a later drive reaches stop', async () => {
+    // The first drive parks on the agent and saves its wait on the run. In
+    // the second drive the agent completes and the stop ends the run. The
+    // saved wait is stale by then: aborting it reaches a settled submission,
+    // and an abort that fails must not keep a completed run from settling.
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const engine = {
+      ...makeFakeEngineDeps(),
+      abort: vi.fn(async () => {
+        throw new Error('abort reached a settled submission');
+      }),
+    };
+    const parking = parkingAgent('done');
+    const agent: NodeExecutor<WaitNode> = {
+      async execute(args): Promise<NodeExecuteResult> {
+        if (args.existingCheckpoint?.status !== 'intent') return parking.execute(args);
+        await args.store.completeCheckpoint(args.run.runId, args.node.id, args.iteration, args.attempt, {
+          runId: args.run.runId, nodeId: args.node.id, iteration: args.iteration, status: 'completed', attempt: args.attempt,
+          createdAt: args.clock(), result: { done: true }, effects: args.existingCheckpoint.effects,
+        });
+        return { status: 'completed', result: { done: true } };
+      },
+    };
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: agent };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'end', type: 'stop', outcome: 'success' },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 'agent', to: 'end' }],
+    };
+    await store.createRun('run-stop-after-done', runParams(), definition, 'v1');
+
+    const first = await driveUntilPark('run-stop-after-done', await claimAttempt(store, 'run-stop-after-done'), { store, engine, clock: clock.now, executors });
+    expect(first.status).toBe('parked');
+    const second = await driveUntilPark('run-stop-after-done', await claimAttempt(store, 'run-stop-after-done'), { store, engine, clock: clock.now, executors });
+
+    expect(second.outcome).toBe('completed');
+    expect(engine.abort).not.toHaveBeenCalled();
+  });
 });

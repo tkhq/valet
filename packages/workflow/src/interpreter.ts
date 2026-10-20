@@ -457,8 +457,13 @@ async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisD
     if (wait.kind === 'submission') waits.set(`submission:${wait.queueItemId}`, wait);
     else if (wait.kind === 'run') waits.set(`run:${wait.runId}`, wait);
   };
-  for (const wait of [...run.waitingOn, ...parkedThisDrive]) add(wait);
-  for (const cp of await store.getCheckpoints(run.runId)) {
+  const checkpoints = await store.getCheckpoints(run.runId);
+  // A saved wait is stale once its node has checkpoints and none is still
+  // `intent`: the work finished, and aborting it now could fail the settle.
+  const open = new Set(checkpoints.filter((cp) => cp.status === 'intent').map((cp) => cp.nodeId));
+  const seen = new Set(checkpoints.map((cp) => cp.nodeId));
+  for (const wait of [...run.waitingOn, ...parkedThisDrive]) if (open.has(wait.nodeId) || !seen.has(wait.nodeId)) add(wait);
+  for (const cp of checkpoints) {
     if (cp.status !== 'intent' || !cp.effects) continue;
     const { sessionId, receipt, childRunId } = cp.effects;
     if (typeof sessionId === 'string' && typeof receipt === 'object' && receipt !== null) {
@@ -475,6 +480,8 @@ async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisD
 
 /** Cancel propagation to a sub-workflow run: same durable signal + wake the host's own `terminate()` writes. */
 async function cancelChildRun(store: WorkflowStore, childRunId: string, clock: () => number): Promise<void> {
+  // An intent records the child id before the child run is created.
+  if ((await store.getRun(childRunId)) === null) return;
   await store.insertSignal({
     runId: childRunId,
     signalId: 'cancel',
