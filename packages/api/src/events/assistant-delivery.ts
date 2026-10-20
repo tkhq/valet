@@ -101,6 +101,9 @@ export class PinUnavailableError extends Error {
 export interface DeliveredThread {
   sessionId: string;
   threadId: string;
+  /** The queue item the delivery admitted, or recovered. The dispatcher
+   * records it, and the item's settled outcome is the turn's. */
+  queueItemId?: string;
   recovered?: true;
 }
 
@@ -282,7 +285,7 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   if (args.inbound) await recordChannelMessage(deps.db, {
     ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
   });
-  return { sessionId: prior.session_id, threadId: prior.thread_id, recovered: true };
+  return { sessionId: prior.session_id, threadId: prior.thread_id, queueItemId: prior.id, recovered: true };
 }
 
 /**
@@ -398,7 +401,7 @@ async function deliverToAssistantThreadInner(
     ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
-  await thread.submitPrompt(signal, {
+  const receipt = await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
     ...(Object.keys(metadata).length ? { metadata } : {}),
     author: args.author ?? { id: args.actorUserId },
@@ -408,5 +411,5 @@ async function deliverToAssistantThreadInner(
       ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
     });
   }
-  return { sessionId: session.id, threadId: thread.id };
+  return { sessionId: session.id, threadId: thread.id, queueItemId: receipt.queueItemId };
 }

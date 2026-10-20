@@ -5280,6 +5280,9 @@ export interface EventDeliveryWire {
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;
+  /** The assistant turn this dead delivery started failed after it began.
+   * It may have replied or acted, so a redelivery can repeat that. */
+  turnFailed?: true;
   /** On a `dead` delivery, the id of a later delivery for the same event and
    * the same subscription that was delivered, such as a redelivery. The dead
    * row is then settled and is not a fault. Only `GET /api/events/log` sets

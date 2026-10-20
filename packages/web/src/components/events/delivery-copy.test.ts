@@ -71,6 +71,14 @@ describe("deliveryStatusLine", () => {
     expect(dead).toBe("Gave up after 4 attempts. To send it again, press Redeliver.");
   });
 
+  // The turn started before it failed, so a plain "press Redeliver" could
+  // repeat a reply or an action it already made.
+  it("warns before a redelivery of a delivery whose assistant turn failed", () => {
+    const line = deliveryStatusLine(delivery({ status: "dead", attempts: 1, turnFailed: true }), NOW);
+    expect(line).toBe("The assistant's turn failed after it started, so it may have replied or acted already. Check its thread before you press Redeliver.");
+    expect(line).not.toContain("To send it again");
+  });
+
   it("describes a queued first attempt without a countdown", () => {
     expect(deliveryStatusLine(delivery({ status: "pending", nextAttemptAt: NOW }), NOW)).toBe(
       "Waiting for the first attempt.",

@@ -172,6 +172,19 @@ describe("EventDispatcher", () => {
     expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
   });
 
+
+  // The delivery already succeeded when the failed-turn check runs, so a
+  // failed check must not turn it into a retry (the sweep marks it later).
+  it("keeps a delivery delivered with its queue item when the failed-turn check fails", async () => {
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => ({ ...LANDED, queueItemId: "q-landed" }));
+    const markFailedTurns = vi.fn(async () => { throw new Error("connection lost"); });
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToAssistant: deliver, plugins: [githubPlugin], markFailedTurns });
+    await dispatcher.pollOnce();
+    expect(markFailedTurns).toHaveBeenCalledWith(tdb.appDb, { deliveryId });
+    expect(await getDelivery(deliveryId)).toMatchObject({ status: "delivered", attempts: 1, queueItemId: "q-landed" });
+  });
   it("a team subscription's matching subject filter suppresses delivery under ignoreIfMyTeamSubscribed (spec Part G)", async () => {
     const db = tdb.appDb;
     const subjects = ["github:acme", "github:acme/site", "github:acme/site#7"];

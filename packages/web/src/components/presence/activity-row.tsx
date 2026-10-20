@@ -131,7 +131,8 @@ export function ActivityRow({ item, workflowsByListener }: { item: EventLogItem;
         title={<ActivitySentence eventId={item.id} sentence={sentence} />}
         badge={<Badge variant={meta.badge}>{meta.label}</Badge>}
         time={item.at}
-        detail={[item.summary, item.actor].filter(Boolean).join(" · ")}
+        // A failed row names why, such as an assistant turn that failed.
+        detail={[item.summary, item.actor, item.status === "failed" ? item.detail : null].filter(Boolean).join(" · ")}
       />
       <ReceiptDisclosure eventId={item.id} deliveries={deliveries} />
     </div>
