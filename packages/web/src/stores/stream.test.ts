@@ -246,6 +246,27 @@ describe("stream store reducer", () => {
     expect(msg?.settledOutcome).toBe("superseded");
   });
 
+  it("does not badge a message that belongs to another submission", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const running = addUserMessage(SESSION, "running prompt", THREAD);
+    setMessageQueueItemId(SESSION, running, "q-first");
+
+    // A queued item this window never hydrated (queued before a reload) is canceled.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-second",
+      outcome: "aborted",
+    });
+
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === running);
+    expect(msg?.settledOutcome).toBeUndefined();
+  });
+
   it("marks a matching user message as failed on submission.settled outcome=failed", () => {
     const { ingest, addUserMessage } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "do another thing", THREAD);

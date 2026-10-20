@@ -1364,7 +1364,23 @@ export class Thread {
    * It never touches a running turn; that is Stop.
    */
   async cancelQueuedItem(queueItemId: string): Promise<boolean> {
-    const settled = await this.session.providers.store.settleUnclaimed(
+    // Join the overheard-digest chain: a digest admits first and merges its
+    // constituents after, so a cancel between the two would report success
+    // while the digest still carries the text. On the chain, either the
+    // cancel lands first and the digest is built without the item, or the
+    // merge lands first and the cancel loses.
+    const run = this.overheardCoalesceChain.then(() => this.settleCanceled(queueItemId));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    return run;
+  }
+
+  private async settleCanceled(queueItemId: string): Promise<boolean> {
+    const store = this.session.providers.store;
+    // Only a `queued` item. A `collecting` one belongs to the collect
+    // window, which merges it the same way; it never turns back to queued.
+    const item = await store.getQueueItem(this.session.id, queueItemId);
+    if (!item || item.threadId !== this.id || item.status !== "queued") return false;
+    const settled = await store.settleUnclaimed(
       this.session.id, this.id, queueItemId, { outcome: "aborted" }, { onlyIfUnsuperseded: true },
     );
     if (!settled) return false;

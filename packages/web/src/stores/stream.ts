@@ -653,10 +653,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
           (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
         );
         if (direct >= 0) return direct;
+        // A message that already carries another queue item id belongs to
+        // that submission, so it is never a candidate: canceling a queued
+        // item this window never hydrated must not badge the running prompt.
         const unsettled: number[] = [];
         for (let i = 0; i < slice.messages.length; i++) {
           const m = slice.messages[i];
-          if (m.threadId === ev.threadId && m.role === "user" && m.settledOutcome === undefined) {
+          if (m.threadId === ev.threadId && m.role === "user" && m.settledOutcome === undefined && !m.queueItemId) {
             unsettled.push(i);
           }
         }
