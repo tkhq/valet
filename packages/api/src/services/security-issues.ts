@@ -209,6 +209,12 @@ export async function createIssueViaProvider(
     // params (team is required on create).
     action: "save_issue",
     params: { title: req.title, description: req.body, team: req.teamId },
+    // The issue posts as the person who clicks File, so it reads their own
+    // Linear connection only. Without the pin, a person with no connection
+    // falls back to the `linear:app` token and the issue posts as the Valet
+    // app into any team the app can see. With the pin, the read comes back
+    // empty and the person gets the corrective copy instead.
+    credential: "user",
     invocationId: mintInvocationId("linear"),
   });
   return linearIssueFromResult(data);

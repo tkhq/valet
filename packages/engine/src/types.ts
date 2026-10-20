@@ -866,12 +866,34 @@ export interface ToolContext {
 
 // ── Credentials ────────────────────────────────────────────────────
 
+/**
+ * Whose account a resolved credential is. A plugin reads it to name the
+ * right fix when the provider rejects the token: only the account's holder
+ * can reconnect it.
+ *
+ * - `personal`: the acting person's own connection.
+ * - `team`: the team's own connection.
+ * - `shared`: another member's connection, shared with the team.
+ * - `org`: an organization connection that an admin manages.
+ * - `app`: the native integration's app identity (the Linear app).
+ * - `vault`: an item that Valet found in 1Password by service name.
+ */
+export type CredentialSource =
+  | { kind: "personal" }
+  | { kind: "team" }
+  | { kind: "shared"; memberId: string; memberName?: string }
+  | { kind: "org" }
+  | { kind: "app" }
+  | { kind: "vault" };
+
 export interface Credential {
   accessToken: string;
   refreshToken?: string;
   expiresAt?: number;
   scopes?: string[];
   metadata?: Record<string, unknown>;
+  /** Whose account this is. Absent when the host did not say. */
+  source?: CredentialSource;
 }
 
 export interface CredentialProvider {
@@ -881,13 +903,21 @@ export interface CredentialProvider {
    * the plugin catalog when it builds PluginActionContext); first-class
    * tools should always pass it explicitly.
    */
-  get(service?: string): Promise<Credential | null>;
+  get(service?: string, read?: CredentialRead): Promise<Credential | null>;
   request(service: string, reason: string): Promise<Credential>;
 }
 
 export interface CredentialOwner {
   type: "user" | "team" | "org" | "session";
   id: string;
+}
+
+/** What one credential read is for. */
+export interface CredentialRead {
+  /** The read is an action's own, made while it executes. Tool discovery
+   * and the `list_tools` probe leave it unset. A host counts per-action
+   * outcomes (such as a fallback to the app token) on these reads only. */
+  forAction?: boolean;
 }
 
 /** Who a credential read acts for: the turn's author and thread. A team host
@@ -901,6 +931,8 @@ export interface CredentialUse {
   externalSender?: boolean;
   /** The running submission. The host reads its metadata. */
   queueItemId?: string;
+  /** Set for one read: the read is an action's own (`CredentialRead`). */
+  forAction?: boolean;
 }
 
 export interface StoredCredential {
@@ -912,6 +944,10 @@ export interface StoredCredential {
   scopes?: string[];
   metadata?: Record<string, unknown>;
 }
+
+/** A credential a host resolver returns: the stored row plus whose account
+ * it is. `source` is never stored; it describes this one read. */
+export type ResolvedCredential = StoredCredential & { source?: CredentialSource };
 
 /**
  * The one secret a credential row carries, whichever slot holds it.
@@ -2506,7 +2542,7 @@ export interface CreateSessionOptions {
    * service to the raw store itself), so the engine never re-reads the store
    * behind a resolver it was given.
    */
-  credentialResolver?: (owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>;
+  credentialResolver?: (owner: CredentialOwner, service: string, use: CredentialUse) => Promise<ResolvedCredential | null>;
   /** Resolve the assistant identity used by provider-specific outbound actions. */
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */

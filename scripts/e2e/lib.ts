@@ -105,6 +105,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
+  "src/integration/native-credential-acceptance.test.ts",
   "src/integration/usage-summary.test.ts",
   "src/integration/plugin-entitlements.test.ts",
   "src/integration/org-mcp-servers.test.ts",

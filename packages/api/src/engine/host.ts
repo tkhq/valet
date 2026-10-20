@@ -35,14 +35,14 @@ import {
   type SessionStore,
   type ServiceAvailability,
   type Thread,
-  type StoredCredential,
+  type ResolvedCredential,
   type ResolvedModel,
   type PolicyResolver,
   type PluginStore,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
 import { canBorrowCredential } from "../services/credential-borrow.js";
-import { membersSharing } from "../services/credential-shares.js";
+import { membersSharing, withSharerName } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
@@ -93,11 +93,17 @@ import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
+  isAppCredentialRowService,
+  noteAppCredentialFallback,
+  resolveOrgNativeAppRead,
+  rowBackedAppServiceFor,
   orgFallbackPolicy,
+  resolveAppCredentialRead,
   resolveOrgCredentialRead,
-  resolveTeamCredentialRead,
-  resolveUserCredentialRead,
+  readTeamCredential,
+  readUserCredential,
   onePasswordScopesFor,
+  teamFallbackReason,
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
@@ -1733,6 +1739,13 @@ export class EngineHost {
    *    result, hint text intact.
    *    Synthesizes a `StoredCredential` the engine's `credentialProvider`
    *    maps to `{ accessToken }`.
+   *  - `linear:app` (an app credential service an org row answers,
+   *    `isAppCredentialRowService`) → `resolveAppCredentialRead` for every
+   *    owner: the org `linear` app row as a bare `{ accessToken }`, or `null`
+   *    when no native plugin names the service. This is the app step of the
+   *    native credential policy's Part B order
+   *    (docs/specs/2026-10-15-native-integration-credential-policy-design.md);
+   *    `linear` itself keeps the personal and delegated order below.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves, or when `db`/
@@ -1894,7 +1907,7 @@ export class EngineHost {
     actingMember: boolean,
     /** The member a turn with no author acts for: a workflow run's actor. */
     runActor?: string,
-  ): ((owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>) | undefined {
+  ): ((owner: CredentialOwner, service: string, use: CredentialUse) => Promise<ResolvedCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
@@ -1922,6 +1935,17 @@ export class EngineHost {
       }
       const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
       const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
+      if (isAppCredentialRowService(service)) {
+        // A native integration's app identity (`linear:app`), the last step
+        // of the Part B order for every owner. The org owns it, so the
+        // answer does not depend on who reads. `null` unless a native plugin
+        // names the service (INV-P2); a bare token, never the row (INV-P1).
+        // The app tier is for members only: a channel sender with no Valet
+        // account never acts as the app (native credential policy, Part B).
+        if (use.externalSender) return null;
+        const app = await resolveAppCredentialRead({ credentials, onePassword }, { orgId }, service, this.opts.plugins);
+        return app ? { ...app, source: { kind: "app" } } : null;
+      }
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -2021,16 +2045,38 @@ export class EngineHost {
       // is the identity link, which the private-channel check needs — and
       // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      // An external sender never reaches the app tier, so its reads neither
+      // fall through to the app token nor count as a fallback.
+      const appService = use.externalSender ? undefined : rowBackedAppServiceFor(this.opts.plugins, service);
+      // An action whose read ends at the app token is counted
+      // (`valet_credentials_app_fallback_total`), so a broken delegated
+      // credential stays visible while the app keeps the action working.
+      // Only the action's own read counts: discovery and the `list_tools`
+      // probe read the same credential, and would count one action thrice.
+      const countsFallback = appService !== undefined && use.forAction === true;
+      const readDeps = { credentials, onePassword };
       if (owner.type === "team") {
+        let deadDelegated = false;
         // The acting member's own share first. Another member's share is
         // used once that member approved, including authenticated tool discovery
         // (`services/credential-borrow.ts`).
         const actor = use.externalSender ? undefined : use.actorId ?? runActor;
-        return resolveTeamCredentialRead(
+        const { credential: fromTeam, source, approvalFrom } = await readTeamCredential(
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
-            mayBorrow: async (memberId) => !!db && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service, memberId }),
+            // A sender with no Valet account never rides a teammate's approval.
+            mayBorrow: async (memberId) => !use.externalSender && !!db && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service, memberId }),
+            // A native integration's app token is the last tier (Part B), so
+            // a dead team connection or broken share gives way to it.
+            ...(appService
+              ? {
+                  laterTier: async () => {
+                    deadDelegated = (await resolveAppCredentialRead(readDeps, { orgId }, appService, this.opts.plugins)) !== null;
+                    return deadDelegated;
+                  },
+                }
+              : {}),
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read
@@ -2038,22 +2084,34 @@ export class EngineHost {
           // refusing the org credential row (decision 5).
           fallback,
         );
+        if (fromTeam === null && countsFallback) {
+          await noteAppCredentialFallback(readDeps, { orgId }, service, teamFallbackReason(approvalFrom, deadDelegated), this.opts.plugins);
+        }
+        // The source names who must repair a rejected token: the team, or
+        // the member whose shared account it is.
+        return fromTeam ? { ...fromTeam, source: db ? await withSharerName(db, source) : source } : null;
       }
       if (owner.type === "org") {
-        return resolveOrgCredentialRead(
+        const app = use.externalSender ? null : await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins, use.forAction === true);
+        if (app) return { ...app, source: { kind: "app" } };
+        const fromOrg = await resolveOrgCredentialRead(
           { credentials, onePassword },
           { orgId, userId, scopes },
           service,
         );
+        return fromOrg ? { ...fromOrg, source: { kind: "org" } } : null;
       }
-      const stored = await resolveUserCredentialRead(
+      const { credential: stored, source } = await readUserCredential(
         { credentials, onePassword },
         { orgId, userId: owner.id, scopes },
         service,
         fallback,
       );
-      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, owner.id, stored);
-      return stored;
+      if (stored === null && countsFallback) await noteAppCredentialFallback(readDeps, { orgId }, service, "no_personal", this.opts.plugins);
+      if (!stored) return null;
+      const resolved: ResolvedCredential = { ...stored, ...(source ? { source } : {}) };
+      if (service === "slack" && db) return withSlackOwnerMetadata(db, owner.id, resolved);
+      return resolved;
     };
   }
 

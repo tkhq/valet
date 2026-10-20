@@ -653,3 +653,40 @@ describe("validateValetPlugin identityLink", () => {
     }
   });
 });
+
+// Native integration credential policy, Part A
+// (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+describe("validateValetPlugin native classification", () => {
+  it("accepts a native plugin that names its app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "demo:app" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts native: false with no app credential service", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), native: false }).ok).toBe(true);
+  });
+
+  it("rejects a non-boolean native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: "yes" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("native");
+  });
+
+  it("rejects a native plugin with no app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an app credential service on a plugin that is not native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), appCredentialService: "demo:app" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an empty app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+});

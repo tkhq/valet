@@ -15,7 +15,8 @@
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { credentialShares } from "../schema/index.js";
+import type { CredentialSource } from "@valet/engine";
+import { credentialShares, users } from "../schema/index.js";
 
 export interface CredentialShare {
   teamId: string;
@@ -33,6 +34,15 @@ export async function membersSharing(db: AppQueryable, teamId: string, service: 
       sql`EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = ${credentialShares.teamId} AND m.user_id = ${credentialShares.userId})`))
     .orderBy(asc(credentialShares.createdAt), asc(credentialShares.userId));
   return rows.map((row) => row.userId);
+}
+
+/** `source` with the sharing member's display name added, so a plugin can
+ * name who must reconnect a rejected shared account. Other sources pass
+ * through unchanged. */
+export async function withSharerName(db: AppQueryable, source: CredentialSource | undefined): Promise<CredentialSource | undefined> {
+  if (source?.kind !== "shared" || source.memberName) return source;
+  const [member] = await db.select({ name: users.name }).from(users).where(eq(users.id, source.memberId)).limit(1);
+  return member?.name ? { ...source, memberName: member.name } : source;
 }
 
 /** Every share a team holds, every service, oldest first. */

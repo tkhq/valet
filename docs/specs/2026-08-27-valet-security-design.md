@@ -562,6 +562,8 @@ The file-issue dialog offers the providers whose integrations are connected; a m
 - **GitHub** — `github.create_issue` (plugin-github, `issues:write`), default target the engagement's repo, override allowed in the dialog.
 - **Linear** — the Linear MCP integration (plugin-linear); the dialog asks for the team on first use and remembers it per engagement.
 
+The Linear filing pins `credential: "user"` on its invocation. The issue posts as the person who clicks File, so the read never falls back to the org's `linear:app` token (native credential policy, `2026-10-15-native-integration-credential-policy-design.md`). If that person has no Linear connection, the filing fails with "Connect the Linear integration in Settings." and no issue is created.
+
 The issue body is generated from the finding alone: severity, title, evidence, blob permalink, and a permalink back to the finding in Valet — never state docs or other findings. On success the server writes a `security_finding_links` row (the per-provider unique index makes filing idempotent) and the list shows the link chip. Bulk filing creates one digest issue from the current filter (a checklist of findings with permalinks), not N issues — a tracker flooded with forty auto-filed tickets is worse than no integration.
 
 Issue filing and export are human-driven REST actions only. No agent tool files issues or exports findings (Decision 10): content derived from hostile code leaves Valet only on a human's click.

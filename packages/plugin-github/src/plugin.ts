@@ -13,6 +13,9 @@ const plugin: ValetPlugin = {
   name: "github",
   version: "0.1.0",
   description: "GitHub integration for PRs, issues, repos, and webhooks",
+  // The app identity is the GitHub App installation token.
+  native: true,
+  appCredentialService: "github:installation",
   actions: [githubPlugin],
   triggers: githubTriggerDefs,
   filterOptionResolvers: githubFilterOptionResolvers,

@@ -129,6 +129,15 @@ export interface ActionPlugin {
    */
   requiresCredential?: boolean;
   /**
+   * The credential service that answers with the native integration's app
+   * identity (for example `linear:app`). When set, the `list_tools`
+   * credential probe tries this service after `credentialService` and
+   * counts the service as connected when either answers
+   * (docs/specs/2026-10-15-native-integration-credential-policy-design.md
+   * Part C).
+   */
+  appCredentialService?: string;
+  /**
    * Default approval policy. Unset = derived from each action's riskLevel:
    * low/medium → allow; high/critical → require_approval.
    */
@@ -1325,6 +1334,9 @@ function makeListTool(
         let probeReason: string | undefined;
         try {
           cred = await ctx.credentials.get(credService);
+          if (!cred && plugin.appCredentialService) {
+            cred = await ctx.credentials.get(plugin.appCredentialService);
+          }
         } catch (err) {
           // A resolver may throw instead of returning null (e.g. a
           // GitHubAuthError when the org has no installation). Treat that
@@ -1788,7 +1800,7 @@ async function executeAction(
     actionId: entry.action.id,
     service: entry.service,
     summary,
-    credentials: scopedCredentialProvider(ctx, credentialService),
+    credentials: scopedCredentialProvider(ctx, credentialService, true),
     ...(pluginStore ? { pluginStore } : {}),
   };
 
@@ -1896,12 +1908,18 @@ function qualifiedId(entry: CatalogEntry): string {
  * plugin's `credentialService` setting rather than the bare
  * action.service.
  */
+/** `ctx.credentials` with the plugin's own service as the default. Set
+ * `forAction` for the provider an action executes with, so the host can
+ * tell its reads from discovery and probes (`CredentialRead`). */
 function scopedCredentialProvider(
   ctx: ToolContext,
   defaultService: string,
+  forAction = false,
 ): ToolContext["credentials"] {
   return {
-    get: (service?: string) => ctx.credentials.get(service ?? defaultService),
+    get: (service?: string) => forAction
+      ? ctx.credentials.get(service ?? defaultService, { forAction: true })
+      : ctx.credentials.get(service ?? defaultService),
     request: (service: string, reason: string) => ctx.credentials.request(service, reason),
   };
 }

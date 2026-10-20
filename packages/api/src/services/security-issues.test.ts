@@ -5,8 +5,12 @@
  * invoker seam is covered by action-invoker.test.ts; here it is a counter.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { Type } from "typebox";
+import type { ActionPlugin, PluginAction, StoredCredential, ValetPlugin } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
-import type { ActionInvocationContext } from "../plugins/action-invoker.js";
+import { buildActionInvoker, type ActionInvocationContext } from "../plugins/action-invoker.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
@@ -114,6 +118,62 @@ describe("security issue filing", () => {
 
   beforeEach(async () => {
     ({ appDb: db } = await freshTestPgDb());
+  });
+
+  it("linear refuses a person with no connection, even when the org app is connected", async () => {
+    const { appDb, pgdb } = await freshTestPgDb();
+    const credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    const appRow: StoredCredential = { type: "oauth2", accessToken: "lin-app-token", metadata: { grant: "client_credentials" } };
+    await credentials.save({ type: "org", id: ACTOR.orgId }, "linear", appRow);
+    const saved: string[] = [];
+    const saveIssue: PluginAction = {
+      id: "linear.save_issue",
+      name: "save_issue",
+      description: "save_issue",
+      riskLevel: "low",
+      parameters: Type.Object({}, { additionalProperties: true }),
+      execute: async () => {
+        saved.push("save_issue");
+        return { success: true, data: JSON.stringify({ identifier: "SEC-1", url: "https://linear.app/acme/issue/SEC-1/x" }) };
+      },
+    };
+    // Reads the way `mcpActionPlugin` does with `appCredentialService`: the
+    // person's own credential, then the app credential, then it throws.
+    const actionPlugin: ActionPlugin = {
+      service: "linear",
+      actions: [],
+      resolveActions: async ({ credentials: provider }) => {
+        const cred = (await provider.get()) ?? (await provider.get("linear:app"));
+        if (!cred) throw new Error("linear: no credential connected");
+        return [saveIssue];
+      },
+    };
+    const plugin: ValetPlugin = {
+      name: "linear",
+      version: "0.0.1",
+      native: true,
+      appCredentialService: "linear:app",
+      actions: [actionPlugin],
+      credentials: [{ type: "oauth2", configKeys: ["accessToken"] }],
+    };
+    const invokeAction = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: new Map([["linear", { plugin, actionPlugin }]]),
+      plugins: [plugin],
+    });
+
+    await expect(
+      fileFindingIssue({ db: appDb, webBaseUrl: WEB, invokeAction }, {
+        engagement: ENGAGEMENT,
+        finding: finding({ id: "fnd_1" }),
+        provider: "linear",
+        actor: ACTOR,
+        teamId: "team_sec",
+      }),
+    ).rejects.toThrow(new MissingIntegrationError("Connect the Linear integration in Settings."));
+    expect(saved).toEqual([]);
+    expect(await appDb.select().from(securityFindingLinks)).toHaveLength(0);
   });
 
   it("returns the existing link on a repeat, without invoking the provider", async () => {
@@ -240,6 +300,8 @@ describe("security issue filing", () => {
     expect(req.action).toBe("save_issue");
     expect(req.params.team).toBe("team_sec");
     expect(req.params.title).toBe("[high] IDOR on sessions");
+    // The issue posts as the person who clicked File, never as the app.
+    expect(req.credential).toBe("user");
   });
 
   it("linear prose result: scrapes the issue URL and identifier", async () => {

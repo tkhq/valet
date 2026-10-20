@@ -61,7 +61,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { resolveOrgChannelCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { isOrgAdmin } from "../services/org.js";
 import { answersGate, canResolveSessionGate, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -95,7 +95,7 @@ export interface ChannelHostDeps {
   now?: () => number;
   /**
    * 1Password reference-credential resolver (owner-precedence contract,
-   * Task 6). Threaded into `resolveOrgCredentialRead` so an org-owned bot
+   * Task 6). Threaded into `resolveOrgChannelCredentialRead` so an org-owned bot
    * token row carrying `metadata.onepassword` resolves through the org's
    * shared 1Password token instead of surfacing the raw reference string.
    * Optional — omit for deployments/tests with no 1Password service wired;
@@ -531,7 +531,7 @@ export class ChannelHost {
         // boot — log it and skip this transport, same as "no bot token".
         let credential: StoredCredential | null;
         try {
-          credential = await resolveOrgCredentialRead(
+          credential = await resolveOrgChannelCredentialRead(
             { credentials: this.deps.engineCredentials, onePassword: this.deps.onePassword },
             { orgId, scopes: ["org"] },
             factory.channelType,
