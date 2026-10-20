@@ -1066,3 +1066,9 @@ export const builtinTools: ToolDef[] = [
   childSendTool,
   childStatusTool,
 ];
+
+/** The tools that need a session's wakeup seam (`CreateSessionOptions.wakeups`).
+ * A session without the seam leaves them out (`session.ts`). */
+export const WAKEUP_TOOL_NAMES: ReadonlySet<string> = new Set(
+  [watchTool, wakeAtTool, holdSandboxTool, processReadTool, wakeupListTool, wakeupCancelTool].map((tool) => tool.name),
+);

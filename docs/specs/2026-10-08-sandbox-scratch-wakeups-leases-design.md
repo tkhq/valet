@@ -1514,3 +1514,5 @@ with an earlier entry, the entry below wins.
   reads the same session query as the status line, so a row never sends
   its own request. A `queue.state` frame now also refreshes the query, so
   work that a turn starts or ends shows without the one-minute poll.
+
+- **A session without a wakeup seam offers no wakeup tools (2026-10-19).** `Session` leaves `watch`, `wake_at`, `hold_sandbox`, `process_read`, `wakeup_list`, and `wakeup_cancel` out of its builtin tools when `CreateSessionOptions.wakeups` is absent (a bare engine, a test). Each would only refuse, and six schemas widen every prompt. The api gives every session a seam.
