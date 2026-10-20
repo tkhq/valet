@@ -90,7 +90,10 @@ export type SentenceService = "slack" | "github" | "linear";
  */
 export type SentencePart =
   | { kind: "text"; text: string }
-  | { kind: "place"; text: string; service: SentenceService; subject: string }
+  // `page: false` renders the token without a link: Valet is not in the
+  // place, so its page answers 404, and Activity holds no event for it
+  // either, since an event no line matched leaves only a receipt.
+  | { kind: "place"; text: string; service: SentenceService; subject: string; page?: false }
   | { kind: "thread"; text: string; sessionId?: string; threadId?: string; archived?: true }
   | { kind: "workflow"; text: string; id: string }
   | { kind: "person"; text: string };
@@ -1313,15 +1316,21 @@ export interface LineEntryNames {
   /** True when the line's stored action is Reply (see `replies`): a
    * delivered entry reads `replied in`, else `worked in`. */
   replies?: boolean;
+  /** True when the place key has a page: it is on the places list. An entry
+   * whose place has none renders it as a token with no link. Absent, every
+   * place links its page. */
+  placeHasPage?: (key: string) => boolean;
 }
 
-/** An entry's place as a token, or as words when its key names no service. */
-function entryPlaceParts(entry: Pick<LineActivityEntryWire, "place" | "placeLabel">): SentencePart[] | null {
+/** An entry's place as a token, or as words when its key names no service.
+ * A place with no page (`names.placeHasPage`) is a token with no link. */
+function entryPlaceParts(entry: Pick<LineActivityEntryWire, "place" | "placeLabel">, names: LineEntryNames): SentencePart[] | null {
   const label = entry.placeLabel ?? entry.place;
   if (!hasText(label)) return null;
   const service = entry.place === null ? null : placeKeyService(entry.place);
   if (service === null || entry.place === null) return [text(label)];
-  return [{ kind: "place", text: label, service, subject: entry.place }];
+  const page = names.placeHasPage !== undefined && !names.placeHasPage(entry.place) ? { page: false as const } : {};
+  return [{ kind: "place", text: label, service, subject: entry.place, ...page }];
 }
 
 /** A thread an entry names, as a token. An archived thread keeps its name and drops its id. */
@@ -1421,7 +1430,7 @@ function skipInWords(entry: LineActivityEntryWire): string {
  * `on` for GitHub, `in` for Slack and Linear.
  */
 export function lineEntryParts(entry: LineActivityEntryWire, names: LineEntryNames = {}): SentencePart[] {
-  const place = entryPlaceParts(entry);
+  const place = entryPlaceParts(entry, names);
   const preposition = entry.place !== null && placeKeyService(entry.place) === "github" ? "on" : "in";
   const lead = place === null ? [text(eventInWords(entry.eventKey))] : [text(`${eventInWords(entry.eventKey)} ${preposition} `), ...place];
   const outcome = entry.kind === "skipped" ? [text(`skipped, ${skipInWords(entry)}`)] : actedOutcomeParts(entry, names);
