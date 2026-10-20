@@ -67,6 +67,7 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
       ...(entry.scopes ? { scopes: entry.scopes } : {}),
       configKeys: ["accessToken"],
       oauth: { mode: "mcp", serverUrl: entry.url },
+      ...(entry.oauthOnly ? { oauthOnly: true as const } : {}),
     });
   } else if (entry.auth === "api_key") {
     credentials.push({
@@ -97,6 +98,9 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
           // scope is fixed by editing the entry.
           scopesInConfig: entry.auth === "oauth",
           description: entry.description,
+          // Rejection messages name the server the way the connect UI does.
+          displayName,
+          oauthOnly: entry.oauthOnly,
         }),
         // Approval cards name the account by this, as the connect UI does.
         displayName,

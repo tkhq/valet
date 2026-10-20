@@ -78,6 +78,10 @@ export interface McpServerDecl {
    * requests only these; registering a client logs each scope the server
    * advertises that is not listed (integration-oauth design). */
   scopes?: string[];
+  /** The server accepts only tokens from its own OAuth sign-in, so the
+   * connect UI offers no token entry. Only valid when auth is "oauth".
+   * Pylon's MCP server is one. */
+  oauthOnly?: boolean;
   /** Connect-UI copy for api_key entry, e.g. "Acme API key". */
   connectLabel?: string;
   description?: string;
@@ -676,6 +680,8 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
           }
           return scope;
         });
+      } else if (key === "oauthOnly") {
+        entry.oauthOnly = assertBoolean(v, `mcpServers[${i}].oauthOnly`, path);
       } else if (key === "connectLabel") {
         entry.connectLabel = assertString(v, `mcpServers[${i}].connectLabel`, path);
       } else if (key === "description") {
@@ -721,6 +727,11 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
     if (entry.scopes !== undefined && entry.auth !== "oauth") {
       err(
         `${path}: mcpServers[${i}].scopes is only valid when auth is "oauth". Remove it, or set auth: oauth.`,
+      );
+    }
+    if (entry.oauthOnly !== undefined && entry.auth !== "oauth") {
+      err(
+        `${path}: mcpServers[${i}].oauthOnly is only valid when auth is "oauth". Remove it, or set auth: oauth.`,
       );
     }
     // authQueryParam rewrites how a credential is SENT, so it needs a

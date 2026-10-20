@@ -8,13 +8,14 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
 import { listTeamShares } from "../services/credential-shares.js";
 import { createContentSource } from "../services/content-sources.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import { addMember, createTeam, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { startSlackFixture, type SlackFixture } from "../test-helpers/slack-fixture.js";
-import type { ListCredentialsResponse } from "../wire/types.js";
+import type { ListCredentialsResponse, ListPluginsResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -487,6 +488,42 @@ describe("PUT /api/credentials/:service — unconfigured services", () => {
     expect(((await provided.json()) as { error: string }).error).toBe(
       "GitHub is provided by your organization and needs no personal token. An admin manages it in Settings → Organization.",
     );
+  });
+});
+
+describe("PUT /api/credentials/:service — OAuth-only services", () => {
+  // Dev's Pylon entry. Pylon's MCP server accepts only tokens from its own
+  // OAuth sign-in, so a pasted Pylon API token failed every run.
+  const pylon = (oauthOnly: boolean) =>
+    configMcpPlugins([{ name: "pylon", url: "https://mcp.usepylon.com", auth: "oauth", oauthOnly }], {});
+
+  async function putPylonToken(baseUrl: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/credentials/pylon`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "pylon-api-token" }),
+    });
+  }
+
+  it("refuses a pasted token, names the sign-in fix, stores nothing, and tells the connect UI", async () => {
+    api = await bootTestApi({ plugins: pylon(true) });
+
+    const res = await putPylonToken(api.baseUrl);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "Pylon accepts only its own sign-in, not a pasted token. To connect, select Connect for Pylon on the Integrations page, then select Continue.",
+    );
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "pylon")).toBeNull();
+
+    const plugins = (await (await fetch(`${api.baseUrl}/api/plugins`)).json()) as ListPluginsResponse;
+    const service = plugins.plugins.flatMap((plugin) => plugin.services).find((svc) => svc.service === "pylon");
+    expect(service?.oauthOnly).toBe(true);
+  });
+
+  it("still stores a pasted token for an OAuth service that does not declare oauthOnly", async () => {
+    api = await bootTestApi({ plugins: pylon(false) });
+
+    expect((await putPylonToken(api.baseUrl)).status).toBe(200);
   });
 });
 

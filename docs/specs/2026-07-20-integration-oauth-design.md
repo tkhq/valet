@@ -149,7 +149,7 @@ A `RefreshingCredentialStore` decorator in `packages/api/src/plugins/` wraps the
 ## Web UI (`packages/web`)
 
 - `integration-row.tsx`: **Connect** is a button that opens the pre-connect screen. It is no longer an anchor to `/api/credentials/:service/connect` — a bare anchor left no moment between the click and the redirect in which to tell the user what the credential gives away. The tile runs no connect path itself.
-- `connect-dialog.tsx`: the pre-connect screen. A split pane — the decision on the left, the tools this credential unlocks on the right — that resumes one of three paths behind **Continue**: the org's GitHub App OAuth, the generic `/api/credentials/:service/connect` redirect, or token entry in a second step. Manual token entry stays available on OAuth services, behind the same disclosure rather than beside it.
+- `connect-dialog.tsx`: the pre-connect screen. A split pane — the decision on the left, the tools this credential unlocks on the right — that resumes one of three paths behind **Continue**: the org's GitHub App OAuth, the generic `/api/credentials/:service/connect` redirect, or token entry in a second step. Manual token entry stays available on OAuth services, behind the same disclosure rather than beside it. A service whose declaration sets `oauthOnly` gets no token entry (see "OAuth-only services" below).
 - `connect-disclosure.ts`: derives every sentence on that screen from `PluginServiceSummary`. It has an explicit "cannot say" arm, and the screen renders it instead of filler. A service whose declared credential key no `ActionPlugin` reads (the google-calendar skew, below) resolves to that arm, and **Continue** is disabled.
 - `integrations.tsx`: read `?connected=` / `?error=` search params on mount, surface a success/error toast, and strip the params from the URL.
 - Disconnect is unchanged (`DELETE /api/credentials/:service`).
@@ -171,6 +171,7 @@ To make the choice real, both of these must land: add `"team"` to `CredentialOwn
 | Provider consent denied | redirect `/integrations?error=<provider code>` |
 | Token exchange failure | redirect `/integrations?error=oauth_failed`, server log |
 | Refresh failure at use time | stored credential returned; `metadata.refreshFailedAt` and the masked `metadata.refreshError` stamped |
+| Pasted token for an `oauthOnly` service | 400 JSON on `PUT /api/credentials/:service`; nothing stored |
 
 ## Testing
 
@@ -237,3 +238,17 @@ The in-memory store and each credential decorator implement the same contract. N
 
 Regression tests pause between the final credential read and the update. Both successful refreshes and refused refreshes preserve reconnects and deletions.
 Real Postgres tests also hold a competing row mutation open until the conditional update blocks, then commit it.
+
+
+### OAuth-only services (2026-10-20)
+
+"Enter a token instead" sends a pasted token to the provider unchanged. Some MCP servers accept a provider token, such as a Linear API key. Others accept only tokens from their own authorization server. Pylon's support article ([Connecting to the Pylon MCP Server](https://support.usepylon.com/articles/2407390554-connecting-to-the-pylon-mcp-server), "Authentication Flow") says the MCP server supports only OAuth, and that API keys work only on the REST API. On dev, a Pylon API token saved, and each run then failed at tool discovery with "pylon rejected your connected account. Reconnect pylon on the Integrations page". The reconnect offered the same token entry again.
+
+`CredentialDeclaration.oauthOnly: true` marks such a provider. It is valid only with `oauth`, and `validateValetPlugin` rejects it elsewhere. A config-declared MCP server sets it with `oauthOnly: true` on an `auth: oauth` entry (instance config design).
+
+- `/api/plugins` carries `oauthOnly` on the service summary. The connect dialog then shows no "Enter a token instead".
+- `PUT /api/credentials/:service` refuses the save for every scope, and for a 1Password reference too, with 400: "Pylon accepts only its own sign-in, not a pasted token. To connect, select Connect for Pylon on the Integrations page, then select Continue." The sign-in callback stores its token through `routes/credential-connect.ts`, so sign-in is unchanged.
+- `mcpActionPlugin` takes `oauthOnly` too. A rejected personal account then reads: "Pylon rejected your connected account. Disconnect Pylon on the Integrations page, then select Connect to sign in with Pylon." A row that a pasted token created before this change gets this message. Other account sources keep their reconnect messages, because a reconnect for this service goes through sign-in.
+- Config-declared MCP plugins pass their display name to `mcpActionPlugin`, so the message names "Pylon", not "pylon".
+
+The token form in `connect-dialog.tsx` shows a refused save's sentence through `errorText`. It showed `Error.message` before, which is only the request line ("PUT /credentials/gmail → 400").

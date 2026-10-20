@@ -241,8 +241,9 @@ function DecisionPane({
         <Button size="lg" className="w-full" onClick={() => void onContinue()} disabled={blocked || connectGithub.isPending}>
           {connectGithub.isPending ? "Opening GitHub…" : service.connected ? "Reconnect" : "Continue"}
         </Button>
-        {/* The escape hatch still sits behind the disclosure, never beside it. */}
-        {path !== "manual" && !blocked && (
+        {/* The escape hatch still sits behind the disclosure, never beside it.
+            An `oauthOnly` provider refuses every pasted token, so it gets none. */}
+        {path !== "manual" && !blocked && !service.oauthOnly && (
           <button
             type="button"
             className="text-xs text-muted underline-offset-2 hover:underline"
@@ -529,9 +530,11 @@ function TokenForm({
         placeholder={`Paste the ${fieldLabel.toLowerCase()}…`}
         autoFocus
       />
+      {/* The server's sentence names the fix; `Error.message` is only the
+          request line ("PUT /credentials/pylon → 400"). */}
       {connect.error && (
         <Callout role="alert" tone="danger" className="text-xs">
-          {connect.error.message}
+          {errorText(connect.error)}
         </Callout>
       )}
       <Button

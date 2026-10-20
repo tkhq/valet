@@ -265,6 +265,14 @@ describe("validateValetPlugin credential.oauth", () => {
     }
   });
 
+  it("accepts oauthOnly with oauth, and rejects it without", () => {
+    const mcp = { mode: "mcp", serverUrl: "https://mcp.example.com/mcp" };
+    expect(validateValetPlugin(manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth: mcp, oauthOnly: true })).ok).toBe(true);
+    const result = validateValetPlugin(manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauthOnly: true }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.issues.some((i) => i.path === "credentials[0].oauthOnly")).toBe(true);
+  });
+
   it("rejects an unknown mode", () => {
     const result = validateValetPlugin(
       manifestWith({ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "implicit" } }),
