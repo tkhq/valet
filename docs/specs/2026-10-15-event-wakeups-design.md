@@ -554,9 +554,13 @@ mention that arrives as two Slack events.
 The tool fixes `self` at arm. It holds three ids for the subject's
 service: the session owner's linked external id, the external id of a
 shared personal credential that the session resolves, and the app's actor id.
-So events by the agent, the person it acts for, or the Valet app are
-skipped unless a clause sets `include_self`. The tool description says
-this and shows `include_self: true` for a wait on the owner's own reply.
+So events by the person the agent acts for, and the agent's own GitHub
+or Linear actions, are skipped unless a clause sets `include_self`. The
+Slack inbox drops Valet's own posts before ingest ("Ignored Valet's own
+message to prevent a reply loop"), so no clause can match them, and the
+agent's own Slack message cannot trigger a wait. The tool description says
+this and shows `include_self: true` for a wait on the owner's own reply,
+in a channel or in the bot's DM with the owner.
 
 `from_status` resolution: when a candidate clause names `from_status` and
 the event has no `previousStatus`, the matcher calls the plugin's status

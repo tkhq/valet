@@ -209,9 +209,15 @@ describe("waitForEventTool", () => {
 
   it("names who self covers and shows an include_self recipe (final review, item 7)", () => {
     expect(waitForEventTool.description).toContain(
-      "Events by you, the person you act for, or the Valet app are skipped unless a clause sets include_self.",
+      "Events by the person you act for, and your own GitHub or Linear actions, are skipped unless a clause sets include_self.",
     );
     expect(waitForEventTool.description).toContain('"include_self": true');
+    // The Slack inbox drops Valet's own posts before ingest, so no clause can keep them.
+    expect(waitForEventTool.description).toContain(
+      "Valet's own Slack posts never arrive as events, so your own Slack message cannot trigger a wait.",
+    );
+    expect(waitForEventTool.description).toContain("in a channel or in your DM with them");
+    expect(waitForEventTool.description).not.toContain("or the Valet app are skipped");
   });
 
   it("returns wakeupsUnavailable without a seam", async () => {
