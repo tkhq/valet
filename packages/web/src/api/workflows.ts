@@ -208,7 +208,14 @@ export function useRunDetail(
     queryKey: qkWorkflows.run(runId),
     queryFn: () => api.getWorkflowRun(runId),
     enabled: !!runId,
-    refetchInterval: (query) => (query.state.data?.run.status === "settled" ? false : 5000),
+    // A typical run settles in seconds: poll fast while it is young, then
+    // back off for a long run.
+    refetchInterval: (query) => {
+      const run = query.state.data?.run;
+      if (run?.status === "settled") return false;
+      const age = run ? Date.now() - run.createdAt : 0;
+      return age < 30_000 ? 1000 : age < 120_000 ? 2000 : 5000;
+    },
     ...opts,
   });
 }

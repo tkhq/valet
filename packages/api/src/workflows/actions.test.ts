@@ -522,11 +522,21 @@ describe("DB-backed actions", () => {
       await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v",
         definition: {}, params: {}, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
       const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
-      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke", toolScope: { actions: ["demo.echo"] } }))).toMatchObject({ success: true });
+      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke", toolScope: { actions: ["demo.echo"] }, toolScopeCeiling: { actions: ["demo.echo"] } }))).toMatchObject({ success: true });
       expect(runHost.started.at(-1)?.[1].origin).toBeUndefined();
       expect(runHost.started.at(-1)?.[1].toolScope).toEqual({ actions: ["demo.echo"] });
     },
   );
+
+  it("gives a run the caller's ceiling, not the caller's thread focus", async () => {
+    // A validate focus keeps run controls only; the run's sandbox steps still need a shell.
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
+    const toolScope = { tools: ["workflows"], actions: ["workflows.start_run"] };
+    const toolScopeCeiling = { tools: ["workflows", "bash", "artifact_publish"] };
+    expect(await start.execute({ workflow_id: workflowId }, ctx({ toolScope, toolScopeCeiling }))).toMatchObject({ success: true });
+    expect(runHost.started.at(-1)?.[1].toolScope).toEqual(toolScopeCeiling);
+  });
 
   it("marks a run an agent starts on its own, but not one the person's own prompt starts", async () => {
     const workflowId = await seedWorkflow();

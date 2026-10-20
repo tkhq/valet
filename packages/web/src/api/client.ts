@@ -858,11 +858,15 @@ export const api = {
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     if (opts?.queueItemId) qs.set("queueItemId", opts.queueItemId);
+    // A workflow step's thread has no thread route for its transcript. The
+    // session route reads it and checks that the caller can read the run.
+    const workflowStep = sessionId.startsWith("wf:");
+    if (workflowStep && opts?.threadId) qs.set("threadId", opts.threadId);
 
     const tail = qs.toString() ? `?${qs}` : "";
     return request<ListMessagesResponse>(
       "GET",
-      opts?.threadId ? `/threads/${encodeURIComponent(opts.threadId)}/messages${tail}` : `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
+      opts?.threadId && !workflowStep ? `/threads/${encodeURIComponent(opts.threadId)}/messages${tail}` : `/sessions/${encodeURIComponent(sessionId)}/messages${tail}`,
     );
   },
   sendPrompt: (sessionId: string, body: SendPromptRequest) =>

@@ -1484,7 +1484,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "denied-unattended":
       return {
-        text: `denied: ${toolId} needs approval, and no one can approve during an unattended workflow run. Do not retry it. Say in the result that this step needs approval. To run it unattended, the workflow's owner can move it to a tool step, which saving the workflow approves, or a team admin can allow it by policy. For a teammate's shared account, connect a team account on the team's Integrations page.`,
+        text: `not run: ${toolId} needs approval, and an unattended workflow run cannot ask for it. Valet sent no approval request. Do not retry it, and do not ask anyone in a message. Do not say that you asked for approval or that approval is pending. In your result, say that ${toolId} did not run because it needs approval. Also say the fixes for the workflow's owner. To approve it on each run, move ${toolId} to a Tool step, which asks for approval on each run. To let it run without asking, list ${toolId} in this step's actions, then use Review permissions on the workflow page. A team admin can also allow it by policy. For a teammate's shared account, connect a team account on the team's Integrations page.`,
       };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse

@@ -1981,6 +1981,108 @@ describe('slack actions', () => {
     expect(body.text.length).toBeLessThanOrEqual(SLACK_TEXT_LIMIT);
   });
 
+  it('update_message cuts the fallback text to 4,000 UTF-8 bytes', async () => {
+    // chat.update rejects a text over 4,000 bytes (msg_too_long); a report row's
+    // "Oct 16 · @author" made a 4,000-character slice 4,004 bytes.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Report\n${'Oct 16 · @author\n'.repeat(400)}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    const bytes = new TextEncoder().encode(body.text).length;
+    expect(bytes).toBeLessThanOrEqual(4000);
+    expect(bytes).toBeGreaterThan(3990);
+  });
+
+  it('update_message uses blocks for a short text that is over 4,000 bytes', async () => {
+    // 1,400 characters but 4,200 bytes: needsContentBlocks is false, so only the
+    // byte check keeps this edit from sending an over-limit text with no blocks.
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: '中'.repeat(1400) },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  // chat.update measures the text after Slack escapes it. A raw `>` or a code
+  // span's `<id>` grows the stored text, so a 4,000-byte cut of the unescaped
+  // text still failed with msg_too_long.
+  it('update_message measures and cuts the fallback in Slack-escaped form', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Report\n${'Use `--promotion-id <id>` when x > y.\n'.repeat(150)}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.text).not.toMatch(/[<>]/);
+    expect(body.text).toContain('&lt;id&gt;');
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message does not cut the fallback inside a link', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+    const link = 'See [tkhq/mono#8632](https://github.com/tkhq/mono/pull/8632) now. ';
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: `Links \n\n${link.repeat(90).trim()}` },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const { text } = JSON.parse(init.body as string) as { text: string };
+    expect(text.split('<').length).toBe(text.split('>').length);
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message uses blocks when a short text grows past 4,000 bytes once escaped', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: 'a > b '.repeat(600) },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(body.text).length).toBeLessThanOrEqual(4000);
+  });
+
+  it('update_message includes Slack response_metadata messages in the error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      ok: false,
+      error: 'msg_too_long',
+      response_metadata: { messages: ['[ERROR] text is too long'] },
+    }));
+
+    const result = await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: 'corrected' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: false, error: 'Slack API error: msg_too_long ([ERROR] text is too long)' });
+  });
+
   it('update_message maps cant_update_message to a corrective error', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'cant_update_message' }));

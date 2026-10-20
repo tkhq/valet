@@ -73,7 +73,7 @@ export const findReplaceRenderer: ToolRenderer = {
           <DiffView before={before} after={after} />
         )}
         {n !== undefined && (
-          <div className="px-3 py-1.5 border-t border-[--border]/60 text-[11px] text-muted font-mono">
+          <div className="px-3 py-1.5 border-t border-line/60 text-[11px] text-muted font-mono">
             {n} {n === 1 ? "occurrence" : "occurrences"} replaced
           </div>
         )}

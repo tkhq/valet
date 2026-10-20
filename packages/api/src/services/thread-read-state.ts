@@ -7,14 +7,31 @@ import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
 import { canViewSession } from "./session-access.js";
 export interface ThreadActivity {
   readAt?: number;
+  /** Set on a team thread that a person wrote in: whether the viewer is one of them. */
+  participant?: boolean;
   lastAgentActivityAt?: number;
   agentQuestion?: string;
   pullRequests?: ThreadPullRequest[];
 }
 
-/** Read state, the last agent message, and pull requests for the threads the viewer lists. */
+/**
+ * A person's own message in a thread: a user entry whose author is a person.
+ * A team API key writes as `team:<id>` and a channel sender with no account is
+ * marked `externalSender`; neither is a person who can be notified.
+ */
+const personAuthorSql = (entry: SQL) => sql`(${entry}.entry_type = 'message' AND ${entry}.role = 'user' AND ${entry}.author IS NOT NULL
+  AND ${entry}.author::jsonb->>'id' NOT LIKE 'team:%' AND ${entry}.author::jsonb->>'id' NOT LIKE 'org:%'
+  AND coalesce(${entry}.author::jsonb->>'externalSender', 'false') <> 'true')`;
+
+/**
+ * Read state, the last agent message, and pull requests for the threads the
+ * viewer lists. In a team session (`teamOwned`), a thread that a person wrote
+ * in also says whether the viewer is one of them: its replies notify only the
+ * people who wrote. A thread no person wrote in, such as one only a team API
+ * key prompts, carries no flag and notifies every member as before.
+ */
 export async function listThreadActivity(
-  db: AppDb, userId: string, sessionId: string, threadIds: string[], viewer: RequestPrincipal,
+  db: AppDb, userId: string, sessionId: string, threadIds: string[], viewer: RequestPrincipal, teamOwned = false,
 ): Promise<Map<string, ThreadActivity>> {
   const activity = new Map<string, ThreadActivity>();
   if (threadIds.length === 0) return activity;
@@ -36,6 +53,14 @@ export async function listThreadActivity(
       .where(and(eq(threadPullRequests.sessionId, sessionId), inArray(threadPullRequests.threadId, threadIds))),
   ]);
   for (const row of reads) entry(row.threadId).readAt = row.readAt;
+  if (teamOwned) {
+    // Messages are the record of who wrote, whichever path sent them: web, Slack, or an event delivery.
+    const writers = await db.execute(sql`SELECT e.thread_id, bool_or(e.author::jsonb->>'id' = ${userId}) AS viewer_wrote
+      FROM engine_entries e
+      WHERE e.session_id = ${sessionId} AND e.thread_id IN (${sql.join(threadIds.map(id => sql`${id}`), sql`,`)}) AND ${personAuthorSql(sql`e`)}
+      GROUP BY e.thread_id`) as { rows: Array<{ thread_id: string; viewer_wrote: boolean }> };
+    for (const row of writers.rows) entry(row.thread_id).participant = row.viewer_wrote;
+  }
   for (const row of latest.rows) {
     const value = entry(row.thread_id);
     value.lastAgentActivityAt = Number(row.created_at);
@@ -112,7 +137,8 @@ export const WAITING_WINDOW_MS = 14 * 24 * 60 * 60_000;
 /**
  * Threads that wait on a reply: a person took part, the agent answered after
  * their last action, and nobody replied or archived the thread since. A thread
- * with queued, running, or gated work is excluded; active work lists it.
+ * with queued, running, or gated work is excluded; active work lists it. In a
+ * team workspace, a thread that a person wrote in waits only on those people.
  */
 export async function listWaitingThreads(
   db: AppDb, orgId: string, owner: Principal, viewerId: string, now = Date.now(), limit = 50,
@@ -132,6 +158,11 @@ export async function listWaitingThreads(
     WHERE s.status <> 'deleted' AND s.org_id = ${orgId} AND s.owner_type = ${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END) = ${owner.id}
       AND t.archived_at IS NULL AND t.last_user_activity_at IS NOT NULL
+      AND (${owner.type} <> 'team'
+        OR EXISTS (SELECT 1 FROM engine_entries p WHERE p.session_id = t.session_id AND p.thread_id = t.id
+          AND ${personAuthorSql(sql`p`)} AND p.author::jsonb->>'id' = ${viewerId})
+        OR NOT EXISTS (SELECT 1 FROM engine_entries p WHERE p.session_id = t.session_id AND p.thread_id = t.id
+          AND ${personAuthorSql(sql`p`)}))
       AND ${sharedThreadKey(sql`et.key`, viewerId)}
       -- The editor of a deleted workflow has nothing left to answer.
       AND (et.key IS NULL OR et.key NOT LIKE 'workflow:%' OR w.id IS NOT NULL)

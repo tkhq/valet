@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, SUBMISSION_TIMEOUT_MS, ValidationError, withSpan } from "@valet/engine";
 import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -158,7 +158,9 @@ const STEER_CANDIDATES_SQL = `
     AND created_at <= $4
 `;
 
-// claimSubmission: single-statement CAS (decision 6, bucket 1). Succeeds
+// claimSubmission: single-statement CAS (decision 6, bucket 1). A claim with
+// attempt_count = 0 also starts the execution clock ($8 is the budget), so
+// time spent queued does not count against timeout_at. Succeeds
 // only when itemId IS the thread's runnable head (oldest 'queued',
 // not-superseded item) — the subquery re-derives the head so a concurrent
 // claim of a different item (or of a non-head item) loses (rowCount=0). No
@@ -168,6 +170,7 @@ const CLAIM_SQL = `
   UPDATE engine_queue_items
   SET status = 'running', attempt_id = $1, owner_id = $2,
       lease_expires_at = $3, attempt_count = attempt_count + 1,
+      timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
       updated_at = $4
   WHERE id = $5 AND session_id = $6 AND thread_id = $7
     AND status = 'queued' AND superseded_by_item_id IS NULL
@@ -1000,7 +1003,7 @@ export class PgSessionStore implements SessionStore {
     return this.db.transaction(async (tx) => {
       const result = await tx.query(`${CLAIM_SQL} RETURNING *`, [
         claim.attemptId, claim.ownerId, now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS), now,
-        claim.itemId, claim.sessionId, claim.threadId,
+        claim.itemId, claim.sessionId, claim.threadId, SUBMISSION_TIMEOUT_MS,
       ]);
       const row = result.rows[0];
       if (!row) return null;

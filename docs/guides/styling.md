@@ -179,26 +179,24 @@ exposes the tokens as Tailwind colors (`paper`, `ink`, `muted`, `line`, `moss`,
 `accent`, and the `*-wash` variants). Use the token colors rather than raw
 Tailwind palette values, so a brand change reaches every surface at once.
 
-### The opacity-modifier trap
+### Opacity modifiers
 
-Tailwind's slash-opacity syntax (`bg-ink/10`) only works when a theme color is
-registered as a function receiving an `<alpha-value>` placeholder. Valet's
-tokens are plain color strings pointing at CSS variables, so Tailwind cannot
-inject an alpha channel:
+Slash opacity (`bg-ink/10`, `bg-danger-500/10`) works on every theme color.
+The fixed OKLCH scales (`neutral`, `accent`, `danger`, `success`) carry an
+`<alpha-value>` placeholder. The CSS-variable tokens (`paper`, `ink`,
+`muted`, `line`, `moss`, and the `*-wash` colors) go through `varColor` in
+`tailwind.config.ts`, which emits `color-mix(...)` only when a class names an
+opacity. Until 2026-10-18 both kinds silently emitted no CSS, which left
+rows without hover states and pills without backgrounds.
+
+Arbitrary variable colors (`text-[--fg]/85`) still emit no CSS. Use the token
+instead (`text-ink/85`).
 
 ```tsx
-// Wrong — silently produces NO rule. Not a subtle bug: nothing renders.
-<div className="bg-ink/10 hover:bg-moss/20" />
-
-// Right — use the pre-mixed wash token.
+// For hover and press states, prefer the pre-mixed wash token: it keeps one
+// tuned alpha per theme.
 <div className="bg-ink-wash hover:bg-moss-wash" />
 ```
-
-This has already produced an invisible badge and a pill with no background.
-When you need a translucent surface, use the `*-wash` token, or add one to
-`theme.css` built with native `oklch(... / <alpha>)` at the same lightness,
-chroma, and hue as the base token. Do not reach for a hardcoded
-`hover:bg-neutral-100 dark:hover:bg-neutral-900` stopgap.
 
 ### Dark mode
 

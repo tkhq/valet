@@ -57,6 +57,7 @@ export type { TriggerInputError, ResolvedTriggerInput } from './dag/trigger-inpu
 
 export { validateWorkflowDefinition } from './dag/validate.js';
 export { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, stepModelCallLimit, unboundedWorkWarning } from './dag/step-budget.js';
+export { approvalRequestWarning } from './dag/step-design.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
 export {

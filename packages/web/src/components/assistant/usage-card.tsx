@@ -209,9 +209,8 @@ function MemberBar({
         <span className="truncate">{isMe ? "You" : member.name}</span>
       </span>
       <div className="flex-1 h-1.5 rounded-full bg-ink-wash overflow-hidden">
-        {/* `bg-muted-wash`, never `bg-muted/50`: the slash modifier on a
-            `var()` token emits no rule, which shipped these bars invisible
-            for everyone but the viewer. See theme.css's trap note. */}
+        {/* `bg-muted-wash` keeps other members' bars visible against the
+            `bg-ink-wash` track. */}
         <div
           className={cn("h-full rounded-full", isMe ? "bg-moss" : "bg-muted-wash")}
           style={{ width: `${Math.max(2, Math.round(fraction * 100))}%` }}

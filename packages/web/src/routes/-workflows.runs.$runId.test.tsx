@@ -233,7 +233,7 @@ describe("RunDetailBody", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
-    expect(screen.getByText("completed")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
   });
 
   it("shows the Retry button for a settled failed run and wires the click", () => {
@@ -389,7 +389,7 @@ describe("RunDetailBody", () => {
       { nodeId: "set1", iteration: 0, status: "completed", result: { ok: true }, createdAt: Date.now() },
     ];
     render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
-    expect(screen.getByText("set1")).toBeTruthy();
+    expect(screen.getByText("Set1")).toBeTruthy();
     expect(screen.getByText(/"ok": true/)).toBeTruthy();
   });
 

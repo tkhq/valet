@@ -107,9 +107,9 @@ export const threadReadRenderer: ToolRenderer = {
     return (
       <ToolBody className="px-0 py-0">
         {key && (
-          <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center gap-2">
+          <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center gap-2">
             <span className="text-muted">reading from</span>
-            <span className="font-mono text-[--fg]/95">{key}</span>
+            <span className="font-mono text-ink/95">{key}</span>
           </div>
         )}
         {status === "running" ? (
@@ -121,7 +121,7 @@ export const threadReadRenderer: ToolRenderer = {
             (thread is empty)
           </div>
         ) : (
-          <pre className="px-3 py-2 font-mono text-[12px] whitespace-pre-wrap text-[--fg]/85">
+          <pre className="px-3 py-2 font-mono text-[12px] whitespace-pre-wrap text-ink/85">
             {text}
           </pre>
         )}
@@ -169,7 +169,7 @@ function ThreadExcerpts({ messages }: { messages: ParsedMessage[] }) {
                 <span className="text-[10px] text-muted/80">{m.meta}</span>
               )}
             </div>
-            <div className="text-[12px] text-[--fg]/90 leading-snug whitespace-pre-wrap line-clamp-4">
+            <div className="text-[12px] text-ink/90 leading-snug whitespace-pre-wrap line-clamp-4">
               {m.content || (
                 <span className="italic text-muted">(empty)</span>
               )}

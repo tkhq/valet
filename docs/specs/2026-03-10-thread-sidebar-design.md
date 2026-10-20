@@ -30,7 +30,8 @@ The channel selector dropdown was a workaround — channels route *to* threads, 
 - **Reactivate dismissed thread:** Click in dismissed section → PATCH status to `active` → moves back to active list → becomes selected thread.
 - **Auto-reactivate:** When a channel message arrives for an archived thread, the backend flips status to `active`. Sidebar re-fetches and shows it in the active list.
 - **New thread:** "+" button creates a new thread (existing `useCreateThread`), selects it.
-- **Unread tracking:** Track "last viewed" per thread in localStorage (threadId → timestamp). Threads with messages newer than last-viewed show a badge.
+- **Unread tracking:** The server records when each person last read each thread (`thread_reads`). A thread with an agent message newer than that time, and newer than the last user activity, shows as unread.
+- **Team threads:** A reply in a team thread notifies only the people who wrote in it, through any path (web, Slack, an event delivery). The thread list derives this from the stored messages and their authors. For other members the thread stays in the list without an unread mark or a waiting question, and "Waiting on you" leaves it out. A thread that no person wrote in, such as one only a team API key prompts, notifies every member.
 
 ### Component Structure
 
@@ -156,6 +157,11 @@ It skips chats already moved elsewhere and keeps their assignments and pins. A f
 The server stores project folders, names, assignments, pins, and grouping preferences for each viewer and workspace runtime.
 Two devices signed in as the same viewer see the same folders in that runtime.
 Other viewers, teams, and organizations keep separate preferences. Team membership does not share a viewer's folder organization with teammates.
+The workspace stores assignments and pins for visible threads in its root session, team execution sessions, and migration-retained histories.
+Folder sync checks each thread's actual session and governing conversation before accepting or retaining its reference.
+It rejects unrelated sessions and conversations hidden from the viewer.
+It removes references to archived threads or deleted sessions without removing the folders.
+Retry sync can replay a failed assignment after the server recognizes its execution session.
 The sidebar refreshes these preferences when the window regains focus. The project menu also offers **Rename project**.
 
 `GET` and `PATCH /api/me/thread-projects/:sessionId` use the signed-in viewer and existing session and thread access checks.

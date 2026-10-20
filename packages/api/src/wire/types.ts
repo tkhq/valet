@@ -42,6 +42,9 @@ export interface AuthConfigResponse {
   stub: boolean;
   social: ("google" | "github")[];
   sso: { name: string } | null;
+  /** The configured public origin that generated file links use. Absent
+   * when the deployment has no public URL. */
+  publicOrigin?: string;
 }
 
 // ── REST: sessions ────────────────────────────────────────────────────────
@@ -878,6 +881,9 @@ export interface ThreadSummary {
   key?: string;
   /** When the viewer last read this thread. */
   readAt?: number;
+  /** Set on a team thread that a person wrote in. False when the viewer is
+   * not one of them: its replies then do not show as unread to the viewer. */
+  participant?: boolean;
   /** Time of the newest assistant message. Later than `readAt` means unread. */
   lastAgentActivityAt?: number;
   /** The question the newest assistant message asks, as plain text. It waits on
@@ -1936,6 +1942,23 @@ export interface MemoryTreeEntry {
 // caller's own rows plus their teams', `?ownerType=&ownerId=` narrows it to
 // one owner, and an owner the caller cannot reach 404s.
 
+/** `GET /api/workflows/step-check` (organization admins): workflows whose
+ * steps expect a person's approval in a way a run cannot deliver. */
+export interface WorkflowStepCheckResponse {
+  /** Workflows read in the organization. */
+  scanned: number;
+  /** Only the workflows with at least one warning. */
+  workflows: {
+    workflowId: string;
+    name: string;
+    ownerType: "user" | "team" | "org";
+    ownerId: string;
+    /** The team's name, for a team workflow. */
+    ownerName?: string;
+    steps: { nodeId: string; warnings: string[] }[];
+  }[];
+}
+
 export interface WorkflowDefinitionSummary {
   /** Most recently started run, scoped to the current workflow owner. */
   latestRun?: WorkflowRunSummary;
@@ -2089,6 +2112,12 @@ export interface WorkflowRunCheckpoint {
   result?: unknown;
   error?: string;
   createdAt: number;
+  /** When the step began: its first intent write. Absent for steps
+   * recorded before this field. */
+  startedAt?: number;
+  /** Copied from the run this retry repeats: the step did not run again,
+   * and its times are from that earlier run. */
+  reused?: true;
   /** The session a session/orchestrator node drove. Present on a failed
    * node too — that is where the failure is readable. */
   sessionId?: string;

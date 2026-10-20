@@ -53,6 +53,7 @@ import {
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
+  SUBMISSION_TIMEOUT_MS,
   validateSignalAttributeKeys,
   validateSignalTagName,
 } from "./submission.js";
@@ -1211,7 +1212,7 @@ export class Thread {
       status: "queued",
       attemptCount: 0,
       maxAttempts: 10,
-      timeoutAt: now + 3_600_000,
+      timeoutAt: now + SUBMISSION_TIMEOUT_MS,
       createdAt: now,
       updatedAt: now,
     };

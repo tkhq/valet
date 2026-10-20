@@ -22,6 +22,12 @@ export const SIGNAL_HOP_BUDGET = 3;
 /** Default max unsettled, non-superseded submissions a single thread may hold (Phase 4 decision 5). */
 export const MAX_PENDING_PER_THREAD = 20;
 
+/**
+ * Execution budget of one submission. A claim with `attemptCount === 0` sets
+ * `timeoutAt` to claim time + this budget, so time spent queued does not count.
+ */
+export const SUBMISSION_TIMEOUT_MS = 3_600_000;
+
 const SIGNAL_TAG_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
 /** Validates a `SignalContent.tagName` (or the default `'signal'`) at admission. */
@@ -352,7 +358,7 @@ export interface ReconcileContext {
  *      expired/withdrawn/missing fall THROUGH to 5-7. Gate-blocked items are
  *      EXEMPT from the step-6 timeout.
  *   5. attemptCount >= maxAttempts → settle failed (retry budget exhausted)
- *   6. now >= timeoutAt (and not gate-blocked) → settle failed (timed out)
+ *   6. now >= timeoutAt (attemptCount > 0, not gate-blocked) → settle failed (timed out)
  *   7. otherwise → resume
  */
 export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): ReconcileAction {
@@ -388,9 +394,11 @@ export function decideReconciliation(item: QueueItem, ctx: ReconcileContext): Re
     return { kind: "settle", outcome: { outcome: "failed", error: "retry budget exhausted" } };
   }
 
-  // Step 6 — timeout. Gate-blocked items are exempt (their bound is the gate's
-  // own expiry, not the execution timeout).
-  if (!gateBlocked && ctx.now >= item.timeoutAt) {
+  // Step 6 — timeout. It bounds execution, so an item that has not run
+  // (attemptCount 0: never claimed, or released before it ran) cannot time
+  // out. It waits behind its thread's head, which its own timeout or its
+  // gate's expiry bounds. Gate-blocked items are exempt too.
+  if (!gateBlocked && item.attemptCount > 0 && ctx.now >= item.timeoutAt) {
     return { kind: "settle", outcome: { outcome: "failed", error: "timed out" } };
   }
 

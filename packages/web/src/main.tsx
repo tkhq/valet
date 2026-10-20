@@ -6,6 +6,8 @@ import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
 import { applyStoredPalette, applyStoredTheme } from "./lib/theme";
 import { registerServiceWorker } from "./pwa/register";
+import { api } from "./api/client";
+import { loadPublicOrigin } from "./lib/public-origin";
 
 // Apply the persisted appearance choices (Settings → Appearance) before the
 // first React paint. The inline script in `index.html` has normally done
@@ -18,6 +20,10 @@ applyStoredPalette();
 
 // PWA install support. Production-only; see src/pwa/register.ts.
 registerServiceWorker();
+
+// Generated file links name the deployment's public origin. Markdown opens
+// them on this hostname once the origin is known (lib/public-origin.ts).
+void loadPublicOrigin(() => api.getAuthConfig());
 
 const queryClient = new QueryClient({
   defaultOptions: {

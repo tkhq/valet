@@ -17,7 +17,7 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
+import { buildWorkflowEngineDeps, mapPiAiUsage, unattendedRefusalError, workflowRunThreadKey } from "./engine-deps.js";
 import { eq, sql } from "drizzle-orm";
 import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
@@ -711,13 +711,13 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       await vi.waitFor(async () => {
         expect((await engineStore.getQueueItem(first.sessionId, first.queueItemId))?.status).toBe("settled");
       }, { timeout: 15_000, interval: 50 });
-      expect(toolResult).toContain("no one can approve during an unattended workflow run");
+      expect(toolResult).toContain("Valet sent no approval request");
       expect(executed).toBe(false);
       // Nothing waits, and the refused approval fails the step so the owner hears about it.
       expect((await engineStore.listDecisionGates(first.sessionId, first.threadId)).map((gate) => gate.status)).toEqual(["resolved"]);
       const settled = await deps.awaitResult(first.sessionId, first.threadId, first.queueItemId);
       expect(settled.outcome).toBe("failed");
-      expect(settled.error).toContain("This step needed approval nobody can give during a run");
+      expect(settled.error).toContain("demo.review did not run");
 
       faux.appendResponses([fauxAssistantMessage("second run reported")]);
       const next = await submit("run_next", "second run");
@@ -951,6 +951,43 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     await expect(
       deps.llmComplete({ runId, nodeId: "summarize", iteration: 0, model: "definitely-not-a-real-model-id", prompt: "hi" }),
     ).rejects.toThrow(/unknown or unavailable model/);
+  });
+});
+
+describe("unattendedRefusalError", () => {
+  // An agent step's ask_approval used to open a card; since build-time
+  // approval, a run refuses it. "Allow the action" cannot fix an
+  // ask_approval request, so the notice names the Approval step.
+  it("tells the owner to replace an agent step's approval request with an Approval step", () => {
+    const error = unattendedRefusalError([{ title: "Create the Linear onboarding project for the new hire?" }]);
+    expect(error).toContain("Valet sent no approval request");
+    expect(error).toContain("\"Create the Linear onboarding project for the new hire?\"");
+    expect(error).toContain("add an Approval step before this step");
+    expect(error).toContain("remove the request for approval from this step's prompt");
+    expect(error).toContain("A Tool step asks for approval on each run by itself");
+    expect(error).not.toContain("Review permissions");
+  });
+
+  it("names each refused action and both ways to run it", () => {
+    const error = unattendedRefusalError([
+      { title: "Approve Save Project?", context: { tool_id: "linear.save_project" } },
+      { title: "Approve Save Project?", context: { tool_id: "linear.save_project" } },
+    ]);
+    expect(error).toContain("linear.save_project did not run");
+    expect(error.match(/linear\.save_project/g)).toHaveLength(3);
+    expect(error).toContain("move linear.save_project to a Tool step, which asks for approval on each run");
+    // Review permissions cannot grant an MCP action in a Tool step, and a Tool
+    // step after an Approval step would ask twice.
+    expect(error).not.toContain("Approval step");
+    expect(error).toContain("Review permissions");
+    expect(error).not.toContain("team account");
+  });
+
+  it("names the team account fix for a teammate's shared account", () => {
+    const error = unattendedRefusalError([
+      { title: "Let a teammate use your Linear account?", context: { tool_id: "linear.save_project", approver: { userId: "u_lender" } } },
+    ]);
+    expect(error).toContain("connect a team account on the team's Integrations page");
   });
 });
 

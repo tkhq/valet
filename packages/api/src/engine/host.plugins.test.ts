@@ -159,6 +159,21 @@ describe("EngineHost + plugin extras", () => {
     expect(session.options.tools?.map((tool) => tool.name)).toContain("list_tools");
   });
 
+  it("workflow sessions can publish a page from a sandbox file, but get no memory tools", async () => {
+    api = await bootTestApi({ plugins: [] });
+    const session = await api.providers.engineHost.workflowSessionFor("wf:pulse:build", {
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+
+    const names = session.options.tools?.map((tool) => tool.name) ?? [];
+    expect(names).toContain("artifact_publish");
+    expect(names.filter((name) => name.startsWith("mem_"))).toEqual([]);
+    expect(session.options.toolConfig).toMatchObject({ workflowStep: true });
+  });
+
   it("with plugins: [] the orchestrator keeps catalog and memory tools", async () => {
     api = await bootTestApi({ plugins: [] });
     const { engineHost } = api.providers;

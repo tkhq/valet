@@ -67,6 +67,9 @@ Without a configured public origin, links remain relative and work only in the V
 The tool reports this limitation with instructions to configure `VALET_PUBLIC_URL`.
 Recipients must sign in to Valet and pass the existing download authorization checks.
 The web renderer accepts relative links and absolute links on its current origin.
+A sign-in belongs to one hostname, and a deployment can serve the app on more than one.
+`GET /api/auth-config` reports the configured public origin as `publicOrigin`, and the web app loads it once at start.
+Markdown opens a generated download link on that origin on the current origin. A link on any other origin keeps its href.
 The route checks current session access and thread visibility before reading the snapshot.
 Workflow engine sessions use the run owner, current team membership, private origin visibility, and private event visibility.
 Authorization follows the workflow run detail policy (`ownedRun`), including private-event checks for personal runs.
@@ -136,4 +139,4 @@ They check names, credential-free registration, delivery instructions, and forma
 The existing API bundled-skill tests validate frontmatter and registry discovery.
 Runtime tests exercise native file creation, edits, inspection, validation, and rendering where the tools are available.
 
-The tool returns a relative webUrl for authenticated web downloads and a public-origin url for channel replies. The renderer validates the local path. This keeps downloads on the current login origin when a deployment has multiple domains.
+The tool returns a relative webUrl for authenticated web downloads and a public-origin url for channel replies. The renderer validates the local path. This keeps downloads on the current login origin when a deployment has multiple domains. Models often link `url` in web replies, and children and workflows relay such links into other threads, so Markdown also moves a generated download on `publicOrigin` to the current origin.

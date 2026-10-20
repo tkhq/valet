@@ -12,6 +12,11 @@ describe("StepBudgetField", () => {
     expect(screen.getByRole("status").textContent).toContain("use a foreach step that handles one item in each iteration");
   });
 
+  it("points an agent step that asks for approval at a tool step", () => {
+    render(<StepBudgetField node={node("DM the people lead that the project is ready for approval, then create it.", 40)} onChange={vi.fn()} />);
+    expect(screen.getByRole("status").textContent).toContain("Put the action that needs approval in a tool step");
+  });
+
   it("shows no warning for bounded work and saves a new limit", () => {
     const onChange = vi.fn();
     render(<StepBudgetField node={node("Summarize the notes.", 40)} onChange={onChange} />);

@@ -1,5 +1,6 @@
 import { createFileRoute, Link, useBlocker, useNavigate } from "@tanstack/react-router";
-import { runLabel } from "~/components/workflows/run-detail-helpers";
+import { formatRunDuration, runLabel } from "~/components/workflows/run-detail-helpers";
+import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import type {
   GetWorkflowPermissionsResponse,
   ListWorkflowRunsResponse, WorkflowDefinitionSummary, WorkflowNodePermissionWire
@@ -701,30 +702,23 @@ function RunsDrawer({
       {!runsQuery.isLoading && runsQuery.error == null && runs.length === 0 && (
         <div className="px-4 py-3 text-xs text-muted">No runs yet — press Run to start one.</div>
       )}
-      <ul className="divide-y divide-line/60">
+      <ul className="divide-y divide-line">
         {runs.map((r) => (
           <li key={r.runId}>
             <Link
               to="/workflows/runs/$runId"
               params={{ runId: r.runId }}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-ink-wash/60 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 hover:bg-ink-wash transition-colors"
             >
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  r.needsApproval
-                    ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
-                    : r.outcome === "completed"
-                      ? "bg-moss-wash text-moss"
-                      : r.outcome === "failed"
-                        ? "bg-rose-50 text-danger-500 dark:bg-rose-950/40"
-                        : "bg-neutral-500/10 text-muted",
-                )}
-              >
-                {r.needsApproval ? "needs approval" : (r.outcome ?? r.status)}
+              {/* A fixed column keeps every run's label at the same x. */}
+              <span className="w-[6.75rem] shrink-0">
+                <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={Boolean(r.needsApproval)} />
               </span>
               <span className="min-w-0 flex-1 truncate text-xs text-ink" title={r.runId}>{runLabel(r)}</span>
-              <span className="shrink-0 text-[10px] text-muted">{relativeTime(r.createdAt)}</span>
+              {r.status === "settled" && (
+                <span className="shrink-0 text-[11px] tabular-nums text-muted" title="How long the run took">{formatRunDuration(r.createdAt, r.updatedAt)}</span>
+              )}
+              <span className="w-14 shrink-0 text-right text-[11px] text-muted" title={new Date(r.createdAt).toLocaleString()}>{relativeTime(r.createdAt)}</span>
             </Link>
           </li>
         ))}

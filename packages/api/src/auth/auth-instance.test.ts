@@ -74,6 +74,17 @@ describe("real better-auth instance + mounting", () => {
     expect(body).toEqual({ stub: true, social: [], sso: null });
   });
 
+  it("GET /api/auth-config reports the public origin that generated file links use", async () => {
+    vi.stubEnv("VALET_PUBLIC_URL", "https://valet.example.com/app");
+    try {
+      api = await bootTestApi();
+      const body = (await (await fetch(`${api.baseUrl}/api/auth-config`)).json()) as AuthConfigResponse;
+      expect(body.publicOrigin).toBe("https://valet.example.com");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it(
     "a code-only invite's inviteCode survives ctx.body into databaseHooks and stamps the invited role, " +
       "accepting the invite — through the real /sign-up/email endpoint, not a synthetic hook call",

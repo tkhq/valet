@@ -55,12 +55,15 @@ import {
 import type { AppEnv } from "../env.js";
 import {
   canReadWorkflowRun,
+  getWorkflowDefinition,
   ownedDefinitionRow,
   validateDefinitionInput,
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
+import { analyzeDefinitionPermissions } from "../workflows/permissions.js";
+import { stepDesignWarnings } from "../workflows/step-design.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   PreviewField,
@@ -884,6 +887,13 @@ export async function previewWorkflow(
       if (node.type !== "trigger") fromPreview.push(node.id);
     }
   }
+
+  // Approval a run cannot deliver: an agent step that asks, or an action it
+  // lists that policy holds for approval.
+  const summary = await getWorkflowDefinition(deps, owner, workflowId);
+  const permissions = summary ? await analyzeDefinitionPermissions(deps, owner, { ...summary, definition }) : [];
+  const design = stepDesignWarnings(definition, permissions);
+  for (const node of nodes) node.warnings.push(...(design.get(node.nodeId) ?? []));
 
   const response: PreviewWorkflowResponse = {
     sample: {

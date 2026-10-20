@@ -13,6 +13,8 @@ import type { Context } from "hono";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
+import { requireOrgAdmin } from "./_org-admin.js";
+import { checkOrganizationWorkflowSteps } from "../workflows/step-design.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
 import {
@@ -114,6 +116,7 @@ import type {
   UpdateWorkflowRequest,
   UpdateWorkflowResponse,
   WorkflowWebhookResponse,
+  WorkflowStepCheckResponse,
 } from "../wire/types.js";
 
 export const workflowsRouter = new Hono<AppEnv>();
@@ -317,6 +320,19 @@ workflowsRouter.get("/runs", async (c) => {
 workflowsRouter.get("/action-required", async (c) => {
   const { deps, owner } = serviceCtx(c);
   const resp: ListWorkflowActionRequiredResponse = await listWorkflowActionRequired(deps, owner);
+  return c.json(resp);
+});
+
+/**
+ * Organization admins: every workflow in the organization whose steps expect
+ * a person's approval in a way a run cannot deliver. A one-time check for
+ * workflows built before runs stopped asking a person.
+ */
+workflowsRouter.get("/step-check", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+  const { deps, owner } = serviceCtx(c);
+  const resp: WorkflowStepCheckResponse = await checkOrganizationWorkflowSteps(deps, owner);
   return c.json(resp);
 });
 

@@ -42,6 +42,7 @@ import {
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
+  type DecisionGate,
   type Principal,
   type SessionStore,
   type SignalContent,
@@ -438,14 +439,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const refused = (await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId))
         .filter((gate) => gate.resolution !== undefined && isUnattendedWorkflowRefusal(gate.resolution));
       if (refused.length === 0) return result;
-      return {
-        queueItemId,
-        outcome: "failed" as const,
-        error:
-          `This step needed approval nobody can give during a run: ${refused.map((gate) => `"${gate.title}"`).join(", ")}. ` +
-          "Before the next run, list the exact action in this step's actions and review the workflow's permissions, " +
-          "or move the action to a tool step. A team admin can also allow it by policy, and a team account replaces a teammate's shared account.",
-      };
+      return { queueItemId, outcome: "failed" as const, error: unattendedRefusalError(refused) };
     },
 
     async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {
@@ -719,6 +713,43 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       return { definition: row.definition, definitionVersionId: definitionVersionId(row.definition) };
     },
   };
+}
+
+/**
+ * The failed-step error for approvals an unattended run refused before a
+ * gate opened (`Thread.requestDecision`). An action gate carries its
+ * `tool_id`. A Tool step for that action stops and asks on each run, and
+ * Review permissions can allow it in the agent step instead (only there for
+ * an MCP action, which the review cannot resolve in a Tool step). An
+ * ask_approval request can never be answered in a run, so it gets the
+ * Approval step fix.
+ */
+export function unattendedRefusalError(gates: Array<Pick<DecisionGate, "title" | "context">>): string {
+  const toolId = (gate: Pick<DecisionGate, "context">) => {
+    const id = gate.context?.tool_id;
+    return typeof id === "string" ? id : undefined;
+  };
+  const actions = [...new Set(gates.flatMap((gate) => toolId(gate) ?? []))];
+  const requests = gates.filter((gate) => toolId(gate) === undefined).map((gate) => `"${gate.title}"`);
+  const parts = ["A workflow run cannot ask a person for approval, so Valet sent no approval request."];
+  for (const action of actions) {
+    parts.push(
+      `${action} did not run. To approve it on each run, move ${action} to a Tool step, which asks for approval on each run. ` +
+        `To let it run without asking, list ${action} in this step's actions, then use Review permissions on the workflow page.`,
+    );
+  }
+  if (requests.length > 0) {
+    parts.push(
+      `This step asked for approval: ${requests.join(", ")}. To approve on each run, add an Approval step before this step, ` +
+        "and remove the request for approval from this step's prompt. A Tool step asks for approval on each run by itself, " +
+        "so an integration action that needs approval can move to a Tool step instead.",
+    );
+  }
+  if (actions.length > 0) parts.push("A team admin can also allow an action by policy.");
+  if (gates.some((gate) => gate.context?.approver !== undefined)) {
+    parts.push("For a teammate's shared account, connect a team account on the team's Integrations page.");
+  }
+  return parts.join(" ");
 }
 
 /** Pure so it's unit-testable without a live completion — the network

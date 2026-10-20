@@ -6,6 +6,7 @@ import type { ThreadProjectsOperation } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { agentSessions } from "../schema/index.js";
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { canViewSession } from "../services/session-access.js";
 import { changeThreadProjects, readThreadProjects, ThreadProjectsConflict, ThreadProjectsImportConflict } from "../services/thread-projects.js";
 import { threadProjectsMutationSchema } from "../services/thread-projects-schema.js";
@@ -26,17 +27,50 @@ async function access(c: Context<AppEnv>) {
   return { scope: { orgId: user.orgId, userId: user.id, sessionId }, session };
 }
 
-async function activeThreads(c: Context<AppEnv>, session: { id: string; ownerType: string }, ids: string[]): Promise<Set<string>> {
+async function activeThreads(c: Context<AppEnv>, session: typeof agentSessions.$inferSelect, ids: string[]): Promise<Set<string>> {
   const visible = new Set<string>();
-  const canSee = threadsVisibleTo(c, session);
+  const checks = new Map<string, ReturnType<typeof threadsVisibleTo>>();
+  const retained = new Map<string, Promise<boolean>>();
+  // A workspace sidebar includes execution and migration-retained histories.
+  // Resolve only the requested IDs, without loading every workspace thread.
+  const execution = session.ownerType === "team" ? sql`EXISTS (
+    SELECT 1 FROM assistant_executions x JOIN assistants a ON a.id = x.assistant_id
+    WHERE x.session_id = s.id AND a.session_id = ${session.id} AND a.org_id = ${session.orgId}
+      AND a.owner_type = ${session.ownerType} AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL
+  )` : sql`false`;
   for (let offset = 0; offset < ids.length; offset += 100) {
     const batch = ids.slice(offset, offset + 100);
-    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key FROM engine_threads t
+    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key, s.id AS session_id, ${execution} AS execution
+      FROM engine_threads t JOIN agent_sessions s ON s.id = t.session_id
       LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
-      WHERE t.session_id = ${session.id} AND m.archived_at IS NULL
-      AND t.id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
-    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable() })) }).parse(result);
-    for (const thread of rows) if (await canSee(thread.key)) visible.add(thread.id);
+      WHERE s.org_id = ${session.orgId} AND s.owner_type = ${session.ownerType} AND s.owner_id = ${session.ownerId}
+        AND s.status <> 'deleted' AND m.archived_at IS NULL AND t.status <> 'archived'
+        AND (s.id = ${session.id} OR ${execution} OR (EXISTS (
+          SELECT 1 FROM legacy_assistant_runtimes l WHERE l.session_id = s.id AND l.org_id = ${session.orgId}
+            AND l.owner_type = ${session.ownerType} AND l.owner_id = ${session.ownerId}
+        ) AND EXISTS (
+          SELECT 1 FROM assistants a WHERE a.session_id = ${session.id} AND a.org_id = ${session.orgId}
+            AND a.owner_type = ${session.ownerType} AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL
+        )))
+        AND t.id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
+    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable(), session_id: z.string(), execution: z.boolean() })) }).parse(result);
+    for (const thread of rows) {
+      if (thread.session_id !== session.id && !thread.execution) {
+        let valid = retained.get(thread.session_id);
+        if (!valid) {
+          valid = isLegacyAssistantRuntime(c.var.providers.db, thread.session_id, session.orgId);
+          retained.set(thread.session_id, valid);
+        }
+        if (!await valid) continue;
+      }
+      let canSee = checks.get(thread.session_id);
+      if (!canSee) {
+        const source = { id: thread.session_id, ownerType: session.ownerType };
+        canSee = threadsVisibleTo(c, source);
+        checks.set(thread.session_id, canSee);
+      }
+      if (await canSee(thread.key)) visible.add(thread.id);
+    }
   }
   return visible;
 }

@@ -91,7 +91,7 @@ export const memWriteRenderer: ToolRenderer = {
               {metaEntries(args).map(([k, v]) => (
                 <div key={k} className="contents">
                   <dt className="text-muted">{k}</dt>
-                  <dd className="text-[--fg]/85 break-words">{v}</dd>
+                  <dd className="text-ink/85 break-words">{v}</dd>
                 </div>
               ))}
             </dl>

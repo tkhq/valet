@@ -487,7 +487,7 @@ export const secDispatchTool = defineTool({
       {
         method: "POST",
         headers: securityHeaders(cfg, ctx, true),
-        body: JSON.stringify({ cellId: args.cell_id, mode: args.mode, threadId: ctx.threadId, toolScope: ctx.toolScope }),
+        body: JSON.stringify({ cellId: args.cell_id, mode: args.mode, threadId: ctx.threadId, toolScope: ctx.toolScopeCeiling }),
       },
       async (res) => {
         const body = await parseJsonBody(res);
@@ -619,7 +619,7 @@ export const secHandoffTool = defineTool({
       {
         method: "POST",
         headers: securityHeaders(cfg, ctx, true),
-        body: JSON.stringify({ findingId: args.finding_id, task: args.task, threadId: ctx.threadId, toolScope: ctx.toolScope }),
+        body: JSON.stringify({ findingId: args.finding_id, task: args.task, threadId: ctx.threadId, toolScope: ctx.toolScopeCeiling }),
       },
       async (res) => {
         const body = await parseJsonBody(res);

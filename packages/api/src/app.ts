@@ -26,6 +26,8 @@ import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth 
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
 import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
+import { publicUrlFromEnv } from "./channels/host.js";
+import { generatedFileOrigin } from "./services/generated-files.js";
 import { VALET_VERSION, valetBuildSha } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
@@ -303,16 +305,22 @@ export function createApp(
 
   // Unauthenticated: drives `/login`/`/signup` control rendering.
   app.get("/api/auth-config", (c) => {
-    const body: AuthConfigResponse = authConfig
-      ? {
-          stub: false,
-          social: [
-            ...(authConfig.social.google ? (["google"] as const) : []),
-            ...(authConfig.social.github ? (["github"] as const) : []),
-          ],
-          sso: authConfig.oidc ? { name: authConfig.oidc.name } : null,
-        }
-      : { stub: true, social: [], sso: null };
+    // The origin of generated file links (`file_attach`), so the web app can
+    // open them on the hostname the person signed in on.
+    const publicOrigin = generatedFileOrigin(publicUrlFromEnv(process.env));
+    const body: AuthConfigResponse = {
+      ...(authConfig
+        ? {
+            stub: false,
+            social: [
+              ...(authConfig.social.google ? (["google"] as const) : []),
+              ...(authConfig.social.github ? (["github"] as const) : []),
+            ],
+            sso: authConfig.oidc ? { name: authConfig.oidc.name } : null,
+          }
+        : { stub: true, social: [], sso: null }),
+      ...(publicOrigin ? { publicOrigin } : {}),
+    };
     return c.json(body);
   });
 
