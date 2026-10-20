@@ -1012,7 +1012,7 @@ describe("unattendedRefusalError", () => {
     expect(error).toContain("An agent started or retried this run, so its agent steps do not use the workflow's saved permissions");
     // The marker can come from the source run or from an agent's retry, so
     // the fix is a new run, never a retry.
-    expect(error).toContain("Start a new run from the workflow page, or let the workflow's trigger start one.");
+    expect(error).toContain("Start a new run from the workflow page, or wait for the workflow to start one on its own.");
     expect(error).not.toContain("A retry keeps this");
     expect(error).toContain("move linear.save_milestone to a Tool step, which asks for approval on each run");
     // The setup a new run needs, when the step does not have it yet.
