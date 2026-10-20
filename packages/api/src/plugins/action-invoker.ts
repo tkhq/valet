@@ -71,8 +71,7 @@ import {
   readTeamCredential,
   teamFallbackReason,
   readUserCredential,
-  onePasswordScopesFor,
-} from "../services/credential-resolution.js";
+  onePasswordScopesFor, orgManagedCredentialService } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
@@ -501,7 +500,7 @@ async function computeResult(
     (ctx.owner.type === "team" && (mode !== "org" || userPinnedNative))
     || (ctx.owner.type === "user" && userPinnedNative));
   const refusalText = ctx.owner.type === "user"
-    ? userPinnedPersonalRefusalMessage(credentialService)
+    ? userPinnedPersonalRefusalMessage(credentialService, { orgManaged: orgManagedCredentialService(registry, credentialService) })
     : userPinnedNative ? userPinnedTeamRefusalMessage(credentialService) : teamRefusalMessage(credentialService);
   // An `auto` team read of a native service ends at the app token (Part B),
   // so a team with no person's credential is not refused when it answers.
@@ -657,7 +656,16 @@ async function refuseRunWithoutCredential(
 /** The refusal for a native service pinned `"user"` in a personal run whose
  * owner has no credential for it. The template gallery and install gate
  * report the same block (`workflows/templates.ts#templateRequirements`). */
-export function userPinnedPersonalRefusalMessage(service: string): string {
+export function userPinnedPersonalRefusalMessage(service: string, opts: { orgManaged?: boolean } = {}): string {
+  if (opts.orgManaged) {
+    // The org connects this service for everyone (`requires.orgCredential`),
+    // so the Integrations page offers no personal connect control for it.
+    const own = service === "slack" ? ", or use slack-user for your own account" : "";
+    return (
+      `This node uses your own ${service} account, but ${service} connects for the whole organization, so there is no personal account to connect. ` +
+      `Change the node's credential setting to the app${own}.`
+    );
+  }
   return (
     `This node uses your own ${service} account, and none is connected. ` +
     `Connect ${service} on the Integrations page, or change the node's credential setting.`

@@ -244,12 +244,14 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     await credentials.save({ type: "org", id: orgId }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
     const invoke = invokerFor(appDb, credentials);
 
+    // Slack connects for the whole organization, so the fix is the node's
+    // credential setting, never a personal Connect button.
     expect(await invoke(node("slack", "user"), userCtx)).toEqual({
       ok: false,
-      error:
-        "This node uses your own slack account, and none is connected. " +
-        "Connect slack on the Integrations page, or change the node's credential setting.",
+      error: userPinnedPersonalRefusalMessage("slack", { orgManaged: true }),
     });
+    expect(userPinnedPersonalRefusalMessage("slack", { orgManaged: true })).not.toContain("Connect slack on the Integrations page");
+    expect(userPinnedPersonalRefusalMessage("slack", { orgManaged: true })).toContain("slack-user");
 
     await credentials.save({ type: "user", id: userId }, "slack", { type: "bot_token", accessToken: "xoxb-personal" });
     expect(await invoke(node("slack", "user"), userCtx)).toMatchObject({ ok: true, result: { token: "xoxb-personal" } });
@@ -272,7 +274,8 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
       [["acme-chat", { plugin, actionPlugin }]]);
     const invoke = buildActionInvoker({ db: appDb, credentials, actionPluginByService, plugins: [plugin] });
 
-    expect(await invoke(node("acme-chat", "user"), userCtx)).toEqual({ ok: false, error: userPinnedPersonalRefusalMessage("acme-chat") });
+    // The fixture declares `requires.orgCredential`, so the refusal names the node setting, not a connect control.
+    expect(await invoke(node("acme-chat", "user"), userCtx)).toEqual({ ok: false, error: userPinnedPersonalRefusalMessage("acme-chat", { orgManaged: true }) });
     expect(resolveActions).not.toHaveBeenCalled();
   });
 

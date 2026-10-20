@@ -57,7 +57,7 @@ import {
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
-import { nativeAppCredentialServiceFor } from "../services/credential-resolution.js";
+import { nativeAppCredentialServiceFor, orgManagedCredentialService } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
   teamArmRefusals,
@@ -415,9 +415,11 @@ export function templateRequirements(
       && nativeAppCredentialServiceFor(plugins, service) !== undefined;
     const prior = byService.get(service);
     if (prior && !(userPinned && prior.connected)) continue;
+    const orgManagedPin = userPinned && orgManagedCredentialService(plugins, service);
     byService.set(service, {
       service,
       connected: required ? (userPinned ? personalServices.has(service) : connectedServices.has(service)) : true,
+      ...(orgManagedPin ? { organizationManagedPin: true } : {}),
       ...(dynamic ? { dynamic: true } : {}),
       ...(unavailableServices.has(service) ? { unconfigured: true } : {}),
     });
@@ -1102,7 +1104,20 @@ export async function installWorkflowTemplate(
     // it — only an admin can act, in Settings → Organization.
     const unmet = summarized.value.summary.requires.filter((r) => !r.connected);
     const unconfigured = unmet.filter((r) => r.unconfigured === true).map((r) => r.service);
-    const unconnected = unmet.filter((r) => r.unconfigured !== true).map((r) => r.service);
+    const orgManagedPins = unmet.filter((r) => r.organizationManagedPin === true).map((r) => r.service);
+    if (orgManagedPins.length > 0) {
+      return {
+        ok: false,
+        code: "not_connected",
+        // The org connects these services for everyone, so the Integrations
+        // page has no personal connect control; the node's credential
+        // setting is the fix.
+        error:
+          `This template pins ${orgManagedPins.join(" and ")} to your own account, but ${orgManagedPins.join(" and ")} connects for the whole organization. ` +
+          `Change those nodes' credential setting to the app, then install this template.`,
+      };
+    }
+    const unconnected = unmet.filter((r) => r.unconfigured !== true && r.organizationManagedPin !== true).map((r) => r.service);
     if (unconfigured.length > 0) {
       return {
         ok: false,

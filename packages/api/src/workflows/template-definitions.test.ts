@@ -437,6 +437,8 @@ describe("template requirements", () => {
     const connected = new Set(["github", "google_calendar", "slack"]);
     const blocked = templateRequirements(definition, actionPluginByService, connected, new Set(), new Set(["github", "google_calendar"]));
     expect(blocked.filter((r) => !r.connected).map((r) => r.service)).toEqual(["slack"]);
+    // Slack is org-managed, so the requirement says the pin, not a missing connection, is the block.
+    expect(blocked.find((r) => r.service === "slack")?.organizationManagedPin).toBe(true);
     const own = templateRequirements(definition, actionPluginByService, connected, new Set(), connected);
     expect(own.filter((r) => !r.connected)).toEqual([]);
     // An unpinned definition still rides the org-provided Slack bot.
