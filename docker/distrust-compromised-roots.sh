@@ -45,17 +45,26 @@ cert_fp() {
   printf '%s\n' "$out" | tr -d ':'
 }
 
-# Fail if any cert in a PEM file (single cert or bundle) has a bad fingerprint.
+# Fail if any PEM block in a file (single cert or bundle) is a distrusted root.
+# Every "-----BEGIN" block is fingerprinted with `openssl x509`, which reads
+# CERTIFICATE, TRUSTED CERTIFICATE and X509 CERTIFICATE blocks as they are.
+# A block that is unterminated or that openssl cannot parse as a certificate
+# fails the build. It is never skipped.
 check_pem_file() {
   rm -rf "$work/split"
   mkdir "$work/split"
   awk -v d="$work/split" '
-    /-----BEGIN CERTIFICATE-----/ { n++; out = d "/" n ".pem" }
-    out { print > out }
-    /-----END CERTIFICATE-----/ { out = "" }' "$1" || fail "cannot read $1"
+    /-----BEGIN / {
+      if (out != "") exit 3
+      n++; out = d "/" n ".pem"
+    }
+    out != "" { print > out }
+    /-----END / { out = "" }
+    END { if (out != "") exit 3 }' "$1" ||
+    fail "$1 has an unterminated or unreadable PEM block"
   for c in "$work"/split/*.pem; do
     [ -e "$c" ] || continue
-    fp=$(cert_fp "$c") || fail "cannot parse a certificate in $1"
+    fp=$(cert_fp "$c") || fail "cannot fingerprint a PEM block in $1"
     for bad in $BAD_FPS; do
       [ "$fp" != "$bad" ] || fail "distrusted root $bad still present in $1"
     done

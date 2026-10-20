@@ -98,6 +98,17 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * scoped to just this command) even though the docker provider gets there
  * via CLI flags instead of shell syntax.
  */
+/**
+ * A caller NODE_OPTIONS replaces the image default (`--use-openssl-ca`), which
+ * would drop the eMudhra root distrust. Prepend the flag so other options keep
+ * working. A later `--use-bundled-ca` or `--use-system-ca` in the caller value
+ * can still win; see docker/distrust-compromised-roots.sh.
+ */
+export function withTrustedCa(value: string): string {
+  if (value.split(/\s+/).includes("--use-openssl-ca")) return value;
+  return value.trim() === "" ? "--use-openssl-ca" : `--use-openssl-ca ${value}`;
+}
+
 export function buildShellCommand(command: string, opts?: ExecOpts): string {
   const parts: string[] = [];
   if (opts?.env) {
@@ -105,7 +116,7 @@ export function buildShellCommand(command: string, opts?: ExecOpts): string {
       if (!ENV_NAME_RE.test(name)) {
         throw new Error(`buildShellCommand: invalid env var name ${JSON.stringify(name)}`);
       }
-      parts.push(`export ${name}=${shQuote(value)};`);
+      parts.push(`export ${name}=${shQuote(name === "NODE_OPTIONS" ? withTrustedCa(value) : value)};`);
     }
   }
   if (opts?.cwd) {
