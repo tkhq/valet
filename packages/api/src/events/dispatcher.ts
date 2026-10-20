@@ -115,6 +115,8 @@ export interface EventDispatcherDeps {
   workflowStore: WorkflowStore;
   /** Seam over the assistant runtime and the destination thread's `submitPrompt`. See `assistant-target.ts`. */
   deliverToAssistant: AssistantDeliverFn;
+  /** Marks delivered rows whose turn failed (`delivery-turn.ts`). Absent → `markFailedDeliveryTurns`. */
+  markFailedTurns?: typeof markFailedDeliveryTurns;
   /**
    * Where a channel-originated event should route a reply. Returns the origin
    * for a channel event that names a conversation (a Slack message or mention),
@@ -384,7 +386,7 @@ export class EventDispatcher {
 
   /** Marks delivered rows whose turn failed and that the settle watcher missed. */
   async sweepFailedDeliveryTurns(now = Date.now()): Promise<number> {
-    return markFailedDeliveryTurns(this.deps.db, { deliveredSince: now - FAILED_TURN_SWEEP_WINDOW_MS });
+    return (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(this.deps.db, { deliveredSince: now - FAILED_TURN_SWEEP_WINDOW_MS });
   }
 
   private async deliverOne(deliveryId: string): Promise<void> {
@@ -696,7 +698,7 @@ export class EventDispatcher {
       // The delivery already succeeded, so a failed check only logs: the sweep
       // marks the row later.
       if (queueItemId) {
-        await markFailedDeliveryTurns(db, { deliveryId })
+        await (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(db, { deliveryId })
           .catch((err) => console.error(`event dispatch ${deliveryId}: failed-turn check:`, err));
       }
     } catch (err) {

@@ -6,22 +6,6 @@ import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js"
 import type { EventLogResponse } from "../wire/types.js";
 import { markFailedDeliveryTurns, wireDeliveryTurnFailures } from "./delivery-turn.js";
 
-/** Set to fail the dispatcher's next failed-turn check once. */
-const failNextCheck = vi.hoisted(() => ({ armed: false, failed: false }));
-vi.mock("./delivery-turn.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./delivery-turn.js")>();
-  return {
-    ...actual,
-    markFailedDeliveryTurns: async (...args: Parameters<typeof actual.markFailedDeliveryTurns>) => {
-      if (failNextCheck.armed && "deliveryId" in args[1]) {
-        failNextCheck.armed = false;
-        failNextCheck.failed = true;
-        throw new Error("connection lost");
-      }
-      return actual.markFailedDeliveryTurns(...args);
-    },
-  };
-});
 
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
@@ -109,12 +93,4 @@ it("finds a failed turn through the dispatch id when the delivery recorded no qu
   await local.providers.db.update(eventDeliveries).set({ queueItemId: null }).where(eq(eventDeliveries.id, "d_push"));
   expect(await markFailedDeliveryTurns(local.providers.db, { queueItemId })).toBe(1);
   expect(await deliveryRow(local)).toMatchObject({ status: "dead", queueItemId });
-}, 30_000);
-
-// The delivery already succeeded when the follow-up check runs.
-it("keeps a delivery delivered when the dispatcher's failed-turn check fails", async () => {
-  failNextCheck.armed = true;
-  const { local } = await deliverPush(fauxAssistantMessage("Triage posted."));
-  expect(failNextCheck.failed).toBe(true);
-  expect(await deliveryRow(local)).toMatchObject({ status: "delivered", attempts: 1 });
 }, 30_000);
