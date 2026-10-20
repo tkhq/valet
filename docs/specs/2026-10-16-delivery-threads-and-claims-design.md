@@ -413,7 +413,11 @@ event wakeups spec Part A.
 - **A dead follow binding is no binding.** If the bound thread fails
   `isDeliverableTarget`, the dispatcher passes no binding and the policy
   decides. A follow mention then re-binds the Slack thread to the new
-  thread.
+  thread. This includes a team re-mention, which otherwise keeps the
+  conversation's first binding: if that binding's own thread is dead, the
+  dispatcher moves the row to the thread the mention landed in
+  (`repointFollowedThread`). The row keeps its actor and rule. The write
+  applies only while the row still points at the dead thread.
 - **The follow router does not fall through.** A Slack reply that the
   follow router routes by a stored thread is refused when that thread is
   archived or deleted. The router throws its existing text and delivers

@@ -110,3 +110,21 @@ export async function touchFollowedThread(db: AppDb, id: string, lastSeenTs?: st
     .set({ lastActivityAt: Date.now(), ...(lastSeenTs !== undefined ? { lastSeenTs } : {}) })
     .where(eq(followedThreads.id, id));
 }
+
+/**
+ * Move a follow binding off a thread that can no longer receive deliveries
+ * (archived, or its session is gone) to `target`, the thread a re-mention
+ * just landed in. The binding keeps its actor and rule. The write applies
+ * only while the row still points at `stale`, so a concurrent re-bind wins.
+ */
+export async function repointFollowedThread(
+  db: AppDb,
+  id: string,
+  stale: { sessionId: string; threadId: string },
+  target: { sessionId: string; threadId: string },
+): Promise<void> {
+  await db
+    .update(followedThreads)
+    .set({ sessionId: target.sessionId, threadId: target.threadId, lastActivityAt: Date.now() })
+    .where(and(eq(followedThreads.id, id), eq(followedThreads.sessionId, stale.sessionId), eq(followedThreads.threadId, stale.threadId)));
+}

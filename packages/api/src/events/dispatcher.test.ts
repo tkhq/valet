@@ -989,6 +989,9 @@ describe("EventDispatcher", () => {
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
       expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_new" });
+      // The kept binding moves to the thread this mention landed in, so later replies resume.
+      expect(await findFollowedThread(tdb.appDb, { ...followKey, threadTs: "1.1" }))
+        .toMatchObject({ createdBy: "member-9", sessionId: LANDED.sessionId, threadId: LANDED.threadId });
     });
   });
 

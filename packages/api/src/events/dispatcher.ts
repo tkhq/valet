@@ -33,7 +33,7 @@ import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
-import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
+import { findFollowedThread, repointFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
 import { allCatalogEntries } from "./ingest.js";
 import { buildPromptValues, hasPromptConfig, renderEventPrompt } from "./prompt-template.js";
@@ -618,10 +618,20 @@ export class EventDispatcher {
             // rule admitted them under, and the router drops every message in
             // the thread. This mention passed the gate, so it re-binds the
             // thread to its own actor and rule and the conversation resumes.
+            // A kept binding whose thread was archived or deleted moves to
+            // the thread this mention landed in (`followBinding` already
+            // skipped it). Else every later reply would dead-letter.
             let preserveBinding = teamMention;
             if (preserveBinding) {
               const bound = await findFollowedThread(db, key);
               if (bound && !(await followBindingAuthorized(db, bound))) preserveBinding = false;
+              else if (bound && bound.ownerType === owner.type && bound.ownerId === owner.id
+                && bound.sessionId !== null && bound.threadId !== null) {
+                const stale = { sessionId: bound.sessionId, threadId: bound.threadId };
+                if (!(await isDeliverableTarget({ db }, event.orgId, owner, stale))) {
+                  await repointFollowedThread(db, bound.id, stale, { sessionId: landed.sessionId, threadId: landed.threadId });
+                }
+              }
             }
             await upsertFollowedThread(this.deps.db, {
               ...key,

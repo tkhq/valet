@@ -25,7 +25,7 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxResponseFactory } 
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { linkIdentity } from "../channels/identity-links.js";
 import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
@@ -37,6 +37,7 @@ import {
   events,
   githubInstallations,
   linearInstallations,
+  sessionThreads,
   slackChannelPrivacy,
   slackWebhookInbox,
   workflowSchedules,
@@ -602,6 +603,50 @@ describe("api integration: delivery threads acceptance scenario", () => {
     expect(await refused.json()).toEqual({ error: CROSS_OWNER });
     expect((await deliveriesOf(api, r2)).length).toBe(1);
   }, 120_000);
+
+  it("moves a team follow off an archived thread when the conversation is mentioned again", async () => {
+    const api = await bootUniverse();
+    const p = api.providers;
+    const team = await createTeam(p.db, { orgId: ORG, name: "Ops", creatorUserId: USER });
+    // A team rule with no stored policy opens one thread per mention.
+    const now = Date.now();
+    await p.db.insert(eventSubscriptions).values({
+      id: "sub-team-mentions", orgId: ORG, ownerType: "team", ownerId: team.id, name: "Ops mentions",
+      eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "eq", value: "C900" }],
+      target: { kind: "orchestrator", follow: true }, enabled: true, createdBy: USER, createdAt: now, updatedAt: now,
+    });
+    const conversation = `${++slackTs}.000100`;
+    const followKey = { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: conversation };
+    await postSlack(api, {
+      type: "app_mention", channel: "C900", user: "U001", text: `<@${BOT_USER}> is the deploy green?`,
+      ts: conversation, team: SLACK_TEAM, event_ts: conversation,
+    });
+    const first = await landingOf(api, (await settled(api, "sub-team-mentions", 1))[0]);
+    expect(await findFollowedThread(p.db, followKey)).toMatchObject({ ownerType: "team", sessionId: first.sessionId, threadId: first.id });
+
+    // A person archives the bound thread, then mentions the conversation again.
+    await p.db.update(sessionThreads).set({ archivedAt: Date.now() })
+      .where(and(eq(sessionThreads.sessionId, first.sessionId), eq(sessionThreads.id, first.id)));
+    const again = `${++slackTs}.000100`;
+    await postSlack(api, {
+      type: "app_mention", channel: "C900", user: "U001", text: `<@${BOT_USER}> any news?`,
+      ts: again, thread_ts: conversation, team: SLACK_TEAM, event_ts: again,
+    });
+    const second = await landingOf(api, (await settled(api, "sub-team-mentions", 2))[1]);
+    expect(second.id).not.toBe(first.id);
+    expect(await findFollowedThread(p.db, followKey)).toMatchObject({ createdBy: USER, sessionId: second.sessionId, threadId: second.id });
+
+    // A later reply follows the binding to the new thread.
+    const replyText = "rollback finished at 10:02";
+    await postSlack(api, {
+      type: "message", channel: "C900", channel_type: "channel", user: "U001", text: replyText, team: SLACK_TEAM,
+      ts: `${++slackTs}.000100`, thread_ts: conversation,
+    });
+    const reply = await poll(async () => rowsOf(await p.db.execute(
+      sql`SELECT session_id, thread_id FROM engine_queue_items WHERE content LIKE ${`%${replyText}%`}`,
+    )), (rows) => rows.length > 0, "the reply in the conversation");
+    expect(reply).toEqual([{ session_id: second.sessionId, thread_id: second.id }]);
+  }, 60_000);
 
   it("keeps a legacy team rule's channel events in one thread per channel", async () => {
     const api = await bootUniverse();
