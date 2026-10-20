@@ -294,6 +294,11 @@ describe("Ask Valet conversations", () => {
     expect(await alice.open()).toEqual(legacy["local-user"]);
     const mine = await alice.open({ fresh: true });
     const theirs = await bob.open({ fresh: true });
+    await use(mine);
+    // A member's newer conversations share one private session, so memory and files carry over.
+    const mineLater = await alice.open({ fresh: true });
+    expect(mineLater.threadId).not.toBe(mine.threadId);
+    expect(mineLater.sessionId).toBe(mine.sessionId);
     expect(mine.sessionId).toMatch(/^execution:/);
     expect(theirs.sessionId).toMatch(/^execution:/);
     expect(mine.sessionId).not.toBe(theirs.sessionId);
@@ -302,7 +307,6 @@ describe("Ask Valet conversations", () => {
     expect(await canAccessSessionResources(api.providers, await session(theirs.sessionId), { type: "user", id: "local-user" })).toBe(false);
     expect(await assistantMemoryNamespace(db, mine.sessionId, owner.id, "local-org")).toBe(mine.sessionId);
     expect(await assistantMemoryNamespace(db, theirs.sessionId, owner.id, "local-org")).toBe(theirs.sessionId);
-    await use(mine);
     await use(theirs);
     expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[mine.sessionId, mine.threadId]]);
     expect((await bob.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[theirs.sessionId, theirs.threadId]]);
@@ -312,12 +316,27 @@ describe("Ask Valet conversations", () => {
     await use(legacy["local-user"]!);
     expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([
       [root.sessionId, legacy["local-user"]!.threadId], [mine.sessionId, mine.threadId]]);
+    expect(await db.select({ key: assistantExecutions.conversationKey }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, mine.sessionId))).toEqual([{ key: "app-assistant:local-user:private" }]);
     expect(await alice.open()).toEqual(legacy["local-user"]);
     await waitForApproval(legacy["local-user"]!);
     expect(await alice.open({ fresh: true, unlessBusy: true })).toEqual(legacy["local-user"]);
     const runtime = await (await fetch(`${api.baseUrl}/api/workspaces/legacy-ask/runtime`, { method: "POST" })).json() as EnsureWorkspaceRuntimeResponse;
     expect(runtime.sessionId).toBe(root.sessionId);
     expect(await db.select().from(assistantExecutions).where(eq(assistantExecutions.conversationKey, "app-assistant:local-user"))).toEqual([]);
+  });
+
+  it("keeps a team member's memory and files across fresh conversations", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "memory-team", orgId: "local-org", name: "Memory", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values({ teamId: "memory-team", userId: "local-user", role: "admin" });
+    const { open } = conversations("memory-team");
+    const first = await open({ fresh: true });
+    await use(first);
+    const second = await open({ fresh: true, unlessBusy: true });
+    expect(second.threadId).not.toBe(first.threadId);
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(await assistantMemoryNamespace(api.providers.db, second.sessionId, "memory-team", "local-org")).toBe(first.sessionId);
   });
 
   it("keeps each team member's conversations to that member", async () => {
@@ -336,8 +355,7 @@ describe("Ask Valet conversations", () => {
     expect(own.sessionId).toMatch(/^execution:/);
     expect(own.sessionId).not.toBe(other.sessionId);
     const [execution] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, own.sessionId));
-    // Each fresh conversation has its own private execution, keyed by the conversation.
-    expect(execution?.conversationKey).toMatch(/^app-assistant:local-user:[0-9a-f-]{36}$/);
+    expect(execution?.conversationKey).toBe("app-assistant:local-user");
     expect((await theirs.list()).conversations.map(item => item.threadId)).toEqual([other.threadId]);
     expect((await mine.list()).conversations.map(item => item.threadId)).toContain(own.threadId);
     const read = (threadId: string, user: string) => fetch(`${api!.baseUrl}/api/threads/${threadId}/messages`, { headers: { "x-valet-test-user-id": user } });

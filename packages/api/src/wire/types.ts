@@ -848,7 +848,8 @@ export interface EnsureWorkspaceConversationResponse { sessionId: string; thread
 
 /** One of the viewer's Ask Valet conversations. */
 export interface WorkspaceConversationSummary {
-  /** A team keeps each newer conversation in its own private execution. */
+  /** After a team upgrade, the older conversation can live on the shared root
+   * and newer ones in a private execution, so each item names its session. */
   sessionId: string;
   threadId: string;
   title?: string;

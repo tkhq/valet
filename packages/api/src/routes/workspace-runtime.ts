@@ -74,9 +74,8 @@ function assistantConversationSession(c: Context<AppEnv>, owner: Principal) {
   return ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}`);
 }
 
-/** Where the viewer's Ask Valet conversations live. A team gives every newer
- * conversation its own private execution, so only the older per-person
- * conversation can stay on the shared root. Governing threads in the root
+/** Where the viewer's Ask Valet conversations live: the helper session, and in
+ * a team any private execution the viewer owns. Governing threads in the root
  * are anchors, not conversations. */
 async function conversationScope(c: Context<AppEnv>, owner: Principal, helperSessionId: string) {
   if (owner.type !== "team") return { sessionIds: [helperSessionId], anchors: new Set<string>(), sharedRoot: undefined };
@@ -131,11 +130,14 @@ workspaceRuntimeRouter.post("/:workspace/conversation", async (c) => {
   // A new helper thread starts from the viewer's current model and reasoning
   // defaults, as every other new thread does, not the runtime's stored model.
   // Without `fresh`, the first conversation keeps the older per-person key, so
-  // concurrent opens agree on one thread. A fresh team conversation gets its
-  // own private execution, so it never lands on a shared legacy root.
+  // concurrent opens agree on one thread. Fresh conversations share the
+  // person's private helper, which keeps their memory and working files. After
+  // an upgrade, a team member's helper can be the shared root, so their fresh
+  // conversations get a private per-person execution instead.
   const key = request.fresh === true ? assistantConversationKey(c.var.user.id) : `app-assistant:${c.var.user.id}`;
-  const target = request.fresh === true && owner.type === "team"
-    ? await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, key)
+  const sharedHelper = owner.type === "team" && !helper.sessionId.startsWith("execution:");
+  const target = request.fresh === true && sharedHelper
+    ? await ensureAssistantExecution(c.var.providers, owner, { actorUserId: c.var.user.id, orgId: c.var.user.orgId }, `app-assistant:${c.var.user.id}:private`)
     : helper;
   const data = await target.session.toData();
   const thread = await c.var.providers.engineHost.ensureFreshThread(target.session, key,
