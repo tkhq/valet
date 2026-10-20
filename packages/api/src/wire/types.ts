@@ -2951,6 +2951,17 @@ export interface ListWorkflowActionRequiredResponse {
 
 // ── Workflow triggers (spec 2026-08-15) ──────────────────────────────────
 
+/** The assistant thread a routine's firings land on, as the routine page
+ * links it (spec 2026-10-16: presence hub, Part E step 2). */
+export interface WorkflowScheduleThreadRef {
+  sessionId: string;
+  threadId: string;
+  /** The thread's title, or null when it has none yet. */
+  title: string | null;
+  /** True when the thread is archived: it takes no firings, and its link shows disabled. */
+  archived: boolean;
+}
+
 export interface WorkflowScheduleTriggerDetail {
   cron: string;
   timezone: string;
@@ -2962,6 +2973,11 @@ export interface WorkflowScheduleTriggerDetail {
   input?: unknown;
   nextFireAt: number;
   lastFiredAt: number | null;
+  /** The thread the latest firing landed on, or, for the `own` policy before
+   * any recorded firing, the routine's own thread. Null for a workflow
+   * routine (its firings are runs), before any thread exists, and when the
+   * viewer may not open the thread. */
+  lastFiredThread: WorkflowScheduleThreadRef | null;
   /** Why the scheduler disabled this schedule, as a sentence that names the
    * fix: the pin text when its `existing` thread cannot receive deliveries,
    * or an empty prompt, a deleted workflow, or a schedule that does not

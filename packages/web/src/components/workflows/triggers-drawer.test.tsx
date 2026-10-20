@@ -58,7 +58,7 @@ const nightly: WorkflowTriggerItem = {
     timezone: "UTC",
     targetKind: "workflow",
     nextFireAt: 1_924_000_000_000,
-    lastFiredAt: null,
+    lastFiredAt: null, lastFiredThread: null,
     ownerType: "user",
     ownerId: "u1",
   },

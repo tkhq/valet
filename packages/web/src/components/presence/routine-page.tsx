@@ -8,8 +8,9 @@
  *
  * A routine that runs a workflow reads its firings from the workflow's runs
  * this routine started. An assistant routine records only when it last
- * fired, so its Activity holds that one firing and its strip shows no
- * count. A routine the scheduler turned off for an archived thread shows its
+ * fired and the thread that firing landed on, so its Activity holds that
+ * one firing and its strip shows no count. The title, Where, and the firing
+ * link that thread when the viewer may open it. A routine the scheduler turned off for an archived thread shows its
  * problem with the thread picker inline; a pick repins the routine and
  * turns it on again. Edit's **Where** lists the routine owner's threads.
  */
@@ -81,7 +82,7 @@ export function routineColumns(routine: Routine, workflows: WorkflowNames, threa
   const policy = routine.detail.thread ?? { mode: "own" };
   const where: HowColumn = routine.detail.targetKind === "workflow"
     ? { section: "where", value: [text("in a workflow run")], explanation: "A workflow run has no thread. Open the run from Activity to follow it." }
-    : { section: "where", value: whereParts(policy, null, threads), explanation: whereExplanation(policy, null, "routine") };
+    : { section: "where", value: whereParts(policy, null, threads, routine.detail.lastFiredThread), explanation: whereExplanation(policy, null, "routine") };
   return [
     { section: "when", value: [text(scheduleInWords(routine.detail.cron, routine.detail.timezone))], explanation: scheduleExplanation(routine.detail.timezone) },
     { section: "do", value: routineDoParts(routine, workflows), explanation: routineDoExplanation(routine, workflows) },

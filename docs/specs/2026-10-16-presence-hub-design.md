@@ -503,8 +503,13 @@ Pass criterion: all steps, in one run, from a clean start.
    Turn the routine on to resume.` beside the switch), **How it works** with When (the schedule in words and `The
    times are in <zone>.`), Do, and Where, and **Activity** as its firings
    without chips (each `Fired → worked in <thread>` or `Fired → started
-   <workflow> run`). A workflow routine's firings are the runs it started
-   among the workflow's last 50 runs, each with the time it took; **Fire
+   <workflow> run`). When the viewer may open the routine's thread, `its
+   own thread` links that thread in the title, in Where, and in the
+   firing row, and a `new` routine's firing row links the thread that
+   firing landed on (`a new thread`). The words do not change. An archived
+   thread shows as a disabled link. Without a thread the viewer may open,
+   the words stay plain text. A workflow routine's firings are the runs
+   it started among the workflow's last 50 runs, each with the time it took; **Fire
    now** refreshes them. Edit opens the editor (Part H) and its Where
    lists the routine owner's threads.
 3. A routine is created through **Add** → `On a schedule`, or `+ New
@@ -523,6 +528,23 @@ Pass criterion: all steps, in one run, from a clean start.
    prompt for the prompt reason. A thread change
    clears the pin reason. A PATCH cannot change a routine's workflow, so
    the workflow reason clears only on enable.
+5. `workflow_schedules` carries `last_fired_session_id` and
+   `last_fired_thread_id`, two new nullable text columns edited in place
+   in `0000_app.sql`, with a matching `SCHEMA_REPAIRS` entry for each. The
+   scheduler and **Fire now** write them from the thread each
+   assistant-prompt firing lands on. A workflow routine writes neither,
+   because its firings are runs. No backfill runs. The triggers list
+   gives each schedule `lastFiredThread` (`sessionId`, `threadId`,
+   `title`, `archived`): the recorded thread, or, for the `own` policy
+   with no recorded firing, the thread keyed `schedule:<id>` in the
+   owner's assistant. The list checks the thread as the event page checks
+   its thread links (`readableThreads`). A thread the viewer may not open
+   reads as null. The recorded pair belongs to the policy that chose it: a
+   change of the thread policy clears both columns, and a firing writes
+   them only while the row still holds the policy the firing read. The
+   list reads the recorded pairs by thread id and the `schedule:<id>`
+   keys by the owners' assistant sessions, in two queries, so neither
+   scans `engine_threads`.
 
 ## Part F: Activity
 

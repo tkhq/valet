@@ -449,6 +449,13 @@ export async function updateWorkflowSchedule(
     nextAt = next.at;
   }
 
+  const threadPolicy = patch.thread === undefined ? row.threadPolicy
+    : patch.thread === null ? null : readThreadPolicy(patch.thread);
+  // The recorded landing was chosen under the old policy. A `new` routine
+  // changed to `own` would otherwise open its old slot thread as "its own
+  // thread" until the next firing, so the pair clears with the policy and
+  // the own thread is found by key until then (`routineThreads`).
+  const policyChanged = JSON.stringify(threadPolicy ?? null) !== JSON.stringify(row.threadPolicy ?? null);
   const updated = await db
     .update(workflowSchedules)
     .set({
@@ -458,8 +465,8 @@ export async function updateWorkflowSchedule(
       enabled: patch.enabled ?? row.enabled,
       prompt: patch.prompt ?? row.prompt,
       input: patch.input !== undefined ? patch.input : row.input,
-      threadPolicy: patch.thread === undefined ? row.threadPolicy
-        : patch.thread === null ? null : readThreadPolicy(patch.thread),
+      threadPolicy,
+      ...(policyChanged ? { lastFiredSessionId: null, lastFiredThreadId: null } : {}),
       // An edit that answers the recorded reason clears it (`patchAnswersReason`).
       disabledReason: patchAnswersReason(row.disabledReason, patch, {
         schedule: cronOrTzChanged,

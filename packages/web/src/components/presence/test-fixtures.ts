@@ -66,7 +66,7 @@ export function routine(
       targetKind: "assistant",
       prompt: "Summarize",
       nextFireAt: Date.now() + 3_600_000,
-      lastFiredAt: null,
+      lastFiredAt: null, lastFiredThread: null,
       ownerType: "user",
       ownerId: "u-001",
       ...detail,

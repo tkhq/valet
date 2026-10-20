@@ -2009,6 +2009,19 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "disabled_reason" text',
   },
   {
+    // The thread the latest assistant-prompt firing landed on (spec
+    // 2026-10-16: presence hub, Part E). Null means no recorded firing, so
+    // existing rows need no backfill.
+    describe: "workflow_schedules.last_fired_session_id column",
+    probe: { kind: "column", table: "workflow_schedules", column: "last_fired_session_id" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "last_fired_session_id" text',
+  },
+  {
+    describe: "workflow_schedules.last_fired_thread_id column",
+    probe: { kind: "column", table: "workflow_schedules", column: "last_fired_thread_id" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "last_fired_thread_id" text',
+  },
+  {
     // The assistant thread a follow binds to (spec 2026-10-16: delivery
     // threads, Part B step 5). Null keeps the Slack thread key route.
     describe: "followed_threads.session_id column",
