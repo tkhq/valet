@@ -997,6 +997,40 @@ describe("team OAuth connections", () => {
     expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "admin-repair" });
   });
 
+  it("keeps an account an admin swapped in, with the same scopes, while the member signed in", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
+    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "admin-account", scopes: ["read"] });
+    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "admin-account" });
+  });
+
+  it("keeps a connection that was deleted and created again while the member signed in", async () => {
+    const { app, team } = await setup();
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
+    const state = await startStepUp(app.baseUrl, app.providers.db, team.id, "read extra");
+    await app.providers.engineCredentials.delete({ type: "team", id: team.id }, "linear");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "recreated", scopes: ["read"] });
+    fake.tokenResponse = { access_token: "stale", expires_in: 3600, scope: "read extra" };
+    expect((await finish(app.baseUrl, state, "test-member")).headers.get("location")).toContain("error=team_step_up_not_granted");
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "recreated" });
+  });
+
+  it("refuses a team step-up when the team has no connection", async () => {
+    const { app, team } = await setup();
+    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await app.providers.db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
+      ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    const started = await fetch(`${app.baseUrl}/api/credentials/linear/connect?addScopes=read+extra&session=team-thread-session`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(started.status).toBe(400);
+  });
+
   it("lets a team member connect a team account", async () => {
     const { app, team } = await setup();
     await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });

@@ -24,6 +24,7 @@ import { Hono } from "hono";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
 import {
   insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, replaceTeamCredentialForStepUp, teamConnectionIsDead,
+  teamConnectionVersion,
 } from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
@@ -75,6 +76,9 @@ interface OAuthConnectState {
    * live connection only with a grant that holds them and every scope the
    * connection already holds (`replaceTeamCredentialForStepUp`). */
   stepUp?: string[];
+  /** Step-up on a team: the connection version the step-up started from
+   * (`teamConnectionVersion`). The callback replaces only that version. */
+  stepUpFrom?: string;
   nonce: string;
   exp: number;
 }
@@ -87,7 +91,7 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, stepUp } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, stepUp, stepUpFrom } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
@@ -96,6 +100,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (stepUp !== undefined && (!Array.isArray(stepUp) || !stepUp.every((s) => typeof s === "string") || typeof teamId !== "string")) return null;
+    if ((stepUp === undefined) !== (stepUpFrom === undefined) || (stepUpFrom !== undefined && typeof stepUpFrom !== "string")) return null;
     if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
     return {
@@ -104,7 +109,9 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
       ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
-      ...(Array.isArray(stepUp) ? { stepUp: stepUp.filter((s): s is string => typeof s === "string") } : {}),
+      ...(Array.isArray(stepUp) && typeof stepUpFrom === "string"
+        ? { stepUp: stepUp.filter((s): s is string => typeof s === "string"), stepUpFrom }
+        : {}),
     };
   });
 }
@@ -231,6 +238,10 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
     }
   }
+  const stepUpFrom = stepUp && teamId !== undefined ? await teamConnectionVersion(db, teamId, service) : undefined;
+  if (stepUp && stepUpFrom === undefined) {
+    return c.json({ error: "This team has no connection to add scopes to. Connect one for the team on the Integrations page." }, 400);
+  }
   const redirectUri = callbackUrl(c.req.url);
   const key = deriveSecretKey(encryptionKey);
   const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
@@ -238,7 +249,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
     ...(reconnect ? { reconnect: true as const } : {}),
-    ...(stepUp && addScopes ? { stepUp: addScopes } : {}),
+    ...(stepUp && addScopes && stepUpFrom ? { stepUp: addScopes, stepUpFrom } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -437,8 +448,10 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
         };
-        if (verified.stepUp) {
-          const result = await replaceTeamCredentialForStepUp(tx, encryptionKey, teamId, verified.service, credential, verified.stepUp);
+        if (verified.stepUp && verified.stepUpFrom) {
+          const result = await replaceTeamCredentialForStepUp(
+            tx, encryptionKey, teamId, verified.service, credential, verified.stepUp, verified.stepUpFrom,
+          );
           if (result === "replaced") await invalidateWorkflowSources(tx, { teamId });
           if (result === "removed") return "team_connection_removed";
           return result === "replaced" ? null : "team_step_up_not_granted";
