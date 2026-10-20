@@ -18,6 +18,7 @@ import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
+const cancelQueuedMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const resumeMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const sendState: { pending: boolean; sessions?: string[] } = { pending: false };
 // Sessions whose stop request is in flight.
@@ -56,6 +57,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       isPending: false,
       mutateAsync: resumeMutateAsync,
     }),
+    useCancelQueuedItem: () => ({ isPending: false, mutateAsync: cancelQueuedMutateAsync }),
   };
 });
 
@@ -137,6 +139,7 @@ beforeEach(() => {
   sendMutateAsync.mockReset();
   sendMutateAsync.mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
   abortMutateAsync.mockClear();
+  cancelQueuedMutateAsync.mockClear();
   resumeMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
@@ -210,12 +213,33 @@ describe("Composer queued-message stack", () => {
     );
   });
 
-  it("keeps unresolved pending items visible after reload", () => {
+  it("keeps unresolved pending items visible after reload, each with Cancel", () => {
     queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1", "q-2"] };
     renderComposer("streaming", [], 2);
 
-    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
+    expect(screen.getAllByText("Queued message. It runs when the current turn ends.")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[1]!);
+    expect(cancelQueuedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", itemId: "q-2" });
+  });
+
+  it("shows the server's corrective text when a cancel is refused", async () => {
+    cancelQueuedMutateAsync.mockRejectedValueOnce(
+      new ApiError(409, "POST /threads/thread-1/queue/q-1/cancel → 409", {
+        error: "This message is no longer queued. If it started, select Stop to end it.",
+      }),
+    );
+    queueStateRef.current = { ...queueState("followup"), pendingIds: ["q-1"] };
+    renderComposer("streaming", [], 1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText("This message is no longer queued. If it started, select Stop to end it.")).toBeTruthy();
+    expect(screen.queryByText(/→ 409/)).toBeNull();
+  });
+
+  it("counts pending items when the live queue state is not loaded", () => {
+    renderComposer("streaming", [], 2);
+    expect(screen.getByRole("status").textContent).toBe("2 queued messages are waiting.");
   });
 });
 
@@ -728,6 +752,25 @@ describe("Composer — mid-turn submit affordance", () => {
     rerenderComposer();
     expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
+  });
+
+  it("disarms Steer when a canceled item was listed before the send resolved", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("steer");
+    const { rerenderComposer } = renderComposer("streaming");
+
+    // The queue update that lists q-1 arrives before POST /messages resolves.
+    queueStateRef.current = { ...queueState("steer"), pendingIds: ["q-1"] };
+    await type("follow after this turn");
+    await userEvent.click(screen.getByRole("button", { name: /^queue$/i }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
+
+    // Cancel removes q-1 from the queue.
+    queueStateRef.current = { ...queueState("steer"), pendingIds: [] };
+    rerenderComposer();
+    expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
+    expect(screen.queryByText(/queued\. press enter again/i)).toBeNull();
   });
 
   it("shows the API error when promote fails", async () => {

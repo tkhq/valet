@@ -662,6 +662,14 @@ export function useAbortThread(sessionId: string) {
   });
 }
 
+/** Cancels one queued message that has not started. The queue change and
+ * the settled `aborted` outcome arrive on the WS stream, like Stop. */
+export function useCancelQueuedItem() {
+  return useMutation<{ ok: true }, Error, { threadId: string; itemId: string }>({
+    mutationFn: ({ threadId, itemId }) => api.cancelQueuedItem(threadId, itemId),
+  });
+}
+
 export function useResumeThread(sessionId: string) {
   return useMutation<{ ok: true }, Error, { threadId: string }>({
     mutationFn: ({ threadId }) => api.resumeThread(threadId),

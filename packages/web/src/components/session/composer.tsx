@@ -13,7 +13,7 @@ import {
 } from "react";
 import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
-import { useAbortThread, useResumeThread, useSendPrompt } from "~/api/queries";
+import { useAbortThread, useCancelQueuedItem, useResumeThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import {
   queueBusy,
@@ -296,6 +296,7 @@ export function Composer({
   const appPageHint = useContext(AppPageHintContext);
   const abort = useAbortThread(sessionId);
   const resume = useResumeThread(sessionId);
+  const cancelQueued = useCancelQueuedItem();
   // The textarea disables while a send is in flight, which drops focus to
   // <body>. Refocus when the send settles so the user can type the next
   // message or command immediately (covers Enter sends and Send clicks).
@@ -330,7 +331,14 @@ export function Composer({
     setSubmitErrors((current) => ({ ...current, [key]: error }));
   }, [key]);
   const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
-  const unresolvedQueuedCount = Math.max(0, queuedItemCount - queuedMessages.length);
+  // Pending items this window has no text for: queued before a reload, or
+  // from another tab. Each still gets a row with Cancel. Without the live
+  // queue state, only the count is known.
+  const knownQueuedIds = new Set(queuedMessages.map((message) => message.queueItemId));
+  const unresolvedQueuedIds = (queueState?.pendingIds ?? []).filter((itemId) => !knownQueuedIds.has(itemId));
+  const unresolvedQueuedCount = queueState
+    ? unresolvedQueuedIds.length
+    : Math.max(0, queuedItemCount - queuedMessages.length);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -366,7 +374,11 @@ export function Composer({
       if (claimed || leftQueue) return drop();
       return prev;
     });
-  }, [working, queueState, threadId]);
+    // The followup id is a dependency: the queue update that lists the item
+    // usually arrives before `POST /messages` resolves, so the item must be
+    // checked against the current pending ids when the followup is armed.
+    // Otherwise a Cancel leaves Steer armed on an item that is gone.
+  }, [working, queueState, threadId, queuedFollowup?.itemId]);
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
   const action: SubmitAction = !working
@@ -530,6 +542,16 @@ export function Composer({
     };
     drafts.setFiles(key, (prev) => prev.map((f) => (f.id === id ? reset : f)));
     startUpload(key, reset);
+  }
+
+  async function cancelQueuedItem(itemId: string) {
+    if (!threadId || cancelQueued.isPending) return;
+    setSubmitError(null);
+    try {
+      await cancelQueued.mutateAsync({ threadId, itemId });
+    } catch (err) {
+      setSubmitError(apiErrorDetail(err, "Could not cancel the queued message. Try again."));
+    }
   }
 
   async function promoteQueuedItem(itemId: string, messageId: string) {
@@ -897,10 +919,7 @@ export function Composer({
             const itemId = message.queueItemId;
             if (!itemId) return null;
             return (
-              <div
-                key={itemId}
-                className="flex items-center gap-2 rounded-xl border border-line bg-ink-wash px-3 py-2 text-xs"
-              >
+              <QueuedRow key={itemId} cancel={guest ? undefined : () => void cancelQueuedItem(itemId)} canceling={cancelQueued.isPending}>
                 <p className="min-w-0 flex-1 line-clamp-2 text-ink">{message.content}</p>
                 <Button
                   type="button"
@@ -912,10 +931,14 @@ export function Composer({
                 >
                   {promotingItemId === itemId ? "Sending…" : "Send now"}
                 </Button>
-              </div>
+              </QueuedRow>
             );
           })}
-          {unresolvedQueuedCount > 0 && (
+          {queueState ? unresolvedQueuedIds.map((itemId) => (
+            <QueuedRow key={itemId} cancel={guest ? undefined : () => void cancelQueuedItem(itemId)} canceling={cancelQueued.isPending}>
+              <p className="min-w-0 flex-1 text-muted">Queued message. It runs when the current turn ends.</p>
+            </QueuedRow>
+          )) : unresolvedQueuedCount > 0 && (
             <p className="px-1 text-xs text-muted" role="status">
               {unresolvedQueuedCount} queued{" "}
               {unresolvedQueuedCount === 1 ? "message is" : "messages are"} waiting.
@@ -1156,5 +1179,20 @@ function QueueIndicator({
   if (parts.length === 0) return null;
   return (
     <div role="status" className="mb-2 px-3 pt-1 text-xs leading-5 text-muted">{parts.join(" • ")}</div>
+  );
+}
+
+/** One queued message above the composer: its content and actions, then
+ * Cancel, which removes it before it starts. */
+function QueuedRow({ cancel, canceling, children }: { cancel?: () => void; canceling: boolean; children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-line bg-ink-wash px-3 py-2 text-xs">
+      {children}
+      {cancel && (
+        <Button type="button" variant="ghost" size="sm" className="shrink-0" disabled={canceling} onClick={cancel}>
+          Cancel
+        </Button>
+      )}
+    </div>
   );
 }

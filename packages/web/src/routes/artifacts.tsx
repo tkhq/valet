@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useArtifacts } from "~/api/artifacts";
 import { useMe } from "~/api/settings";
-import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkList, WorkRow, pageClass } from "~/components/primitives";
+import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, PageHeader, WorkList, WorkRow, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { currentCursor, formatCursorStack, pageNumber, parseCursorStack, popCursor, pushCursor } from "~/lib/cursor-stack";
@@ -36,14 +36,13 @@ export function ArtifactsPage() {
 
   return <div className="min-w-0 flex-1 overflow-y-auto">
     <div className={pageClass}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-baseline gap-3">
-          <h1 className="font-display text-2xl text-ink">Artifacts</h1>
-          <WorkspaceClause />
-        </div>
-        <Button asChild variant="ghost" size="sm"><Link to="/memory">Memory</Link></Button>
-      </div>
-      <p className="mb-6 mt-2 text-sm text-muted">Published documents and pages in this workspace, most recently updated first.</p>
+      <PageHeader
+        className="mb-6"
+        title="Artifacts"
+        clause={<WorkspaceClause />}
+        description="Published documents and pages in this workspace, most recently updated first."
+        actions={<Button asChild variant="secondary" size="sm"><Link to="/memory">Memory</Link></Button>}
+      />
       {!owner && me.isError ? <ErrorRow>Could not load your workspace. Reload this page to try again.</ErrorRow>
         : !owner || query.isPending ? <LoadingRow label="Loading artifacts…" />
         : query.isError ? <>

@@ -84,7 +84,7 @@ export function PresenceLine({ sub, sentence }: {
           {sub.ownerType !== "user" && <> <OwnerBadge ownerType={sub.ownerType} /></>}
         </p>
       </div>
-      <div className="flex items-center gap-2 pt-1">
+      <div className="flex items-center gap-2">
         <Switch
           size="sm"
           checked={sub.enabled}

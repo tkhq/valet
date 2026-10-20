@@ -969,6 +969,11 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  cancelQueuedItem: (threadId: string, itemId: string) =>
+    request<{ ok: true }>(
+      "POST",
+      `/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(itemId)}/cancel`,
+    ),
 
   // slash commands
   listCommands: (sessionId: string) =>

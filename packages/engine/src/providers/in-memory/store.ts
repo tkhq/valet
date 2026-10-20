@@ -881,12 +881,13 @@ export class InMemorySessionStore implements SessionStore {
     threadId: string,
     itemId: string,
     outcome: SubmissionOutcome,
-    opts?: { mergedIntoItemId?: string },
+    opts?: { mergedIntoItemId?: string; onlyIfUnsuperseded?: boolean },
   ): Promise<boolean> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
     if (!item || item.threadId !== threadId) return false;
     if (item.status !== "collecting" && item.status !== "queued") return false;
+    if (opts?.onlyIfUnsuperseded && item.supersededByItemId) return false;
     item.status = "settled";
     item.outcome = outcome;
     if (outcome.outcome === "merged" && opts?.mergedIntoItemId) {

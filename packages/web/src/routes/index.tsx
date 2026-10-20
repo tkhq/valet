@@ -4,7 +4,7 @@ import { MemoryCard } from "~/components/assistant/memory-card";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
-import { Spinner, pageClass } from "~/components/primitives";
+import { Button, ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { cn } from "~/lib/cn";
 
@@ -24,24 +24,16 @@ export function Home() {
 export function Dashboard() {
   const info = useWorkspaceRuntimeInfo("user");
 
-  if (info.isLoading) {
+  if (info.isLoading || info.error || !info.data) {
     return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        <Spinner /> Loading…
-      </div>
-    );
-  }
-
-  if (info.error || !info.data) {
-    return (
-      <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
-        <div>
-          Couldn’t load your workspace.
-          <div className="mt-2">
-            <button type="button" className="min-h-11 px-3 underline sm:min-h-0" onClick={() => info.refetch()}>
-              Retry
-            </button>
-          </div>
+      <div className="min-w-0 flex-1 overflow-y-auto">
+        <div className={pageClass}>
+          {info.isLoading ? <LoadingRow label="Loading your workspace…" /> : (
+            <>
+              <ErrorRow>Could not load your workspace. Try again.</ErrorRow>
+              <Button variant="secondary" size="sm" onClick={() => void info.refetch()}>Retry</Button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -54,7 +46,7 @@ function DashboardBody() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className={cn(pageClass, "space-y-8")}>
-        <header><h1 className="font-display text-2xl">Personal</h1><p className="mt-1 text-sm text-muted">Your recent work and items that need attention.</p></header>
+        <PageHeader title="Personal" description="Your recent work and items that need attention." />
         <WorkspaceCatchUp />
         <div className="grid gap-4 md:grid-cols-2">
           <MemoryCard />

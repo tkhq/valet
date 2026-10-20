@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Dialog, DialogContent, DialogTitle, PageHeader, Spinner, pageClass } from "~/components/primitives";
-import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
@@ -176,7 +175,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={cn(pageClass, "[&>*]:max-w-3xl")}>
+      <div className={pageClass}>
         <PageHeader
           title="Integrations"
           // The box stays up through an empty match — hiding it would leave
@@ -184,6 +183,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           actions={!isLoading && !error && showSearch && (
             <div className="w-full sm:w-56">
               <SearchInput
+                size="sm"
                 value={query}
                 onSettled={(next) =>
                   void navigate({

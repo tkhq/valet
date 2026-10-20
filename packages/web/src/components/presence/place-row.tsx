@@ -43,8 +43,13 @@ export const ROSTER_ROW_CLASS =
 export const QUIET_ADD_CLASS =
   "-ml-2 mt-1 h-auto justify-self-start rounded-md px-2 py-1 text-xs font-normal text-muted hover:bg-moss-wash hover:text-accent-600";
 
+/** The place column. Its top inset and the name's line height match a
+ * sentence line (`py-1.5`, `text-base`), so the name, the first sentence,
+ * and the line's controls share one center line. */
+export const PLACE_COLUMN_CLASS = "min-w-0 pt-1.5";
+
 /** The place name in the place column. */
-export const PLACE_NAME_CLASS = "break-words text-[15px] font-medium text-ink";
+export const PLACE_NAME_CLASS = "break-words text-[15px] leading-6 font-medium text-ink";
 
 /** The stacked meta lines under the place name; one line at phone width. */
 export const PLACE_META_CLASS = "mt-1.5 grid gap-0.5 text-xs tabular-nums text-muted max-sm:mt-0.5 max-sm:flex max-sm:flex-wrap max-sm:gap-x-3";
@@ -89,7 +94,7 @@ export function PlaceRow({ block, highlighted = false }: {
       data-highlight={highlighted ? "true" : undefined}
       className={cn(ROSTER_ROW_CLASS, "transition-colors", highlighted && CREATED_HIGHLIGHT_CLASS)}
     >
-      <div className="min-w-0 pt-0.5">
+      <div className={PLACE_COLUMN_CLASS}>
         <div className="flex items-start justify-between gap-2">
           {hasPage(block)
             ? (

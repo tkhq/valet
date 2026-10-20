@@ -254,6 +254,82 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("a cancel during a digest's admission loses, so the digest never carries canceled text", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-cancel" });
+    const store = new InMemorySessionStore();
+    // Hold the digest's admission open: the window between the coalescer's
+    // read of the queue and its merge of the constituents.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let digestAdmitting!: () => void;
+    const admitting = new Promise<void>((resolve) => { digestAdmitting = resolve; });
+    const admit = store.admitSubmission.bind(store);
+    store.admitSubmission = async (sessionId, threadId, item, opts) => {
+      if (item.metadata?.overheardDigest !== undefined) {
+        digestAdmitting();
+        await gate;
+      }
+      return admit(sessionId, threadId, item, opts);
+    };
+    const engine = new Engine({
+      providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+    const x = await thread.submitPrompt(overheardSignal({ body: "cancel me", sender: "Sender A" }), { dispatchId: "slack:follow:x" });
+    const y = thread.submitPrompt(overheardSignal({ body: "keep me", sender: "Sender B", messageTs: "200.1" }), {
+      dispatchId: "slack:follow:y",
+    });
+    await admitting;
+    const canceled = thread.cancelQueuedItem(x.queueItemId);
+    release();
+    const [receipt, wasCanceled] = await Promise.all([y, canceled]);
+
+    expect(wasCanceled).toBe(false);
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+    const digest = await store.getQueueItem(session.id, receipt.queueItemId);
+    const body = typeof digest?.content === "object" && digest.content !== null && "body" in digest.content
+      ? String(digest.content.body) : "";
+    expect(body).toContain("cancel me");
+    faux.unregister();
+  });
+
+  it("refuses to cancel an item a digest lists after its merge settlement failed", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-cancel-partial" });
+    const store = new InMemorySessionStore();
+    // Fail the first merge settlement once, after the digest is admitted.
+    let failNextMerge = true;
+    const settle = store.settleUnclaimed.bind(store);
+    store.settleUnclaimed = async (sessionId, threadId, itemId, outcome, opts) => {
+      if (outcome.outcome === "merged" && failNextMerge) {
+        failNextMerge = false;
+        throw new Error("transient store error");
+      }
+      return settle(sessionId, threadId, itemId, outcome, opts);
+    };
+    const engine = new Engine({
+      providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+    const x = await thread.submitPrompt(overheardSignal({ body: "cancel me", sender: "Sender A" }), { dispatchId: "slack:follow:x" });
+    await expect(
+      thread.submitPrompt(overheardSignal({ body: "keep me", sender: "Sender B", messageTs: "200.1" }), { dispatchId: "slack:follow:y" }),
+    ).rejects.toThrow("transient store error");
+
+    // The digest is admitted and lists x, but x still reads `queued`.
+    const unsettled = await store.listUnsettledSubmissions(session.id);
+    const digest = unsettled.find((i) => i.metadata?.overheardDigest !== undefined);
+    expect(digest).toBeDefined();
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.status).toBe("queued");
+
+    expect(await thread.cancelQueuedItem(x.queueItemId)).toBe(false);
+    expect((await store.getQueueItem(session.id, x.queueItemId))?.status).toBe("queued");
+    faux.unregister();
+  });
+
   it("keeps custom-presence submissions outside default overheard digests", async () => {
     const faux = registerFauxProvider({ provider: "digest-presence" });
     try {

@@ -277,9 +277,9 @@ export function SessionView({
   const summaryControl = effectiveThreadId ? (
     <Popover key={`${sessionId}:${effectiveThreadId}`} open={active && summaryOpen} onOpenChange={setSummaryOpen}>
       <PopoverTrigger asChild>
-        <button type="button" aria-label="Toggle summary" title="Toggle summary" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink data-[state=open]:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
+        <Button variant="ghost" size="sm" aria-label="Toggle summary" title="Toggle summary" className="shrink-0 data-[state=open]:bg-ink-wash">
           <ListTree className="h-4 w-4" aria-hidden />
-        </button>
+        </Button>
       </PopoverTrigger>
       <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
                 <ThreadContextPanel

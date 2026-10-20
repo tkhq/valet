@@ -413,31 +413,34 @@ function EditorDraft({
             <TabBar label="Workflow view" size="sm" active={mainView} onSelect={setMainView}
               tabs={[{ id: "steps", label: "Steps" }, { id: "map", label: "Map" }]} />
           )}
-          <Button variant="secondary" size="sm" aria-expanded={appearanceOpen} onClick={() => setAppearanceOpen(!appearanceOpen)}>Appears as</Button>
           {effectiveDirty && (
             <StatusDot data-testid="unsaved-indicator" title="Unsaved changes" tone="warning" />
           )}
           {/* JSON mode is the escape hatch for a change the assistant
               cannot express, so it stays — but out of the way. Reaching it
               takes a menu; leaving it takes one visible button, because
-              nobody should have to hunt for the way back to the canvas. */}
-          {!readOnly &&
-            (jsonMode ? (
-              <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
-                Visual editor
+              nobody should have to hunt for the way back to the canvas.
+              "Appears as" sits in the same menu, as on a Presence line. */}
+          {!readOnly && jsonMode && (
+            <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
+              Visual editor
+            </Button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="sm" aria-label="More editor actions">
+                <MoreHorizontal className="h-4 w-4" aria-hidden />
               </Button>
-            ) : (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" aria-label="More editor actions">
-                    <MoreHorizontal className="h-4 w-4" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onSelect={() => { setJsonMode(true); setCompactView("canvas"); }}>Edit JSON</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ))}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onSelect={() => setAppearanceOpen(!appearanceOpen)}>
+                {appearanceOpen ? "Hide Appears as" : "Appears as"}
+              </DropdownMenuItem>
+              {!readOnly && !jsonMode && (
+                <DropdownMenuItem onSelect={() => { setJsonMode(true); setCompactView("canvas"); }}>Edit JSON</DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
         {!readOnly && (
           <div className="flex min-w-0 flex-wrap items-center gap-2">

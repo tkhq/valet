@@ -118,3 +118,73 @@ describe("POST /messages: queueMode and promote", () => {
     expect(original?.supersededByItemId).toBeUndefined();
   });
 });
+
+describe("POST /threads/:threadId/queue/:itemId/cancel", () => {
+  it("cancels one queued message, keeps the rest, and 409s once it is gone", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    // Paused, so both messages stay queued while the cancel lands.
+    await thread.pause();
+
+    const send = async (text: string) => {
+      const res = await fetch(`${api!.baseUrl}/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, threadId: thread.id, queueMode: "followup" }),
+      });
+      expect(res.status).toBe(202);
+      return ((await res.json()) as SendPromptResponse).messageId!;
+    };
+    const first = await send("first");
+    const second = await send("second");
+
+    const cancel = () => fetch(`${api!.baseUrl}/api/threads/${thread.id}/queue/${second}/cancel`, { method: "POST" });
+    expect((await cancel()).status).toBe(200);
+
+    const store = api.providers.engineStore;
+    expect((await store.getQueueItem(sessionId, second))?.outcome).toEqual({ outcome: "aborted" });
+    expect((await store.getQueueItem(sessionId, first))?.status).toBe("queued");
+    expect((await thread.currentQueueState()).pending.map((item) => item.id)).toEqual([first]);
+
+    const again = await cancel();
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { error: string }).error).toMatch(/select Stop/);
+  });
+
+  it("409s for a message that Send now already promoted, and leaves its successor queued", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    await thread.pause();
+
+    const post = async (body: Record<string, unknown>) => {
+      const res = await fetch(`${api!.baseUrl}/api/sessions/${sessionId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threadId: thread.id, ...body }),
+      });
+      expect(res.status).toBe(202);
+      return ((await res.json()) as SendPromptResponse).messageId!;
+    };
+    await post({ text: "first" });
+    const queued = await post({ text: "later", queueMode: "followup" });
+    const successor = await post({ text: "", promoteItemId: queued });
+
+    const cancel = await fetch(`${api.baseUrl}/api/threads/${thread.id}/queue/${queued}/cancel`, { method: "POST" });
+    expect(cancel.status).toBe(409);
+    const store = api.providers.engineStore;
+    expect((await store.getQueueItem(sessionId, successor))?.status).toBe("queued");
+    expect((await store.getQueueItem(sessionId, queued))?.outcome).not.toEqual({ outcome: "aborted" });
+  });
+});

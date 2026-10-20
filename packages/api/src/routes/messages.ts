@@ -1482,6 +1482,27 @@ export async function abortThread(c: Context<AppEnv>, sessionId: string, threadI
   return c.json({ ok: true });
 }
 
+// One queued message the person no longer wants. Only a message that has not
+// started is canceled here; a started turn ends with Stop (`abortThread`).
+messagesRouter.post("/:id/threads/:threadId/queue/:itemId/cancel", (c) => cancelQueuedItem(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function cancelQueuedItem(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const { session, engineSession } = result;
+
+  const thread = await visibleThread(c, session, engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+
+  // One store CAS decides: a claim or a Send now that lands first wins, and
+  // the person is told the message is no longer queued.
+  const itemId = c.req.param("itemId");
+  if (!itemId || !await thread.cancelQueuedItem(itemId)) {
+    return c.json({ error: "This message is no longer queued. If it started, select Stop to end it." }, 409);
+  }
+  return c.json({ ok: true });
+}
+
 // A queue can be busy without an active Stop target while paused or between
 // durable claims. This control resumes a paused queue and kicks an unpaused
 // queue without stamping abort intent on any submission.

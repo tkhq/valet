@@ -1357,6 +1357,49 @@ export class Thread {
     void this.kick();
   }
 
+  /**
+   * Cancel one queued message a person withdrew. It settles `aborted` only
+   * while the item is unclaimed and no promotion superseded it, in one store
+   * CAS, so a concurrent claim or Send now wins and the caller learns it.
+   * It never touches a running turn; that is Stop.
+   */
+  async cancelQueuedItem(queueItemId: string): Promise<boolean> {
+    // Join the overheard-digest chain: a digest admits first and merges its
+    // constituents after, so a cancel between the two would report success
+    // while the digest still carries the text. On the chain, either the
+    // cancel lands first and the digest is built without the item, or the
+    // merge lands first and the cancel loses.
+    const run = this.overheardCoalesceChain.then(() => this.settleCanceled(queueItemId));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    return run;
+  }
+
+  private async settleCanceled(queueItemId: string): Promise<boolean> {
+    const store = this.session.providers.store;
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    // Only a `queued` item. A `collecting` one belongs to the collect
+    // window, which merges it the same way; it never turns back to queued.
+    const item = unsettled.find((i) => i.id === queueItemId);
+    if (!item || item.threadId !== this.id || item.status !== "queued") return false;
+    // A digest that lists the item already carries its text. The item can
+    // still read `queued` when a merge settlement failed after the digest
+    // was admitted (`repairOverheardDigests` settles it later), so the
+    // digest's durable membership decides.
+    const inDigest = unsettled.some((d) => {
+      const meta = d.metadata?.overheardDigest;
+      return d.threadId === this.id && isOverheardDigestMeta(meta) && meta.constituentIds.includes(queueItemId);
+    });
+    if (inDigest) return false;
+    const settled = await store.settleUnclaimed(
+      this.session.id, this.id, queueItemId, { outcome: "aborted" }, { onlyIfUnsuperseded: true },
+    );
+    if (!settled) return false;
+    await this.emitSettled(queueItemId, { outcome: "aborted" });
+    await this.emitQueueState();
+    void this.kick();
+    return true;
+  }
+
   /** Cancel one submission without aborting other work on this thread. */
   async abortSubmission(queueItemId: string, withdrawReason: DecisionWithdrawReason = "abort"): Promise<void> {
     const store = this.session.providers.store;

@@ -28,14 +28,19 @@ export function PageHeader({ title, clause, description, actions, back, classNam
   return (
     <header className={className}>
       {back && <div className="mb-2">{back}</div>}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="min-w-0 break-words font-display text-2xl text-ink">{title}</h1>
-          {clause}
+      {/* The description stays with the title, so on a phone the actions wrap
+          below both instead of splitting them. `items-start` keeps the
+          actions on the title row: a `sm` control is as tall as its line. */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+            <h1 className="min-w-0 break-words font-display text-2xl text-ink">{title}</h1>
+            {clause}
+          </div>
+          {description && <p className="mt-1 text-sm text-muted">{description}</p>}
         </div>
         {actions}
       </div>
-      {description && <p className="mt-1 text-sm text-muted">{description}</p>}
     </header>
   );
 }

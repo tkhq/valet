@@ -63,13 +63,12 @@ export function MemoryCard() {
   return (
     <section className={cn(cardClass, "min-w-0 flex flex-col min-h-0")}>
       <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
-        <h2 className="font-display text-base text-ink">
-          <Link to="/memory" className="inline-flex min-h-11 items-center hover:text-moss sm:min-h-0">
-            Memory
-          </Link>
-        </h2>
-        <Link to="/memory" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-moss sm:min-h-0">
-          Browse
+        <h2 className="font-display text-base text-ink">Memory</h2>
+        <Link
+          to="/memory"
+          className="inline-flex min-h-11 items-center text-xs text-moss sm:min-h-0 hover:underline underline-offset-2"
+        >
+          View all memory →
         </Link>
       </header>
 

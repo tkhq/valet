@@ -5,7 +5,7 @@ import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Callout, Input, Label, RadioCard, Select, Spinner, cardClass } from "~/components/primitives";
+import { Badge, Button, Callout, Input, Label, PageHeader, RadioCard, Select, Spinner, cardClass, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
@@ -31,20 +31,11 @@ export const Route = createFileRoute("/security/")({
 
 export function SecurityIndexPage() {
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      <div className="border-b border-line px-4 py-4 sm:px-6">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-lg font-semibold tracking-tight text-ink font-display">
-            Security reviews
-          </h1>
-          <WorkspaceClause />
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-        <div className="mx-auto max-w-4xl space-y-6 sm:space-y-8">
-          <NewReviewCard />
-          <ReviewList />
-        </div>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className={cn(pageClass, "space-y-6 sm:space-y-8")}>
+        <PageHeader title="Security reviews" clause={<WorkspaceClause />} />
+        <NewReviewCard />
+        <ReviewList />
       </div>
     </div>
   );
