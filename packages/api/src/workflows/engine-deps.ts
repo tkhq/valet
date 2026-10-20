@@ -746,7 +746,7 @@ export function unattendedRefusalError(
     // The marker comes from the source run or from an agent's retry
     // (`startWorkflowRun`), so only a new run is sure to clear it.
     parts.push("An agent started or retried this run, so its agent steps do not use the workflow's saved permissions. " +
-      "Start a new run from the workflow page, or let the workflow's trigger start one.");
+      "Start a new run from the workflow page, or wait for the workflow to start one on its own.");
   }
   for (const action of actions) {
     parts.push(
