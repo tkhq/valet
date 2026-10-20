@@ -40,6 +40,7 @@ import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
 import { wireThreadPullRequests, startPullRequestSweep } from "./services/thread-pull-requests.js";
+import { wireDeliveryTurnFailures } from "./events/delivery-turn.js";
 import { initTelemetry } from "./observability/otel.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -331,6 +332,9 @@ wireAttentionRouter({
 // alone left the parent unaware of a blocked child until it finished.
 wireChildGateReports(providers.eventStream, providers.childWatcher);
 wireThreadPullRequests(providers.eventStream, providers.db);
+// An event delivery is marked failed when the turn it queued fails. Restored
+// work can settle in the boot chain, so this subscribes before it.
+wireDeliveryTurnFailures(providers.eventStream, providers.db);
 // A restored submission can settle during the first boot-chain step. Subscribe
 // before that work starts so automatic naming does not miss the completion.
 providers.autoTitleHost.start();

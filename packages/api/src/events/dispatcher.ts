@@ -66,10 +66,13 @@ import {
   type DestinationRecorder,
 } from "../observability/delivery-metrics.js";
 import { readStoredTarget } from "./target-names.js";
+import { FAILED_TURN_SWEEP_WINDOW_MS, markFailedDeliveryTurns } from "./delivery-turn.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
 const POLL_MS = 1_000;
+/** How often a poll also sweeps delivered rows for failed turns (`delivery-turn.ts`). */
+const FAILED_TURN_SWEEP_MS = 60_000;
 const BATCH = 20;
 /** How long a claimed-but-unresolved row stays invisible to other polls. */
 const CLAIM_LEASE_MS = 60_000;
@@ -112,6 +115,8 @@ export interface EventDispatcherDeps {
   workflowStore: WorkflowStore;
   /** Seam over the assistant runtime and the destination thread's `submitPrompt`. See `assistant-target.ts`. */
   deliverToAssistant: AssistantDeliverFn;
+  /** Marks delivered rows whose turn failed (`delivery-turn.ts`). Absent → `markFailedDeliveryTurns`. */
+  markFailedTurns?: typeof markFailedDeliveryTurns;
   /**
    * Where a channel-originated event should route a reply. Returns the origin
    * for a channel event that names a conversation (a Slack message or mention),
@@ -293,6 +298,7 @@ export class EventDispatcher {
   private draining = false;
   private wakeRequested = false;
   private stopped = false;
+  private lastFailedTurnSweepAt = 0;
   private drainIngress?: () => Promise<void>;
   private ingressInFlight: Promise<void> | null = null;
   private ingressWakeRequested = false;
@@ -368,10 +374,19 @@ export class EventDispatcher {
       for (const row of claimed) {
         await this.deliverOne(row.id).catch((err) => console.error(`event dispatch ${row.id}:`, err));
       }
+      if (now - this.lastFailedTurnSweepAt >= FAILED_TURN_SWEEP_MS) {
+        this.lastFailedTurnSweepAt = now;
+        await this.sweepFailedDeliveryTurns(now).catch((err) => console.error("event failed-turn sweep:", err));
+      }
     } finally {
       this.draining = false;
       if (this.wakeRequested) { this.wakeRequested = false; this.nudge(); }
     }
+  }
+
+  /** Marks delivered rows whose turn failed and that the settle watcher missed. */
+  async sweepFailedDeliveryTurns(now = Date.now()): Promise<number> {
+    return (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(this.deps.db, { deliveredSince: now - FAILED_TURN_SWEEP_WINDOW_MS });
   }
 
   private async deliverOne(deliveryId: string): Promise<void> {
@@ -394,6 +409,8 @@ export class EventDispatcher {
       return;
     }
 
+    // Set only by an assistant delivery: the queue item its prompt became.
+    let queueItemId: string | undefined;
     try {
       // Both jsonb shapes are owned by their writers: `target` by the
       // subscriptions CRUD validator, `refs` by ingest (NormalizedEvent.refs
@@ -602,6 +619,7 @@ export class EventDispatcher {
         const recorded = await appendReceiptStageForEvent(db, event.orgId, event.id,
           destinationReceiptStage(receiptIds, fallback ? { ...destination, reason: "claim_fallback" } : destination),
           destinationStageMarker(delivery.id));
+        queueItemId = landed.queueItemId;
         if (recorded === "appended" || (recorded === "no_receipt" && !landed.recovered)) {
           this.recordDestination(fallback ? "claim_fallback" : destinationMetricReason(destination));
         }
@@ -673,8 +691,16 @@ export class EventDispatcher {
       }
       await db
         .update(eventDeliveries)
-        .set({ status: "delivered", deliveredAt: Date.now(), attempts: delivery.attempts + 1 })
+        .set({ status: "delivered", deliveredAt: Date.now(), attempts: delivery.attempts + 1, ...(queueItemId ? { queueItemId } : {}) })
         .where(eq(eventDeliveries.id, deliveryId));
+      // The turn can fail before this write lands; the settle watcher then
+      // found the row still pending. Check once more now that it is delivered.
+      // The delivery already succeeded, so a failed check only logs: the sweep
+      // marks the row later.
+      if (queueItemId) {
+        await (this.deps.markFailedTurns ?? markFailedDeliveryTurns)(db, { deliveryId })
+          .catch((err) => console.error(`event dispatch ${deliveryId}: failed-turn check:`, err));
+      }
     } catch (err) {
       const attempts = delivery.attempts + 1;
       const backoff = BACKOFF_MS[attempts - 1];
