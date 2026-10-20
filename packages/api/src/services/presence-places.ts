@@ -18,6 +18,7 @@ import { eventNaturalSubject } from "../events/dispatcher.js";
 import { EVENT_LOG_WINDOW_MS } from "./event-log.js";
 import { isAssistantKind, readScheduleTargetKind, readStoredTarget } from "../events/target-names.js";
 import { slackMessageUrl } from "./channel-messages.js";
+import { eventHeadColumns, type EventHead } from "./event-columns.js";
 import { channelFilterIds, runtimeSessionId, type ChannelNames, type ChannelVisibility, type ThreadsShown } from "./channels.js";
 import type {
   ChannelConversation, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceService, PresencePlaceWire,
@@ -25,7 +26,8 @@ import type {
 } from "../wire/types.js";
 
 type SubscriptionRow = typeof eventSubscriptions.$inferSelect;
-type EventRow = typeof events.$inferSelect;
+/** A stored event as the places read selects it: no payload (`event-columns.ts`). */
+type EventRow = EventHead;
 
 const SERVICES: readonly PresencePlaceService[] = ["slack", "github", "linear"];
 /** The top row of a service whose listeners name no repository or team. Slack's top row is its workspace, `slack:<team>`. */
@@ -486,7 +488,8 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     }
   }
 
-  const recentEvents = await db.select().from(events).where(and(
+  // The payload is most of an event row's size, and no place reads it.
+  const recentEvents = await db.select(eventHeadColumns).from(events).where(and(
     eq(events.orgId, orgId),
     gte(events.receivedAt, now - EVENT_LOG_WINDOW_MS),
     // Only events that reached this workspace's rules (or the org's), as the Activity log reads them.

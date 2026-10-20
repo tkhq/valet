@@ -37,6 +37,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { GITHUB_CREDENTIAL_SERVICE, GitHubAuthError, resolveInstallationApiToken } from "../services/github-tokens.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { eventChannelColumns, eventHeadColumns, type EventHead } from "../services/event-columns.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   EventDeliveryThreadRef,
@@ -189,7 +190,7 @@ export async function orgSlackTeam(providers: Parameters<typeof orgSlackCredenti
 
 /** `refs`/`actor` jsonb shapes are owned by the ingest writer
  * (`events/ingest.ts`), which only stores `NormalizedEvent` fields. */
-export function rowToEventSummary(row: typeof events.$inferSelect): EventSummaryWire {
+export function rowToEventSummary(row: EventHead): EventSummaryWire {
   return {
     id: row.id,
     service: row.service,
@@ -546,12 +547,8 @@ eventsRouter.get("/events/log", async (c) => {
       // behind. The place plugins' `naturalSubject` (GitHub, Linear, Slack)
       // reads only `subjects` and `refs`. A plugin that reads its payload
       // to name a place needs that column added here.
-      const rows = await db.select({
-        id: events.id, orgId: events.orgId, service: events.service, eventKey: events.eventKey, dedupeKey: events.dedupeKey,
-        actor: events.actor, refs: events.refs, summary: events.summary, occurredAt: events.occurredAt,
-        receivedAt: events.receivedAt, subjects: events.subjects,
-      }).from(events).where(and(eq(events.orgId, user.orgId), inArray(events.id, [...ids])));
-      return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, { ...row, payload: null }, place)).map((row) => row.id));
+      const rows = await db.select(eventHeadColumns).from(events).where(and(eq(events.orgId, user.orgId), inArray(events.id, [...ids])));
+      return new Set(rows.filter((row) => eventInPlace(c.var.providers.plugins, row, place)).map((row) => row.id));
     }
     : undefined;
   const { items, next } = await listEventLog(db, {
@@ -583,7 +580,8 @@ async function withPlacesAndDeliveries(c: Context<AppEnv>, items: EventLogItem[]
   if (ids.length === 0) return items;
   const { db, plugins } = c.var.providers;
   const orgId = c.var.user.orgId;
-  const eventRows = await db.select().from(events).where(and(eq(events.orgId, orgId), inArray(events.id, ids)));
+  // A place reads `subjects` and `refs`, never the payload (`event-columns.ts`).
+  const eventRows = await db.select(eventHeadColumns).from(events).where(and(eq(events.orgId, orgId), inArray(events.id, ids)));
   const places = new Map<string, { key: string; label: string }>();
   for (const row of eventRows) {
     const place = eventPlace(plugins, row);
@@ -1215,7 +1213,8 @@ eventsRouter.get("/event-subscriptions/:id/deliveries", async (c) => {
       nextAttemptAt: eventDeliveries.nextAttemptAt,
       destination: eventDeliveries.destination,
       target: eventSubscriptions.target,
-      event: events,
+      // Only the payload keys that name the event's Slack channel.
+      event: eventChannelColumns,
     })
     .from(eventDeliveries)
     .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
