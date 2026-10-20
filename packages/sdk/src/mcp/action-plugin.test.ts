@@ -861,7 +861,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       serviceName: 'metabase',
       defaultRiskLevel: 'low',
       displayName: 'Turnkey Metabase',
-      scopesInConfig: true,
+      configScopes: ['agent:query:run'],
     });
     const credentials = fakeCredentialProvider({
       accessToken: 'tok',
@@ -876,6 +876,78 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
         'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
         "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
     });
+  });
+
+  // The scope is declared, but the server granted less (the user lacks the
+  // permission). Editing the entry cannot help, so no config advice.
+  it('keeps the account fix when the missing scope is already declared', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:sql:run"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run', 'agent:sql:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error:
+        'Turnkey Metabase has not granted the agent:sql:run scope to this connection. ' +
+        'Turnkey Metabase rejected your connected account. Reconnect Turnkey Metabase on the Integrations page.',
+    });
+  });
+
+  // A pasted token records no grant, so Valet cannot tell which scopes it lacks.
+  it('names no scope when the credential records no grant', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'pasted' });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error: 'Turnkey Metabase rejected your connected account. Reconnect Turnkey Metabase on the Integrations page.',
+    });
+  });
+
+  it('reads an unquoted, capitalized insufficient_scope challenge (RFC 7235)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer Error=insufficient_scope, Scope="agent:query:run agent:content:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+      configScopes: ['agent:query:run'],
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+    expect(result.error).toContain("Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes.");
   });
 
   it('names the missing scope but keeps the account fix when config cannot supply scopes', async () => {
@@ -898,7 +970,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     expect(await action.execute({}, fakeContext(credentials))).toEqual({
       success: false,
       error:
-        'Linear needs the admin:read scope for this call. ' +
+        'Linear has not granted the admin:read scope to this connection. ' +
         'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
     });
   });

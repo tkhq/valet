@@ -95,8 +95,8 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
           staticToken,
           authQueryParam: entry.authQueryParam,
           // An oauth entry's `scopes` come from this file, so a missing
-          // scope is fixed by editing the entry.
-          scopesInConfig: entry.auth === "oauth",
+          // scope it does not list is fixed by editing the entry.
+          configScopes: entry.auth === "oauth" ? (entry.scopes ?? []) : undefined,
           description: entry.description,
           // Rejection messages name the server the way the connect UI does.
           displayName,
