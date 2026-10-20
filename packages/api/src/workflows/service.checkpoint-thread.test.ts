@@ -64,3 +64,13 @@ describe("toRunCheckpoint — thread id", () => {
     expect(wire.threadId).toBeUndefined();
   });
 });
+
+describe("toRunCheckpoint — step timing", () => {
+  it("passes the start through and marks a step a retry reused", () => {
+    const ran = toRunCheckpoint({ ...checkpoint(undefined), startedAt: 1_000, createdAt: 4_000 });
+    expect(ran).toMatchObject({ startedAt: 1_000, createdAt: 4_000 });
+    expect(ran.reused).toBeUndefined();
+    // A retry seeds the steps it reuses as attempt 0.
+    expect(toRunCheckpoint({ ...checkpoint(undefined), attempt: 0 }).reused).toBe(true);
+  });
+});

@@ -28,6 +28,7 @@ describe("CheckpointList", () => {
     expect(draft.textContent).toContain("$0.0421");
     expect(draft.textContent).toContain("1.5k tokens over 2 calls");
     expect(each.textContent).toContain("$0.0050+");
+    expect(each.textContent).toContain("Item 2");
     expect(notify.textContent).not.toContain("$");
   });
 
@@ -50,10 +51,15 @@ describe("CheckpointList", () => {
     );
     const chip = "Model changed since the last run: sol-5.6 → sol-6.1. The workflow was not edited.";
     expect(screen.getAllByText(chip)).toHaveLength(1);
-    const [first, second, review] = screen.getAllByRole("listitem");
-    expect(first.textContent).toContain(chip);
+    // The step that ran per item is one row; its items open below it.
+    const [draft, first, second, review] = screen.getAllByRole("listitem");
+    expect(draft.textContent).toContain(chip);
+    expect(draft.textContent).toContain("2 items · 2 completed · sol-6.1");
+    expect(draft.textContent).toContain("$0.0200");
+    expect(first.textContent).toContain("Item 1");
+    expect(first.textContent).not.toContain("Model changed");
+    expect(second.textContent).toContain("Item 2");
     expect(screen.getAllByText("sol-6.1")).toHaveLength(2);
-    expect(second.textContent).not.toContain("Model changed");
     expect(review.textContent).toContain("claude-haiku-4-5");
     expect(review.textContent).not.toContain("Model changed");
   });
@@ -83,10 +89,10 @@ describe("CheckpointList", () => {
     const first = { nodeId: "inventory", iteration: 0, status: "completed" };
     const second = { nodeId: "apply", iteration: 0, status: "intent" };
     const { rerender } = render(<CheckpointList checkpoints={[second, first]} nodeOrder={["inventory", "apply"]} />);
-    expect(screen.getAllByRole("listitem")[0].textContent).toContain("inventory");
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("Inventory");
     rerender(<CheckpointList checkpoints={[first, { ...second, status: "completed" }]} nodeOrder={["inventory", "apply"]} />);
-    expect(screen.getAllByRole("listitem")[0].textContent).toContain("inventory");
-    expect(screen.getAllByRole("listitem")[1].textContent).toContain("apply");
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("Inventory");
+    expect(screen.getAllByRole("listitem")[1].textContent).toContain("Apply");
   });
 
   it("maps raw statuses to their display labels", () => {
@@ -142,8 +148,80 @@ describe("CheckpointList", () => {
       { nodeId: "apply", iteration: 1, status: "intent" },
     ]} nodeStatuses={{ apply: "waiting" }} />);
     expect(screen.getByText("Completed")).toBeTruthy();
-    expect(screen.getByText("Waiting")).toBeTruthy();
-    expect(screen.getByText("Iteration 2")).toBeTruthy();
+    // The step's row and its waiting item both say Waiting.
+    expect(screen.getAllByText("Waiting")).toHaveLength(2);
+    expect(screen.getByText("Item 2")).toBeTruthy();
+    // A step with an item still waiting opens its item list.
+    expect(screen.getByText("Item 2").closest("details")?.open).toBe(true);
+  });
+
+  it("shows how long each finished step ran, and a running step's time so far", () => {
+    render(<CheckpointList now={10_000} timeline={{ start: 0, end: 10_000 }} checkpoints={[
+      { nodeId: "fetch", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 3_500 },
+      { nodeId: "apply", iteration: 0, status: "intent", createdAt: 4_000 },
+      { nodeId: "legacy", iteration: 0, status: "completed", createdAt: 2_000 },
+    ]} nodeOrder={["fetch", "apply", "legacy"]} />);
+    const [fetch, apply, legacy] = screen.getAllByRole("listitem");
+    expect(fetch.textContent).toContain("2.5s");
+    expect(apply.textContent).toContain("6.0s so far");
+    // A step recorded before start times were kept shows no duration.
+    expect(legacy.textContent).not.toMatch(/\d(ms|s)\b/);
+  });
+
+  it("sums a per-item step's items and opens it when an item failed", () => {
+    render(<CheckpointList now={0} checkpoints={[
+      { nodeId: "qualify_batch", iteration: 0, status: "completed", startedAt: 0, createdAt: 1_000 },
+      { nodeId: "qualify_batch", iteration: 1, status: "failed", error: "rate limited", startedAt: 0, createdAt: 3_000 },
+      { nodeId: "qualify_batch", iteration: 2, status: "completed", startedAt: 500, createdAt: 2_000 },
+    ]} />);
+    const [group] = screen.getAllByRole("listitem");
+    expect(group.textContent).toContain("Qualify batch");
+    expect(group.textContent).toContain("3 items · 2 completed · 1 failed");
+    expect(group.textContent).toContain("3.0s");
+    expect(screen.getByText("rate limited")).toBeTruthy();
+    expect(group.querySelector("details")?.open).toBe(true);
+  });
+
+  it("counts a per-item step's denied items and opens the group", () => {
+    render(<CheckpointList now={0} checkpoints={[
+      { nodeId: "notify", iteration: 0, status: "completed", result: { approved: false, policyDenied: true, resolvedBy: "policy" }, startedAt: 0, createdAt: 1_000 },
+      { nodeId: "notify", iteration: 1, status: "completed", startedAt: 0, createdAt: 1_000 },
+    ]} />);
+    const [group] = screen.getAllByRole("listitem");
+    expect(group.textContent).toContain("2 items · 2 completed · 1 denied");
+    expect(group.querySelector("details")?.open).toBe(true);
+  });
+
+  it("ends a settled run's leftover intent with the run, not the page clock", () => {
+    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} checkpoints={[
+      { nodeId: "wait", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 1_000 },
+    ]} />);
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("5.0s");
+  });
+
+  it("times a running step from its first start, not from a rewritten intent", () => {
+    render(<CheckpointList now={10_000} checkpoints={[
+      { nodeId: "summarize", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 7_000 },
+    ]} />);
+    expect(screen.getAllByRole("listitem")[0].textContent).toContain("9.0s so far");
+  });
+
+  it("labels a step a retry reused instead of timing it", () => {
+    render(<CheckpointList now={0} checkpoints={[
+      { nodeId: "inventory", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 61_000, reused: true },
+      { nodeId: "qualify_batch", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 2_000, reused: true },
+      { nodeId: "qualify_batch", iteration: 1, status: "completed", startedAt: 5_000, createdAt: 6_500 },
+    ]} nodeOrder={["inventory", "qualify_batch"]} />);
+    const [inventory, group] = screen.getAllByRole("listitem");
+    expect(inventory.textContent).toContain("Reused");
+    expect(inventory.textContent).not.toContain("1m 00s");
+    expect(group.textContent).toContain("2 items · 2 completed · 1 reused");
+    expect(group.textContent).toContain("1.5s");
+  });
+
+  it("offers a copy button for a step's result", () => {
+    render(<CheckpointList checkpoints={[{ nodeId: "fetch", iteration: 0, status: "completed", result: { rows: 12 } }]} />);
+    expect(screen.getByRole("button", { name: "Copy result" })).toBeTruthy();
   });
 
   it("leaves the result details closed by default for a succeeded node", () => {

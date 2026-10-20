@@ -5,6 +5,7 @@ import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
+import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
@@ -2831,6 +2832,7 @@ export class EngineHost {
       initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
       threadSystemContext: workflowThreadContext,
       unattendedThread: isWorkflowRunThread,
+      automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],

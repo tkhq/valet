@@ -3,10 +3,12 @@
  * events into the stream store. Auto-reconnects with exponential backoff.
  *
  * Connection state and ingest live in `~/stores/stream`; this hook only
- * owns the socket lifecycle.
+ * owns the socket lifecycle. Every view of one session shares one socket:
+ * `text_delta` frames carry no offset, so a second socket would apply each
+ * delta twice to the same store slice.
  */
 import { useEffect } from "react";
-import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
@@ -93,134 +95,152 @@ function wsUrl(sessionId: string, fromOffset: string | undefined, threadId: stri
   return query ? `${base}?${query}` : base;
 }
 
+/** Open sockets by session id and shared thread id, with their view count. */
+const sockets = new Map<string, { views: number; close: () => void }>();
+
 /** `sharedThreadId` opens the stream of one shared thread for a person who
  * is not the session's owner: the server sends that thread's frames only. */
 export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) {
   const qc = useQueryClient();
-  const setConnection = useStreamStore((s) => s.setConnection);
-  const ingest = useStreamStore((s) => s.ingest);
-  const reset = useStreamStore((s) => s.reset);
 
   useEffect(() => {
     if (!sessionId) return;
-    // Per-effect-run cancellation flag. Must be a closure local, NOT a
-    // shared ref: under StrictMode's double effect run, a shared ref gets
-    // re-armed to false by the second run, letting the first run's closed
-    // socket schedule a zombie reconnect — two live sockets, duplicated
-    // chunk rendering.
-    let cancelled = false;
-    // Fresh mount (no durable offset seen yet for this session) resets the
-    // slice and relies on REST to bootstrap history/gates. A resumed
-    // connection (lastOffset non-empty — either a reconnect within this
-    // mount's lifetime, or a remount that still has store state e.g. a
-    // route revisit) must NOT reset: state is continuous and the server
-    // replays the gap via `?fromOffset=`, so wiping here would cause a
-    // flash back to empty before replay refills it.
-    if (!useStreamStore.getState().bySession[sessionId]?.lastOffset) {
-      reset(sessionId);
+    const key = JSON.stringify([sessionId, sharedThreadId ?? null]);
+    let shared = sockets.get(key);
+    if (!shared) {
+      shared = { views: 0, close: connect(qc, sessionId, sharedThreadId) };
+      sockets.set(key, shared);
     }
-    setConnection(sessionId, "connecting");
-
-    let socket: WebSocket | null = null;
-    const settingsWrites = new Map<string, string>();
-    // A remount resumes after tool_start. Recover pending writes from the
-    // same stream state that retains the durable cursor.
-    for (const message of useStreamStore.getState().bySession[sessionId]?.messages ?? []) {
-      for (const part of message.parts) {
-        if (part.kind === "tool_call" && part.status === "running" && isSettingsWrite(part.toolName, part.args) && message.threadId) {
-          settingsWrites.set(part.callId, message.threadId);
-        }
-      }
-    }
-    let retryDelay = INITIAL_RETRY_MS;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-
-    function open() {
-      if (cancelled) return;
-      const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
-      socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
-      socket.onopen = () => {
-        setConnection(sessionId, "open");
-      };
-      socket.onmessage = (ev) => {
-        try {
-          const data = typeof ev.data === "string" ? ev.data : ev.data.toString();
-          const wire = JSON.parse(data) as WireEvent;
-          if (import.meta.env.DEV) {
-            const summary = summarizeForLog(wire);
-            console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
-          }
-          ingest(sessionId, wire);
-          if (wire.type === "tool_start" && wire.callId && isSettingsWrite(wire.toolName, wire.args)) {
-            settingsWrites.set(wire.callId, wire.threadId);
-          }
-          if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
-            void qc.invalidateQueries({ queryKey: ["settings"] });
-          }
-          if (wire.type === "title.updated") {
-            invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
-          }
-          // A finished turn can add an unread reply or a pull request to any thread
-          // in the session. The list query carries both, so refresh it.
-          if (wire.type === "turn_end") {
-            void qc.invalidateQueries(threadListFilters(sessionId));
-            for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
-          }
-          if (wire.type === "thread.activity") {
-            qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
-              thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
-            // Unloaded rows can move above the saved cursor. Fetch just that row.
-            void refreshMissingActivityThread(qc, wire.threadId);
-          }
-          // Reset backoff only after receiving init — confirms the session
-          // is valid and the connection is healthy. Resetting in onopen
-          // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
-          if (wire.type === "init") {
-            retryDelay = INITIAL_RETRY_MS;
-            // title.updated is ephemeral. Refresh both persisted title views
-            // after every initial connection or reconnect to recover a frame
-            // missed while this client was disconnected.
-            invalidatePersistedTitles(qc, sessionId, true, true);
-          }
-        } catch (err) {
-          console.error("ws parse failed:", err);
-        }
-      };
-      socket.onerror = () => {
-        // The matching onclose will trigger the reconnect.
-        setConnection(sessionId, "error");
-      };
-      socket.onclose = (closeEv) => {
-        if (cancelled) return;
-        // 4040 means the session does not exist or the user cannot view it.
-        // A retry cannot change that result. Other private close codes can
-        // describe temporary application state, so they keep the backoff.
-        if (closeEv.code === 4040) {
-          setConnection(sessionId, "error");
-          return;
-        }
-        setConnection(sessionId, "closed");
-        retryTimer = setTimeout(open, retryDelay);
-        retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
-      };
-    }
-
-    open();
-
+    shared.views += 1;
+    const current = shared;
     return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-      socket?.close();
-      // `onclose` early-returns once cancelled, so without this the slice
-      // would report "open" forever after the last view of this session
-      // unmounts — and readers that trust an open connection as live gate
-      // truth (the assistant rail's needs-you dot) would keep believing a
-      // stale gate set.
-      setConnection(sessionId, "closed");
+      current.views -= 1;
+      if (current.views > 0) return;
+      sockets.delete(key);
+      current.close();
     };
-    // We intentionally exclude the store actions from the dep list — Zustand
-    // returns stable function refs per call but TypeScript can't prove that.
-    // The hook only re-runs when the session or shared thread changes.
+    // The app has one query client, so the hook re-runs only when the
+    // session or shared thread changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, sharedThreadId]);
+}
+
+/** Opens one socket and returns the function that closes it. */
+function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | undefined): () => void {
+  const { setConnection, ingest, reset } = useStreamStore.getState();
+  // Per-connection cancellation flag. Must be a closure local, NOT a
+  // shared ref: under StrictMode's double effect run, a shared ref gets
+  // re-armed to false by the second run, letting the first run's closed
+  // socket schedule a zombie reconnect — two live sockets, duplicated
+  // chunk rendering.
+  let cancelled = false;
+  // Fresh mount (no durable offset seen yet for this session) resets the
+  // slice and relies on REST to bootstrap history/gates. A resumed
+  // connection (lastOffset non-empty — either a reconnect within this
+  // mount's lifetime, or a remount that still has store state e.g. a
+  // route revisit) must NOT reset: state is continuous and the server
+  // replays the gap via `?fromOffset=`, so wiping here would cause a
+  // flash back to empty before replay refills it.
+  if (!useStreamStore.getState().bySession[sessionId]?.lastOffset) {
+    reset(sessionId);
+  }
+  setConnection(sessionId, "connecting");
+
+  let socket: WebSocket | null = null;
+  const settingsWrites = new Map<string, string>();
+  // A remount resumes after tool_start. Recover pending writes from the
+  // same stream state that retains the durable cursor.
+  for (const message of useStreamStore.getState().bySession[sessionId]?.messages ?? []) {
+    for (const part of message.parts) {
+      if (part.kind === "tool_call" && part.status === "running" && isSettingsWrite(part.toolName, part.args) && message.threadId) {
+        settingsWrites.set(part.callId, message.threadId);
+      }
+    }
+  }
+  let retryDelay = INITIAL_RETRY_MS;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function open() {
+    if (cancelled) return;
+    const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
+    socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
+    socket.onopen = () => {
+      setConnection(sessionId, "open");
+    };
+    socket.onmessage = (ev) => {
+      try {
+        const data = typeof ev.data === "string" ? ev.data : ev.data.toString();
+        const wire = JSON.parse(data) as WireEvent;
+        if (import.meta.env.DEV) {
+          const summary = summarizeForLog(wire);
+          console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
+        }
+        ingest(sessionId, wire);
+        if (wire.type === "tool_start" && wire.callId && isSettingsWrite(wire.toolName, wire.args)) {
+          settingsWrites.set(wire.callId, wire.threadId);
+        }
+        if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
+          void qc.invalidateQueries({ queryKey: ["settings"] });
+        }
+        if (wire.type === "title.updated") {
+          invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
+        }
+        // A finished turn can add an unread reply or a pull request to any thread
+        // in the session. The list query carries both, so refresh it.
+        if (wire.type === "turn_end") {
+          void qc.invalidateQueries(threadListFilters(sessionId));
+          for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
+        }
+        if (wire.type === "thread.activity") {
+          qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
+            thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
+          // Unloaded rows can move above the saved cursor. Fetch just that row.
+          void refreshMissingActivityThread(qc, wire.threadId);
+        }
+        // Reset backoff only after receiving init — confirms the session
+        // is valid and the connection is healthy. Resetting in onopen
+        // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
+        if (wire.type === "init") {
+          retryDelay = INITIAL_RETRY_MS;
+          // title.updated is ephemeral. Refresh both persisted title views
+          // after every initial connection or reconnect to recover a frame
+          // missed while this client was disconnected.
+          invalidatePersistedTitles(qc, sessionId, true, true);
+        }
+      } catch (err) {
+        console.error("ws parse failed:", err);
+      }
+    };
+    socket.onerror = () => {
+      // The matching onclose will trigger the reconnect.
+      setConnection(sessionId, "error");
+    };
+    socket.onclose = (closeEv) => {
+      if (cancelled) return;
+      // 4040 means the session does not exist or the user cannot view it.
+      // A retry cannot change that result. Other private close codes can
+      // describe temporary application state, so they keep the backoff.
+      if (closeEv.code === 4040) {
+        setConnection(sessionId, "error");
+        return;
+      }
+      setConnection(sessionId, "closed");
+      retryTimer = setTimeout(open, retryDelay);
+      retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
+    };
+  }
+
+  open();
+
+  return () => {
+    cancelled = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    socket?.close();
+    // `onclose` early-returns once cancelled, so without this the slice
+    // would report "open" forever after the last view of this session
+    // unmounts — and readers that trust an open connection as live gate
+    // truth (the assistant rail's needs-you dot) would keep believing a
+    // stale gate set.
+    setConnection(sessionId, "closed");
+  };
 }

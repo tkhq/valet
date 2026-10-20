@@ -1,6 +1,6 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -53,6 +53,7 @@ import {
   resolvePartialSubmissionText,
   resolveSubmissionText,
   SIGNAL_HOP_BUDGET,
+  SUBMISSION_TIMEOUT_MS,
   validateSignalAttributeKeys,
   validateSignalTagName,
 } from "./submission.js";
@@ -1211,7 +1212,7 @@ export class Thread {
       status: "queued",
       attemptCount: 0,
       maxAttempts: 10,
-      timeoutAt: now + 3_600_000,
+      timeoutAt: now + SUBMISSION_TIMEOUT_MS,
       createdAt: now,
       updatedAt: now,
     };
@@ -4498,7 +4499,7 @@ export class Thread {
   }
 
   private async continueAfterCompaction(): Promise<void> {
-    const prompt = this.isUnattendedWorkflowTask() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
+    const prompt = this.isUnattendedTurn() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
     const item = this.runningItem;
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
@@ -5362,10 +5363,18 @@ export class Thread {
 
   /** A workflow step's own session, a workflow task handed to an assistant thread,
    * or any turn on a run's own thread that a person did not type. Nobody answers
-   * its decisions, so `requestDecision` refuses them before a gate opens. */
+   * its decisions, and a task it delegates inherits that. */
   private isUnattendedWorkflowTask(): boolean {
     return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
       || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
+  }
+
+  /** An unattended workflow task, or an automated event or schedule delivery.
+   * Nobody answers its decisions, so `requestDecision` refuses them before a
+   * gate opens. A task that a delivery delegates can still ask in the inbox. */
+  private isUnattendedTurn(): boolean {
+    return this.isUnattendedWorkflowTask() || this.runningItem?.metadata?.[UNATTENDED_DELIVERY_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.automatedThread?.({ id: this.id, key: this.key }) === true);
   }
 
   private buildTools(includeRestricted = false): AgentTool[] {
@@ -5512,7 +5521,7 @@ export class Thread {
         // until it expires. Refuse it here, after replay, so a gate opened
         // before this rule still resolves. The author grants approvals when
         // the workflow is saved.
-        if (this.isUnattendedWorkflowTask()) {
+        if (this.isUnattendedTurn()) {
           const refusal: DecisionResolution = { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
           // A refused approval means an action did not run. Record it as an
           // already-resolved gate, never pending, so the workflow can fail the

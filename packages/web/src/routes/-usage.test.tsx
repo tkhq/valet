@@ -506,7 +506,7 @@ describe("UsagePage — outcomes", () => {
     expect(screen.getByText("Outcomes")).toBeTruthy();
     const row = screen.getByRole("row", { name: /PRs created/ });
     expect(row.textContent).toContain("2");
-    expect(row.textContent).toContain("$1.5000");
+    expect(row.textContent).toContain("$1.50");
     expect(row.textContent).toContain("$0.7500");
     expect(screen.getByRole("row", { name: /Slack DMs sent/ })).toBeTruthy();
   });

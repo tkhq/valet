@@ -23,12 +23,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
-/**
- * The thread a non-channel event delivery lands on — the owner's default
- * assistant "events" firehose. Named so the outbound reply path can recognise
- * it without a magic string (`ChannelHost.deliverAssistantMessage`).
- */
-export const EVENTS_THREAD_KEY = "events";
+import { EVENTS_THREAD_KEY } from "./automated-threads.js";
+export { EVENTS_THREAD_KEY };
 
 /**
  * Which assistant thread an event signal lands on. A channel-originated signal
@@ -47,7 +43,7 @@ export function buildOrchestratorTarget(deps: {
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence }) => {
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence, unattended }) => {
     // Every subscription resolves the singleton runtime of its owner.
     await deliverToAssistantThread(deps, {
       orgId,
@@ -60,6 +56,7 @@ export function buildOrchestratorTarget(deps: {
       mismatchReason: "event_target_mismatch",
       ...(inbound ? { inbound } : {}),
       ...(author ? { author } : {}),
+      ...(unattended ? { unattended } : {}),
     });
   };
 }

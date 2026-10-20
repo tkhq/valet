@@ -38,7 +38,7 @@ import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, LoadingRow } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 
@@ -248,7 +248,7 @@ export function SessionView({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {panel && !hidePanelHeader && renderPanelHeader?.(null)}
-        <div className="flex-1 grid place-items-center text-sm text-muted"><Spinner /> Loading conversation…</div>
+        <div className="flex flex-1 items-center justify-center"><LoadingRow label="Loading conversation…" /></div>
       </div>
     );
   }

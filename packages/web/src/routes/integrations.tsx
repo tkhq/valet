@@ -175,7 +175,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={cn(pageClass, "max-w-3xl")}>
+      <div className={cn(pageClass, "[&>*]:max-w-3xl")}>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <h1 className="text-2xl font-medium text-ink">Integrations</h1>
           {/* The box stays up through an empty match — hiding it would leave

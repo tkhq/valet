@@ -118,6 +118,7 @@ export class WorkflowScheduler {
           },
         },
         dispatchId: `schedule:${schedule.id}:${slotMs}`,
+        unattended: true,
       });
       return "ok";
     }

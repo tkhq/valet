@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCreateThread, useThreads } from "~/api/queries";
 import { useTeams } from "~/api/settings";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, LoadingRow } from "~/components/primitives";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
@@ -44,7 +44,7 @@ function ChatPage() {
     Couldn’t open this workspace’s threads. {errorText(conversation.error)}
     <button className="ml-2 underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
-  if (!runtimeId || !sessionId || threads.isLoading) return <div className="flex-1 grid place-items-center"><Spinner /> Opening threads…</div>;
+  if (!runtimeId || !sessionId || threads.isLoading) return <div className="flex flex-1 items-center justify-center"><LoadingRow label="Opening threads…" /></div>;
   if (threads.error) return <div role="alert" className="p-8 text-sm">
     Couldn’t load threads. {errorText(threads.error)}
     <Button variant="ghost" onClick={() => void threads.refetch()}>Retry</Button>

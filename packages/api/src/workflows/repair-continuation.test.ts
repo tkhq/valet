@@ -145,8 +145,8 @@ it.each(limits)("continues a real workflow run with $name", async ({ ceiling, ca
     if (!row) throw new Error(`The real start_run action did not start a run: ${JSON.stringify(await thread.readEntries())}`);
     const run = await p.workflowStore.getRun(row.id);
     if (!run) throw new Error("The workflow run was not stored");
-    // Delegated workflow execution keeps the narrower validation focus.
-    expect(run.params.toolScope).toEqual(intersectToolScopes(ceiling, workflowToolFocus("validate")));
+    // The run gets the starting task's ceiling. The validation focus stays with the thread.
+    expect(run.params.toolScope).toEqual(intersectToolScopes(ceiling));
     expect(run.params.toolScope).not.toEqual(workflowToolFocus("repair"));
 
     await thread.pause();

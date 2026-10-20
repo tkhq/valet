@@ -97,7 +97,7 @@ export function ViewTabsBar({
   children: React.ReactNode;
 }) {
   return (
-    <div className="px-3 py-1.5 border-b border-[--border]/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
+    <div className="px-3 py-1.5 border-b border-line/60 bg-neutral-50 dark:bg-neutral-900/60 text-[11px] flex items-center justify-between gap-2">
       <div className="min-w-0 flex-1">{left}</div>
       {children}
     </div>

@@ -62,6 +62,7 @@ export {
   countPendingForCap,
   SIGNAL_HOP_BUDGET,
   MAX_PENDING_PER_THREAD,
+  SUBMISSION_TIMEOUT_MS,
   type ReconcileAction,
   type ReconcileContext,
 } from "./submission.js";

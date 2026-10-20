@@ -10,6 +10,8 @@ export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
 export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
 /** Marks a workflow task that nobody watches. The engine refuses its decision requests before a gate opens. */
 export const UNATTENDED_WORKFLOW_KEY = "unattendedWorkflow";
+/** Marks an automated event or schedule delivery that nobody watches. The engine refuses its decision requests, but a task it delegates can still ask. */
+export const UNATTENDED_DELIVERY_KEY = "unattendedDelivery";
 /** The workflow agent step `{ runId, nodeId }` a submission belongs to. Only host dispatch writes it. */
 export const WORKFLOW_STEP_KEY = "workflowStep";
 /** The most model calls one submission may make. The engine stops before the next call and fails the submission. */
@@ -85,10 +87,16 @@ export function readToolScope(value: unknown): ToolScope | undefined {
   return parsed === false ? { tools: [], actions: [] } : parsed;
 }
 
-/** A session-wide autonomous continuation has no single originating thread. */
+/**
+ * A session-wide autonomous continuation has no single originating thread.
+ * It keeps the session or submission ceiling and every thread's durable
+ * continuation ceiling. A thread's focus is reversible and stays on that
+ * thread, where each turn still applies it; saving it here would turn it into
+ * a ceiling that clearing focus cannot lift.
+ */
 export function continuationToolScope(metadata: Record<string, unknown> | undefined, threads: readonly { metadata?: Record<string, unknown> }[]): ToolScope | undefined {
   return intersectToolScopes(readToolScope(metadata?.[TOOL_SCOPE_KEY]),
-    ...threads.flatMap((thread) => [readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY])]));
+    ...threads.map((thread) => readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY])));
 }
 
 export function isToolScope(value: unknown): value is ToolScope {

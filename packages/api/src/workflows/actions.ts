@@ -629,7 +629,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const deps = getDeps();
       const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
       // Only the person's own signed-in prompt starts a run whose agent steps may use saved grants.
-      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope, ctx.toolScopeCeiling ?? {},
+      // The run gets the caller's ceiling. The caller's thread focus is its own and stays with it.
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScopeCeiling, ctx.toolScopeCeiling ?? {},
         undefined, isDirectActor(ctx, owner) ? "person" : "agent");
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {

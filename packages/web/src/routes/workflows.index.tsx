@@ -23,7 +23,8 @@ import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { WorkspaceClause } from "~/components/workspace-clause";
-import { relativeTime } from "~/lib/relative-time";
+import { relativeTime, timeUntil } from "~/lib/relative-time";
+import { formatWhen } from "~/lib/format-when";
 import { useListOwner } from "~/lib/use-list-owner";
 
 /** Workflow definitions and schedules; failures link directly to run details. */
@@ -256,7 +257,10 @@ function DefinitionRow({
         )}
 
         <p className="basis-full text-xs leading-5 text-muted">Updated {relativeTime(workflow.updatedAt)}</p>
-        <p className="basis-full text-xs text-muted">{nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : scheduleCount > 0 ? "Schedule paused" : eventCount > 0 ? "Runs when a matching event arrives" : "Run when needed"}{workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status}` : " · No runs yet"}</p>
+        <p className="basis-full text-xs text-muted">
+          {nextFireAt ? <span title={new Date(nextFireAt).toLocaleString()}>Next run {formatWhen(nextFireAt)} ({timeUntil(nextFireAt)})</span> : scheduleCount > 0 ? "Schedule paused" : eventCount > 0 ? "Runs when a matching event arrives" : "Run when needed"}
+          {workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status} ${relativeTime(workflow.latestRun.createdAt)}` : " · No runs yet"}
+        </p>
       </div>
       {hasSchema && (
         <RunWorkflowDialog
@@ -272,7 +276,7 @@ function DefinitionRow({
         {scheduleCount > 0 && (
           <span
             aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
-            title={nextFireAt ? `next fire ${new Date(nextFireAt).toLocaleString()}` : undefined}
+            title={nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : undefined}
             className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
             <Clock className="h-3 w-3" /> {scheduleCount}

@@ -1233,7 +1233,7 @@ queued → running → terminalizing → settled
 - **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
 - **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge). The first terminal write wins; later attempts to settle differently are conflicts.
 
-Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (default admission + 1 hour), lease duration 30 seconds with heartbeat renewal.
+Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (claim time + 1 hour, set by a claim with `attemptCount` 0, so time spent queued does not count), lease duration 30 seconds with heartbeat renewal.
 
 #### Ownership and leases
 
@@ -1255,7 +1255,7 @@ On engine startup, and whenever an expired lease is reclaimed, each unsettled su
 3. **Supersession.** If `supersededByItemId` is set (stamped transactionally by a `steer` admission — see below), settle `superseded`. In particular, a gate resolution arriving for a superseded submission's gate is acknowledged but never resumes it, regardless of when the crash landed.
 4. **Blocked on a gate.** If the submission was `blocked_on_decision_gate` and a `SuspendedTurnState` checkpoint exists, re-arm the gate wait (or replay immediately if the gate resolved while the engine was down) per the restart-safe gate contract. **Gate-blocked submissions are exempt from `timeoutAt`** — the human-wait bound is the gate's own `expiresAt`, not the execution timeout; a submission must never fail by timeout while legitimately parked on a pending gate.
 5. **Retry budget.** If `attemptCount >= maxAttempts`, settle `failed` with a retry-exhausted error.
-6. **Timeout.** If now ≥ `timeoutAt`, settle `failed` with a timeout error.
+6. **Timeout.** If `attemptCount > 0` and now ≥ `timeoutAt`, settle `failed` with a timeout error. A submission with `attemptCount` 0 has not run (never claimed, or released before it ran), so it is exempt. It waits behind its thread's head, which its own timeout or its gate's `expiresAt` bounds. A restart must not drop prompts that waited behind a parked turn.
 7. **Otherwise, resume.** Atomically replace the attempt (CAS: new `attemptId`, incremented `attemptCount`, fresh lease) *before* appending any recovery output. Then apply the same rest-state repair as terminalization: any trailing assistant `tool_call` part with no persisted result is updated in place to `status: 'error'` with an interrupted marker — never re-executed — because LLM providers reject a context containing an unanswered tool call. Only then continue the turn from persisted history.
 
 **Reconciliation never waits for the resumed turn.** The reconcile pass resolves once each unsettled item is claimed (fresh attempt, marker, fence) and its resume drive is kicked; the turn itself runs and settles in the background. This bound is load-bearing: `restoreSession` awaits reconciliation, and the host's single-flight `sessionFor` hands that same promise to every API route that needs the engine session. When reconciliation awaited the full drive, a resumed turn that parked on a decision gate held the session's entire API surface pending — including the decisions route — so the human who had to resolve the gate could never load it (2026-09-05 dev incident, session `child_a3eb6e52`). A resumed turn that needs a decision therefore surfaces its gate through the normal event/route path while `restoreSession` has long since returned.
@@ -1963,7 +1963,7 @@ interface QueueItem {
   attemptId?: string;
   attemptCount: number;
   maxAttempts: number;        // default 10
-  timeoutAt: number;          // default createdAt + 1h; not enforced while blocked_on_decision_gate
+  timeoutAt: number;          // claim time + 1h, set by a claim with attemptCount 0; not enforced at attemptCount 0 or while blocked_on_decision_gate
   abortRequestedAt?: number;
   ownerId?: string;
   leaseExpiresAt?: number;

@@ -226,7 +226,9 @@ export interface QueueItem {
    * the backoff window of it coalesce into the same cycle (no increment).
    */
   lastCredentialReleaseAt?: number;
-  timeoutAt: number; // default createdAt + 3_600_000
+  /** Execution deadline. A claim with attemptCount 0 sets it to claim time +
+   * `SUBMISSION_TIMEOUT_MS`, so time spent queued does not count. */
+  timeoutAt: number;
   abortRequestedAt?: number;
   ownerId?: string;
   leaseExpiresAt?: number;
@@ -2639,6 +2641,10 @@ export interface CreateSessionOptions {
   /** True for a thread nobody watches, such as a workflow run's own thread.
    * `requestDecision` refuses decisions on its turns that a person did not type. */
   unattendedThread?: (thread: { id: string; key: string }) => boolean;
+  /** True for a thread only automated deliveries write to, such as an events
+   * thread. `requestDecision` refuses decisions on its turns that a person did
+   * not type, but a task that such a turn delegates can still ask. */
+  automatedThread?: (thread: { id: string; key: string }) => boolean;
   /**
    * Host-supplied, session-scoped config surfaced verbatim as
    * `ToolContext.config` inside every tool execution (Phase 4 decision 7).
