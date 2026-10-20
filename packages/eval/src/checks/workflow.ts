@@ -8,9 +8,16 @@
  * `metadata.savedWorkflows`), else the last draft.
  *
  * The check reports two measurements apart: initial correctness (the
- * first draft already passes) and repair effort (validator rejections
+ * first full draft already passes) and repair effort (validator rejections
  * before the final definition). Only the final definition decides pass or
  * fail.
+ *
+ * Two kinds of call are not drafts. A call to a tool that does not exist
+ * (a model that writes `workflows__validate_definition` after the pinned
+ * `workflows__get_workflow`) never reaches the validator. A probe is a
+ * small draft that checks one detail, such as whether the validator
+ * accepts an action name, before the real draft. The check counts both
+ * on their own.
  */
 import { approvalRequestWarning, validateWorkflowDraft } from "@valet/api/eval-workflows";
 import { toolResultText } from "../trajectory.js";
@@ -45,6 +52,14 @@ function actionParams(call: TrajectoryToolCall): unknown {
   return call.args;
 }
 
+/**
+ * True when the call named a tool that does not exist. The agent loop
+ * answers it before any action runs, so it is not a validator rejection.
+ */
+function isUnknownTool(call: TrajectoryToolCall): boolean {
+  return call.status === "error" && toolResultText(call.result).trim() === `Tool ${call.toolName} not found`;
+}
+
 /** True when the action refused the call: a tool error, or a failed action result. */
 function isRejected(call: TrajectoryToolCall): boolean {
   if (call.status === "error") return true;
@@ -52,11 +67,15 @@ function isRejected(call: TrajectoryToolCall): boolean {
   return call.actionId !== undefined && toolResultText(call.result).startsWith(`${call.actionId} failed`);
 }
 
-/** Every definition the agent sent to the save validator, in call order. */
+/**
+ * Every definition the agent sent to the save validator, in call order. A
+ * call to a tool that does not exist never reached the validator, so it is
+ * not a draft.
+ */
 export function workflowDrafts(trajectory: Trajectory): WorkflowDraft[] {
   const drafts: WorkflowDraft[] = [];
   for (const call of trajectory.toolCalls) {
-    if (call.actionId === undefined || !DRAFT_ACTIONS.has(call.actionId)) continue;
+    if (call.actionId === undefined || !DRAFT_ACTIONS.has(call.actionId) || isUnknownTool(call)) continue;
     const params = actionParams(call);
     if (!isRecord(params) || params.definition === undefined) continue;
     drafts.push({ definition: params.definition, callIndex: call.index, rejected: isRejected(call) });
@@ -67,8 +86,26 @@ export function workflowDrafts(trajectory: Trajectory): WorkflowDraft[] {
 /** Validator rejections across save, validate, and patch calls. */
 function rejectionCount(trajectory: Trajectory): number {
   return trajectory.toolCalls.filter(
-    (call) => call.actionId !== undefined && VALIDATED_ACTIONS.has(call.actionId) && isRejected(call),
+    (call) =>
+      call.actionId !== undefined && VALIDATED_ACTIONS.has(call.actionId) && !isUnknownTool(call) && isRejected(call),
   ).length;
+}
+
+function nodeCount(definition: unknown): number {
+  return isRecord(definition) && Array.isArray(definition.nodes) ? definition.nodes.length : 0;
+}
+
+/**
+ * The first full draft and the probes before it. A full draft has at least
+ * half as many steps as the final definition; a smaller draft before it is
+ * a probe. When no draft is that large (the agent grew the workflow with
+ * patches), the final definition is the first full one.
+ */
+export function firstFullDraft(drafts: WorkflowDraft[], final: unknown): { definition: unknown; probes: number } {
+  const size = nodeCount(final);
+  const index = drafts.findIndex((draft) => nodeCount(draft.definition) * 2 >= size);
+  if (index === -1) return { definition: final, probes: drafts.length };
+  return { definition: drafts[index].definition, probes: index };
 }
 
 /** The most recently saved definition a product-drive case recorded. */
@@ -280,29 +317,45 @@ export function runWorkflowDefinitionCheck(check: WorkflowDefinitionCheck, traje
   const saved = lastSavedDefinition(trajectory);
   const final = saved ?? drafts[drafts.length - 1]?.definition;
   const rejections = rejectionCount(trajectory);
+  const unknownToolCalls = trajectory.toolCalls.filter(isUnknownTool).length;
   if (final === undefined) {
     return {
       check,
       pass: false,
       detail: "the agent sent no workflow definition to the save validator and saved none",
-      metrics: { drafts: 0, rejections, first_valid: false, first_correct: false, final_valid: false },
+      metrics: {
+        drafts: 0,
+        probes: 0,
+        rejections,
+        unknown_tool_calls: unknownToolCalls,
+        first_valid: false,
+        first_correct: false,
+        final_valid: false,
+      },
     };
   }
 
   const finalScore = score(final, check);
-  const first = drafts.length > 0 ? score(drafts[0].definition, check) : finalScore;
+  const full = firstFullDraft(drafts, final);
+  const first = score(full.definition, check);
   const metrics = {
     drafts: drafts.length,
+    probes: full.probes,
     rejections,
+    unknown_tool_calls: unknownToolCalls,
     first_valid: first.errors.length === 0,
     first_correct: first.errors.length === 0 && first.rules.length === 0,
     final_valid: finalScore.errors.length === 0,
   };
   const firstLine =
     metrics.first_correct
-      ? "first draft correct"
-      : `first draft: ${first.errors.length} validator error(s), ${first.rules.length} rule failure(s)`;
-  const effort = `${firstLine}; ${drafts.length} draft(s), ${rejections} validator rejection(s)`;
+      ? "first full draft correct"
+      : `first full draft: ${first.errors.length} validator error(s), ${first.rules.length} rule failure(s)`;
+  const extras = [
+    ...(full.probes > 0 ? [`${full.probes} probe(s)`] : []),
+    ...(unknownToolCalls > 0 ? [`${unknownToolCalls} call(s) to a tool that does not exist`] : []),
+  ];
+  const effort = `${firstLine}; ${drafts.length} draft(s), ${rejections} validator rejection(s)${extras.map((e) => `, ${e}`).join("")}`;
   const source = saved !== undefined ? "saved definition" : "last draft";
   const problems = [...finalScore.errors.map((error) => `validator: ${error}`), ...finalScore.rules];
   if (problems.length > 0) {

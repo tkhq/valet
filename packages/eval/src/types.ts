@@ -214,8 +214,10 @@ export type DeterministicCheck =
  * add case-specific rules.
  *
  * The check also reports metrics: the drafts sent to the validator, the
- * validator rejections (repair effort), and whether the first draft was
- * already correct (initial correctness).
+ * validator rejections (repair effort), and whether the first full draft
+ * was already correct (initial correctness). A small draft before the
+ * first full one is a probe, and a call to a tool that does not exist is
+ * not a draft; the check counts each on its own.
  *
  * Selectors name steps. A selector with a dot is an action id glob that
  * matches tool steps and `foreach` tool bodies (`sheets.write_*`). A

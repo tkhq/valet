@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadCases, parseEvalCase } from "../src/case-loader.js";
 import { runDeterministicCheck } from "../src/checks/deterministic.js";
-import { selectorMatches, workflowDrafts, workflowRuleFailures } from "../src/checks/workflow.js";
+import { firstFullDraft, selectorMatches, workflowDrafts, workflowRuleFailures } from "../src/checks/workflow.js";
 import { evalGateAnswer, EVAL_QUESTION_ANSWER } from "../src/product-drive.js";
 import { formatMetrics } from "../src/scorecard.js";
 import type { ScorecardEntry, Trajectory, TrajectoryToolCall, WorkflowDefinitionCheck } from "../src/index.js";
@@ -104,7 +104,15 @@ describe("workflow_definition", () => {
   it("passes a correct draft and reports first-draft correctness", () => {
     const r = runDeterministicCheck(CHECK, trajectory([saveCall(0, leadWorkflow(), true)]));
     expect(r.pass).toBe(true);
-    expect(r.metrics).toEqual({ drafts: 1, rejections: 0, first_valid: true, first_correct: true, final_valid: true });
+    expect(r.metrics).toEqual({
+      drafts: 1,
+      probes: 0,
+      rejections: 0,
+      unknown_tool_calls: 0,
+      first_valid: true,
+      first_correct: true,
+      final_valid: true,
+    });
   });
 
   it("keeps repair effort apart from the final verdict", () => {
@@ -124,6 +132,46 @@ describe("workflow_definition", () => {
     expect(r.pass).toBe(false);
     expect(r.detail).toContain("saved definition");
     expect(r.detail).toContain('"completed"');
+  });
+
+  it("does not score a call to a tool that does not exist", () => {
+    const unknown: TrajectoryToolCall = {
+      toolName: "workflows__validate_definition",
+      callId: "c0",
+      status: "error",
+      index: 0,
+      actionId: "workflows.validate_definition",
+      args: { definition: JSON.stringify(leadWorkflow()) },
+      result: { content: [{ type: "text", text: "Tool workflows__validate_definition not found" }], details: {} },
+    };
+    const t = trajectory([unknown, saveCall(1, leadWorkflow(), true)]);
+    expect(workflowDrafts(t).map((draft) => draft.callIndex)).toEqual([1]);
+    const r = runDeterministicCheck(CHECK, t);
+    expect(r.metrics).toMatchObject({ drafts: 1, rejections: 0, unknown_tool_calls: 1, first_correct: true });
+    expect(r.detail).toContain("1 call(s) to a tool that does not exist");
+  });
+
+  it("scores the first full draft, not a probe before it", () => {
+    const probe = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "done", type: "stop", outcome: "success" },
+      ],
+      edges: [{ from: "start", to: "done" }],
+    };
+    const check: WorkflowDefinitionCheck = { ...CHECK, approved_actions: ["sheets.write_spreadsheet"] };
+    const r = runDeterministicCheck(check, trajectory([saveCall(0, probe, true), saveCall(1, leadWorkflow(), true)]));
+    expect(r.metrics).toMatchObject({ drafts: 2, probes: 1, first_correct: true });
+    expect(r.detail).toContain("1 probe(s)");
+  });
+
+  it("treats the final definition as the first full draft when every draft is small", () => {
+    const small = { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }], edges: [] };
+    expect(firstFullDraft([{ definition: small, callIndex: 0, rejected: false }], leadWorkflow())).toEqual({
+      definition: leadWorkflow(),
+      probes: 1,
+    });
   });
 
   it("fails when the agent drafted nothing", () => {

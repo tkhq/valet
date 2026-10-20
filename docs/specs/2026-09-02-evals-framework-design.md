@@ -408,8 +408,19 @@ steps and foreach tool bodies. A selector without a dot is a step type.
 Only the final definition decides pass or fail. The check reports repair
 effort and initial correctness apart, as metrics: `drafts`, `rejections`
 (validator rejections across save, validate, and patch calls),
-`first_valid`, `first_correct` (the first draft passes the validator and
-every rule), and `final_valid`.
+`first_valid`, `first_correct` (the first full draft passes the validator
+and every rule), and `final_valid`. Two kinds of call are not scored as
+first drafts:
+
+- A call to a tool that does not exist. A model can write
+  `workflows__validate_definition` after the pinned
+  `workflows__get_workflow`, and the agent loop answers "Tool ... not
+  found" before any action runs. The call is not a draft and not a
+  rejection. `unknown_tool_calls` counts it.
+- A probe: a small draft that checks one detail, such as whether the
+  validator accepts an action name. The first full draft is the first
+  draft with at least half as many steps as the final definition.
+  `probes` counts the smaller drafts before it.
 
 The cases:
 
