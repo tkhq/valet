@@ -1,4 +1,4 @@
-import { readToolScope } from "@valet/shared";
+import { actionParamsLabel, readToolScope } from "@valet/shared";
 /**
  * What the api does when a workflow run settles. Two observers live here,
  * both driven by `LocalRunHost`'s `onRunSettled` hook: the failed-run
@@ -38,6 +38,15 @@ export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
 }
 
+/** Names the action and, when its parameters have one, what it would change,
+ * so two waiting approvals for one action read differently. A parameter can
+ * come from a webhook or a model. Slack renders the title as markdown, so a
+ * space after "]" keeps "[text](url)" from becoming a disguised link. */
+function policyGateTitle(info: { service?: string; action?: string; params?: unknown }): string {
+  const label = actionParamsLabel(info.params)?.value.replaceAll("](", "] (");
+  return `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}${label ? ` for "${label}"` : ""}`;
+}
+
 /** Routes an account gate to its lender and other gates to the run's audience. */
 export function buildRunApprovalAttention(deps: {
   db: AppDb;
@@ -56,7 +65,7 @@ export function buildRunApprovalAttention(deps: {
         owner: info.approver ? { type: "user", id: info.approver.userId } : owner,
         ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
         ...(channel ? { audienceKey: slackEventsThreadKey(channel) } : {}),
-        title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
+        title: info.summary ?? info.prompt ?? policyGateTitle(info),
         body: info.kind === "policy_gate" ? `Workflow run ${info.runId} is paused on ${info.nodeId}.` : info.summary ? info.prompt : undefined,
         href: workflowApprovalHref(info.runId, info.nodeId),
         dedupeKey: `${info.runId}:${info.gateId ?? `${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`}`,

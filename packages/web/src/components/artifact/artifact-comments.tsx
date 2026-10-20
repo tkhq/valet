@@ -201,7 +201,9 @@ export function ArtifactThreadPanel({
   };
 
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col border-l border-line bg-paper">
+    // Below md the panel sits under the frame, so the page keeps the full
+    // width. From md up it is a 320px column beside the frame.
+    <aside className="flex h-1/2 w-full shrink-0 flex-col border-t border-line bg-paper md:h-full md:w-80 md:border-l md:border-t-0">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <h2 className="flex items-center gap-2 text-sm font-medium text-ink">
           <MessageSquare className="h-4 w-4" aria-hidden />

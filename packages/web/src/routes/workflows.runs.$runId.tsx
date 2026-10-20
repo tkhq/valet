@@ -22,7 +22,7 @@ import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
-import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { BackLink, Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 import { formatUsdPrecise } from "~/lib/format-usage";
@@ -83,8 +83,8 @@ export function RunDetailPage() {
   // header is hidden while the conversation tab is open.
   const hasConversations = (data.conversations ?? []).length > 0;
   const back = workflowName
-    ? <Link to="/workflows/$workflowId" params={{ workflowId: data.run.workflowId }} className="inline-flex min-h-11 max-w-full items-center truncate text-xs text-muted hover:text-ink sm:min-h-0" title={workflowName}>← {workflowName}</Link>
-    : <Link to="/workflows" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">← Workflows</Link>;
+    ? <BackLink to="/workflows/$workflowId" params={{ workflowId: data.run.workflowId }} className="max-w-full truncate" title={workflowName}>{workflowName}</BackLink>
+    : <BackLink to="/workflows">Workflows</BackLink>;
 
   return (
     <div className="min-w-0 flex-1 flex flex-col min-h-0">
@@ -166,7 +166,7 @@ export interface RunDetailBodyProps {
 /**
  * Props-driven body (result panel + status bar + gate cards + checkpoint
  * list), split out from `RunDetailPage` so it's testable without router/query
- * wiring — the router `<Link>` above is the only thing that needs real router
+ * wiring — the `BackLink` above is the only thing that needs real router
  * context, and it's kept out of this component.
  */
 export function RunDetailBody({

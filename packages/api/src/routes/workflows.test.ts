@@ -13,10 +13,11 @@ import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { persistInvocationAudit } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicy } from "../policies/service.js";
 import {
   actionInvocations,
   actionPolicies,
+  actionPolicyOverrides,
   assistants,
   orgs,
   runtimeGrants,
@@ -1278,22 +1279,25 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
    * definition directly into the DB to bypass the save-time validator (which
    * rejects unknown services in environments without a plugin catalog). */
   async function setupRun(
-    opts: { nodeType?: string; service?: string; action?: string; origin?: { assistantSessionId: string; threadId: string } } = {},
+    opts: { nodeType?: string; service?: string; action?: string; origin?: { assistantSessionId: string; threadId: string }; foreach?: boolean } = {},
   ) {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
+    // With `foreach`, the gate node is the body of a foreach node "each".
+    const gate = { id: "gate", type: opts.nodeType, service: opts.service, action: opts.action, params: {} };
+    const step = opts.foreach ? "each" : "gate";
     const definition = {
       version: "dag/v1",
       nodes: [
         { id: "trigger", type: "trigger" },
         ...(opts.nodeType
-          ? [{ id: "gate", type: opts.nodeType, service: opts.service, action: opts.action, params: {} }]
+          ? [opts.foreach ? { id: "each", type: "foreach", items: "{{trigger.data.items}}", body: gate } : gate]
           : []),
         { id: "stop", type: "stop" },
       ],
       edges: [
-        { from: "trigger", to: opts.nodeType ? "gate" : "stop" },
-        ...(opts.nodeType ? [{ from: "gate", to: "stop" }] : []),
+        { from: "trigger", to: opts.nodeType ? step : "stop" },
+        ...(opts.nodeType ? [{ from: step, to: "stop" }] : []),
       ],
     };
 
@@ -1476,6 +1480,45 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(409);
     expect(await localApi.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+
+  it.each([
+    { provenance: "risk_default", granted: true },
+    { provenance: "plugin_default", granted: true },
+    { provenance: "risk_default", granted: true, foreach: true },
+    { provenance: "org_policy", granted: false },
+    { provenance: "resolver_error", granted: false },
+    // A rule added after the run parked refuses the grant too.
+    { provenance: "risk_default", granted: false, ruleSince: "org" as const },
+    { provenance: "risk_default", granted: false, ruleSince: "override" as const },
+  ])("a Tool step card grants its dynamic action for this workflow only when a default held it ($provenance, foreach=$foreach, rule since=$ruleSince)", async ({ provenance, granted, foreach, ruleSince }) => {
+    // widgets.nuke is not in the static catalog, like every MCP action, so the
+    // permission review reports it as "unknown". The run read its risk.
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke", foreach });
+    api = localApi;
+    if (ruleSince === "org") {
+      await localApi.providers.db.insert(actionPolicies).values({ id: "pol-since-park", orgId: "local-org", principalType: "org", principalId: "local-org",
+        actionId: "widgets.nuke", mode: "require_approval", paramMatchers: [], appliesIn: "workflow", origin: "settings", createdAt: 1, updatedAt: 1 });
+    }
+    if (ruleSince === "override") {
+      await localApi.providers.db.insert(actionPolicyOverrides).values({ id: "ovr-since-park", orgId: "local-org", userId: "local-user",
+        actionId: "widgets.nuke", mode: "require_approval", paramMatchers: [], createdAt: 1, updatedAt: 1 });
+    }
+    const gateId = "approval:gate:gate:1";
+    await localApi.providers.workflowStore.putIntent({ runId, nodeId: "gate", iteration: 0, status: "intent", attempt: 1, createdAt: 1,
+      effects: { gate: true, gateId, riskLevel: "critical", provenance } });
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "workflow", gateId }),
+    });
+    expect(res.status).toBe(granted ? 200 : 403);
+    expect(await localApi.providers.db.select({ actionId: workflowActionGrants.actionId }).from(workflowActionGrants))
+      .toEqual(granted ? [{ actionId: "widgets.nuke" }] : []);
+    expect(await localApi.providers.workflowStore.listSignals(runId)).toHaveLength(granted ? 1 : 0);
+    // A run of these steps no longer stops at the action.
+    const decision = await resolveActionPolicy(localApi.providers.db, { orgId: "local-org", userId: "local-user", service: "widgets",
+      actionId: "widgets.nuke", riskLevel: "critical", params: {}, appliesIn: "workflow", workflowExecutionId: runId, pluginDefault: undefined, now: Date.now() });
+    expect(decision.provenance.source).toBe(granted ? "workflow_grant" : ruleSince === "org" ? "org_policy" : ruleSince === "override" ? "override" : "risk_default");
   });
 
   it("legacy always scope cannot create an org-wide grant for an undiscoverable action", async () => {

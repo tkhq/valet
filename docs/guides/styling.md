@@ -86,10 +86,23 @@ never reach past a primitive to style its internals from a consumer.
 Search existing feature components before adding UI. Extend typed variants or sizes when a primitive almost fits.
 Keep one-off components beside their feature. Promote them when a second caller appears. Update both callers.
 Use `WorkRow` inside `WorkList` or `WorkSection` for work lists, and `SubSection` for titled settings sections.
-Reuse `cardClass`/`Card`, `pageClass`, `FilterChips`, and `TabBar` for existing layout patterns.
+Reuse `cardClass`/`Card`, `pageClass`, `FilterChips`, `TabBar`, and `RadioCard` for existing layout patterns.
 Use `textLinkClass` for text links and `Button asChild` for links presented as buttons.
 Delete superseded implementations. Preserve test seams and unique coverage for code that still runs.
 Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUnusedLocals`. Check export references with `rg`.
+
+### Shared page parts
+
+Use these primitives instead of hand-written classes:
+
+- `Button`, `Input`, `Select`, `FilterChips`, and `TabBar` take their height from `CONTROL_SIZE` (`primitives/control.ts`). `sm` is 32px with `text-xs`. Use it in toolbars, filter rows, and row actions. `md` is 36px with `text-sm`. Use it in forms and dialogs. Below the `sm` breakpoint, every control is at least 44px tall with 16px text, so a field does not trigger iOS zoom and a row keeps one text size. Give every control in one row the same `size`. Do not set `h-*`, `py-*`, or a text size in a control's `className`. `control.test.ts` fails on that, and on a raw `<select>`, text `<input>`, `role="tab"`, or `role="radio"` outside `primitives/`.
+- `TabBar` is the strip for panels inside one page. A tab can be `disabled`, show a `badge` such as a `StatusDot`, and carry an `action` outside its button, such as a close button. If the strip can show more than once on a page, pass a `useId()` value as `id`. `LinkTabs` is the strip for tabs that are routes.
+- `RadioCard` is the selectable card in a `role="radiogroup"`. Put extra content, such as a list of passes, in `children`.
+- `Select` is a native `<select>` with the field surface and focus ring of `Input`. It has no default width, so pass `w-full` for a form field.
+- `Callout` is a tinted notice box. Set `tone` to `neutral`, `warning`, `danger`, or `success`. If the notice can appear after the first paint, add `role="alert"` or `role="status"`. Use `asChild` to put its classes on a `label` or a `ul`.
+- `PageHeader` is the top of a page: the `h1` title, an optional `clause` such as `WorkspaceClause`, the `actions` on the right, and an optional `description`. Pass one element as `actions`, and wrap two or more actions in a `div`.
+- `BackLink` is a "← label" link to the parent page. It takes the props of `Link`, so the route and its params stay typed. Pass it to `PageHeader` as `back`, or use it alone in a toolbar.
+- `Time` shows a timestamp in a `<time>` element. The text is relative by default, or absolute with `format="absolute"`. The `title` always shows the full date. Do not show `toLocaleString()` output directly.
 
 ### Accepting `className` for composition
 

@@ -11,8 +11,8 @@ import {
   Input,
   Label,
   LoadingRow,
+  RadioCard,
 } from "~/components/primitives";
-import { RadioCard } from "./radio-card";
 import { SubSection } from "./section";
 import { useCreateInvite, useInvites, useRevokeInvite } from "~/api/invites";
 import { formatDate } from "~/lib/format-when";

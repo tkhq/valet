@@ -7,7 +7,7 @@
  */
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { ErrorRow, Button, Input, LoadingRow } from "~/components/primitives";
+import { ErrorRow, Button, Input, LoadingRow, Select } from "~/components/primitives";
 import { FilterValuePicker, fieldLabel, toWireFilters, type FilterField, type FilterOp, type UiFilterRow } from "~/components/events/filter-editor";
 import { splitCommon } from "~/components/events/event-match-step";
 import { ScheduleMatchStep } from "~/components/events/schedule-step";
@@ -425,7 +425,7 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
   return (
     <div className="mt-2 grid gap-2 rounded-lg border border-line p-3">
       <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1.4fr)]">
-        <select
+        <Select
           aria-label="Condition field"
           value={field}
           onChange={(e) => {
@@ -433,21 +433,20 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
             setValue("");
             setLabel(undefined);
           }}
-          className="min-h-11 min-w-0 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
+          className="min-w-0"
         >
           {fields.map((f) => <option key={f.field} value={f.field}>{fieldLabel(f.field)}</option>)}
-        </select>
-        <select
+        </Select>
+        <Select
           aria-label="Condition comparison"
           value={op}
           onChange={(e) => {
             const next = ADD_OPS.find((o) => o.value === e.target.value);
             if (next) setOp(next.value);
           }}
-          className="min-h-11 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink sm:min-h-0"
         >
           {ADD_OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+        </Select>
         {source !== undefined ? (
           <FilterValuePicker
             source={source.source}

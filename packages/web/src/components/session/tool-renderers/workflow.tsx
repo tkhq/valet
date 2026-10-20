@@ -23,6 +23,7 @@ import { ApiError } from "~/api/client";
 import { useRunDetail, useWorkflow } from "~/api/workflows";
 import { Badge } from "~/components/primitives/badge";
 import { textLinkClass } from "~/components/primitives/button";
+import { Time } from "~/components/primitives/time";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import {
   findApprovalPrompt,
@@ -398,7 +399,7 @@ function DefinitionBody({ workflowId }: { workflowId: string }) {
         <div className="flex items-center gap-2 text-xs min-w-0">
           <span className="font-medium text-ink truncate">{data.name}</span>
           <span className="text-muted whitespace-nowrap">
-            updated {new Date(data.updatedAt).toLocaleString()}
+            updated <Time ts={data.updatedAt} format="absolute" />
           </span>
         </div>
         <Link

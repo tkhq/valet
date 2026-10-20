@@ -688,7 +688,8 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
         actionPluginByService, credentials: engineCredentials });
       await seedRun(api, "run_first", "wf_gate");
-      await workflowStore.createRun("run_next", { workflowId: "wf_gate", definitionVersionId: "v1" },
+      // An agent started the second run, so its agent steps never use saved permissions.
+      await workflowStore.createRun("run_next", { workflowId: "wf_gate", definitionVersionId: "v1", startedBy: "agent" },
         { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: LOCAL_USER.id });
       const submit = (runId: string, text: string) => deps.promptOrchestrator(text, {
         dispatchId: `workflow:${runId}:node1`, queueMode: "followup",
@@ -718,14 +719,24 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       const settled = await deps.awaitResult(first.sessionId, first.threadId, first.queueItemId);
       expect(settled.outcome).toBe("failed");
       expect(settled.error).toContain("demo.review did not run");
+      expect(settled.error).not.toContain("An agent started this run");
 
-      faux.appendResponses([fauxAssistantMessage("second run reported")]);
+      faux.appendResponses([
+        fauxAssistantMessage(
+          [fauxToolCall("call_tool", { tool_id: "demo.review", params: {}, summary: "review it" }, { id: "tc-gate-next" })],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("second run reported"),
+      ]);
       const next = await submit("run_next", "second run");
       expect(next.sessionId).toBe(first.sessionId);
       expect(next.threadId).not.toBe(first.threadId);
       await vi.waitFor(async () => {
         expect((await engineStore.getQueueItem(next.sessionId, next.queueItemId))?.status).toBe("settled");
       }, { timeout: 15_000, interval: 50 });
+      const settledNext = await deps.awaitResult(next.sessionId, next.threadId, next.queueItemId);
+      expect(settledNext.outcome).toBe("failed");
+      expect(settledNext.error).toContain("An agent started or retried this run, so its agent steps do not use the workflow's saved permissions");
     } finally {
       faux.unregister();
     }
@@ -988,6 +999,24 @@ describe("unattendedRefusalError", () => {
       { title: "Let a teammate use your Linear account?", context: { tool_id: "linear.save_project", approver: { userId: "u_lender" } } },
     ]);
     expect(error).toContain("connect a team account on the team's Integrations page");
+  });
+
+  // A run an agent starts never uses saved permissions in agent steps
+  // (`step-grants.ts`), so "use Review permissions" sent the owner to redo a
+  // review that had already been done.
+  it("says that an agent-started run does not use saved permissions", () => {
+    const error = unattendedRefusalError([
+      { title: "Approve save_milestone?", context: { tool_id: "linear.save_milestone" } },
+    ], { agentStarted: true });
+    expect(error).toContain("linear.save_milestone did not run");
+    expect(error).toContain("An agent started or retried this run, so its agent steps do not use the workflow's saved permissions");
+    // The marker can come from the source run or from an agent's retry, so
+    // the fix is a new run, never a retry.
+    expect(error).toContain("Start a new run from the workflow page, or wait for the workflow to start one on its own.");
+    expect(error).not.toContain("A retry keeps this");
+    expect(error).toContain("move linear.save_milestone to a Tool step, which asks for approval on each run");
+    // The setup a new run needs, when the step does not have it yet.
+    expect(error).toContain("A new run uses saved permissions for linear.save_milestone only if this step lists it in its actions and Review permissions allows it.");
   });
 });
 

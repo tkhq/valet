@@ -145,7 +145,8 @@ function EnterCodeForm({
           aria-label={`${title} link code`}
           autoFocus
           autoComplete="one-time-code"
-          className="h-8 font-mono text-xs"
+          size="sm"
+          className="font-mono"
         />
         <Button type="submit" size="sm" disabled={verify.isPending || code.trim() === ""}>
           {verify.isPending ? "Linking…" : "Link"}
@@ -196,7 +197,7 @@ function MemberSearch({
           placeholder={`Your name on ${title}…`}
           aria-label={`Search ${title} members`}
           autoFocus
-          className="h-8 text-xs"
+          size="sm"
         />
         <Button type="submit" variant="ghost" size="sm" disabled={busy || query.trim() === ""}>
           Search

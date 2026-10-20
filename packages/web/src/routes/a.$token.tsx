@@ -170,7 +170,7 @@ export function ArtifactPage() {
   const authorName = meQ.data?.name || meQ.data?.email || "You";
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-dvh flex-col">
       {/* One compact bar — the page below is the point; the chrome is not.
           The title/byline collapse to a single truncating row, and the
           description rides in the tooltip instead of a second line. */}
@@ -227,8 +227,8 @@ export function ArtifactPage() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <div className="relative min-h-0 min-w-0 flex-1">
           <ArtifactFrame
             title={doc.title}
             rendered={doc.rendered}
