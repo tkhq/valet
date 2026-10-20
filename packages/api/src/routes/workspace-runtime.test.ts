@@ -3,8 +3,10 @@ import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistrati
 import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, legacyAssistantConversations, teams, teamMembers } from "../schema/index.js";
-import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse } from "../wire/types.js";
+import { assistantMemoryNamespace } from "../services/memory-scope.js";
+import { canAccessSessionResources } from "../services/session-access.js";
+import { agentSessions, assistants, assistantExecutions, childWatches, legacyAssistantRuntimes, legacyAssistantConversations, sessionThreads, teams, teamMembers } from "../schema/index.js";
+import type { EnsureWorkspaceRuntimeResponse, ListThreadsResponse, CreateThreadResponse, EnsureWorkspaceConversationResponse, ListWorkspaceConversationsResponse } from "../wire/types.js";
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; faux?.unregister(); faux = undefined; vi.unstubAllEnvs(); });
@@ -189,5 +191,292 @@ describe("workspace runtime authorization", () => {
     for (const [suffix, method] of [["", "POST"], ["/info", "GET"]]) {
       expect((await fetch(`${api.baseUrl}/api/workspaces/same/runtime${suffix}`, { method, headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
     }
+  });
+});
+
+describe("Ask Valet conversations", () => {
+  const conversations = (workspace: string, user = "local-user") => ({
+    open: async (body?: object) => await (await fetch(`${api!.baseUrl}/api/workspaces/${workspace}/conversation`, {
+      method: "POST", headers: { "x-valet-test-user-id": user, ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })).json() as EnsureWorkspaceConversationResponse,
+    list: async () => await (await fetch(`${api!.baseUrl}/api/workspaces/${workspace}/conversations`, {
+      headers: { "x-valet-test-user-id": user },
+    })).json() as ListWorkspaceConversationsResponse,
+  });
+  // Thread ids are random, so space out creations to order them by time.
+  const tick = () => new Promise(resolve => setTimeout(resolve, 5));
+  // A sent message records the person's activity on the thread.
+  const use = async ({ sessionId, threadId }: EnsureWorkspaceConversationResponse) => {
+    const at = Date.now();
+    await api!.providers.db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: at, lastUserActivityAt: at })
+      .onConflictDoUpdate({ target: sessionThreads.id, set: { lastUserActivityAt: at } });
+    await tick();
+  };
+  const waitForApproval = ({ sessionId, threadId }: EnsureWorkspaceConversationResponse) => api!.providers.engineStore.saveDecisionGate(sessionId, threadId, {
+    id: "gate-settings", sessionId, threadId, queueItemId: "q-settings", resumeKey: "rk-settings", ordinal: 0,
+    type: "approval", title: "Change your name?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 1, updatedAt: 1,
+  });
+
+  it("counts a conversation with history as started when its activity was not recorded", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const earlier = await open();
+    // Activity recording is best effort, so a conversation can have history without it.
+    await api.providers.engineStore.appendEntries(earlier.sessionId, earlier.threadId, [{
+      id: "earlier-message", sessionId: earlier.sessionId, threadId: earlier.threadId, parentId: null,
+      type: "message", role: "user", content: "An earlier question", createdAt: 1,
+    }]);
+    expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(earlier.threadId);
+    expect((await open({ fresh: true })).threadId).not.toBe(earlier.threadId);
+    expect(await open()).toEqual(earlier);
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([earlier.threadId]);
+  });
+
+  it("reuses an empty conversation and starts a fresh one after a message", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const first = await open();
+    expect(await open()).toEqual(first);
+    // Opening and closing the panel without a message saves no new thread.
+    for (let i = 0; i < 3; i++) expect(await open({ fresh: true, unlessBusy: true })).toEqual(first);
+    expect((await list()).conversations).toEqual([]);
+    await use(first);
+    const fresh = await open({ fresh: true });
+    expect(fresh.threadId).not.toBe(first.threadId);
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(fresh);
+    expect(await open()).toEqual(first);
+    const keys = (await api.providers.engineStore.listThreads(first.sessionId)).map(thread => thread.key);
+    expect(keys).toContain("app-assistant:local-user");
+    expect(keys.filter(key => /^app-assistant:local-user:[0-9a-f-]{36}$/.test(key))).toHaveLength(1);
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([first.threadId]);
+    // Ask Valet conversations stay out of the Threads list.
+    const threads = await (await fetch(`${api.baseUrl}/api/sessions/${encodeURIComponent(first.sessionId)}/threads?limit=10`)).json() as ListThreadsResponse;
+    expect(threads.threads.some(thread => thread.key?.startsWith("app-assistant:"))).toBe(false);
+  });
+
+  it("reopens the latest conversation while it waits for an approval, also after New chat", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const waiting = await open();
+    await use(waiting);
+    await waitForApproval(waiting);
+    const newChat = await open({ fresh: true });
+    expect(newChat.threadId).not.toBe(waiting.threadId);
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(waiting);
+    await use(newChat);
+    const next = await open({ fresh: true, unlessBusy: true });
+    expect([waiting.threadId, newChat.threadId]).not.toContain(next.threadId);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[newChat.threadId, false], [waiting.threadId, true]]);
+  });
+
+  it("gives each fresh conversation in a legacy team its own private execution", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "legacy-ask", orgId: "local-org", name: "Legacy", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "legacy-ask", userId: "local-user", role: "admin" },
+      { teamId: "legacy-ask", userId: "test-member", role: "member" },
+    ]);
+    // An upgraded team: each member's older conversation lives on the shared root.
+    const owner = { type: "team" as const, id: "legacy-ask" };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: root.assistant.id, sessionId: root.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    const legacy: Record<string, EnsureWorkspaceConversationResponse> = {};
+    for (const user of ["local-user", "test-member"]) {
+      const thread = await root.session.createThread(`app-assistant:${user}`);
+      await db.insert(legacyAssistantConversations).values({ threadId: thread.id, sessionId: root.sessionId, conversationKey: thread.key });
+      legacy[user] = { sessionId: root.sessionId, threadId: thread.id };
+    }
+    const alice = conversations("legacy-ask");
+    const bob = conversations("legacy-ask", "test-member");
+    expect(await alice.open()).toEqual(legacy["local-user"]);
+    const mine = await alice.open({ fresh: true });
+    const theirs = await bob.open({ fresh: true });
+    await use(mine);
+    // A member's newer conversations share one private session, so memory and files carry over.
+    const mineLater = await alice.open({ fresh: true });
+    expect(mineLater.threadId).not.toBe(mine.threadId);
+    expect(mineLater.sessionId).toBe(mine.sessionId);
+    expect(mine.sessionId).toMatch(/^execution:/);
+    expect(theirs.sessionId).toMatch(/^execution:/);
+    expect(mine.sessionId).not.toBe(theirs.sessionId);
+    const session = async (id: string) => (await db.select().from(agentSessions).where(eq(agentSessions.id, id)))[0]!;
+    expect(await canAccessSessionResources(api.providers, await session(mine.sessionId), { type: "user", id: "test-member" })).toBe(false);
+    expect(await canAccessSessionResources(api.providers, await session(theirs.sessionId), { type: "user", id: "local-user" })).toBe(false);
+    expect(await assistantMemoryNamespace(db, mine.sessionId, owner.id, "local-org")).toBe(mine.sessionId);
+    expect(await assistantMemoryNamespace(db, theirs.sessionId, owner.id, "local-org")).toBe(theirs.sessionId);
+    await use(theirs);
+    expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[mine.sessionId, mine.threadId]]);
+    expect((await bob.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[theirs.sessionId, theirs.threadId]]);
+
+    // The older conversation stays reachable on the root: in Recent, on a plain
+    // open, on reopen while it waits for an approval, and as the CLI target.
+    await use(legacy["local-user"]!);
+    expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([
+      [root.sessionId, legacy["local-user"]!.threadId], [mine.sessionId, mine.threadId]]);
+    expect(await db.select({ key: assistantExecutions.conversationKey }).from(assistantExecutions)
+      .where(eq(assistantExecutions.sessionId, mine.sessionId))).toEqual([{ key: "app-assistant:local-user:private" }]);
+    expect(await alice.open()).toEqual(legacy["local-user"]);
+    await waitForApproval(legacy["local-user"]!);
+    expect(await alice.open({ fresh: true, unlessBusy: true })).toEqual(legacy["local-user"]);
+    const runtime = await (await fetch(`${api.baseUrl}/api/workspaces/legacy-ask/runtime`, { method: "POST" })).json() as EnsureWorkspaceRuntimeResponse;
+    expect(runtime.sessionId).toBe(root.sessionId);
+    expect(await db.select().from(assistantExecutions).where(eq(assistantExecutions.conversationKey, "app-assistant:local-user"))).toEqual([]);
+  });
+
+  it("keeps a team member's memory and files across fresh conversations", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "memory-team", orgId: "local-org", name: "Memory", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values({ teamId: "memory-team", userId: "local-user", role: "admin" });
+    const { open } = conversations("memory-team");
+    const first = await open({ fresh: true });
+    await use(first);
+    const second = await open({ fresh: true, unlessBusy: true });
+    expect(second.threadId).not.toBe(first.threadId);
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(await assistantMemoryNamespace(api.providers.db, second.sessionId, "memory-team", "local-org")).toBe(first.sessionId);
+  });
+
+  it("reopens a conversation while its child work still runs", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const working = await open({ fresh: true });
+    await use(working);
+    await api.providers.db.insert(childWatches).values({ childSessionId: "child-running", queueItemId: "q-child", parentSessionId: working.sessionId,
+      parentThreadId: working.threadId, actorUserId: "local-user", orgId: "local-org", settled: false, createdAt: Date.now() });
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(working);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[working.threadId, true]]);
+    await api.providers.db.update(childWatches).set({ settled: true }).where(eq(childWatches.childSessionId, "child-running"));
+    expect((await open({ fresh: true, unlessBusy: true })).threadId).not.toBe(working.threadId);
+  });
+
+  it("reopens a conversation while background work it started is still open", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const waiting = await open({ fresh: true });
+    await use(waiting);
+    const now = Date.now();
+    await api.providers.engineStore.createWakeup({
+      id: "wk_ask_valet", sessionId: waiting.sessionId, threadId: waiting.threadId, kind: "timer", status: "pending",
+      reason: "check the deploy", prompt: "check the deploy", fireAt: now + 3_600_000,
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
+    });
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(waiting);
+    expect((await list()).conversations.map(item => [item.threadId, item.busy])).toEqual([[waiting.threadId, true]]);
+  });
+
+  it("lists every started conversation in Recent", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const started: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const conversation = await open({ fresh: true });
+      await use(conversation);
+      started.push(conversation.threadId);
+    }
+    expect((await list()).conversations.map(item => item.threadId)).toEqual([...started].reverse());
+  });
+
+  it("leaves archived conversations out of the latest one and Recent", async () => {
+    api = await bootTestApi();
+    const { open, list } = conversations("user");
+    const archived = await open({ fresh: true });
+    await use(archived);
+    await api.providers.db.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, archived.threadId));
+    const durable = await open();
+    expect(durable.threadId).not.toBe(archived.threadId);
+    expect((await list()).conversations).toEqual([]);
+    // An archived older conversation is not reopened either.
+    await use(durable);
+    await api.providers.db.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, durable.threadId));
+    expect([archived.threadId, durable.threadId]).not.toContain((await open()).threadId);
+    expect((await list()).conversations).toEqual([]);
+  });
+
+  it("starts New chat in a new thread even when the shown conversation is empty", async () => {
+    api = await bootTestApi();
+    const { open } = conversations("user");
+    const shown = await open({ fresh: true, unlessBusy: true });
+    const newChat = await open({ fresh: true });
+    expect(newChat.threadId).not.toBe(shown.threadId);
+    // Reopening the panel still reuses the newest empty conversation.
+    expect(await open({ fresh: true, unlessBusy: true })).toEqual(newChat);
+  });
+
+  it("keeps fresh conversations off a retained legacy runtime", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(teams).values({ id: "retained-ask", orgId: "local-org", name: "Retained", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "retained-ask", userId: "local-user", role: "admin" });
+    const owner = { type: "team" as const, id: "retained-ask" };
+    // The singleton migration retained an older shared runtime with this person's empty conversation.
+    const old = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    const legacy = await old.session.createThread("app-assistant:local-user");
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: old.assistant.id, sessionId: old.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: old.sessionId, conversationKey: legacy.key });
+    await db.update(assistants).set({ ownerId: `${owner.id}:retired:${old.assistant.id}` }).where(eq(assistants.id, old.assistant.id));
+    engineHost.evictCache(old.sessionId);
+    const { open } = conversations("retained-ask");
+    expect((await open()).sessionId).toBe(old.sessionId);
+    for (const request of [{ fresh: true }, { fresh: true, unlessBusy: true }]) {
+      const fresh = await open(request);
+      expect(fresh.sessionId).toMatch(/^execution:/);
+      expect(fresh.threadId).not.toBe(legacy.id);
+    }
+  });
+
+  it("replaces a deleted private execution of a legacy team member", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "legacy-deleted", orgId: "local-org", name: "Legacy", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "legacy-deleted", userId: "local-user", role: "admin" });
+    const owner = { type: "team" as const, id: "legacy-deleted" };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: root.assistant.id, sessionId: root.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    const legacy = await root.session.createThread("app-assistant:local-user");
+    await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: root.sessionId, conversationKey: legacy.key });
+    const { open } = conversations("legacy-deleted");
+    const first = await open({ fresh: true });
+    expect(first.sessionId).toMatch(/^execution:/);
+    await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, first.sessionId));
+    const response = await fetch(`${api.baseUrl}/api/workspaces/legacy-deleted/conversation`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fresh: true }) });
+    expect(response.status).toBe(200);
+    const replacement = await response.json() as EnsureWorkspaceConversationResponse;
+    expect(replacement.sessionId).toMatch(/^execution:/);
+    expect(replacement.sessionId).not.toBe(first.sessionId);
+  });
+
+  it("keeps each team member's conversations to that member", async () => {
+    api = await bootTestApi();
+    await api.providers.db.insert(teams).values({ id: "ask-team", orgId: "local-org", name: "Ask", createdAt: 1 });
+    await api.providers.db.insert(teamMembers).values([
+      { teamId: "ask-team", userId: "local-user", role: "admin" },
+      { teamId: "ask-team", userId: "test-member", role: "member" },
+    ]);
+    const mine = conversations("ask-team");
+    const theirs = conversations("ask-team", "test-member");
+    const own = await mine.open({ fresh: true });
+    const other = await theirs.open({ fresh: true });
+    await use(own);
+    await use(other);
+    expect(own.sessionId).toMatch(/^execution:/);
+    expect(own.sessionId).not.toBe(other.sessionId);
+    const [execution] = await api.providers.db.select().from(assistantExecutions).where(eq(assistantExecutions.sessionId, own.sessionId));
+    expect(execution?.conversationKey).toBe("app-assistant:local-user");
+    expect((await theirs.list()).conversations.map(item => item.threadId)).toEqual([other.threadId]);
+    expect((await mine.list()).conversations.map(item => item.threadId)).toContain(own.threadId);
+    const read = (threadId: string, user: string) => fetch(`${api!.baseUrl}/api/threads/${threadId}/messages`, { headers: { "x-valet-test-user-id": user } });
+    expect((await read(own.threadId, "local-user")).status).toBe(200);
+    expect((await read(own.threadId, "test-member")).status).toBe(404);
+    const { workspaceSessionId } = await (await fetch(`${api.baseUrl}/api/workspaces/ask-team/runtime`, {
+      method: "POST", headers: { "x-valet-test-user-id": "test-member" },
+    })).json() as EnsureWorkspaceRuntimeResponse;
+    const listed = await (await fetch(`${api.baseUrl}/api/sessions/${workspaceSessionId}/threads`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as ListThreadsResponse;
+    expect(listed.threads.some(thread => thread.id === own.threadId)).toBe(false);
   });
 });

@@ -62,6 +62,8 @@ export const qk = {
   sessions: (owner?: OwnerFilter) =>
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
+  /** The viewer's Ask Valet conversations in one workspace. */
+  workspaceConversations: (workspace: string) => ["workspace-conversations", workspace] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
   threadPages: (id: string, options?: object) => ["sessions", id, "threads", "pages", ...(options ? [options] : [])] as const,
   threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,

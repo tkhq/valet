@@ -2,24 +2,31 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MutationObserver, QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { api } from "~/api/client";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { ENSURE_CONVERSATION_MUTATION, WorkspaceAssistantDock, WorkspaceAssistantProvider, useWorkspaceAssistant } from "./workspace-assistant";
 
 vi.mock("~/lib/workspace-scope", () => ({ useWorkspaceScope: () => ({ key: "user" }) }));
 vi.mock("~/components/session/assistant-panel", () => ({
-  AssistantPanel: ({ sessionId, threadId }: { sessionId?: string; threadId?: string }) => <p>Conversation {sessionId}/{threadId}</p>,
+  AssistantPanel: ({ sessionId, threadId, actions }: { sessionId?: string; threadId?: string; actions?: React.ReactNode }) => <div><p>Conversation {sessionId}/{threadId}</p>{actions}</div>,
 }));
 
 afterEach(() => {
   onlineManager.setOnline(true);
   vi.restoreAllMocks();
+  useComposerDraftStore.setState({ byKey: {} });
 });
 
 function OpenButton() {
   const assistant = useWorkspaceAssistant();
-  return <button onClick={() => assistant.open()}>Ask Valet</button>;
+  return <>
+    <button onClick={() => assistant.open()}>Ask Valet</button>
+    <button onClick={() => assistant.open("Summarize this page")}>Try in chat</button>
+    <button onClick={() => assistant.open("Explain this error")}>Explain error</button>
+    <button onClick={assistant.close}>Close Valet</button>
+  </>;
 }
 
 function renderAt(path: string) {
@@ -65,5 +72,108 @@ describe("Ask Valet panel", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/chat"));
     expect(router.state.location.search).toEqual({ workspace: "user", thread: "workflow-thread" });
     expect(screen.queryByRole("complementary", { name: "Valet assistant" })).toBeNull();
+  });
+});
+
+describe("Ask Valet conversation rule", () => {
+  const draft = (threadId: string) => useComposerDraftStore.getState().byKey[draftKey("s1", threadId)]?.text;
+
+  it("starts a new conversation each time the panel opens from closed", async () => {
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "first" })
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "second" });
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Ask Valet" }));
+    expect(await screen.findByText("Conversation s1/first")).toBeTruthy();
+    expect(ensure).toHaveBeenLastCalledWith("user", { fresh: true, unlessBusy: true });
+    // Asking again while the panel is open keeps the open conversation.
+    await userEvent.click(screen.getByRole("button", { name: "Ask Valet" }));
+    expect(ensure).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: "Close Valet" }));
+    await userEvent.click(screen.getByRole("button", { name: "Ask Valet" }));
+    expect(await screen.findByText("Conversation s1/second")).toBeTruthy();
+    expect(ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts a contextual prompt in a new conversation, or in the open one", async () => {
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "contextual" })
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "open" });
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Try in chat" }));
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    expect(ensure).toHaveBeenLastCalledWith("user", { fresh: true });
+    expect(draft("contextual")).toBe("Summarize this page");
+
+    await userEvent.click(screen.getByRole("button", { name: "Close Valet" }));
+    await userEvent.click(screen.getByRole("button", { name: "Ask Valet" }));
+    expect(await screen.findByText("Conversation s1/open")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Try in chat" }));
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(draft("open")).toBe("Summarize this page");
+  });
+
+  it("gives a contextual prompt its own conversation while the panel is still opening", async () => {
+    let finishOpen: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finishOpen = resolve; }))
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "contextual" });
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Ask Valet" }));
+    await userEvent.click(screen.getByRole("button", { name: "Try in chat" }));
+    expect(ensure.mock.calls).toEqual([["user", { fresh: true, unlessBusy: true }], ["user", { fresh: true }]]);
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    await act(async () => finishOpen({ sessionId: "s1", threadId: "waiting" }));
+    expect(screen.getByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Summarize this page");
+    expect(draft("waiting")).toBeUndefined();
+  });
+
+  it("puts the latest contextual prompt in the draft when two start together", async () => {
+    let finish: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Try in chat" }));
+    await userEvent.click(screen.getByRole("button", { name: "Explain error" }));
+    expect(ensure).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ sessionId: "s1", threadId: "contextual" }));
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Explain this error");
+  });
+
+  it("keeps the contextual conversation when Ask Valet is pressed while it opens", async () => {
+    let finish: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Try in chat" }));
+    await userEvent.click(screen.getByRole("button", { name: "Ask Valet" }));
+    expect(ensure.mock.calls).toEqual([["user", { fresh: true }]]);
+    await act(async () => finish({ sessionId: "s1", threadId: "contextual" }));
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Summarize this page");
+  });
+
+  it("starts a new chat from the header and reopens a recent conversation", async () => {
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "first" })
+      .mockResolvedValueOnce({ sessionId: "s1", threadId: "newer" });
+    // A team keeps each conversation in its own session.
+    vi.spyOn(api, "listWorkspaceConversations").mockResolvedValue({ conversations: [
+      { sessionId: "s1", threadId: "newer", createdAt: 2, lastUserActivityAt: 2, busy: false },
+      { sessionId: "s2", threadId: "older", title: "Rename my account", createdAt: 1, lastUserActivityAt: 1, busy: true },
+    ] });
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Ask Valet" }));
+    await userEvent.click(await screen.findByRole("button", { name: "New chat" }));
+    expect(await screen.findByText("Conversation s1/newer")).toBeTruthy();
+    expect(ensure).toHaveBeenLastCalledWith("user", { fresh: true });
+
+    await userEvent.click(screen.getByRole("button", { name: "Recent conversations" }));
+    expect((await screen.findByRole("menuitem", { name: /New conversation/ })).getAttribute("aria-current")).toBe("true");
+    await userEvent.click(screen.getByRole("menuitem", { name: /Rename my account/ }));
+    expect(await screen.findByText("Conversation s2/older")).toBeTruthy();
+    expect(ensure).toHaveBeenCalledTimes(2);
   });
 });

@@ -931,6 +931,32 @@ export interface WorkspaceRuntimeInfoResponse {
 }
 export interface EnsureWorkspaceRuntimeResponse { sessionId: string; workspaceSessionId?: string; }
 
+/** `POST /api/workspaces/:workspace/conversation`: opens one of the viewer's
+ * Ask Valet conversations. With no body it returns the latest one. */
+export interface EnsureWorkspaceConversationRequest {
+  /** Start a new conversation instead of returning the latest one. */
+  fresh?: boolean;
+  /** With `fresh`, return the latest conversation while it runs a turn or waits for an approval. */
+  unlessBusy?: boolean;
+}
+export interface EnsureWorkspaceConversationResponse { sessionId: string; threadId: string; }
+
+/** One of the viewer's Ask Valet conversations. */
+export interface WorkspaceConversationSummary {
+  /** After a team upgrade, the older conversation can live on the shared root
+   * and newer ones in a private execution, so each item names its session. */
+  sessionId: string;
+  threadId: string;
+  title?: string;
+  createdAt: number;
+  lastUserActivityAt: number;
+  /** The conversation runs a turn or waits for an approval. */
+  busy: boolean;
+}
+/** `GET /api/workspaces/:workspace/conversations`: every started Ask Valet
+ * conversation of the viewer, the most recently used first. */
+export interface ListWorkspaceConversationsResponse { conversations: WorkspaceConversationSummary[]; }
+
 /** The services a workspace's carried-over integration limit allows, or null for no limit. */
 export interface WorkspaceIntegrationLimitResponse { services: string[] | null; }
 

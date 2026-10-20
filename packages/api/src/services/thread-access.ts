@@ -3,7 +3,9 @@
  * session access alone would show every thread to every member. Three kinds
  * of thread are narrower:
  *
- * - A member's helper thread (`app-assistant:<user>`) is that member's alone.
+ * - A member's helper thread (`app-assistant:<user>:<conversation>`, or
+ *   `app-assistant:<user>` from before per-conversation keys) is that
+ *   member's alone.
  * - A workflow editor conversation (`workflow:<id>:<user>`) is that member's
  *   alone.
  * - A thread that holds content from a private Slack channel shows only to
@@ -29,6 +31,7 @@
  * stays hidden: it may be private. The first thread list after a channel's
  * first message classifies it, while the bot's token still works there.
  */
+import { randomUUID } from "node:crypto";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { Thread, type StoredCredential, type ThreadAccessCheck, type ThreadData } from "@valet/engine";
 import type { WorkflowRunOrigin } from "@valet/workflow";
@@ -291,9 +294,20 @@ export function isPersonalThreadKey(key: string | null | undefined): boolean {
  * undefined when the key names nobody. */
 export function privateThreadOwner(key: string | null | undefined): string | undefined {
   if (!key) return undefined;
-  if (key.startsWith("app-assistant:")) return key.slice("app-assistant:".length) || undefined;
+  if (key.startsWith("app-assistant:")) return key.split(":")[1] || undefined;
   if (key.startsWith("workflow:")) return key.split(":")[2] || undefined;
   return undefined;
+}
+
+/** The key of a new Ask Valet conversation for one person. */
+export function assistantConversationKey(userId: string): string {
+  return `app-assistant:${userId}:${randomUUID()}`;
+}
+
+/** Whether a key names one of the person's Ask Valet conversations, including
+ * the one conversation each person had before per-conversation keys. */
+export function isAssistantConversationOf(key: string | null | undefined, userId: string): boolean {
+  return key === `app-assistant:${userId}` || !!key?.startsWith(`app-assistant:${userId}:`);
 }
 
 /** A thread to judge: its key alone, or the engine thread with its metadata.

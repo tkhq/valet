@@ -216,7 +216,9 @@ export async function ensureAssistantExecution(
     if (app?.status === "deleted") {
       // Explicitly deleting a helper must not reserve its owner's entry point
       // forever. Allocate fresh state; never restore the deleted execution.
-      if (conversationKey !== `app-assistant:${meta.actorUserId}`) throw new ArchivedAssistantError();
+      // A legacy team member's newer conversations use the `:private` helper.
+      const helperKeys = [`app-assistant:${meta.actorUserId}`, `app-assistant:${meta.actorUserId}:private`];
+      if (!helperKeys.includes(conversationKey)) throw new ArchivedAssistantError();
       const [replacement] = await tx.update(assistantExecutions)
         .set({ sessionId: candidate.sessionId, createdAt: candidate.createdAt })
         .where(eq(assistantExecutions.sessionId, row.sessionId)).returning();

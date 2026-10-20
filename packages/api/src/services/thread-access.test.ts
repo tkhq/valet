@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { cachedThreadVisibility, runOriginVisible, visibleThreadIds, governingThreadKeySql, resetThreadAccessCache, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility } from "./thread-access.js";
+import { cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -77,6 +77,10 @@ it("lets a thread read only what its audience may see", async () => {
   expect(await read("app-assistant:member", "slack:CREADPRIV:1.1")).toBe(true);
   expect(await read("app-assistant:outsider", "slack:CREADPRIV:1.1")).toBe(false);
   expect(await read("app-assistant:outsider", "app-assistant:member")).toBe(false);
+  // Each Ask Valet conversation adds its own id after the person.
+  expect(await read("app-assistant:member:c1", "slack:CREADPRIV:1.1")).toBe(true);
+  expect(await read("app-assistant:member:c1", "app-assistant:member:c2")).toBe(true);
+  expect(await read("app-assistant:outsider:c1", "app-assistant:member:c2")).toBe(false);
   // A personal runtime has one person: it reads everything.
   expect(await canRead({ owner: { type: "user", id: "member" }, orgId: "local-org", reader: ref("web:default"), target: ref("app-assistant:x") })).toBe(true);
 });
@@ -162,11 +166,25 @@ it("shows a person's helper and editor threads only to that person, and a legacy
   expect(await visible("app-assistant:member")).toBe(true);
   expect(await visible("workflow:wf_1:member")).toBe(true);
   expect(await visible("app-assistant:other")).toBe(false);
+  expect(await visible("app-assistant:member:c1")).toBe(true);
+  expect(await visible("app-assistant:other:c1")).toBe(false);
+  expect(await visible("app-assistant:")).toBe(false);
   expect(await visible("workflow:wf_1:other")).toBe(false);
   expect(await visible("workflow:wf_legacy")).toBe(false);
   expect(await visible("web:default")).toBe(true);
   // A personal runtime has one person, who sees every thread.
   expect(await threadVisibility(api.providers, { ownerType: "user" }, { orgId: "local-org", userId: "member" })("workflow:wf_legacy")).toBe(true);
+});
+
+it("reads the person from a helper key with or without a conversation id", () => {
+  expect(privateThreadOwner("app-assistant:member:c1")).toBe("member");
+  expect(privateThreadOwner("app-assistant:member")).toBe("member");
+  expect(privateThreadOwner("app-assistant:")).toBeUndefined();
+  expect(isAssistantConversationOf("app-assistant:member:c1", "member")).toBe(true);
+  expect(isAssistantConversationOf("app-assistant:member", "member")).toBe(true);
+  expect(isAssistantConversationOf("app-assistant:member2:c1", "member")).toBe(false);
+  expect(isAssistantConversationOf("app-assistant:memberx", "member")).toBe(false);
+  expect(isAssistantConversationOf("web:app-assistant:member", "member")).toBe(false);
 });
 
 it("judges a child session's threads by the thread that started it", async () => {
