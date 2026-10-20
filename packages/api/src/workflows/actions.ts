@@ -16,7 +16,7 @@ import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
 import { ValetError } from "@valet/shared";
-import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
+import { WorkflowCursorError, type ValidateEnvironment, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
@@ -376,6 +376,23 @@ export function resolvedGateStillWaiting(gates: { nodeId: string; iteration?: nu
 }
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
+  /**
+   * The validator environment that `save_workflow` checks a definition
+   * against. `validate_definition` uses the same one, so a draft that passes
+   * it passes the save's validation. The environment is best-effort: if deps
+   * aren't wired (early boot, or a test that only exercises validation),
+   * lint without the catalog hooks rather than failing the whole call.
+   */
+  async function saveValidationEnvironment(orgId: string): Promise<ValidateEnvironment> {
+    let validationDeps: WorkflowServiceDeps | undefined;
+    try {
+      validationDeps = getDeps();
+    } catch {
+      validationDeps = undefined;
+    }
+    return validationDeps ? await buildOrgValidateEnvironment(validationDeps, orgId) : buildValidateEnvironment();
+  }
+
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
     team_id: Type.String({ description: "Explicit destination team ID." }),
@@ -563,19 +580,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
 
-      // The validate env is best-effort: if deps aren't wired (early boot,
-      // or a test that only exercises validation), lint without the
-      // catalog hooks rather than failing the whole call.
-      let validationDeps: WorkflowServiceDeps | undefined;
-      try {
-        validationDeps = getDeps();
-      } catch {
-        validationDeps = undefined;
-      }
-      const env = validationDeps
-        ? await buildOrgValidateEnvironment(validationDeps, owner.orgId)
-        : buildValidateEnvironment();
-      const validation = validateDefinitionInput(definition, env);
+      const validation = validateDefinitionInput(definition, await saveValidationEnvironment(owner.orgId));
       if (!validation.ok) {
         return {
           success: false,
@@ -604,6 +609,28 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         success: true,
         data: { workflowId: created.id, name: created.name, updatedAt: created.updatedAt, ...(await approvalNeeded(getDeps(), owner, created.id)) },
       };
+    },
+  });
+
+  const validateDefinition = action(
+    Type.Object({
+      definition: Type.Unknown({ description: "The draft dag/v1 definition: { version: 'dag/v1', nodes: [...], edges: [...] }." }),
+    }),
+  )({
+    id: "workflows.validate_definition",
+    name: "Validate workflow definition",
+    description:
+      "Check a draft dag/v1 definition with the same validator as save_workflow, without saving it. " +
+      "Returns { valid: true } when the definition passes the save validation. " +
+      "Otherwise `error` lists each validation error, as save_workflow does. " +
+      "Run it on every draft before you call the draft ready or show it to the person.",
+    riskLevel: "low",
+    execute: async ({ definition }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const validation = validateDefinitionInput(definition, await saveValidationEnvironment(owner.orgId));
+      if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
+      return { success: true, data: { valid: true } };
     },
   });
 
@@ -1811,6 +1838,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getWorkflow,
       getPermissions,
       saveWorkflow,
+      validateDefinition,
       patchWorkflow,
       updateModel,
       addAggregate,
