@@ -337,6 +337,19 @@ async function deliverToAssistantThreadInner(
     workspace: data.workspace,
   }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
   if (!thread) throw new Error("The original thread is unavailable. Restore it, then redeliver the event.");
+  // A pinned thread is not this rule's own thread, and other people may read
+  // it. A private channel recorded on it would hide it from every reader
+  // outside that channel, so the delivery dead-letters instead (spec
+  // Deviations, "Channel privacy follows content"). The write-time check
+  // (`thread-policy-write.ts`) covers channels the rule's filters name; this
+  // covers the rest, such as an any-channel rule.
+  if (args.slackChannel && destination.kind === "target" && destination.reason === "policy_existing") {
+    const data = thread.toThreadData();
+    const narrows = await recordingNarrowsThread({ db: deps.db, ...deps.slackAccess },
+      args.orgId, { ownerType: args.owner.type, sessionId: session.id, threadId: thread.id, key: data.key ?? null, recorded: recordedSlackChannels(data.metadata) },
+      args.slackChannel);
+    if (narrows) throw new PinUnavailableError(pinNarrowsMessage(args.slackChannel));
+  }
   // Record the channel on a thread that already existed, and on a team
   // execution's governing thread, before the title seed and the context
   // fetch, so a reader outside a private channel never sees the content.

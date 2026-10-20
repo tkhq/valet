@@ -402,8 +402,8 @@ describe("EventDispatcher", () => {
 
   it("lands a Slack event with no thread to reply into in its channel's thread", async () => {
     // A reaction in a channel has no Slack thread to answer. With no policy
-    // set, the rule's own thread holds it (spec 2026-10-16: delivery
-    // threads, Part A step 3).
+    // set, the channel's subject thread holds it, so channels never share a
+    // thread (spec 2026-10-16: delivery threads, Part A step 3).
     const { subscriptionId } = await seedDelivery({
       target: { kind: "assistant" }, ownerType: "org",
       service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],

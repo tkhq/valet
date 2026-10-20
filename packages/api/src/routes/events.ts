@@ -1342,11 +1342,13 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const audience = write.audience ?? null;
   // Only a patch that sets the policy re-checks its thread. A rename of a rule
   // whose pinned thread was archived later must still work.
+  // `merged.eventKeys` passed `validateSubscriptionWrite` above.
+  const rule = { eventKeys: merged.eventKeys as string[], filters };
   if (body.thread != null && patchedTarget.kind === "assistant") {
     const threadError = await existingThreadError(c.var.providers, viewerOf(c),
       { type: row.ownerType, id: row.ownerId }, patchedTarget.thread, rule);
     if (threadError) return c.json({ error: threadError }, 400);
-  } else if ((body.filters !== undefined || body.eventKeys !== undefined) && patchedTarget.kind === "orchestrator") {
+  } else if ((body.filters !== undefined || body.eventKeys !== undefined) && patchedTarget.kind === "assistant") {
     // A match edit can name a private channel that the pinned thread does
     // not gate on yet. Only that check runs, so the edit of a rule whose
     // pinned thread was archived later still works.
