@@ -62,7 +62,7 @@ const R4 = line("R4", {
 const S2 = {
   kind: "schedule", id: "S2", name: "Morning summary", enabled: false,
   detail: {
-    cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null,
+    cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, lastFiredThread: null,
     ownerType: "user", ownerId: "u-001", disabledReason: "The pinned thread is archived.",
   },
 } satisfies WorkflowTriggerItem;

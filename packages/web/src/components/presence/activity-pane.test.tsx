@@ -399,7 +399,7 @@ describe("ActivityPane with no place and no routine", () => {
     places = [];
     lines = [];
     triggers = [{ kind: "schedule", id: "S1", name: "Morning summary", enabled: true, detail: {
-      cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1",
+      cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u1",
     } }];
     renderTab();
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();

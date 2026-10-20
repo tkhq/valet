@@ -101,7 +101,7 @@ const S1: WorkflowTriggerItem = {
   kind: "schedule", id: "S1", name: "Morning summary", enabled: true,
   detail: {
     cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "Summarize the night.",
-    thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+    thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u-001",
   },
 };
 
@@ -162,7 +162,7 @@ function answer(method: string, url: URL, body: string | undefined): Response {
       kind: "schedule", id: schedule.scheduleId, name: schedule.name, enabled: true,
       detail: {
         cron: schedule.cron, timezone: schedule.timezone, targetKind: "assistant", prompt,
-        thread: { mode: "own" }, nextFireAt: schedule.nextFireAt, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+        thread: { mode: "own" }, nextFireAt: schedule.nextFireAt, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u-001",
       },
     }];
     return json({ schedule } satisfies WorkflowScheduleResponse);

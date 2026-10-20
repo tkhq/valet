@@ -60,8 +60,8 @@ import type {
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
-import { channelsVisibleTo, threadEntry, threadsVisibleTo, viewerOf } from "./_thread-access.js";
-import { orgSlackCredential, slackEventChannel, storedThreadRef } from "../services/thread-access.js";
+import { channelsVisibleTo, readableThreads, viewerOf, type ThreadAccessRow, type ThreadChecker } from "./_thread-access.js";
+import { orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
 import { loadLineActivity } from "../services/line-activity.js";
 import { slackChannelNames } from "./workspace-channels.js";
 import { readOwnerFilter } from "./_owner-filter.js";
@@ -618,46 +618,6 @@ async function deliveryThreads(
     if (ref) found.set(deliveryId, ref);
   }
   return found;
-}
-
-/** A thread row with the session columns the thread access checks read,
- * and the thread's title and archived state. Raw SQL rows are untyped; the
- * SELECTs above name these columns. */
-interface ThreadAccessRow {
-  session_id: string; thread_id: string; key: string;
-  org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
-  title: string | null; archived: boolean | null;
-}
-
-/**
- * A checker that returns a thread's reference when this request may open it
- * at `/threads/:threadId` (`routes/threads.ts`), by the same two checks:
- * `threadEntry` (a viewer of the session, or a member the thread's share
- * admits), then `threadsVisibleTo` on the thread's key. It remembers each
- * thread's answer for the life of the checker.
- */
-type ThreadChecker = (row: ThreadAccessRow) => Promise<EventDeliveryThreadRef | null>;
-
-function readableThreads(c: Context<AppEnv>): ThreadChecker {
-  const seen = new Map<string, Promise<EventDeliveryThreadRef | null>>();
-  return (row) => {
-    const key = `${row.session_id}:${row.thread_id}`;
-    let answer = seen.get(key);
-    if (!answer) {
-      answer = (async () => {
-        const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
-        if (!await threadEntry(c, session, row.thread_id)) return null;
-        if (!await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) return null;
-        return {
-          sessionId: row.session_id, threadId: row.thread_id,
-          ...(row.title ? { title: row.title } : {}),
-          ...(row.archived === true ? { archived: true as const } : {}),
-        };
-      })();
-      seen.set(key, answer);
-    }
-    return answer;
-  };
 }
 
 /** The skip text for a viewer who may not open the thread that claimed the delivery. */

@@ -10,6 +10,7 @@
 import { type Appearance, validateAppearance } from "@valet/shared";
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
 import {
@@ -19,6 +20,8 @@ import {
   type WorkflowOwner,
 } from "../workflows/service.js";
 import { resolveCreateOwner } from "../lib/request-principal.js";
+import { workflowSchedules } from "../schema/index.js";
+import { readableThreads, type ThreadAccessRow } from "./_thread-access.js";
 import { isTeamMember } from "../services/teams.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import {
@@ -26,6 +29,7 @@ import {
   deleteWorkflowSchedule,
   listWorkflowSchedules,
   updateWorkflowSchedule,
+  type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
 import {
   createWorkflowTrigger,
@@ -43,6 +47,7 @@ import type {
   UpdateWorkflowScheduleRequest,
   WorkflowEventTriggerResponse,
   WorkflowScheduleResponse,
+  WorkflowScheduleThreadRef,
   WorkflowTriggerItem,
 } from "../wire/types.js";
 import { acceptAppearanceWrite, isAssistantKind } from "../events/target-names.js";
@@ -74,6 +79,75 @@ function withCronHint(error: string): string {
 /** A routine id that is missing, or that the caller may not reach. */
 const ROUTINE_NOT_FOUND = "This routine was not found. Refresh Presence and try again.";
 
+/**
+ * The thread each assistant routine's firings land on, by schedule id (spec
+ * 2026-10-16: presence hub, Part E step 2): the thread the latest firing
+ * recorded, or, for the `own` policy with no recorded firing, the thread
+ * keyed `schedule:<id>` in the owner's assistant. A thread stays only when
+ * this request may open it (`readableThreads`), so a hidden thread reads as
+ * null, the same as no thread.
+ */
+async function routineThreads(
+  c: Context<AppEnv>,
+  schedules: readonly WorkflowScheduleSummary[],
+): Promise<Map<string, WorkflowScheduleThreadRef>> {
+  const found = new Map<string, WorkflowScheduleThreadRef>();
+  const routines = schedules.filter((s) => s.targetKind === "assistant");
+  if (routines.length === 0) return found;
+  const { db } = c.var.providers;
+  const orgId = c.var.user.orgId;
+  const recorded = await db.select({
+    id: workflowSchedules.id, sessionId: workflowSchedules.lastFiredSessionId, threadId: workflowSchedules.lastFiredThreadId,
+  }).from(workflowSchedules).where(and(eq(workflowSchedules.orgId, orgId), inArray(workflowSchedules.id, routines.map((s) => s.scheduleId))));
+  const pairs = new Map<string, { sessionId: string; threadId: string }>();
+  for (const row of recorded) {
+    if (row.sessionId !== null && row.threadId !== null) pairs.set(row.id, { sessionId: row.sessionId, threadId: row.threadId });
+  }
+  // An own routine that has not fired since the columns arrived still has its thread.
+  const byKey = new Map<string, WorkflowScheduleSummary>();
+  for (const s of routines) {
+    const mode = s.thread?.mode ?? "own";
+    if (!pairs.has(s.scheduleId) && (mode === "own" || mode === "subject")) byKey.set(`schedule:${s.scheduleId}`, s);
+  }
+  if (pairs.size === 0 && byKey.size === 0) return found;
+  const conditions = [
+    ...[...pairs.values()].map((p) => sql`(t.session_id = ${p.sessionId} AND t.id = ${p.threadId})`),
+    ...(byKey.size > 0 ? [sql`t.key IN (${sql.join([...byKey.keys()].map((key) => sql`${key}`), sql`, `)})`] : []),
+  ];
+  // A team routine's own thread lives in its execution session, and its
+  // governing thread in the root assistant session carries the same key.
+  // The execution thread comes first: it holds the firings.
+  const result = await db.execute(sql`
+    SELECT t.id AS thread_id, t.session_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id,
+      st.title, (st.archived_at IS NOT NULL) AS archived, (x.session_id IS NOT NULL OR a.id IS NOT NULL) AS assistant
+    FROM engine_threads t
+    JOIN agent_sessions s ON s.id = t.session_id
+    LEFT JOIN session_threads st ON st.session_id = t.session_id AND st.id = t.id
+    LEFT JOIN assistant_executions x ON x.session_id = s.id
+    LEFT JOIN assistants a ON a.session_id = s.id
+    WHERE (${sql.join(conditions, sql` OR `)}) AND s.org_id = ${orgId} AND s.status <> 'deleted'
+    ORDER BY (x.session_id IS NOT NULL) DESC, t.created_at DESC`) as {
+    rows: Array<ThreadAccessRow & { assistant: boolean }>;
+  };
+  const check = readableThreads(c);
+  const toWire = async (row: ThreadAccessRow): Promise<WorkflowScheduleThreadRef | null> => {
+    const ref = await check(row);
+    return ref && { sessionId: ref.sessionId, threadId: ref.threadId, title: ref.title ?? null, archived: ref.archived === true };
+  };
+  for (const [scheduleId, pair] of pairs) {
+    const row = result.rows.find((r) => r.session_id === pair.sessionId && r.thread_id === pair.threadId);
+    const ref = row ? await toWire(row) : null;
+    if (ref) found.set(scheduleId, ref);
+  }
+  for (const [key, s] of byKey) {
+    // Only the owner's assistant holds the routine's own thread.
+    const row = result.rows.find((r) => r.key === key && r.assistant && r.owner_type === s.ownerType && r.owner_id === s.ownerId);
+    const ref = row ? await toWire(row) : null;
+    if (ref) found.set(s.scheduleId, ref);
+  }
+  return found;
+}
+
 workflowTriggersRouter.get("/triggers", async (c) => {
   const { db } = c.var.providers;
   const owner = ownerFrom(c);
@@ -94,6 +168,7 @@ workflowTriggersRouter.get("/triggers", async (c) => {
     listWorkflowSchedules(db, owner, workflowId, sets, filter.scope),
     listWorkflowTriggers(db, owner, workflowId, sets, filter.scope),
   ]);
+  const threads = await routineThreads(c, schedules);
   const triggers: WorkflowTriggerItem[] = [
     ...schedules.map((s): WorkflowTriggerItem => ({
       kind: "schedule",
@@ -110,6 +185,7 @@ workflowTriggersRouter.get("/triggers", async (c) => {
         input: s.input,
         nextFireAt: s.nextFireAt,
         lastFiredAt: s.lastFiredAt,
+        lastFiredThread: s.targetKind === "assistant" ? threads.get(s.scheduleId) ?? null : null,
         ...(s.disabledReason !== undefined ? { disabledReason: s.disabledReason } : {}),
         ownerType: s.ownerType,
         ownerId: s.ownerId,
