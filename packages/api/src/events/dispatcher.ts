@@ -26,6 +26,7 @@ import type { Appearance } from "@valet/shared";
  * becomes due again when the lease lapses.
  */
 import { slackEventChannel } from "../services/thread-access.js";
+import type { EventHead } from "../services/event-columns.js";
 import type { ChannelOrigin, NormalizedEvent, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
@@ -220,13 +221,15 @@ export function deliveryThreadPolicy(
 }
 
 /** A stored event's natural subject from the plugin that owns its service, or null (spec Part D). */
-export function eventNaturalSubject(plugins: readonly ValetPlugin[], event: typeof events.$inferSelect): { subject: string; label: string } | null {
+export function eventNaturalSubject(plugins: readonly ValetPlugin[], event: EventHead & { payload?: unknown }): { subject: string; label: string } | null {
   const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
   return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
 }
 
-/** The stored event row as the plugin contract's `NormalizedEvent`, for `naturalSubject`. */
-function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEvent {
+/** The stored event row as the plugin contract's `NormalizedEvent`, for
+ * `naturalSubject`. A read that leaves the payload behind passes a null one:
+ * the place plugins (GitHub, Linear, Slack) read only `subjects` and `refs`. */
+function normalizedEventFromRow(event: EventHead & { payload?: unknown }): NormalizedEvent {
   const actor = event.actor;
   const externalId = typeof actor === "object" && actor !== null && "externalId" in actor && typeof actor.externalId === "string"
     ? actor.externalId : undefined;
@@ -239,7 +242,7 @@ function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEv
     // `refs` is owned by ingest (NormalizedEvent.refs is Record<string, string>).
     refs: event.refs as Record<string, string>,
     summary: event.summary,
-    payload: event.payload,
+    payload: event.payload ?? null,
     ...(event.subjects ? { subjects: event.subjects } : {}),
   };
 }

@@ -10,7 +10,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { seedAssistantThread } from "../test-helpers/assistant-thread.js";
-import { eventSubscriptions, slackChannelPrivacy, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { eventSubscriptions, sessionThreads, slackChannelPrivacy, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
@@ -1166,5 +1166,92 @@ describe("schedule disabledReason", () => {
     const body = await patched.json() as WorkflowScheduleResponse;
     expect(body.schedule.enabled).toBe(true);
     expect(body.schedule.disabledReason).toBeUndefined();
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part E step 2: the routine page links its
+// own thread and each firing to the thread it landed on.
+describe("schedule lastFiredThread", () => {
+  async function routineDetail(a: TestApi, id: string) {
+    const listed = (await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json()) as ListWorkflowTriggersResponse;
+    const item = listed.triggers.find((t) => t.id === id);
+    if (item?.kind !== "schedule") throw new Error(`schedule ${id} is not listed`);
+    return item.detail;
+  }
+
+  async function seedPrompt(a: TestApi, id: string, opts: {
+    owner?: { type: "user" | "team"; id: string }; thread?: unknown; landed?: { sessionId: string; threadId: string };
+  } = {}): Promise<void> {
+    await seedScheduleRow(a, id, "local-org", { owner: opts.owner ?? { type: "user", id: "local-user" } });
+    await a.providers.db.update(workflowSchedules).set({
+      threadPolicy: opts.thread ?? null,
+      lastFiredAt: opts.landed ? Date.now() : null,
+      lastFiredSessionId: opts.landed?.sessionId ?? null,
+      lastFiredThreadId: opts.landed?.threadId ?? null,
+    }).where(eq(workflowSchedules.id, id));
+  }
+
+  it("carries the thread the latest firing recorded, with its title", async () => {
+    const a = await boot();
+    const landed = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-fired",
+      key: "schedule:sched_new:500",
+    });
+    await a.providers.db.insert(sessionThreads).values({ id: landed.threadId, sessionId: landed.sessionId, title: "Morning summary · 1970-01-01", createdAt: 1 });
+    await seedPrompt(a, "sched_new", { thread: { mode: "new" }, landed });
+    expect((await routineDetail(a, "sched_new")).lastFiredThread).toEqual({
+      sessionId: "sess-mine", threadId: "thr-fired", title: "Morning summary · 1970-01-01", archived: false,
+    });
+  });
+
+  it("resolves an own routine's thread by its key before any recorded firing", async () => {
+    const a = await boot();
+    // Another owner's thread with the same key never links.
+    await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-other", threadId: "thr-other",
+      key: "schedule:sched_own",
+    });
+    await seedPrompt(a, "sched_own");
+    expect((await routineDetail(a, "sched_own")).lastFiredThread).toBeNull();
+
+    await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-own",
+      key: "schedule:sched_own", archived: true,
+    });
+    expect((await routineDetail(a, "sched_own")).lastFiredThread).toEqual({
+      sessionId: "sess-mine", threadId: "thr-own", title: null, archived: true,
+    });
+  });
+
+  it("reads a thread the viewer may not open as null", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    // The caller has no linked Slack account, so no private channel shows to them.
+    await a.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CROUTPRIV", isPrivate: true, checkedAt: Date.now() });
+    const hidden = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_a" }, sessionId: "sess-team", threadId: "thr-hidden",
+      key: "schedule:sched_team", slackChannels: ["CROUTPRIV"],
+    });
+    await seedPrompt(a, "sched_team", { owner: { type: "team", id: "team_a" }, landed: hidden });
+    await seedPrompt(a, "sched_team_key", { owner: { type: "team", id: "team_a" } });
+    await a.providers.db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, metadata, created_at, updated_at)
+      VALUES ('thr-hidden-key', 'sess-team', 'schedule:sched_team_key', 'idle', 'steer', ${JSON.stringify({ slackChannels: ["CROUTPRIV"] })}, 1, 1)`);
+    expect((await routineDetail(a, "sched_team")).lastFiredThread).toBeNull();
+    expect((await routineDetail(a, "sched_team_key")).lastFiredThread).toBeNull();
+
+    // The same team's open thread links.
+    await a.providers.db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+      VALUES ('thr-open', 'sess-team', 'schedule:sched_team_open', 'idle', 'steer', 1, 1)`);
+    await seedPrompt(a, "sched_team_open", { owner: { type: "team", id: "team_a" } });
+    expect((await routineDetail(a, "sched_team_open")).lastFiredThread).toEqual({
+      sessionId: "sess-team", threadId: "thr-open", title: null, archived: false,
+    });
+  });
+
+  it("is null for a workflow routine", async () => {
+    const a = await boot();
+    const wfId = await createWorkflow(a.baseUrl, "wf_thread_ref");
+    await seedScheduleRow(a, "sched_wf", "local-org", { workflowId: wfId, owner: { type: "user", id: "local-user" } });
+    expect((await routineDetail(a, "sched_wf")).lastFiredThread).toBeNull();
   });
 });

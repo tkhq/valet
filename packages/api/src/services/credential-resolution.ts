@@ -408,6 +408,14 @@ export function isNativeAppCredentialService(plugins: readonly ValetPlugin[] | u
  * credential (`linear` → `linear:app`), or `undefined` when that plugin is
  * not native or no plugin declares the service.
  */
+/** Whether `service` is one only the organization connects (`requires.orgCredential`), so a person never holds their own credential for it. */
+export function orgManagedCredentialService(plugins: readonly ValetPlugin[] | undefined, service: string): boolean {
+  for (const plugin of plugins ?? []) {
+    if ((plugin.credentials ?? []).some((decl) => (decl.service ?? plugin.name) === service && decl.requires?.orgCredential === true)) return true;
+  }
+  return false;
+}
+
 export function nativeAppCredentialServiceFor(plugins: readonly ValetPlugin[] | undefined, service: string): string | undefined {
   for (const plugin of plugins ?? []) {
     if (plugin.native !== true) continue;

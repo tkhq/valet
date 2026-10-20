@@ -2078,6 +2078,11 @@ export const workflowSchedules = pgTable(
      * workflow is never touched. */
     origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
+    /** The assistant thread the latest assistant-prompt firing landed on
+     * (spec 2026-10-16: presence hub, Part E). Both null for a `workflow`
+     * target, whose firings are runs, and before the first firing. */
+    lastFiredSessionId: text("last_fired_session_id"),
+    lastFiredThreadId: text("last_fired_thread_id"),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),

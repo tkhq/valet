@@ -590,12 +590,14 @@ export function buildDockerExecArgs(opts: BuildDockerExecArgsOpts): string[] {
     args.push("--env", "HOME=/home/dockerd");
   }
   if (browserWorkload) {
-    for (const name of ["VALET_SANDBOX_JWT_SECRET", "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "NODE_OPTIONS"]) args.push("--env", `${name}=`);
+    for (const name of ["VALET_SANDBOX_JWT_SECRET", "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"]) args.push("--env", `${name}=`);
+    // Keep the trusted-CA flag; user NODE_OPTIONS stays dropped (see distrust-compromised-roots.sh).
+    args.push("--env", "NODE_OPTIONS=--use-openssl-ca");
   }
   args.push(opts.containerId);
   if (browserWorkload) {
     args.push("/usr/bin/setpriv", "--no-new-privs", "/usr/bin/env", "-u", "VALET_SANDBOX_JWT_SECRET");
-    for (const [key, value] of Object.entries(opts.env ?? {})) if (key !== "VALET_SANDBOX_JWT_SECRET") args.push(`${key}=${value}`);
+    for (const [key, value] of Object.entries(opts.env ?? {})) if (key !== "VALET_SANDBOX_JWT_SECRET" && key !== "NODE_OPTIONS") args.push(`${key}=${value}`);
   }
   args.push(browserWorkload ? "/bin/sh" : "sh", "-c", opts.command);
   return args;

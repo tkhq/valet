@@ -16,10 +16,10 @@ import { canViewSession } from "../services/session-access.js";
 import { orgSlackCredential, storedThreadRef } from "../services/thread-access.js";
 import { getPresencePlace, listPresencePlaces, listThreadFeeders, resolveSlackTeam, type PresenceAccess } from "../services/presence-places.js";
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
-import { slackChannelNames, threadsShownTo } from "./workspace-channels.js";
+import { slackChannelNames, threadPairsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { rowToEventSummary, subscriptionProblems, subscriptionToWire } from "./events.js";
-import type { PresencePlaceDetailResponse } from "../wire/types.js";
+import type { ListPresencePlacesResponse, PresencePlaceDetailResponse } from "../wire/types.js";
 
 export const presenceRouter = new Hono<AppEnv>();
 
@@ -30,7 +30,7 @@ function presenceAccess(c: Context<AppEnv>, owner: Principal): PresenceAccess {
   return {
     names: slackChannelNames(c),
     canSee: channelsVisibleTo(c),
-    threadsShown: threadsShownTo(c, owner),
+    threadsShown: threadPairsShownTo(c, owner),
     slackTeamId: async () => {
       const teamId = (await orgSlackCredential(c.var.providers, c.var.user.orgId))?.metadata?.teamId;
       return typeof teamId === "string" && teamId !== "" ? teamId : null;
@@ -46,10 +46,23 @@ async function scopeOwner(c: Context<AppEnv>): Promise<Principal | Response> {
   return owner ?? c.json({ error: "Workspace not found. Select an accessible workspace." }, 404);
 }
 
+/** A places read slower than this logs one line, so a slow workspace shows in the pod logs. */
+export const SLOW_PLACES_MS = 1000;
+
+/** The log line of a slow places read, or null when the read was fast. */
+export function slowPlacesLine(scope: string, ms: number, sessions: number): string | null {
+  return ms > SLOW_PLACES_MS ? `presence places: ${scope} took ${Math.round(ms)} ms over ${sessions} sessions` : null;
+}
+
 presenceRouter.get("/places", async (c) => {
   const owner = await scopeOwner(c);
   if (owner instanceof Response) return owner;
-  return c.json(await listPresencePlaces(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner)));
+  const started = performance.now();
+  const { places, sessionCount } = await listPresencePlaces(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner));
+  const slow = slowPlacesLine(c.req.query("scope") ?? "", performance.now() - started, sessionCount);
+  if (slow) console.info(slow);
+  const body: ListPresencePlacesResponse = { places };
+  return c.json(body);
 });
 
 /** The refusal for a channel-only Slack key the api cannot place in one Slack workspace. */

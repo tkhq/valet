@@ -45,7 +45,7 @@ import { Sentence } from "./sentence";
 import { ServiceMark } from "./service-mark";
 import {
   deadErrorSentence, doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, replies, tookInWords,
-  whenExplanation, whereExplanation, whereParts, type LineEntryNames, type SentencePart, type SentenceService, type ThreadTitles,
+  filterLabels, whenExplanation, whereExplanation, whereParts, type LineEntryNames, type SentenceNames, type SentencePart, type SentenceService, type ThreadTitles,
   type WorkflowNames,
 } from "./sentences";
 import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
@@ -55,14 +55,15 @@ import { useSentenceNames } from "./use-sentence-names";
  * key. Null when no filter names exactly one place. A Slack channel filter
  * carries no Slack workspace id, so its key is `slack:<channel>`, and the
  * places list resolves it (`usePlaceSubject`). */
-export function linePlace(sub: EventSubscriptionWire): { label: string; key: string } | null {
+export function linePlace(sub: EventSubscriptionWire, names: SentenceNames = {}): { label: string; key: string } | null {
   for (const field of ["channel", "repo", "team"] as const) {
     const filter = sub.filters.find((f) => f.field === field && f.op === "eq");
     if (filter === undefined || typeof filter.value !== "string" || filter.value.length === 0) continue;
     const value = filter.value;
     if (field === "channel") {
-      // The label when known, else the raw id, as the title's place token reads.
-      return { label: filter.label?.trim() || value, key: `slack:${value}` };
+      // The label when known, else the channel's name, else the raw id, as
+      // the title's place token reads.
+      return { label: filterLabels(filter, names)[0] ?? value, key: `slack:${value}` };
     }
     const key = field === "repo" ? placeOfSubject(`github:${value}`) : placeOfSubject(`linear:team/${value}`);
     return key === null ? null : { label: value, key };
@@ -108,6 +109,7 @@ export function lineColumns(
   whenParts: readonly SentencePart[],
   workflows: WorkflowNames,
   threads: ThreadTitles,
+  names: SentenceNames = {},
 ): HowColumn[] {
   const subjectKind = subjectKindForKeys(sub.eventKeys);
   const where: HowColumn = sub.target.kind === "workflow"
@@ -117,7 +119,7 @@ export function lineColumns(
       return { section: "where", value: whereParts(policy, subjectKind, threads), explanation: whereExplanation(policy, subjectKind, "presence", { mention: selectsSlackMention(sub.eventKeys) }) };
     })();
   return [
-    { section: "when", value: whenParts, explanation: whenExplanation(sub.filters, sub.eventKeys) },
+    { section: "when", value: whenParts, explanation: whenExplanation(sub.filters, sub.eventKeys, names) },
     { section: "do", value: doParts(sub, workflows), explanation: doExplanation(sub, workflows) },
     where,
   ];
@@ -161,7 +163,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const pinTitles = usePinnedThreadTitle(storedPolicy(sub));
   const names = useSentenceNames();
   const activityQ = useLineActivity(sub.id);
-  const place = linePlace(sub);
+  const place = linePlace(sub, names);
   const placeKey = usePlaceSubject(place?.key ?? "");
   const { readOnly, readOnlyText, teams } = useLineAccess(sub);
   // What the editor opens on, or null while it is closed.
@@ -206,6 +208,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
     withPlaceKey(presenceWhenParts(sub, catalog.data?.catalog, names), place?.key, placeKey),
     workflowNames,
     pinTitles,
+    names,
   );
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {

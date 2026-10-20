@@ -3,10 +3,10 @@ import type { Context } from "hono";
 import type { WorkflowRunOrigin } from "@valet/workflow";
 import type { AppEnv } from "../env.js";
 import { canViewSession, type SessionOwnerLike } from "../services/session-access.js";
-import { channelVisibility, requestViewer, runEventVisible, runOriginVisible as runOriginVisibleTo, threadVisibility, visibleThreadIds, type ThreadViewer, type ThreadVisibility } from "../services/thread-access.js";
+import { channelVisibility, requestViewer, runEventVisible, runOriginVisible as runOriginVisibleTo, storedThreadRef, threadVisibility, visibleThreadIds, type ThreadViewer, type ThreadVisibility } from "../services/thread-access.js";
 import { threadShareGrant } from "../services/thread-share.js";
 import type { ChannelVisibility } from "../services/channels.js";
-import type { ThreadShareMode } from "../wire/types.js";
+import type { EventDeliveryThreadRef, ThreadShareMode } from "../wire/types.js";
 
 export function viewerOf(c: Context<AppEnv>): ThreadViewer {
   return requestViewer(c.var.user.orgId, c.var.principal, c.var.user.id);
@@ -77,4 +77,46 @@ export async function runVisible(
   const viewer = viewerOf(c);
   return await runOriginVisibleTo(c.var.providers, viewer, run)
     && (run.ownerType !== "team" || !run.params || await runEventVisible(c.var.providers, viewer, run.params));
+}
+
+/** A thread row with the session columns the thread access checks read,
+ * and the thread's title and archived state. Raw SQL rows are untyped; each
+ * caller's SELECT names these columns. */
+export interface ThreadAccessRow {
+  session_id: string; thread_id: string; key: string;
+  org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+  title: string | null; archived: boolean | null;
+}
+
+/**
+ * A checker that returns a thread's reference when this request may open it
+ * at `/threads/:threadId` (`routes/threads.ts`), by the same two checks:
+ * `threadEntry` (a viewer of the session, or a member the thread's share
+ * admits), then `threadsVisibleTo` on the thread's key. It remembers each
+ * thread's answer for the life of the checker. The event page's thread
+ * links (`routes/events.ts`) and the routine thread (`routes/workflow-triggers.ts`)
+ * share it.
+ */
+export type ThreadChecker = (row: ThreadAccessRow) => Promise<EventDeliveryThreadRef | null>;
+
+export function readableThreads(c: Context<AppEnv>): ThreadChecker {
+  const seen = new Map<string, Promise<EventDeliveryThreadRef | null>>();
+  return (row) => {
+    const key = `${row.session_id}:${row.thread_id}`;
+    let answer = seen.get(key);
+    if (!answer) {
+      answer = (async () => {
+        const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+        if (!await threadEntry(c, session, row.thread_id)) return null;
+        if (!await threadsVisibleTo(c, session)(await storedThreadRef(c.var.providers.db, row.session_id, row.thread_id, row.key))) return null;
+        return {
+          sessionId: row.session_id, threadId: row.thread_id,
+          ...(row.title ? { title: row.title } : {}),
+          ...(row.archived === true ? { archived: true as const } : {}),
+        };
+      })();
+      seen.set(key, answer);
+    }
+    return answer;
+  };
 }

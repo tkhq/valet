@@ -179,6 +179,17 @@ describe("WhenSection", () => {
       "channel is #a or #b",
     );
   });
+
+  // Review of PR #986: the chip and the sentence must name a channel the
+  // same way, so an unlabeled or id-labeled channel takes the places name.
+  it("names an unlabeled channel from the places list, as the sentence does", () => {
+    const names = { channels: { C1: "incidents" } };
+    expect(conditionWords({ id: "1", field: "channel", op: "eq", value: "C1" }, names)).toBe("channel is #incidents");
+    expect(conditionWords({ id: "2", field: "channel", op: "eq", value: "C1", label: "C1" }, names)).toBe("channel is #incidents");
+    expect(conditionWords({ id: "3", field: "channel", op: "in", value: "C1, C2", inLabels: { field: "channel", values: ["C1", "C2"], labels: ["C1", "C2"] } }, names))
+      .toBe("channel is #incidents or C2");
+    expect(conditionWords({ id: "4", field: "channel", op: "prefix", value: "C1" }, names)).toBe("channel starts with C1");
+  });
 });
 
 describe("conditionHint", () => {

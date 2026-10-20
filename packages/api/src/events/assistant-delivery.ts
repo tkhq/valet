@@ -25,7 +25,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
 import type { DestinationReason } from "./destination.js";
 import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
-import { CONVERSATIONAL_THREAD_KEY } from "./automated-threads.js";
+import { CONVERSATIONAL_THREAD_KEY, isAutomatedThreadKey } from "./automated-threads.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -247,8 +247,27 @@ export async function deliverToAssistantThread(
   return run;
 }
 
+/** A routine fire's dispatch id, `schedule:<id>:<slot>`, read back with the
+ * routine's name from the signal. Null for every other dispatch id. */
+function routineDispatch(args: AssistantDeliveryArgs): { id: string; slot: string; name: string } | null {
+  const match = /^schedule:(.+):([^:]+)$/.exec(args.dispatchId);
+  if (!match) return null;
+  const scheduleName = args.signal.attributes?.scheduleName;
+  const name = typeof scheduleName === "string" && scheduleName.trim() !== "" ? scheduleName : match[1]!;
+  return { id: match[1]!, slot: match[2]!, name };
+}
+
+/** How recovery texts name what the delivery carries, and how to send it again. */
+function recoveryWords(routine: { name: string } | null): { item: string; again: string } {
+  return routine
+    ? { item: `the routine "${routine.name}"`, again: `run the routine "${routine.name}" again` }
+    : { item: "this event", again: "redeliver the event" };
+}
+
 /** Recover an existing admission without resubmitting or replaying its tools.
- * Returns the thread the admission landed in, or null when none exists. */
+ * Returns the thread the admission landed in, or null when none exists.
+ * A routine slot is admitted once whatever its prompt: a retry after a
+ * prompt edit recovers the first admission (INV-D4). */
 async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<DeliveredThread | null> {
   const result = await deps.db.execute(sql`
     SELECT q.id, q.session_id, q.thread_id, q.content, q.status, s.owner_type, s.owner_id
@@ -256,28 +275,32 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
     WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
     LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
   if (result.rows.length === 0) return null;
-  if (result.rows.length !== 1) throw new Error("This event reached its thread more than once. Check the thread's messages, then redeliver the event if one is missing.");
+  const routine = routineDispatch(args);
+  const words = recoveryWords(routine);
+  if (result.rows.length !== 1) {
+    throw new Error(routine
+      ? `The routine "${routine.name}" reached its thread more than once for one fire. Check the thread's messages, then ${words.again} if one is missing.`
+      : "This event reached its thread more than once. Check the thread's messages, then redeliver the event if one is missing.");
+  }
   const prior = result.rows[0]!;
   if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
-    throw new Error("The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
+    throw new Error(routine
+      ? `The routine "${routine.name}" first ran under another owner. Check who owns the routine, then ${words.again}.`
+      : "The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
   }
-  const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
-  if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {
-    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
-  }
-  // First channel admissions include fetched history. Compare the original
-  // signal beneath that known wrapper without fetching mutable history again.
-  const body = content.body === args.signal.body ? content.body
-    : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${args.signal.body}`)
-      ? args.signal.body : content.body;
-  const expected: unknown = JSON.parse(JSON.stringify({ ...args.signal, tagName: args.signal.tagName ?? "signal" }));
-  const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
-  if (!isDeepStrictEqual({ ...content, body, tagName }, expected)) {
-    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
+  if (!admittedContentMatches(prior.content, args.signal)) {
+    if (!routine) {
+      throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
+    }
+    // The routine's prompt changed between the failed fire and this retry.
+    // The slot already ran once, so the first admission stands.
+    console.info(`assistant delivery: routine ${routine.id} ("${routine.name}") slot ${routine.slot} was admitted with an earlier prompt; recovered the first admission.`);
   }
   if (prior.status !== "settled") {
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
-    if (!row || row.status === "deleted") throw new Error("The session that first took this event was deleted. Pick another thread in Presence, then redeliver the event.");
+    if (!row || row.status === "deleted") {
+      throw new Error(`The session that first took ${words.item} was deleted. Pick another thread in Presence, then ${words.again}.`);
+    }
     // Session recovery already owns queued, interrupted, and approval-blocked
     // work. Restoring it never requires another prompt admission here.
     await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
@@ -286,6 +309,20 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
     ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
   });
   return { sessionId: prior.session_id, threadId: prior.thread_id, queueItemId: prior.id, recovered: true };
+}
+
+/** True when a stored admission's content is `signal`. A first channel
+ * admission includes fetched history, so the check compares the original
+ * signal beneath that known wrapper without fetching mutable history again. */
+function admittedContentMatches(stored: unknown, signal: SignalContent): boolean {
+  const content: unknown = typeof stored === "string" ? JSON.parse(stored) : stored;
+  if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") return false;
+  const body = content.body === signal.body ? content.body
+    : content.body.startsWith("Conversation so far in this thread:\n") && content.body.endsWith(`\n\n---\n\n${signal.body}`)
+      ? signal.body : content.body;
+  const expected: unknown = JSON.parse(JSON.stringify({ ...signal, tagName: signal.tagName ?? "signal" }));
+  const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
+  return isDeepStrictEqual({ ...content, body, tagName }, expected);
 }
 
 /**
@@ -396,7 +433,11 @@ async function deliverToAssistantThreadInner(
   // A person waits on an attended delivery, so its thread is a conversation
   // from now on, even if an unattended delivery opened it
   // (`isAutomatedDeliveryThread`). Record it before the turn is admitted.
-  if (!args.unattended) await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
+  // Only a key the automated-thread rule covers reads the flag, so a pinned
+  // or `slack:` thread gets no metadata write.
+  if (!args.unattended && isAutomatedThreadKey(thread.toThreadData().key ?? "")) {
+    await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
+  }
   const metadata = {
     ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),

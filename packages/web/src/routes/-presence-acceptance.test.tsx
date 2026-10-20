@@ -225,7 +225,7 @@ const S1: WorkflowTriggerItem = {
   kind: "schedule", id: "S1", name: "Morning summary", enabled: true,
   detail: {
     cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "Summarize the night.",
-    thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+    thread: { mode: "own" }, nextFireAt: NOW + 3_600_000, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u-001",
   },
 };
 /** P15: a routine the scheduler turned off because its workflow was deleted. */
@@ -233,7 +233,7 @@ const DELETED_WORKFLOW = "Its workflow was deleted. Delete this routine and make
 const S_OFF: WorkflowTriggerItem = {
   kind: "schedule", id: "S-off", workflowId: "wf-gone", name: "Nightly report", enabled: false,
   detail: {
-    cron: "0 2 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: NOW + 7_200_000, lastFiredAt: null,
+    cron: "0 2 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: NOW + 7_200_000, lastFiredAt: null, lastFiredThread: null,
     ownerType: "user", ownerId: "u-001", disabledReason: DELETED_WORKFLOW,
   },
 };
@@ -248,7 +248,7 @@ const WF_EVENT: WorkflowTriggerItem = {
 const WF_ROUTINE: WorkflowTriggerItem = {
   kind: "schedule", id: "S-wf", workflowId: "wf-1", name: "Nightly triage", enabled: true,
   detail: {
-    cron: "0 2 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: NOW + 7_200_000, lastFiredAt: null,
+    cron: "0 2 * * *", timezone: "UTC", targetKind: "workflow", nextFireAt: NOW + 7_200_000, lastFiredAt: null, lastFiredThread: null,
     ownerType: "user", ownerId: "u-001",
   },
 };
@@ -438,7 +438,7 @@ function answerWrite(method: string, path: string, body: string | undefined): Re
       kind: "schedule", id: "S-new", name: request.name, enabled: true,
       detail: {
         cron: request.cron, timezone: request.timezone ?? "UTC", targetKind: "assistant", thread: { mode: "own" },
-        nextFireAt: NOW + 86_400_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+        nextFireAt: NOW + 86_400_000, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u-001",
       },
     });
     return json(response, 201);

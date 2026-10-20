@@ -90,6 +90,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           # Pin the Bun the arc's compile/WS/PGlite gates were verified against.
+          # TODO(2026-10-20 eMudhra CA compromise, https://emudhra.we-have-a-problem.com/):
+          # the compiled `valet` binary still trusts the compromised "emSign ECC
+          # Root CA - G3" via Bun's bundled root store. Bun's `fetch` ignores
+          # --use-system-ca, --use-openssl-ca, NODE_USE_SYSTEM_CA, SSL_CERT_FILE and
+          # --compile-exec-argv (tested on Bun 1.4.3). Bump this pin to the first
+          # Bun release that ships the distrust, then remove this TODO.
           bun-version: 1.2.17
 
       - run: pnpm install --frozen-lockfile

@@ -24,6 +24,7 @@ import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js"
 import type { ChannelNames } from "./channels.js";
 import { slackEventChannel } from "./thread-access.js";
 import { supersedingDeliveries } from "./event-log.js";
+import { eventChannelColumns, type EventHeadWithChannel } from "./event-columns.js";
 import {
   eventPlace, isServiceRoot, lineNamedPlaces, placeCovers, placeLabel, placeOfSubject, serviceOf, type PresenceDeps,
 } from "./presence-places.js";
@@ -205,7 +206,8 @@ const SKIP_OUTCOMES = ["filter_excluded", "authorization_denied", "disabled", "k
 const MAX_SCAN_BATCHES = 20;
 
 type SubscriptionRow = typeof eventSubscriptions.$inferSelect;
-type EventRow = typeof events.$inferSelect;
+/** A stored event with only the payload keys that name its Slack channel (`event-columns.ts`). */
+type EventRow = EventHeadWithChannel;
 
 /** The delivery columns the route's link reader (`deliveriesToWire`) takes. */
 export interface LineDeliveryRow {
@@ -314,7 +316,7 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
       createdAt: eventDeliveries.createdAt,
       destination: eventDeliveries.destination,
       target: eventSubscriptions.target,
-      event: events,
+      event: eventChannelColumns,
     })
       .from(eventDeliveries)
       .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
@@ -389,7 +391,7 @@ export async function loadLineActivity(deps: Pick<PresenceDeps, "db" | "plugins"
 
     const storedIds = [...new Set(keptReceipts.map((row) => row.event_id).filter((id): id is string => id !== null))];
     const stored = storedIds.length === 0 ? new Map<string, EventRow>()
-      : new Map((await db.select().from(events).where(and(eq(events.orgId, orgId), inArray(events.id, storedIds)))).map((row) => [row.id, row]));
+      : new Map((await db.select(eventChannelColumns).from(events).where(and(eq(events.orgId, orgId), inArray(events.id, storedIds)))).map((row) => [row.id, row]));
 
     const visibleChannel = async (channel: string | undefined) => channel === undefined || query.channelVisible(`slack:${channel}`);
     const deliveries: LineDeliveryInput[] = [];

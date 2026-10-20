@@ -109,6 +109,23 @@ function sentenceFor(eventId: string): HTMLElement {
 }
 
 describe("ActivityPane rows", () => {
+  it("reads a row's verb from its line's stored action, and from the event key when the line is gone", () => {
+    const line = (id: string, follow: boolean): EventSubscriptionWire => ({
+      id, name: id, ownerType: "user", ownerId: "u1", eventKeys: ["slack.app_mention"], filters: [],
+      target: { kind: "assistant", ...(follow ? { follow: true } : {}) }, enabled: true, createdBy: "u1", createdAt: 1, updatedAt: 1,
+    });
+    lines = [workflowListener, line("sub-work", false), line("sub-reply", true)];
+    items = [
+      eventItem("ev-work", "slack.app_mention", "#incidents", [delivery({ subscriptionId: "sub-work", thread: tInc })]),
+      eventItem("ev-reply", "slack.message", "#incidents", [delivery({ subscriptionId: "sub-reply", thread: tInc })]),
+      eventItem("ev-gone", "slack.app_mention", "#incidents", [delivery({ subscriptionId: "sub-gone", thread: tInc })]),
+    ];
+    renderTab();
+    expect(sentenceFor("ev-work").textContent).toBe("Mention in #incidents → delivered to t-inc");
+    expect(sentenceFor("ev-reply").textContent).toBe("Message in #incidents → replied in t-inc");
+    expect(sentenceFor("ev-gone").textContent).toBe("Mention in #incidents → replied in t-inc");
+  });
+
   it.each([
     ["replied in <thread>", eventItem("ev-mention", "slack.app_mention", "#incidents", [delivery({ thread: tInc })]), "Mention in #incidents → replied in t-inc"],
     ["delivered to <thread>", eventItem("ev-check", "github.check_run.completed", "acme/api", [delivery({ thread: { sessionId: "s", threadId: "t-ci", title: "Platform CI" } })]), "Completed check in acme/api → delivered to Platform CI"],
@@ -399,7 +416,7 @@ describe("ActivityPane with no place and no routine", () => {
     places = [];
     lines = [];
     triggers = [{ kind: "schedule", id: "S1", name: "Morning summary", enabled: true, detail: {
-      cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, ownerType: "user", ownerId: "u1",
+      cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", nextFireAt: 1, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u1",
     } }];
     renderTab();
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();

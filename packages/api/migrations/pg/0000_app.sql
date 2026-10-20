@@ -1158,6 +1158,10 @@ CREATE TABLE "workflow_schedules" (
 	-- workflow is never touched.
 	"origin" text DEFAULT 'local' NOT NULL,
 	"last_fired_at" bigint,
+	-- The assistant thread the latest assistant-prompt firing landed on.
+	-- NULL for a workflow schedule and before the first firing.
+	"last_fired_session_id" text,
+	"last_fired_thread_id" text,
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,

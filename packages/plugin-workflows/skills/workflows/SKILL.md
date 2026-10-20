@@ -22,6 +22,7 @@ Split the job by what each part needs. A workflow that does everything in one ag
 - For a list of unknown size, list the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
 - Use `{{trigger.timestamp}}` for the run's date. Never write today's date into a prompt.
 - Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
+- Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`.
 - After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
 
 ## Use the workflow tools, not raw API calls
@@ -32,6 +33,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.get_workflow` — full definition by id
 - `workflows.get_permissions` — each tool step's approval `mode` and the rule that set it (`provenance`), as the workflow page's Permissions section shows them
 - `workflows.allow_permissions` — one approval card in which the person allows the steps that need approval and their shared accounts for every later run of the current steps
+- `workflows.validate_definition` — check a draft `definition` with the save validator, without saving it
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
@@ -60,7 +62,7 @@ Always surface returned `workflowId`/`runId` values — the chat UI uses them to
     { "id": "greet", "type": "set", "values": { "greeting": "hello" } },
     { "id": "gate", "type": "approval", "prompt": "Proceed with the demo?" },
     { "id": "haiku", "type": "llm", "model": "s", "prompt": "Write a haiku about {{nodes.greet.result.greeting}}" },
-    { "id": "done", "type": "stop", "outcome": "completed" }
+    { "id": "done", "type": "stop", "outcome": "success" }
   ],
   "edges": [
     { "from": "start", "to": "greet" },
@@ -82,10 +84,42 @@ Node types:
 - `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `maxModelCalls`, `wait`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
-- `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
-- `stop` — terminal node (`outcome`, optional `output`, `message`)
+- `foreach` — run one inline `body` node once for each entry of `items` (optional `itemAlias`, `indexAlias`, `maxItems`, `concurrency`, `onItemError`). See Loop over a list.
+- `stop` — terminal node (optional `outcome`, `output`, `message`). A stop step's `outcome` is `success` (default) or `failure`, not the run outcome (`completed`, `failed`, or `cancelled`).
 
 Edges may carry `"when"` (an expression) to gate a branch.
+
+**Loop over a list (`foreach`).** `body` is ONE inline node object, not a list of node ids. Do not add the body to `nodes`. Do not give the body edges. The body type is `llm`, `tool`, `set`, `session`, `orchestrator`, or `workflow`.
+
+```json
+{
+  "version": "dag/v1",
+  "nodes": [
+    { "id": "start", "type": "trigger", "dataSchema": {
+      "notes": { "type": "string", "required": true, "description": "Meeting notes" }
+    } },
+    { "id": "list", "type": "llm", "model": "s",
+      "prompt": "List each action item in these notes: {{trigger.data.notes}}",
+      "outputSchema": { "type": "object", "properties": { "tasks": { "type": "array", "items": { "type": "string" } } }, "required": ["tasks"] } },
+    { "id": "each_task", "type": "foreach", "items": "{{nodes.list.result.output.tasks}}",
+      "itemAlias": "task", "maxItems": 20, "concurrency": 3, "onItemError": "collect",
+      "body": { "id": "draft", "type": "llm", "model": "s", "prompt": "Write one follow-up question for this task: {{task}}" } },
+    { "id": "done", "type": "stop", "outcome": "success",
+      "output": { "results": "{{nodes.each_task.result.items}}", "dropped": "{{nodes.each_task.result.truncatedCount}}" } }
+  ],
+  "edges": [
+    { "from": "start", "to": "list" },
+    { "from": "list", "to": "each_task" },
+    { "from": "each_task", "to": "done" }
+  ]
+}
+```
+
+- The body reads the current entry as `{{task}}` (the `itemAlias`, default `item`) and its position as `{{index}}` (the `indexAlias`).
+- `onItemError` sets what one failed entry does. `fail` (default) fails the step. `skip` marks the entry `skipped` and continues. `collect` marks it `failed` and continues.
+- Do not set `onError` on the body. Use `onItemError` on the foreach node.
+- Give the body an `id` that no node and no other foreach body uses.
+- Set `maxItems`. Without it, a list of more than 100 entries fails the step. With it, extra entries are dropped and `result.truncatedCount` counts them.
 
 ## Model selection
 
@@ -142,8 +176,10 @@ An incomplete or failed transport does not get schema repair. For awaited sessio
 The schema alone does not enforce abstention — it still requires a string — so keep both halves: the abstain value the schema accepts and the prompt line that says when to return it. Drop either and the model invents a value again.
 
 ```json
-{ "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
-{ "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
+[
+  { "from": "pick", "to": "assign", "when": "nodes.pick.result.output.assignee" },
+  { "from": "pick", "to": "no_assignee", "when": "!nodes.pick.result.output.assignee" }
+]
 ```
 
 For list-shaped output, abstain with an empty array and gate on `if` with `lengthGreaterThan`.
@@ -151,7 +187,7 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 ## Working practices
 
 - Before you create a workflow, restate the plan in two or three lines: what starts it, what each step does and its step type (see Design the steps), and where the result goes. If a gap would change the build, such as which event, channel, repo, or account to use, call `ask_question` once with the plan as `detail` and the likely answers as `options`. Otherwise, build it and list what you assumed.
-- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation.
+- `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation. `validate_definition` runs the same linter and saves nothing.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
 - To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start) — a parked run can be waiting on a node from an OLDER definition version; read the run's own checkpoints, not the current definition.

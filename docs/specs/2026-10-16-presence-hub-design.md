@@ -191,10 +191,8 @@ Pass criterion: all steps, in one run, from a clean start.
    separates a place's own sentences; no place has a border, fill, or
    shadow of its own. A place appears for every mid-grain place (a Slack
    channel, a GitHub repository, a Linear team) that has at least one line
-   of presence. A pull request or issue MUST NOT appear. The api sends the
-   row of each line as `placeKey` (a pull request or issue line rolls up
-   to its parent row), and the overview groups lines by that key, so a row
-   and its place page list the same lines. Lines whose
+   of presence. A pull request or issue MUST NOT appear: the overview
+   groups lines by `placeKey` (step 10). Lines whose
    filters name no single place form one place per service named
    `Everywhere in Slack`, `Across GitHub`, or `Across Linear`, which links
    to the service page (Part C). These three names are the only names of
@@ -263,7 +261,15 @@ Pass criterion: all steps, in one run, from a clean start.
     team of the org's newest Slack subject thread, else the team of its
     newest Slack event in the last 30 days. A Slack line
     has no `placeKey` while none of these names a Slack workspace; the
-    overview then groups it by its filters.
+    overview then groups it by its filters. The places read issues a
+    bounded number of queries regardless of how many conversations the
+    workspace has. It judges visibility only for the threads a place can
+    show (subject threads and the threads that follows and running waiters
+    name), and it never selects an event's payload. The visibility query
+    walks each linked session's parent chain once. Its `walked` CTE is
+    `MATERIALIZED`, so PostgreSQL cannot inline it and repeat the walks
+    for each thread row. A read slower than one
+    second logs one line with its scope, duration, and session count.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.
@@ -305,7 +311,9 @@ Pass criterion: all steps, in one run, from a clean start.
    acme/`). When the api scopes a line to its creator, that actor applies
    to every clause whose key carries `user` (`When you mention Valet or you
    post a message in #incidents`). A labeled sender on a mention line is
-   the actor (`When Alice mentions Valet`).
+   the actor (`When Alice mentions Valet`). A Slack channel in `<place>`
+   reads the filter's own label, then the channel's name from the places
+   list (`#proj-valet`), then the raw channel id.
 
    For a Slack mention, `<event in words>` names who mentions Valet. The
    api scopes a personal, org, or workflow mention line to its creator
@@ -495,8 +503,13 @@ Pass criterion: all steps, in one run, from a clean start.
    Turn the routine on to resume.` beside the switch), **How it works** with When (the schedule in words and `The
    times are in <zone>.`), Do, and Where, and **Activity** as its firings
    without chips (each `Fired → worked in <thread>` or `Fired → started
-   <workflow> run`). A workflow routine's firings are the runs it started
-   among the workflow's last 50 runs, each with the time it took; **Fire
+   <workflow> run`). When the viewer may open the routine's thread, `its
+   own thread` links that thread in the title, in Where, and in the
+   firing row, and a `new` routine's firing row links the thread that
+   firing landed on (`a new thread`). The words do not change. An archived
+   thread shows as a disabled link. Without a thread the viewer may open,
+   the words stay plain text. A workflow routine's firings are the runs
+   it started among the workflow's last 50 runs, each with the time it took; **Fire
    now** refreshes them. Edit opens the editor (Part H) and its Where
    lists the routine owner's threads.
 3. A routine is created through **Add** → `On a schedule`, or `+ New
@@ -515,6 +528,23 @@ Pass criterion: all steps, in one run, from a clean start.
    prompt for the prompt reason. A thread change
    clears the pin reason. A PATCH cannot change a routine's workflow, so
    the workflow reason clears only on enable.
+5. `workflow_schedules` carries `last_fired_session_id` and
+   `last_fired_thread_id`, two new nullable text columns edited in place
+   in `0000_app.sql`, with a matching `SCHEMA_REPAIRS` entry for each. The
+   scheduler and **Fire now** write them from the thread each
+   assistant-prompt firing lands on. A workflow routine writes neither,
+   because its firings are runs. No backfill runs. The triggers list
+   gives each schedule `lastFiredThread` (`sessionId`, `threadId`,
+   `title`, `archived`): the recorded thread, or, for the `own` policy
+   with no recorded firing, the thread keyed `schedule:<id>` in the
+   owner's assistant. The list checks the thread as the event page checks
+   its thread links (`readableThreads`). A thread the viewer may not open
+   reads as null. The recorded pair belongs to the policy that chose it: a
+   change of the thread policy clears both columns, and a firing writes
+   them only while the row still holds the policy the firing read. The
+   list reads the recorded pairs by thread id and the `schedule:<id>`
+   keys by the owners' assistant sessions, in two queries, so neither
+   scans `engine_threads`.
 
 ## Part F: Activity
 
@@ -524,6 +554,11 @@ Pass criterion: all steps, in one run, from a clean start.
    with outcomes `replied in <thread>`, `delivered to <thread>`, `claimed
    by <thread>`, `started <workflow> run`, `skipped: <reason>`, `no one
    listening`, or the delivery's status line when pending, failed, or dead.
+   A delivered row follows its line's stored action, as the line page does
+   (Part D): it reads `replied in` only for a Reply line (`follow: true`).
+   The Log reads the workspace's lines (`repliesByListener`). Only a row
+   whose line is gone falls back to the event key: a conversational key
+   reads `replied in`.
 2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
    filter the list: `All`, `Problems`, and one per service, each service
    chip led by its `ServiceMark size="sm"` (Part K). A text box labeled
@@ -1238,10 +1273,6 @@ Review-fix deviations (2026-10-19):
 - **The delivered body heading reads `Instructions for this line:`.** The
   copy lint reads every api string with a space, so the heading the model
   receives uses Presence words too.
-- **The Log's rows still choose `replied in` by event key (Part F step
-  1).** The line page's Activity follows the line's stored action; the
-  workspace Log has no line in hand for every row and keeps the key-level
-  rule. This replaces the retired `Conversational keys` deviation.
 
 Deviations that revision 4 retires: the wizard's Review step and its
 preview (the side pane replaces both), the team Slack setup's three steps

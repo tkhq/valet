@@ -17,7 +17,7 @@ import { useListOwner } from "~/lib/use-list-owner";
 import { ArchivedThreadLink } from "./archived-thread-link";
 import { Ref } from "./ref";
 import { Sentence } from "./sentence";
-import { activitySentenceParts, type ActivityOutcome, type ActivitySentenceParts, type SentencePart } from "./sentences";
+import { activitySentenceParts, replies, type ActivityOutcome, type ActivitySentenceParts, type SentencePart } from "./sentences";
 
 /** The badge each Log status wears. Exported for the event-log problem rows. */
 export const LOG_STATUS_META: Record<EventLogStatus, { label: string; badge: "success" | "warning" | "danger" | "neutral" | "accent" }> = {
@@ -46,6 +46,17 @@ export function useWorkflowsByListener(): Readonly<Record<string, string>> {
     if (name !== undefined) byListener[sub.id] = name;
   }
   return byListener;
+}
+
+/**
+ * Whether each of the workspace's lines replies (`replies`), by listener id,
+ * so a delivered row reads `replied in` only for a Reply line. A line that
+ * is gone is not listed, and its rows fall back to the event key.
+ */
+export function useRepliesByListener(): Readonly<Record<string, boolean>> {
+  const owner = useListOwner();
+  const listeners = useEventSubscriptions(owner, { enabled: owner !== undefined });
+  return Object.fromEntries((listeners.data?.subscriptions ?? []).map((sub) => [sub.id, replies(sub)]));
 }
 
 /**
@@ -113,13 +124,19 @@ function ReceiptDisclosure({ eventId, deliveries }: { eventId: string; deliverie
 }
 
 /** A stored event as an Activity row: the sentence, the status, when, and what the event said. */
-export function ActivityRow({ item, workflowsByListener }: { item: EventLogItem; workflowsByListener: Readonly<Record<string, string>> }) {
+export function ActivityRow({ item, workflowsByListener, repliesByListener }: {
+  item: EventLogItem;
+  workflowsByListener: Readonly<Record<string, string>>;
+  /** Whether each known line replies, by listener id (`useRepliesByListener`). */
+  repliesByListener?: Readonly<Record<string, boolean>>;
+}) {
   const meta = LOG_STATUS_META[item.status];
   const event = { eventKey: item.eventKey };
   const names = {
     ...(item.place !== undefined ? { place: item.place } : {}),
     ...(item.placeKey !== undefined ? { placeKey: item.placeKey } : {}),
     workflowsByListener,
+    ...(repliesByListener !== undefined ? { repliesByListener } : {}),
   };
   const deliveries = item.deliveries ?? [];
   const parts = activitySentenceParts(event, deliveries, names);

@@ -157,3 +157,18 @@ it("applies caller environment only after the trusted privilege boundary and cle
   );
   expect(args).not.toContain("VALET_SANDBOX_JWT_SECRET=forged");
 });
+
+it("keeps the trusted CA flag in browser workload execs and drops user NODE_OPTIONS", async () => {
+  const { buildDockerExecArgs } = await import("../src/sandbox.js");
+  const args = buildDockerExecArgs({
+    containerId: "container",
+    cwd: "/workspace",
+    command: "true",
+    browser: true,
+    env: { NODE_OPTIONS: "--require /workspace/inject.cjs" },
+  });
+  const boundary = args.indexOf("container");
+  expect(args.slice(0, boundary)).toContain("NODE_OPTIONS=--use-openssl-ca");
+  expect(args.slice(0, boundary)).not.toContain("NODE_OPTIONS=");
+  expect(args.join("\n")).not.toContain("inject.cjs");
+});

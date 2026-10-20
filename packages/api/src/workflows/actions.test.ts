@@ -93,6 +93,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.update_model",
       "workflows.update_schedule",
       "workflows.update_trigger",
+      "workflows.validate_definition",
     ]);
   });
 
@@ -163,6 +164,7 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.get_run")).toBe("low");
     expect(byId.get("workflows.get_node_transcript")).toBe("low");
     expect(byId.get("workflows.preview_workflow")).toBe("low");
+    expect(byId.get("workflows.validate_definition")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
@@ -240,6 +242,42 @@ describe("save_workflow validation", () => {
     const result = await save.execute({ definition: { nodes: "nope" } }, ctx());
     expect(result.success).toBe(false);
     expect(result.error).toContain("definition.nodes");
+  });
+});
+
+// An agent checks a draft before it calls the draft ready, so the check must
+// answer exactly what a save of the same draft would answer.
+describe("validate_definition", () => {
+  const plugin = workflowsActionPlugin(noDeps);
+  const validate = plugin.actions.find((a) => a.id === "workflows.validate_definition");
+  const save = plugin.actions.find((a) => a.id === "workflows.save_workflow");
+  if (!validate || !save) throw new Error("workflow action missing");
+
+  it("returns the errors save_workflow returns for the same draft", async () => {
+    // Both shapes that drafts copied from an old skill example: a run outcome
+    // on a stop step, and a foreach body written as a list of node ids.
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "each", type: "foreach", items: "{{trigger.data.rows}}", body: ["draft"] },
+        { id: "done", type: "stop", outcome: "completed" },
+      ],
+      edges: [{ from: "start", to: "each" }, { from: "each", to: "done" }],
+    };
+    const checked = await validate.execute({ definition }, ctx());
+    expect(checked).toEqual(await save.execute({ definition }, ctx()));
+    expect(checked.error).toContain('stop.outcome must be "success" or "failure", got "completed"');
+    expect(checked.error).toContain("foreach.body must be a single inline node object");
+  });
+
+  it("accepts a valid draft", async () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop", outcome: "success" }],
+      edges: [{ from: "start", to: "done" }],
+    };
+    expect(await validate.execute({ definition }, ctx())).toEqual({ success: true, data: { valid: true } });
   });
 });
 
@@ -523,6 +561,30 @@ describe("DB-backed actions", () => {
     );
     await setApprovedModels(db, "org1", null);
     expect(result).toMatchObject({ success: false, error: expect.stringContaining("not approved") });
+  });
+
+  it("validates a draft against the org's approved models, as a save does, and stores nothing", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    await db.insert(orgs).values({ id: "org1", name: "Test org", createdAt: Date.now() }).onConflictDoNothing();
+    await setApprovedModels(db, "org1", []);
+    const actions = workflowsActionPlugin(() => deps).actions;
+    const validate = actions.find((action) => action.id === "workflows.validate_definition");
+    const save = actions.find((action) => action.id === "workflows.save_workflow");
+    if (!validate || !save) throw new Error("workflow action missing");
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model: "anthropic/claude-haiku-4-5", prompt: "Draft" },
+      ],
+      edges: [{ from: "trigger", to: "draft" }],
+    };
+    const checked = await validate.execute({ definition }, ctx());
+    const saved = await save.execute({ definition }, ctx());
+    await setApprovedModels(db, "org1", null);
+    expect(checked).toMatchObject({ success: false, error: expect.stringContaining("approved") });
+    expect(checked).toEqual(saved);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
   });
 
   it.each(["wf:invoke:workflow:parent:tool", "wf:parent:agent", "wf:parent:agent:1"])(

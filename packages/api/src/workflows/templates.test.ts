@@ -1437,6 +1437,54 @@ describe("github.assign-reviewers — install bakes its roster location", () => 
 });
 
 
+/**
+ * Slack is org-managed (`requires.orgCredential`), so a node pinned to
+ * `"user"` has no personal account to connect. The install API cannot edit
+ * a node, so the install does not block on that pin: the card carries a
+ * note, and the run refuses the node with the credential-setting fix.
+ */
+describe("a template that pins org-managed Slack to the user", () => {
+  const pinnedSlack: WorkflowTemplate = {
+    id: "pinned-slack-dm",
+    name: "Pinned Slack DM",
+    description: "Sends one DM as the user.",
+    category: "Chat",
+    apps: ["slack"],
+    steps: ["DM"],
+    definition: definition(
+      [
+        { id: "start", type: "trigger" },
+        { id: "dm", type: "tool", service: "slack", action: "dm_user", params: { user: "U1", text: "hi" }, credential: "user" },
+      ],
+      [{ from: "start", to: "dm" }],
+    ),
+  };
+  const pinnedPlugin: ValetPlugin = { name: "pinned-slack", version: "0.0.1", templates: [pinnedSlack] };
+  const plugins = (): ValetPlugin[] => [...bundledPlugins, pinnedPlugin];
+
+  it("installs when the organization Slack row exists, and the card shows a note", async () => {
+    await credentials.save({ type: "org", id: OWNER.orgId }, "slack", { type: "bot_token", accessToken: "xoxb-test" });
+    const summaries = await listWorkflowTemplateSummaries(deps(plugins()), OWNER);
+    const card = summaries.find((t) => t.id === pinnedSlack.id);
+    expect(card?.requires.find((r) => r.service === "slack")).toEqual({ service: "slack", connected: true, organizationManagedPin: true });
+    expect(card?.caveats).toContain(
+      "Pinned to your own account, but slack connects for the whole organization. After install, change the node's credential setting to the app.",
+    );
+    const result = await installWorkflowTemplate(deps(plugins()), OWNER, pinnedSlack.id);
+    if (!result.ok) throw new Error(result.error);
+    expect(await db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, result.workflowId))).toHaveLength(1);
+  });
+
+  it("sends the install to organization setup when no organization Slack row exists", async () => {
+    const result = await installWorkflowTemplate(deps(plugins()), OWNER, pinnedSlack.id);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("not_connected");
+    expect(result.error).toContain("not configured for this organization");
+    expect(result.error).not.toContain("credential setting");
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
+  });
+});
+
 describe("team GitHub template repository prerequisites", () => {
   async function setup() {
     await seedTeam("review-team", [OWNER.userId]);

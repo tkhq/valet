@@ -82,6 +82,18 @@ describe("buildShellCommand", () => {
     expect(built).toContain(`export FOO=${shQuote("bar baz")}`);
   });
 
+  it("prepends the trusted CA flag to a caller NODE_OPTIONS", () => {
+    const run = (value: string) => {
+      const built = buildShellCommand("printf %s \"$NODE_OPTIONS\"", { env: { NODE_OPTIONS: value } });
+      return spawnSync("/bin/sh", ["-c", built], { encoding: "utf8" }).stdout;
+    };
+    expect(run("--max-old-space-size=256")).toBe("--use-openssl-ca --max-old-space-size=256");
+    expect(run("--max-old-space-size=256 --use-openssl-ca")).toBe("--use-openssl-ca --max-old-space-size=256 --use-openssl-ca");
+    expect(run('--title="has --use-openssl-ca inside"')).toBe('--use-openssl-ca --title="has --use-openssl-ca inside"');
+    expect(run("")).toBe("--use-openssl-ca");
+    expect(run("--use-system-ca")).toBe("--use-openssl-ca --use-system-ca");
+  });
+
   it("rejects env var names that aren't valid shell identifiers", () => {
     expect(() => buildShellCommand("echo", { env: { "not-valid": "x" } })).toThrow();
     expect(() => buildShellCommand("echo", { env: { "1LEADING": "x" } })).toThrow();

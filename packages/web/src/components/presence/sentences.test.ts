@@ -389,6 +389,49 @@ describe("presenceSentence parts", () => {
   });
 });
 
+describe("a Slack channel's name (spec Part C step 2)", () => {
+  const run = { kind: "workflow" as const, workflowId: "wf-1" };
+  const unlabeled = { field: "channel", op: "eq" as const, value: "C0AK0T8KPPY" };
+  const names = { channels: { C0AK0T8KPPY: "proj-valet" } };
+
+  it("reads the name from names.channels when the filter has no label", () => {
+    const s = sub({ filters: [unlabeled], target: run });
+    const parts = presenceSentenceParts(s, catalog, workflows, threads, names);
+    expect(partsText(parts)).toBe("When someone mentions Valet in #proj-valet, run Triage failures.");
+    expect(partsText(parts)).toBe(presenceSentence(s, catalog, workflows, threads, names));
+    expect(parts).toContainEqual({ kind: "place", text: "#proj-valet", service: "slack", subject: "slack:C0AK0T8KPPY" });
+  });
+
+  it("reads each value of an in filter by name", () => {
+    const s = sub({ filters: [{ field: "channel", op: "in", value: ["C1", "C2"] }], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads, { channels: { C1: "eng" } })).toBe(
+      "When someone mentions Valet in #eng or C2, run Triage failures.",
+    );
+  });
+
+  it("keeps the filter's own label over the name", () => {
+    const s = sub({ filters: [{ ...unlabeled, label: "#old-name" }], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads, names)).toBe(
+      "When someone mentions Valet in #old-name, run Triage failures.",
+    );
+  });
+
+  it("reads the raw id with neither a label nor a name", () => {
+    const s = sub({ filters: [unlabeled], target: run });
+    expect(presenceSentence(s, catalog, workflows, threads)).toBe(
+      "When someone mentions Valet in C0AK0T8KPPY, run Triage failures.",
+    );
+  });
+
+  // Review of PR #986: the matcher tests the id against the pattern, so a
+  // name in a When condition would describe a match the pattern never makes.
+  // An exact channel is a place, and the place clause names it.
+  it("keeps a pattern over the channel id literal in a When condition", () => {
+    expect(whenExplanation([{ field: "channel", op: "prefix", value: "C1" }], ["slack.message"], { channels: { C1: "eng" } }))
+      .toBe("Only when the channel starts with C1.");
+  });
+});
+
 describe("presenceSentence without the place clause (spec Part B step 5)", () => {
   const noPlace = { place: false } as const;
 
@@ -455,6 +498,47 @@ describe("scheduleZone", () => {
     expect(scheduleZone("America/Los_Angeles")).toMatch(/^Pacific (Daylight|Standard) Time$/);
     expect(scheduleZone("UTC")).toBeUndefined();
     expect(scheduleZone(undefined)).toBeUndefined();
+  });
+});
+
+/** The own thread of a routine, as the triggers list returns it. */
+const OWN_THREAD = { sessionId: "s-own", threadId: "t-own", title: "Morning summary", archived: false };
+
+describe("a routine's own thread", () => {
+  it("links its own thread in the sentence, Where, and the firing, with the words unchanged", () => {
+    const r = routine({ lastFiredThread: OWN_THREAD });
+    const token = { kind: "thread", text: "its own thread", sessionId: "s-own", threadId: "t-own" };
+    const sentence = routineSentenceParts(r, workflows, threads);
+    expect(sentence).toContainEqual(token);
+    expect(partsText(sentence)).toBe("Every day at 9:00, Morning summary: work in its own thread.");
+    const where = whereParts({ mode: "own" }, null, threads, r.detail.lastFiredThread);
+    expect(where).toEqual([{ kind: "text", text: "in " }, token]);
+    expect(partsText(where)).toBe("in its own thread");
+    const firing = firingParts(r, workflows, threads);
+    expect(firing).toEqual([{ kind: "text", text: "Fired → worked in " }, token]);
+  });
+
+  it("keeps the words of an archived thread and drops its link", () => {
+    const r = routine({ lastFiredThread: { ...OWN_THREAD, archived: true } });
+    expect(routineSentenceParts(r, workflows, threads)).toContainEqual({ kind: "thread", text: "its own thread", archived: true });
+    expect(partsText(firingParts(r, workflows, threads))).toBe("Fired → worked in its own thread");
+  });
+
+  it("links a new-policy firing to the thread it landed on, and not the sentence", () => {
+    const r = routine({ thread: { mode: "new" }, lastFiredThread: OWN_THREAD });
+    expect(firingParts(r, workflows, threads)).toEqual([
+      { kind: "text", text: "Fired → worked in " },
+      { kind: "thread", text: "a new thread", sessionId: "s-own", threadId: "t-own" },
+    ]);
+    expect(routineSentenceParts(r, workflows, threads).some((part) => part.kind === "thread")).toBe(false);
+  });
+
+  it("stays plain text without a thread", () => {
+    for (const r of [routine({}), routine({ lastFiredThread: null })]) {
+      expect(routineSentenceParts(r, workflows, threads).some((part) => part.kind === "thread")).toBe(false);
+      expect(firingParts(r, workflows, threads)).toEqual([{ kind: "text", text: "Fired → worked in its own thread" }]);
+    }
+    expect(whereParts({ mode: "own" }, null, threads)).toEqual([{ kind: "text", text: "in its own thread" }]);
   });
 });
 
@@ -597,6 +681,19 @@ describe("activitySentence outcomes", () => {
     expect(activitySentence({ eventKey: "slack.team_join" }, null)).toBe("Team join → no one listening");
   });
 
+  it("follows the line's stored action when the line is known, and the event key only for a line that is gone", () => {
+    const inc = delivery({ thread: { sessionId: "s", threadId: "t-inc" } });
+    // A mention line that works on it does not reply.
+    expect(activitySentence(mention, inc, { threads, repliesByListener: { "sub-1": false } }))
+      .toBe("Mention in #incidents → delivered to t-inc");
+    // A Reply line replies whatever its event key.
+    expect(activitySentence(message, inc, { threads, repliesByListener: { "sub-1": true } }))
+      .toBe("Message in #incidents → replied in t-inc");
+    // Another line's flag does not answer for this delivery's line.
+    expect(activitySentence(mention, inc, { threads, repliesByListener: { "sub-2": false } }))
+      .toBe("Mention in #incidents → replied in t-inc");
+  });
+
   it("joins the outcomes of several deliveries", () => {
     expect(
       activitySentence(
@@ -612,6 +709,8 @@ describe("activitySentenceParts", () => {
   const cases: Array<[string, Parameters<typeof activitySentence>]> = [
     ["a reply", [mention, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
     ["a run and a reply", [mention, [delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), delivery({ id: "d-2", runId: "r" })], { threads, workflowName: "Triage failures" }]],
+    ["a known line that works on it", [mention, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads, repliesByListener: { "sub-1": false } }]],
+    ["a known Reply line", [message, delivery({ thread: { sessionId: "s", threadId: "t-inc" } }), { threads, repliesByListener: { "sub-1": true } }]],
     ["a claim", [message, delivery({ status: "skipped", lastError: "Skipped, claimed by thread t-inc", claimedBy: { sessionId: "s", threadId: "t-inc" } }), { threads }]],
     ["no one listening", [check, null]],
     ["a known place key", [check, null, { place: "acme/api#12", placeKey: "github:acme/api#12" }]],
@@ -765,7 +864,10 @@ describe("sentence parts", () => {
         );
       }
     }
-    for (const r of [routine({}), routine({ thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } }), routine({ targetKind: "workflow" }, "wf-1")]) {
+    for (const r of [
+      routine({}), routine({ thread: { mode: "existing", sessionId: "s", threadId: "t-ci" } }), routine({ targetKind: "workflow" }, "wf-1"),
+      routine({ lastFiredThread: OWN_THREAD }), routine({ lastFiredThread: { ...OWN_THREAD, archived: true } }),
+    ]) {
       expect(routineSentence(r, workflows, threads)).toBe(partsText(routineSentenceParts(r, workflows, threads)));
     }
   });

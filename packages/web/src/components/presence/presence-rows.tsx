@@ -4,7 +4,7 @@
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 2, Part D).
  */
 import { Link } from "@tanstack/react-router";
-import type { EventSubscriptionWire, TeamSummary } from "@valet/api/wire";
+import type { EventSubscriptionWire, PresencePlaceWire, TeamSummary } from "@valet/api/wire";
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { usePinnedThreadTitles } from "~/api/rule";
 import { useMe, useTeams } from "~/api/settings";
@@ -30,16 +30,19 @@ export function usePresenceSentence(
 }
 
 /** The sentence for each line of presence as parts, for a row that shows
- * its places, threads, workflows, and people as tokens. See `usePresenceSentence`. */
+ * its places, threads, workflows, and people as tokens. See `usePresenceSentence`.
+ * `knownPlaces` adds places the caller already has, such as a place page's
+ * own channel, so a channel filter without a label reads its name. */
 export function usePresenceSentenceParts(
   subs: readonly EventSubscriptionWire[],
   knownThreads: ThreadTitles = {},
+  knownPlaces: readonly Pick<PresencePlaceWire, "subject" | "label">[] = [],
 ): (sub: EventSubscriptionWire, options?: PresenceSentenceOptions) => SentencePart[] {
   const catalog = useTriggerCatalog();
   const workflows = useWorkflows();
   const pinned = usePinnedThreadTitles(subs.map((sub) => (sub.target.kind === "assistant" ? sub.target.thread : undefined)));
   const threads: ThreadTitles = { ...knownThreads, ...pinned };
-  const names = useSentenceNames();
+  const names = useSentenceNames(knownPlaces);
   const workflowNames = workflows.data?.workflows ?? [];
   return (sub, options) => presenceSentenceParts(sub, catalog.data?.catalog, workflowNames, threads, names, options);
 }

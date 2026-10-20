@@ -175,6 +175,10 @@ vi.mock("~/api/settings", () => ({
   useOrgDirectory: () => ({ data: { users: [] } }),
 }));
 vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
+vi.mock("~/api/presence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("~/api/presence")>(),
+  usePresencePlaces: () => ({ data: { places: [] } }),
+}));
 
 vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
 

@@ -301,9 +301,28 @@ deployment after merge.
    and status routes (`http-slack.ts`, `http-installations.ts`,
    `linear-ingress.ts`) read the stored row directly and never reach an
    action.
-10. **A user-pinned Slack node can run with a null credential.** A
-    user-owned workflow Slack node pinned `credential: "user"`, in an org
-    with only the org bot row, still runs, and the action gets a null
-    credential. A team run in the same state is refused before the action
-    runs; a user-owned run is not. The fix is a follow-up: refuse the
-    user-owned run the same way, and name the fix.
+10. **A personal run pinned to `user` needs the owner's own credential.**
+    A user-owned workflow node of a native service pinned
+    `credential: "user"` reads only the owner's credential, never the org
+    row. If the owner has none, the invoker refuses before discovery and
+    before the action runs: "This node uses your own <service> account,
+    and none is connected. Connect <service> on the Integrations page, or
+    change the node's credential setting." The template gallery and the
+    personal install gate report the same block: such a service counts as
+    connected only through the caller's own credential
+    (`templateRequirements`), so the card offers Connect.
+
+    An org-managed service (`requires.orgCredential`, for example Slack's
+    org bot) has no personal account to connect. For it, the invoker
+    refuses with the node-setting fix: "This node uses your own slack
+    account, but slack connects for the whole organization, so there is no
+    personal account to connect. Change the node's credential setting to
+    the app, or use slack-user for your own account." The install API
+    cannot edit a node, so the personal install gate does not block on
+    this pin. The requirement reads as an unpinned node's: connected when
+    the organization row exists, unconfigured when it does not. A missing
+    organization row therefore still takes the organization-setup refusal.
+    The requirement carries `organizationManagedPin`, and the card shows a
+    note in place of Connect (`orgManagedPinCaveats`). After install, the
+    run refusal tells the user to change the node. Team runs keep the team
+    refusal and team readiness above.

@@ -73,7 +73,7 @@ const S1: WorkflowTriggerItem = {
   kind: "schedule", id: "S1", name: "Morning summary", enabled: true,
   detail: {
     cron: "0 9 * * *", timezone: "UTC", targetKind: "assistant", prompt: "Summarize the night.",
-    thread: { mode: "own" }, nextFireAt: Date.now() + 3_600_000, lastFiredAt: null, ownerType: "user", ownerId: "u-001",
+    thread: { mode: "own" }, nextFireAt: Date.now() + 3_600_000, lastFiredAt: null, lastFiredThread: null, ownerType: "user", ownerId: "u-001",
   },
 };
 const EVENT: GetEventResponse = {

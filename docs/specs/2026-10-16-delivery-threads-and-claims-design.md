@@ -439,8 +439,13 @@ event wakeups spec Part A.
   `schedule:<id>:<slot>` dispatch id recovers an admission with that id
   from any session of the owner. A retry after a policy edit selects
   another team execution session, but it still finds the first admission.
-  Vector: T5; unit test `admits one team schedule slot once when its thread
-  policy changes before a retry` in `assistant-delivery.test.ts`.
+  A routine slot is admitted once whatever its prompt: for a `schedule:` id,
+  a recovered admission with other content counts as recovered, and the api
+  logs the routine id and slot at info. An `event:` id with other content
+  still refuses. Recovery texts for a `schedule:` id name the routine.
+  Vector: T5; unit tests `admits one team schedule slot once when its thread
+  policy changes before a retry` and `recovers a routine slot retried after
+  its prompt was edited (INV-D4)` in `assistant-delivery.test.ts`.
 - **INV-D5 An `existing` policy delivers only inside the owner's live
   runtime.** Mechanism: write-time validation (Part A step 5) and
   `isDeliverableTarget` at delivery. Vectors: T7, T11.
@@ -663,4 +668,4 @@ event wakeups spec Part A.
 - Workflow triggers UI: assistant-prompt schedules carry a thread policy
   (Part A step 2).
 
-- **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked. A policy key does not prove that nobody waits: a Slack mention under an absent policy lands on `sub:<rule>:<delivery>`, and the dispatcher leaves `unattended` unset for a channel conversation. So `deliverToAssistantThread` records `conversational: true` in thread metadata (`Thread.setMetadataFlag`, through the one metadata patch path) when it lands a delivery without `unattended`. The host passes thread metadata to `automatedThread`, and a policy thread marked conversational is attended from then on, even if an unattended delivery opened it. A turn that carries the unattended delivery flag still refuses questions. The legacy `events` and `slack-events:<channel>` threads stay automated, because a mention never landed there.
+- **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked. A policy key does not prove that nobody waits: a Slack mention under an absent policy lands on `sub:<rule>:<delivery>`, and the dispatcher leaves `unattended` unset for a channel conversation. So `deliverToAssistantThread` records `conversational: true` in thread metadata (`Thread.setMetadataFlag`, through the one metadata patch path) when it lands a delivery without `unattended` on a key the rule covers (`isAutomatedThreadKey` in `automated-threads.ts`: `sub:`, `schedule:`, `subject:`, `events`, and `slack-events:<channel>`). A pinned thread and a `slack:` thread never read the flag, so the delivery writes no metadata there. The host passes thread metadata to `automatedThread`, and a policy thread marked conversational is attended from then on, even if an unattended delivery opened it. A turn that carries the unattended delivery flag still refuses questions. The legacy `events` and `slack-events:<channel>` threads stay automated, because a mention never landed there.
