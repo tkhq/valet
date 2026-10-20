@@ -1180,6 +1180,38 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     expect(engine.abort).toHaveBeenCalledWith('session-approval', 'thread-approval', 'queue-approval');
   });
 
+  it('keeps the run going when a stop failed before it ran', async () => {
+    // Under `onUnresolvedPath: "fail"`, a stop whose message names a missing
+    // value fails like any node. It never ran, so it must not end the run on
+    // a later drive or abort the agent on another branch.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const engine = makeFakeEngineDeps();
+    const executors: NodeExecutorRegistry = { ...createDefaultNodeExecutors(), wait: parkingAgent('kept') };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'agent', type: 'wait', mode: 'duration', duration: '1h' } satisfies WaitNode,
+        { id: 'x', type: 'set', values: { a: 1 } },
+        { id: 'end', type: 'stop', outcome: 'success', message: '{{nodes.x.result.nope}}' },
+        { id: 'y', type: 'set', values: { b: 2 } },
+        { id: 'z', type: 'set', values: { c: 3 } },
+      ],
+      edges: [{ from: 't', to: 'agent' }, { from: 't', to: 'x' }, { from: 'x', to: 'end' }, { from: 'x', to: 'y' }, { from: 'y', to: 'z' }],
+      policy: { onUnresolvedPath: 'fail' },
+    };
+    await store.createRun('run-stop-unran', runParams(), definition, 'v1');
+    for (let drive = 0; drive < 2; drive++) {
+      const park = await driveUntilPark('run-stop-unran', await claimAttempt(store, 'run-stop-unran'), { store, engine, clock: clock.now, executors });
+      expect(park.status).toBe('parked');
+    }
+    const byNode = new Map((await store.getCheckpoints('run-stop-unran')).map((cp) => [cp.nodeId, cp.status]));
+    expect(byNode.get('end')).toBe('failed');
+    expect(byNode.get('z')).toBe('completed');
+    expect(engine.abort).not.toHaveBeenCalled();
+  });
+
   it('does not abort a submission that finished before a later drive reaches stop', async () => {
     // The first drive parks on the agent and saves its wait on the run. In
     // the second drive the agent completes and the stop ends the run. The

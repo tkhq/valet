@@ -271,10 +271,11 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
     // signal lived only in that drive's memory, so a drive that failed after
     // the stop's checkpoint (an abort or a read before the settle) would
     // otherwise leave the run parked on its other branches.
-    const stopped = definition.nodes.find((n) => n.type === 'stop'
-      && (cpAll.get(n.id)?.status === 'completed' || cpAll.get(n.id)?.status === 'failed'));
+    const stopped = definition.nodes
+      .map((n) => (n.type === 'stop' ? executedStop(cpAll.get(n.id)) : undefined))
+      .find((status) => status !== undefined);
     if (stopped) {
-      const failed = cpAll.get(stopped.id)?.status === 'failed' || hasDominatingFailure(cpAll, graph);
+      const failed = stopped === 'failed' || hasDominatingFailure(cpAll, graph);
       return await terminateSettle(deps, run.runId, attempt, await inFlightWaits(store, run, parkedWaits()), failed ? 'failed' : 'completed');
     }
 
@@ -438,6 +439,19 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
       );
     }
   }
+}
+
+/**
+ * The status of a stop the stop executor ran, read from its checkpoint: the
+ * executor writes its `StopResult` (with `outcome`) on both a completed and a
+ * failed stop. A stop that failed before it ran, such as an unresolved
+ * template under `onUnresolvedPath: "fail"`, is an ordinary failed node and
+ * does not end the run.
+ */
+function executedStop(cp: NodeCheckpoint | undefined): 'completed' | 'failed' | undefined {
+  if (!cp || (cp.status !== 'completed' && cp.status !== 'failed')) return undefined;
+  const outcome: unknown = typeof cp.result === 'object' && cp.result !== null ? Reflect.get(cp.result, 'outcome') : undefined;
+  return outcome === 'success' || outcome === 'failure' ? cp.status : undefined;
 }
 
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
