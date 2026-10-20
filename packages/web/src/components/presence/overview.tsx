@@ -151,8 +151,10 @@ function useCreatedHighlight(groups: readonly OverviewGroup[], routines: readonl
   useEffect(() => {
     if (highlight === null) return;
     // On the next frame, so a collapsed group the mark opened has opened.
+    // `scrollIntoView` is optional: jsdom has none, and a frame that lands
+    // after a test ends would otherwise throw outside every test.
     const frame = requestAnimationFrame(() => {
-      rootRef.current?.querySelector('[data-highlight="true"]')?.scrollIntoView({ block: "center" });
+      rootRef.current?.querySelector('[data-highlight="true"]')?.scrollIntoView?.({ block: "center" });
     });
     const timer = setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
     return () => {
