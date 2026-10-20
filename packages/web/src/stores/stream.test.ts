@@ -226,8 +226,9 @@ describe("stream store reducer", () => {
   });
 
   it("marks a matching user message as superseded on submission.settled", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "do the thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     const ev: WireEvent = {
       seq: 1,
@@ -236,7 +237,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "superseded",
     };
     ingest(SESSION, ev);
@@ -267,9 +268,60 @@ describe("stream store reducer", () => {
     expect(msg?.settledOutcome).toBeUndefined();
   });
 
+  it("applies a settlement that arrives before the message is linked", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "fails at once", THREAD);
+
+    // The settle reaches the socket before POST /messages resolves.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-fast",
+      outcome: "failed",
+      error: "no credits",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === msgId)?.settledOutcome).toBeUndefined();
+
+    setMessageQueueItemId(SESSION, msgId, "q-fast");
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.messages.find((m) => m.id === msgId)).toMatchObject({ settledOutcome: "failed", settledError: "no credits" });
+    expect(slice.unmatchedSettlements?.["q-fast"]).toBeUndefined();
+  });
+
+  it("does not badge an unacknowledged message with another item's cancel", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    // A new message whose POST has not resolved yet.
+    const pending = addUserMessage(SESSION, "new message", THREAD);
+
+    // Cancel of an older queued item this window never hydrated.
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-old",
+      outcome: "aborted",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === pending)?.settledOutcome).toBeUndefined();
+
+    setMessageQueueItemId(SESSION, pending, "q-new");
+
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === pending);
+    expect(msg?.queueItemId).toBe("q-new");
+    expect(msg?.settledOutcome).toBeUndefined();
+  });
+
   it("marks a matching user message as failed on submission.settled outcome=failed", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "do another thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     const ev: WireEvent = {
       seq: 1,
@@ -278,7 +330,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "failed",
       error: "boom",
     };
@@ -290,8 +342,9 @@ describe("stream store reducer", () => {
   });
 
   it("keeps the engine's error text next to a failed settled outcome", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "deploy the thing", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     ingest(SESSION, {
       seq: 1,
@@ -300,7 +353,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "failed",
       error: "credit balance is too low",
     });
@@ -312,8 +365,9 @@ describe("stream store reducer", () => {
   });
 
   it("leaves settledError undefined when a non-clean outcome carries no reason", () => {
-    const { ingest, addUserMessage } = useStreamStore.getState();
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
     const msgId = addUserMessage(SESSION, "stop that", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
 
     ingest(SESSION, {
       seq: 1,
@@ -322,7 +376,7 @@ describe("stream store reducer", () => {
       type: "submission.settled",
       sessionId: SESSION,
       threadId: THREAD,
-      queueItemId: msgId,
+      queueItemId: "q-1",
       outcome: "aborted",
     });
 
@@ -453,8 +507,8 @@ describe("stream store reducer", () => {
     setMessageQueueItemId(SESSION, idB, "q-b");
 
     // Settled event references a queueItemId that doesn't match any known
-    // message (e.g. linkage never landed). With two candidates unsettled,
-    // the recency heuristic is ambiguous — neither should be badged.
+    // message (e.g. linkage never landed). It waits for a link and badges
+    // neither message.
     ingest(SESSION, {
       seq: 1,
       ts: Date.now(),
@@ -732,9 +786,10 @@ describe("active model state", () => {
     });
   });
 
-  it("clears a matching submission and still applies fallback message badge logic", () => {
-    const { addUserMessage, ingest } = useStreamStore.getState();
+  it("clears a matching submission and badges its message", () => {
+    const { addUserMessage, ingest, setMessageQueueItemId } = useStreamStore.getState();
     const messageId = addUserMessage(SESSION, "run this", THREAD);
+    setMessageQueueItemId(SESSION, messageId, "q-active");
     ingest(SESSION, activeModelState(THREAD, "q-active", "openai/gpt-5.2"));
 
     ingest(SESSION, {

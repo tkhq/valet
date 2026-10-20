@@ -1376,10 +1376,20 @@ export class Thread {
 
   private async settleCanceled(queueItemId: string): Promise<boolean> {
     const store = this.session.providers.store;
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
     // Only a `queued` item. A `collecting` one belongs to the collect
     // window, which merges it the same way; it never turns back to queued.
-    const item = await store.getQueueItem(this.session.id, queueItemId);
+    const item = unsettled.find((i) => i.id === queueItemId);
     if (!item || item.threadId !== this.id || item.status !== "queued") return false;
+    // A digest that lists the item already carries its text. The item can
+    // still read `queued` when a merge settlement failed after the digest
+    // was admitted (`repairOverheardDigests` settles it later), so the
+    // digest's durable membership decides.
+    const inDigest = unsettled.some((d) => {
+      const meta = d.metadata?.overheardDigest;
+      return d.threadId === this.id && isOverheardDigestMeta(meta) && meta.constituentIds.includes(queueItemId);
+    });
+    if (inDigest) return false;
     const settled = await store.settleUnclaimed(
       this.session.id, this.id, queueItemId, { outcome: "aborted" }, { onlyIfUnsuperseded: true },
     );

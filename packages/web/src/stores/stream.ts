@@ -186,7 +186,24 @@ export interface SessionStreamState {
    * message_start / turn_end / abort-or-error message_end.
    */
   streamingArgs?: Record<string, { text: string; parsedLen: number }>;
+  /**
+   * Settlements whose queue item id no message carries yet, keyed by that
+   * id. A settle can arrive before `POST /messages` resolves, so the badge
+   * waits here until `setMessageQueueItemId` links the message. It is never
+   * guessed onto another message. Bounded to the newest
+   * `UNMATCHED_SETTLEMENT_LIMIT` entries.
+   */
+  unmatchedSettlements?: Record<string, UnmatchedSettlement>;
 }
+
+interface UnmatchedSettlement {
+  threadId: string;
+  outcome: SettledOutcome | undefined;
+  error?: string;
+}
+
+/** Acknowledgments arrive within one request, so a short buffer is enough. */
+const UNMATCHED_SETTLEMENT_LIMIT = 50;
 
 export interface StreamStore {
   bySession: Record<string, SessionStreamState>;
@@ -214,9 +231,9 @@ export interface StreamStore {
    * optimistic user message `addUserMessage` just created) once the
    * `POST /messages` response resolves. `SendPromptResponse.messageId` is
    * the engine's queue item id — closing this linkage lets
-   * `submission.settled` match the exact originating message instead of
-   * falling back to a recency heuristic. No-op if the message isn't found
-   * (e.g. it was already reconciled away by a REST snapshot).
+   * `submission.settled` match the exact originating message, and applies
+   * a settlement that arrived before the link. No-op if the message isn't
+   * found (e.g. it was already reconciled away by a REST snapshot).
    */
   setMessageQueueItemId(sessionId: string, messageId: string, queueItemId: string): void;
   /**
@@ -256,6 +273,17 @@ const EMPTY: SessionStreamState = {
 
 function ensure(state: StreamStore, sessionId: string): SessionStreamState {
   return state.bySession[sessionId] ?? { ...EMPTY };
+}
+
+/** Add one held settlement and drop the oldest past the limit. */
+function holdSettlement(
+  held: Record<string, UnmatchedSettlement> | undefined,
+  queueItemId: string,
+  settlement: UnmatchedSettlement,
+): Record<string, UnmatchedSettlement> {
+  const entries = Object.entries(held ?? {}).filter(([id]) => id !== queueItemId);
+  entries.push([queueItemId, settlement]);
+  return Object.fromEntries(entries.slice(-UNMATCHED_SETTLEMENT_LIMIT));
 }
 
 /**
@@ -623,18 +651,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         const { [ev.threadId]: _, ...rest } = slice.activeModelByThread;
         next.activeModelByThread = rest;
       }
-      // Mark the originating user message with a terminal badge.
-      //
-      // Matching: prefer an exact `queueItemId` match — REST rows carry the
-      // engine's queue_item_id via `entryToMessage`
-      // (packages/api/src/routes/messages.ts), and the web client stamps it
-      // onto optimistic messages once `POST /messages` resolves (see
-      // `setMessageQueueItemId`). Only when no message carries a matching
-      // `queueItemId` do we fall back to a recency heuristic — and even
-      // then, ONLY when there is exactly one unsettled user message on the
-      // thread. With two or more candidates the heuristic is ambiguous
-      // (queued prompt A vs. B), so we drop the event rather than badge the
-      // wrong message.
+      // Mark the originating user message with a terminal badge. Match by
+      // queue item id only: REST rows carry the engine's queue_item_id via
+      // `entryToMessage` (packages/api/src/routes/messages.ts), and the web
+      // client stamps it onto an optimistic message once `POST /messages`
+      // resolves (`setMessageQueueItemId`). A settle that arrives before
+      // that link waits in `unmatchedSettlements`. Guessing a message by
+      // recency badged the wrong prompt when another item settled first.
       //
       // Promote remaps the same bubble from the followup id to the steer
       // successor. A superseded settle for the old id must not badge that
@@ -647,32 +670,25 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       ) {
         return next;
       }
-      const idx = (() => {
-        const direct = lastIndex(
-          slice.messages,
-          (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
-        );
-        if (direct >= 0) return direct;
-        // A message that already carries another queue item id belongs to
-        // that submission, so it is never a candidate: canceling a queued
-        // item this window never hydrated must not badge the running prompt.
-        const unsettled: number[] = [];
-        for (let i = 0; i < slice.messages.length; i++) {
-          const m = slice.messages[i];
-          if (m.threadId === ev.threadId && m.role === "user" && m.settledOutcome === undefined && !m.queueItemId) {
-            unsettled.push(i);
-          }
-        }
-        return unsettled.length === 1 ? unsettled[0] : -1;
-      })();
-      if (idx < 0) return next;
-      const m = slice.messages[idx];
       // A clean run needs no badge and no reason. Every other outcome keeps
       // the engine's `error` text next to the outcome, so a consumer can
       // render why the turn ended instead of a bare grey chip.
       const settledOutcome: SettledOutcome | undefined =
         ev.outcome === "completed" ? undefined : ev.outcome;
       const settledError = ev.outcome === "completed" ? undefined : ev.error;
+      const idx = lastIndex(
+        slice.messages,
+        (m) => m.threadId === ev.threadId && m.queueItemId === ev.queueItemId,
+      );
+      if (idx < 0) {
+        next.unmatchedSettlements = holdSettlement(slice.unmatchedSettlements, ev.queueItemId, {
+          threadId: ev.threadId,
+          outcome: settledOutcome,
+          ...(settledError !== undefined ? { error: settledError } : {}),
+        });
+        return next;
+      }
+      const m = slice.messages[idx];
       const updated: StreamMessage = { ...m, settledOutcome, settledError };
       next.messages = replaceAt(slice.messages, idx, updated);
       return next;
@@ -843,7 +859,7 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const prev = slice.messages[idx];
       const remapping =
         prev.queueItemId !== undefined && prev.queueItemId !== queueItemId;
-      const updated: StreamMessage = remapping
+      const linked: StreamMessage = remapping
         ? {
             ...prev,
             queueItemId,
@@ -854,10 +870,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
             settledError: undefined,
           }
         : { ...prev, queueItemId };
+      // A settle that arrived before this link applies now.
+      const held = slice.unmatchedSettlements?.[queueItemId];
+      const updated: StreamMessage = held && held.threadId === prev.threadId
+        ? { ...linked, settledOutcome: held.outcome, settledError: held.error }
+        : linked;
+      let unmatchedSettlements = slice.unmatchedSettlements;
+      if (held && unmatchedSettlements) {
+        const { [queueItemId]: _, ...rest } = unmatchedSettlements;
+        unmatchedSettlements = rest;
+      }
       return {
         bySession: {
           ...state.bySession,
-          [sessionId]: { ...slice, messages: replaceAt(slice.messages, idx, updated) },
+          [sessionId]: { ...slice, messages: replaceAt(slice.messages, idx, updated), unmatchedSettlements },
         },
       };
     }),
