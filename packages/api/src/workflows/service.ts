@@ -203,7 +203,7 @@ export function validateDefinitionInput(
 
 type WorkflowRow = typeof workflowDefinitions.$inferSelect;
 
-function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref: string }): WorkflowDefinitionSummary {
+export function rowToDefinition(row: WorkflowRow, source?: { repoFullName: string; ref: string }): WorkflowDefinitionSummary {
   const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,

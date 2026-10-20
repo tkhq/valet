@@ -1939,6 +1939,23 @@ export interface MemoryTreeEntry {
 // caller's own rows plus their teams', `?ownerType=&ownerId=` narrows it to
 // one owner, and an owner the caller cannot reach 404s.
 
+/** `GET /api/workflows/step-check` (organization admins): workflows whose
+ * steps expect a person's approval in a way a run cannot deliver. */
+export interface WorkflowStepCheckResponse {
+  /** Workflows read in the organization. */
+  scanned: number;
+  /** Only the workflows with at least one warning. */
+  workflows: {
+    workflowId: string;
+    name: string;
+    ownerType: "user" | "team" | "org";
+    ownerId: string;
+    /** The team's name, for a team workflow. */
+    ownerName?: string;
+    steps: { nodeId: string; warnings: string[] }[];
+  }[];
+}
+
 export interface WorkflowDefinitionSummary {
   /** Most recently started run, scoped to the current workflow owner. */
   latestRun?: WorkflowRunSummary;

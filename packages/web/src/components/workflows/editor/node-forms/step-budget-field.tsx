@@ -1,7 +1,7 @@
-import { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, unboundedWorkWarning, type SessionNode, type ThreadNode } from "@valet/workflow";
+import { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, approvalRequestWarning, unboundedWorkWarning, type SessionNode, type ThreadNode } from "@valet/workflow";
 import { NumberField } from "../fields";
 
-/** The agent step's model call limit, and a warning when its prompt asks one agent to handle a whole list. */
+/** The agent step's model call limit, with a warning when its prompt asks one agent to handle a whole list or to get a person's approval. */
 export function StepBudgetField({
   node,
   onChange,
@@ -9,7 +9,7 @@ export function StepBudgetField({
   node: SessionNode | ThreadNode;
   onChange: (patch: Record<string, unknown>) => void;
 }) {
-  const warning = unboundedWorkWarning(node);
+  const warnings = [unboundedWorkWarning(node), approvalRequestWarning(node)].filter((warning) => warning !== undefined);
   return (
     <div className="flex flex-col gap-1">
       <NumberField
@@ -23,11 +23,11 @@ export function StepBudgetField({
       <span className="text-xs text-muted">
         Default {DEFAULT_STEP_MODEL_CALLS}. At the limit, the step stops and fails with the reason.
       </span>
-      {warning && (
-        <p role="status" className="rounded border border-line bg-warning-wash px-3 py-2 text-xs text-ink">
+      {warnings.map((warning) => (
+        <p key={warning} role="status" className="rounded border border-line bg-warning-wash px-3 py-2 text-xs text-ink">
           {warning}
         </p>
-      )}
+      ))}
     </div>
   );
 }

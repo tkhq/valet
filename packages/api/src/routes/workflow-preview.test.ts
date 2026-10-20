@@ -285,6 +285,26 @@ describe("POST /api/workflows/:id/preview — effectful nodes", () => {
   });
 });
 
+describe("POST /api/workflows/:id/preview — step design", () => {
+  it("warns when an agent step tells its agent to get a person's approval", async () => {
+    api = await bootTestApi();
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "run", type: "session", mode: "start", prompt: "DM the people lead that the project is ready for approval, then create it." },
+        { id: "finish", type: "session", mode: "start", prompt: "The project exists. Do not ask anyone for approval." },
+      ],
+      edges: [{ from: "trigger", to: "run" }, { from: "run", to: "finish" }],
+    };
+    const created = await createWorkflow(api.baseUrl, definition);
+
+    const response = await preview(api.baseUrl, created.id);
+    expect(nodeNamed(response, "run").warnings.join(" ")).toContain("Put the action that needs approval in a tool step");
+    expect(nodeNamed(response, "finish").warnings.join(" ")).not.toContain("approval");
+  });
+});
+
 describe("POST /api/workflows/:id/preview — foreach", () => {
   const foreachDefinition = (items: string) => ({
     version: "dag/v1",
