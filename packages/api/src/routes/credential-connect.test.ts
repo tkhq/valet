@@ -17,6 +17,7 @@ import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../ser
 import { and, eq } from "drizzle-orm";
 import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
 import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
 import {
@@ -327,6 +328,23 @@ describe("GET /api/credentials/oauth/callback", () => {
     });
     expect(cb.headers.get("location")).toBe("/integrations?error=oauth_client_changed");
     expect(fake.tokenRequests).toHaveLength(0);
+  });
+
+  it("mcp mode: a state minted before client binding still completes", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
+    const key = deriveSecretKey(api.providers.encryptionKey);
+    const minted = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+    const verified = verifyOAuthConnectState(minted, key, Date.now());
+    if (!verified) throw new Error("connect state did not verify");
+    // A connect started before this deploy signed no client id.
+    const { clientId: _bound, ...legacy } = verified;
+    const state = signState("integration-connect", legacy, key);
+
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
+    expect(fake.tokenRequests[0]?.client_id).toBe("client-1");
   });
 
   it("provider error param redirects to /integrations with the error code", async () => {

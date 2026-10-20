@@ -298,8 +298,11 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
       const clientRow = await getMcpOAuthClient({ db }, verified.service);
       // A connect that re-registered the client after this authorize (a
       // scope change) replaced it. The code belongs to the old client, and
-      // stored refreshes use the new one, so the user starts again.
-      if (clientRow.clientId !== verified.clientId) return c.redirect(`${landing}error=oauth_client_changed`, 302);
+      // stored refreshes use the new one, so the user starts again. A state
+      // signed before client binding has no id and keeps the old behavior.
+      if (verified.clientId !== undefined && clientRow.clientId !== verified.clientId) {
+        return c.redirect(`${landing}error=oauth_client_changed`, 302);
+      }
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,

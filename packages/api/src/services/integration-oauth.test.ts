@@ -102,14 +102,15 @@ describe("ensureMcpOAuthClient", () => {
       const named = (m: string) => m.includes('"metabase"') && m.includes("agent:content:read");
       expect(warn.mock.calls.map((c) => String(c[0])).some(named)).toBe(true);
 
-      // A later connect reuses the client and warns again.
-      warn.mockClear();
+      // A later connect reuses the stored client with no network call, so
+      // a hanging discovery endpoint cannot stall it.
+      const discoveries = mb.discoveryRequests.count;
       const again = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
         "agent:query:run",
       ]);
       expect(again.clientId).toBe("client-1");
       expect(mb.registrations).toHaveLength(1);
-      expect(warn.mock.calls.map((c) => String(c[0])).some(named)).toBe(true);
+      expect(mb.discoveryRequests.count).toBe(discoveries);
     } finally {
       warn.mockRestore();
       await mb.close();

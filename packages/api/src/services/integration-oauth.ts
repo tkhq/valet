@@ -75,7 +75,9 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
  * A declared entry can drift from its server: Metabase 1.64 moved every
  * read tool to `agent:content:read`, a scope the deployed list never named,
  * and each reconnect minted a token those tools refused. Valet requests only
- * the declared scopes, so name the advertised ones the entry lacks on every
+ * the declared scopes, so name the advertised ones the entry lacks when it
+ * registers a client (a first connect, or a scope change). A reused client
+ * makes no network call, so a slow discovery endpoint cannot stall the
  * connect. The protected resource's list (RFC 9728) is what the server
  * checks; the issuer's own list can name scopes for other resources.
  */
@@ -131,18 +133,6 @@ export async function ensureMcpOAuthClient(
         }
       }
       if (advertised && advertised.length > 0) warnScopelessEntry(service, advertised);
-    } else {
-      // The stored client serves this connect, so a discovery outage only
-      // skips the warning.
-      try {
-        const meta = await discoverAuthServer(serverUrl);
-        warnUndeclaredResourceScopes(service, declared, meta.resource_scopes_supported);
-      } catch (err) {
-        console.warn(
-          `MCP OAuth: ${service} discovery failed; scope check skipped (connect continues):`,
-          err instanceof Error ? err.message : String(err),
-        );
-      }
     }
     return toRow(existing[0]);
   }
