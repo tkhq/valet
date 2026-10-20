@@ -183,6 +183,44 @@ describe("OAuthRefreshingCredentialStore", () => {
       .toBe('{"refresh_token": "[redacted]", "error": "invalid_grant"}');
     expect(refreshErrorText(new Error(`token sk-1 leaked`), ["sk-1", undefined])).toBe("token [redacted] leaked");
     expect(refreshErrorText(new Error("x".repeat(400)), [])).toHaveLength(301);
+    // An escaped JSON message, and a value with no closing quote.
+    expect(refreshErrorText(new Error('{"message":"bad client_secret=\\"abc12345\\""}'), [])).toBe('{"message":"bad client_secret=\\"[redacted]\\""}');
+    expect(refreshErrorText(new Error('400 {"access_token":"abcdefgh12345'), [])).toBe('400 {"access_token":"[redacted]');
+    // A cut-off start of a known secret at the end of the text.
+    expect(refreshErrorText(new Error("failed: tok-12345678"), ["tok-1234567890abcdef"])).toBe("failed: [redacted]");
+    // Prose that only mentions a code stays readable.
+    expect(refreshErrorText(new Error("error code: invalid_grant"), [])).toBe("error code: invalid_grant");
+  });
+
+  it("masks the app's client secret that an authorization_code refusal echoes", async () => {
+    const inner = memoryStore();
+    await inner.save(OWNER, "widget", { type: "oauth2", accessToken: "at", refreshToken: "rt-widget", expiresAt: NOW - 1 });
+    fake.tokenFailure = 401;
+    fake.tokenFailureBody = { message: "Invalid client secret 'shared-app-secret-123'" };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, {
+      db: testDb.appDb, plugins: authCodePlugins(), env: { X_ID: "cid", X_SECRET: "shared-app-secret-123" }, now: () => NOW,
+    });
+    await store.get(OWNER, "widget");
+    const reason = (await inner.get(OWNER, "widget"))?.metadata?.refreshError;
+    expect(reason).toContain("Invalid client secret '[redacted]'");
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("shared-app-secret-123");
+    errors.mockRestore();
+  });
+
+  it("masks a long refresh token that the 200-character error cap cuts off", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    const longToken = `rt-${"a1b2c3d4".repeat(33)}`;
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "at", refreshToken: longToken, expiresAt: NOW - 1 });
+    fake.tokenFailure = 400;
+    fake.tokenFailureBody = { refresh_token: longToken };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "linear");
+    const reason = (await inner.get(OWNER, "linear"))?.metadata?.refreshError;
+    expect(reason).toBe('MCP PKCE token refresh failed: 400 {"refresh_token":"[redacted]');
+    vi.restoreAllMocks();
   });
 
   it("does not mark a temporary refresh failure as a refusal", async () => {

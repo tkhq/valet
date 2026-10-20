@@ -22,21 +22,37 @@ import { findOAuthDeclaration, refreshAuthorizationCodeToken } from "../services
 const REFRESH_BUFFER_MS = 60_000;
 /** The longest refusal text kept on a credential. */
 const REFRESH_ERROR_MAX = 300;
+/** The shortest cut-off start of a secret that is still masked. */
+const SECRET_PREFIX_MIN = 8;
+/** A token field and its value: `refresh_token=x`, `"access_token": "x`,
+ * `client_secret=\"x\"`. The value may have no closing quote, because the
+ * upstream error keeps only the first 200 characters of the body. */
+const TOKEN_FIELD = /(\b(?:refresh_token|access_token|id_token|client_secret)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)[^\s"'\\&,;}]*/gi;
+/** An authorization code, in form shape only: prose such as "error code: 400" stays. */
+const CODE_FIELD = /\b(code=)[^\s"'\\&,;}]*/gi;
+
+/** Masks `secret` wherever it appears, and a cut-off start of it at the end of
+ * the text, where the upstream 200-character cap can split it. */
+function maskSecret(text: string, secret: string): string {
+  const masked = text.split(secret).join("[redacted]");
+  for (let k = Math.min(secret.length - 1, masked.length); k >= SECRET_PREFIX_MIN; k--) {
+    if (masked.endsWith(secret.slice(0, k))) return `${masked.slice(0, -k)}[redacted]`;
+  }
+  return masked;
+}
 
 /**
  * The provider's refusal, safe to store on the credential and to log. It masks
- * the credential's own tokens and any token-like field, because a provider may
- * echo the request: Greenhouse answers a malformed refresh token with that
- * token in its message.
+ * the credential's tokens and the app's client secret, and any token field's
+ * value, because a provider may echo the request: Greenhouse answers a
+ * malformed refresh token with that token in its message.
  */
 export function refreshErrorText(err: unknown, secrets: Array<string | undefined>): string {
   let text = err instanceof Error ? err.message : String(err);
   for (const secret of secrets) {
-    if (secret) text = text.split(secret).join("[redacted]");
+    if (secret) text = maskSecret(text, secret);
   }
-  text = text
-    .replace(/\b(refresh_token|access_token|id_token|client_secret|code)=[^&\s"']+/gi, "$1=[redacted]")
-    .replace(/("(?:refresh_token|access_token|id_token|client_secret)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"');
+  text = text.replace(TOKEN_FIELD, "$1[redacted]").replace(CODE_FIELD, "$1[redacted]");
   return text.length > REFRESH_ERROR_MAX ? `${text.slice(0, REFRESH_ERROR_MAX)}…` : text;
 }
 
@@ -106,7 +122,10 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
     } catch (err) {
       // The provider's own words name the cause (expired, revoked, already
       // used), so the credential keeps them for the Integrations page.
-      const reason = refreshErrorText(err, [stored.refreshToken, stored.accessToken]);
+      // An authorization_code refresh sends the app's client secret, so a
+      // provider can echo that too.
+      const clientSecret = found.oauth.mode === "mcp" ? undefined : this.deps.env[found.oauth.clientSecretEnv];
+      const reason = refreshErrorText(err, [stored.refreshToken, stored.accessToken, clientSecret]);
       console.error(`credential refresh failed for ${service}: ${reason}`);
       // Only the provider refusing the grant (400 or 401) makes the row dead
       // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
