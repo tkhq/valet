@@ -451,6 +451,8 @@ function isListener(row: SubscriptionRow): boolean {
 interface LoadedPlaces {
   places: Map<string, PlaceState>;
   slackTeam: string;
+  /** How many sessions the workspace has: its runtime and its team conversations. */
+  sessionCount: number;
 }
 
 async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<LoadedPlaces> {
@@ -634,21 +636,27 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     state.wire.listenerCount = state.listeners.length + state.rolledUp.length;
     state.wire.activeThreadCount = state.active.size;
   }
-  return { places, slackTeam };
+  return { places, slackTeam, sessionCount: sessions.length };
 }
 
 function compareConversations(a: ChannelConversation, b: ChannelConversation): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
+/** The workspace's places, and how many sessions the read covered. The route sends only the places. */
+export interface PresencePlacesList extends ListPresencePlacesResponse {
+  sessionCount: number;
+}
+
 /** The workspace's places: Slack, then GitHub, then Linear, each newest activity first. */
 export async function listPresencePlaces(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now = Date.now(),
-): Promise<ListPresencePlacesResponse> {
-  const rows = [...(await loadPlaces(deps, orgId, owner, access, now)).places.values()].map((state) => state.wire);
+): Promise<PresencePlacesList> {
+  const loaded = await loadPlaces(deps, orgId, owner, access, now);
+  const rows = [...loaded.places.values()].map((state) => state.wire);
   rows.sort((a, b) => SERVICES.indexOf(a.service) - SERVICES.indexOf(b.service)
     || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.label.localeCompare(b.label));
-  return { places: rows };
+  return { places: rows, sessionCount: loaded.sessionCount };
 }
 
 /** One place with the rows its page shows. The route maps the rows to their wire shapes. */

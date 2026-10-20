@@ -267,7 +267,8 @@ Pass criterion: all steps, in one run, from a clean start.
     bounded number of queries regardless of how many conversations the
     workspace has. It judges visibility only for the threads a place can
     show (subject threads and the threads that follows and running waiters
-    name), and it never selects an event's payload.
+    name), and it never selects an event's payload. A read slower than one
+    second logs one line with its scope, duration, and session count.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.
