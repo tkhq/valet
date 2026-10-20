@@ -439,8 +439,13 @@ event wakeups spec Part A.
   `schedule:<id>:<slot>` dispatch id recovers an admission with that id
   from any session of the owner. A retry after a policy edit selects
   another team execution session, but it still finds the first admission.
-  Vector: T5; unit test `admits one team schedule slot once when its thread
-  policy changes before a retry` in `assistant-delivery.test.ts`.
+  A routine slot is admitted once whatever its prompt: for a `schedule:` id,
+  a recovered admission with other content counts as recovered, and the api
+  logs the routine id and slot at info. An `event:` id with other content
+  still refuses. Recovery texts for a `schedule:` id name the routine.
+  Vector: T5; unit tests `admits one team schedule slot once when its thread
+  policy changes before a retry` and `recovers a routine slot retried after
+  its prompt was edited (INV-D4)` in `assistant-delivery.test.ts`.
 - **INV-D5 An `existing` policy delivers only inside the owner's live
   runtime.** Mechanism: write-time validation (Part A step 5) and
   `isDeliverableTarget` at delivery. Vectors: T7, T11.

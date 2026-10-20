@@ -215,6 +215,37 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(rows.rows).toEqual([{ session_id: first.sessionId }]);
   });
 
+  it("recovers a routine slot retried after its prompt was edited (INV-D4)", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const signal = (body: string) => ({ kind: "signal" as const, signalType: "schedule", body,
+      attributes: { scheduleId: "sched-2", scheduleName: "Standup" } });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, dispatchId: "schedule:sched-2:200",
+      destination: { kind: "key" as const, key: "schedule:sched-2", title: "Standup" }, mismatchReason: "test", unattended: true };
+    // The fire admits the slot, then fails before the scheduler records it.
+    const first = await deliverToAssistantThread(deps, { ...args, signal: signal("Post the standup summary") });
+    // The owner edits the prompt, and the scheduler retries the same slot.
+    const retry = await deliverToAssistantThread(deps, { ...args, signal: signal("Post the standup summary and blockers") });
+    expect(retry).toEqual({ ...first, recovered: true });
+    const rows = await testDb.appDb.execute(sql`SELECT content FROM engine_queue_items WHERE dispatch_id = 'schedule:sched-2:200'`) as { rows: Array<{ content: unknown }> };
+    expect(rows.rows).toHaveLength(1);
+    expect(JSON.stringify(rows.rows[0]!.content)).toContain("Post the standup summary");
+    expect(JSON.stringify(rows.rows[0]!.content)).not.toContain("blockers");
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("routine sched-2 (\"Standup\") slot 200"));
+    info.mockRestore();
+  });
+
+  it("names the routine when a recovered routine slot belongs to another owner", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const signal = { kind: "signal" as const, signalType: "schedule", body: "Post the standup summary",
+      attributes: { scheduleId: "sched-3", scheduleName: "Standup" } };
+    const args = { orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, dispatchId: "schedule:sched-3:300", signal,
+      destination: { kind: "key" as const, key: "schedule:sched-3", title: "Standup" }, mismatchReason: "test", unattended: true };
+    await deliverToAssistantThread(deps, args);
+    await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER }, actorUserId: USER }))
+      .rejects.toThrow('The routine "Standup" first ran under another owner. Check who owns the routine, then run the routine "Standup" again.');
+  });
+
   it("recovers the admitted event before a new PR target and verifies its original content", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
