@@ -303,6 +303,28 @@ describe("POST /api/workflows/:id/preview — step design", () => {
     expect(nodeNamed(response, "run").warnings.join(" ")).toContain("Put the action that needs approval in a tool step");
     expect(nodeNamed(response, "finish").warnings.join(" ")).not.toContain("approval");
   });
+
+  it("warns when a step reads a trigger field that the workflow's schedule sends under trigger.data.input", async () => {
+    api = await bootTestApi();
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
+      ],
+      edges: [{ from: "trigger", to: "refresh" }],
+    });
+    expect(nodeNamed(await preview(api.baseUrl, created.id), "refresh").warnings.join(" ")).not.toContain("trigger.data.input");
+
+    const scheduled = await fetch(`${api.baseUrl}/api/workflows/${created.id}/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Nightly refresh", cron: "0 18 * * *", input: { push: true } }),
+    });
+    expect(scheduled.status).toBe(201);
+    const refresh = nodeNamed(await preview(api.baseUrl, created.id), "refresh");
+    expect(refresh.warnings.join(" ")).toContain("{{trigger.data.input.push || trigger.data.push}}");
+  });
 });
 
 describe("POST /api/workflows/:id/preview — foreach", () => {

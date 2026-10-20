@@ -327,9 +327,9 @@ workflowsRouter.get("/action-required", async (c) => {
 });
 
 /**
- * Organization admins: every workflow in the organization whose steps expect
- * a person's approval in a way a run cannot deliver. A one-time check for
- * workflows built before runs stopped asking a person.
+ * Organization admins: every workflow in the organization with a step-design
+ * warning, such as an approval a run cannot deliver or a trigger read that a
+ * schedule leaves empty (`stepDesignWarnings`).
  */
 workflowsRouter.get("/step-check", async (c) => {
   const gate = await requireOrgAdmin(c);

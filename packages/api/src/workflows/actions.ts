@@ -67,6 +67,8 @@ import {
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
 import { allowWorkflowPermissions, analyzeDefinitionPermissions, analyzeWorkflowPermissions, canGrantWorkflowPermissions, needsGrant } from "./permissions.js";
+import { stepDesignWarnings, workflowScheduleNames } from "./step-design.js";
+import { sameWorkflowSteps } from "./definition-version.js";
 import { readNodeDiagnostics } from "./node-diagnostics.js";
 import { readRunFollowUp } from "./run-follow-up.js";
 import { readStepTranscript } from "./step-transcript.js";
@@ -393,6 +395,36 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     return validationDeps ? await buildOrgValidateEnvironment(validationDeps, orgId) : buildValidateEnvironment();
   }
 
+  /**
+   * The step-design warnings for a valid draft, as preview_workflow reports
+   * them for a saved workflow. With `workflowId`, the draft changes that
+   * workflow, so its owner and schedules count. Its saved permissions count
+   * only while the steps stay the same, because a save that changes the steps
+   * revokes them (`updateWorkflowDefinition`). Without `workflowId`, the draft
+   * is a new workflow in the caller's workspace. Null when the caller cannot
+   * reach that workflow. Like the validation environment, the deps are
+   * best-effort: without them, only the definition and the workspace count.
+   */
+  async function draftDesignWarnings(owner: WorkflowOwner, definition: unknown, workflowId: string | undefined) {
+    let deps: WorkflowServiceDeps | undefined;
+    try {
+      deps = getDeps();
+    } catch {
+      deps = undefined;
+    }
+    const saved = deps && workflowId !== undefined ? await getWorkflowDefinition(deps, owner, workflowId) : undefined;
+    if (saved === null) return null;
+    const team = owner.principal?.type === "team" ? owner.principal.id : undefined;
+    // An empty id reads no saved permissions (`loadPolicyRows`).
+    const draft = saved
+      ? { id: sameWorkflowSteps(saved.definition, definition) ? saved.id : "", ownerType: saved.ownerType, ownerId: saved.ownerId, definition }
+      : { id: "", ownerType: team === undefined ? "user" as const : "team" as const, ownerId: team ?? owner.userId, definition };
+    const permissions = deps ? await analyzeDefinitionPermissions(deps, owner, draft) : [];
+    const schedules = deps && saved ? (await workflowScheduleNames(deps.db, owner.orgId, [saved.id])).get(saved.id) : undefined;
+    const warnings = stepDesignWarnings(definition, permissions, { ownerType: draft.ownerType, schedules });
+    return [...warnings].map(([nodeId, list]) => ({ nodeId, warnings: list }));
+  }
+
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
     team_id: Type.String({ description: "Explicit destination team ID." }),
@@ -615,6 +647,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const validateDefinition = action(
     Type.Object({
       definition: Type.Unknown({ description: "The draft dag/v1 definition: { version: 'dag/v1', nodes: [...], edges: [...] }." }),
+      workflow_id: Type.Optional(Type.String({
+        description: "The saved workflow this draft changes. The warnings then read its owner, schedules and saved permissions. Omit it for a new workflow.",
+      })),
     }),
   )({
     id: "workflows.validate_definition",
@@ -623,14 +658,20 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Check a draft dag/v1 definition with the same validator as save_workflow, without saving it. " +
       "Returns { valid: true } when the definition passes the save validation. " +
       "Otherwise `error` lists each validation error, as save_workflow does. " +
+      "A valid draft can also return `warnings` by step: things a run cannot do as written, such as a trigger field a schedule leaves empty, " +
+      "an action a run refuses or stops on, or team commits that a deploy check blocks. A warning does not block a save. " +
+      "Fix each warning, or tell the person why it does not apply. " +
       "Run it on every draft before you call the draft ready or show it to the person.",
     riskLevel: "low",
-    execute: async ({ definition }, ctx) => {
+    execute: async ({ definition, workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const validation = validateDefinitionInput(definition, await saveValidationEnvironment(owner.orgId));
       if (!validation.ok) return { success: false, error: formatLintErrors(validation.errors) };
-      return { success: true, data: { valid: true } };
+      // The raw draft, as save_workflow stores it and compares its steps.
+      const warnings = await draftDesignWarnings(owner, definition, workflow_id);
+      if (warnings === null) return { success: false, error: `workflow not found: ${workflow_id}. Pass the id of a workflow you can edit, or omit workflow_id for a new workflow.` };
+      return { success: true, data: { valid: true, ...(warnings.length > 0 ? { warnings } : {}) } };
     },
   });
 

@@ -63,7 +63,7 @@ import {
 } from "../workflows/service.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { analyzeDefinitionPermissions } from "../workflows/permissions.js";
-import { stepDesignWarnings } from "../workflows/step-design.js";
+import { stepDesignWarnings, workflowScheduleNames } from "../workflows/step-design.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   PreviewField,
@@ -888,11 +888,12 @@ export async function previewWorkflow(
     }
   }
 
-  // Approval a run cannot deliver: an agent step that asks, or an action it
-  // lists that policy holds for approval.
+  // What a run cannot carry out as written: an approval it cannot deliver,
+  // a trigger read its schedule leaves empty, or commits a deploy check blocks.
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   const permissions = summary ? await analyzeDefinitionPermissions(deps, owner, { ...summary, definition }) : [];
-  const design = stepDesignWarnings(definition, permissions);
+  const schedules = await workflowScheduleNames(deps.db, row.orgId, [workflowId]);
+  const design = stepDesignWarnings(definition, permissions, { ownerType: row.ownerType, schedules: schedules.get(workflowId) });
   for (const node of nodes) node.warnings.push(...(design.get(node.nodeId) ?? []));
 
   const response: PreviewWorkflowResponse = {

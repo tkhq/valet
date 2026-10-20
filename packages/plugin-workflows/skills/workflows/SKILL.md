@@ -22,7 +22,7 @@ Split the job by what each part needs. A workflow that does everything in one ag
 - For a list of unknown size, list the items in one step with an `outputSchema` array, handle one item in each iteration of a `foreach` step, then combine the results in a later step.
 - Use `{{trigger.timestamp}}` for the run's date. Never write today's date into a prompt.
 - Write team memory from an `orchestrator` step; a `session` step has no memory tools. Use the sandbox actions API only from a `session` step; an `orchestrator` step is refused.
-- Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`.
+- Run `validate_definition` on every draft before you call it ready or show it to the person. Fix each error it returns, then run it again until it returns `valid: true`. If the draft changes a saved workflow, pass its `workflow_id`. Fix each warning it returns, or tell the person why it does not apply.
 - After each save, run `preview_workflow`. Fix each step warning it reports, or tell the person why it does not apply.
 
 ## Use the workflow tools, not raw API calls
@@ -33,7 +33,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.get_workflow` — full definition by id
 - `workflows.get_permissions` — each tool step's approval `mode` and the rule that set it (`provenance`), as the workflow page's Permissions section shows them
 - `workflows.allow_permissions` — one approval card in which the person allows the steps that need approval and their shared accounts for every later run of the current steps
-- `workflows.validate_definition` — check a draft `definition` with the save validator, without saving it
+- `workflows.validate_definition` — check a draft `definition` with the save validator, without saving it, and list step-design warnings
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes

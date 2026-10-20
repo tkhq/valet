@@ -181,7 +181,7 @@ function dependsOnTemplates(
 export async function analyzeDefinitionPermissions(
   deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
-  summary: WorkflowDefinitionSummary,
+  summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId" | "definition">,
 ): Promise<WorkflowNodePermissionWire[]> {
   const refs = [...toolNodeRefs(summary.definition), ...agentStepRefs(summary.definition)];
   if (refs.length === 0) return [];
@@ -229,11 +229,14 @@ export async function analyzeDefinitionPermissions(
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
     const agentStep = ref.agentStep ? { agentStep: true as const } : {};
     if (!entry || !action) {
-      // An agent step names a dynamic action exactly, so its id is known.
+      // An agent step names a dynamic action exactly, so its id is known. A
+      // tool step's grant comes from a parked run's card, under the id the
+      // run read (`isParkedDynamicStep`); the row keeps a null actionId.
       const actionId = ref.agentStep ? `${ref.service}.${ref.action}` : null;
+      const grantId = actionId ?? (ref.action.includes(".") ? ref.action : `${ref.service}.${ref.action}`);
       nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId,
         mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}),
-        ...(actionId !== null && dynamicActionGranted(rows, ref.service, actionId, now) ? { granted: true as const } : {}) });
+        ...(dynamicActionGranted(rows, ref.service, grantId, now) ? { granted: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);

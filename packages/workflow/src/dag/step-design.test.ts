@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { approvalRequestWarning } from './step-design.js';
+import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses } from './step-design.js';
 
 const session = (prompt: string) => ({ type: 'session', prompt });
 
@@ -18,5 +18,35 @@ describe('approvalRequestWarning', () => {
     expect(approvalRequestWarning(session('Never request approval; report what you need instead.'))).toBeUndefined();
     expect(approvalRequestWarning(session('Summarize the approved budget in three bullets.'))).toBeUndefined();
     expect(approvalRequestWarning({ type: 'llm', prompt: 'Ask for approval.' })).toBeUndefined();
+  });
+});
+
+describe('pushesGitCommits', () => {
+  it('flags an agent step that tells its agent to commit or push', () => {
+    expect(pushesGitCommits(session('If {{trigger.data.push}} is true, commit and push data/dashboard.json to main.'))).toBe(true);
+    expect(pushesGitCommits(session('Run `git push origin HEAD` when the tests pass.'))).toBe(true);
+    expect(pushesGitCommits({ type: 'orchestrator', prompt: 'Push the changes to the main branch.' })).toBe(true);
+  });
+
+  it('stays quiet for prompts that forbid pushing, never mention git, or are not agent steps', () => {
+    expect(pushesGitCommits(session('Read the diff and comment on it. Do not commit or push anything.'))).toBe(false);
+    expect(pushesGitCommits(session('Summarize the open pull requests in three bullets.'))).toBe(false);
+    expect(pushesGitCommits(session('Send a push notification to the on-call channel.'))).toBe(false);
+    expect(pushesGitCommits({ type: 'llm', prompt: 'Commit and push the file.' })).toBe(false);
+  });
+});
+
+describe('scheduledRunMisses', () => {
+  it('lists trigger.data fields a scheduled run leaves empty, by node', () => {
+    const definition = {
+      nodes: [
+        { id: 'trigger', type: 'trigger' },
+        { id: 'gate', type: 'if', conditions: [{ left: 'trigger.data.push', dataType: 'boolean', operation: 'true' }] },
+        { id: 'each', type: 'foreach', items: '{{trigger.data.input.rows}}', body: { type: 'tool', params: { to: '{{trigger.data.channel}}' } } },
+        { id: 'both', type: 'session', prompt: '{{trigger.data.input.push || trigger.data.push}} {{exists(trigger.data.flag)}}' },
+        { id: 'own', type: 'session', prompt: '{{trigger.data.scheduleName}} {{trigger.data.cron}} {{trigger.data.input}} {{trigger.data}}' },
+      ],
+    };
+    expect([...scheduledRunMisses(definition)]).toEqual([['gate', ['push']], ['each', ['channel']]]);
   });
 });

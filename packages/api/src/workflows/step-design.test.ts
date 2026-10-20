@@ -36,6 +36,47 @@ describe("stepDesignWarnings", () => {
   });
 });
 
+describe("stepDesignWarnings: what a run reads and runs as", () => {
+  const steps = (...nodes: Record<string, unknown>[]) => ({ version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, ...nodes], edges: [] });
+
+  it("warns when a step reads a trigger field that a schedule sends under trigger.data.input", () => {
+    const definition = steps(
+      { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
+      { id: "each", type: "foreach", items: "{{trigger.data.input.rows}}", body: { type: "tool", service: "slack", action: "post_message", params: { channel: "{{trigger.data.channel}}" } } },
+    );
+    const warnings = stepDesignWarnings(definition, [], { schedules: ["Nightly refresh"] });
+    expect([...warnings.keys()].sort()).toEqual(["each", "refresh"]);
+    expect(warnings.get("refresh")?.join(" ")).toContain("{{trigger.data.input.push || trigger.data.push}}");
+    expect(warnings.get("refresh")?.join(" ")).toContain('"Nightly refresh"');
+    expect(warnings.get("each")?.join(" ")).toContain("trigger.data.input.channel");
+  });
+
+  it("stays quiet with no schedule, a read that covers both paths, or a field the schedule sets itself", () => {
+    const read = (prompt: string) => steps({ id: "refresh", type: "session", mode: "start", prompt });
+    expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), []).size).toBe(0);
+    expect(stepDesignWarnings(read("Push: {{trigger.data.input.push || trigger.data.push}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
+    expect(stepDesignWarnings(read("{{trigger.data.scheduleName}} fired at {{trigger.data.cron}} with {{trigger.data.input}}"), [], { schedules: ["Nightly"] }).size).toBe(0);
+  });
+
+  it("warns when a run stops on an action that has no saved permission and no known risk", () => {
+    const tool: WorkflowNodePermissionWire = { nodeId: "create_project", service: "linear", action: "save_project", actionId: null, mode: "unknown" };
+    const agent: WorkflowNodePermissionWire = { nodeId: "finish", service: "linear", action: "save_milestone", actionId: "linear.save_milestone", mode: "unknown", agentStep: true };
+    const warnings = stepDesignWarnings(steps(), [tool, agent, { ...tool, nodeId: "allowed_tool", granted: true }, { ...agent, nodeId: "allowed_agent", granted: true }]);
+    expect([...warnings.keys()].sort()).toEqual(["create_project", "finish"]);
+    expect(warnings.get("create_project")?.join(" ")).toContain("Allow for this workflow");
+    expect(warnings.get("finish")?.join(" ")).toContain("linear.save_milestone");
+    expect(warnings.get("finish")?.join(" ")).toContain("Review permissions");
+  });
+
+  it("warns when an agent step of a team or organization workflow pushes git commits", () => {
+    const definition = steps({ id: "refresh", type: "session", mode: "start", prompt: "Commit and push data/dashboard.json to main." });
+    expect(stepDesignWarnings(definition, [], { ownerType: "team" }).get("refresh")?.join(" ")).toContain("Valet Agent <agent@valet.local>");
+    expect(stepDesignWarnings(definition, [], { ownerType: "org" }).get("refresh")?.join(" ")).toContain("Vercel");
+    expect(stepDesignWarnings(definition, [], { ownerType: "user" }).size).toBe(0);
+    expect(stepDesignWarnings(definition, []).size).toBe(0);
+  });
+});
+
 describe("GET /api/workflows/step-check", () => {
   let api: TestApi | undefined;
   afterEach(async () => {
