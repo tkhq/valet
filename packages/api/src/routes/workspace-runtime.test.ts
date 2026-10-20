@@ -283,13 +283,15 @@ describe("Ask Valet conversations", () => {
     const root = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
     await db.insert(legacyAssistantRuntimes).values({ assistantId: root.assistant.id, sessionId: root.sessionId,
       orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    const legacy: Record<string, EnsureWorkspaceConversationResponse> = {};
     for (const user of ["local-user", "test-member"]) {
-      const legacy = await root.session.createThread(`app-assistant:${user}`);
-      await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: root.sessionId, conversationKey: legacy.key });
+      const thread = await root.session.createThread(`app-assistant:${user}`);
+      await db.insert(legacyAssistantConversations).values({ threadId: thread.id, sessionId: root.sessionId, conversationKey: thread.key });
+      legacy[user] = { sessionId: root.sessionId, threadId: thread.id };
     }
     const alice = conversations("legacy-ask");
     const bob = conversations("legacy-ask", "test-member");
-    expect((await alice.open()).sessionId).toBe(root.sessionId);
+    expect(await alice.open()).toEqual(legacy["local-user"]);
     const mine = await alice.open({ fresh: true });
     const theirs = await bob.open({ fresh: true });
     expect(mine.sessionId).toMatch(/^execution:/);
@@ -304,6 +306,18 @@ describe("Ask Valet conversations", () => {
     await use(theirs);
     expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[mine.sessionId, mine.threadId]]);
     expect((await bob.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([[theirs.sessionId, theirs.threadId]]);
+
+    // The older conversation stays reachable on the root: in Recent, on a plain
+    // open, on reopen while it waits for an approval, and as the CLI target.
+    await use(legacy["local-user"]!);
+    expect((await alice.list()).conversations.map(item => [item.sessionId, item.threadId])).toEqual([
+      [root.sessionId, legacy["local-user"]!.threadId], [mine.sessionId, mine.threadId]]);
+    expect(await alice.open()).toEqual(legacy["local-user"]);
+    await waitForApproval(legacy["local-user"]!);
+    expect(await alice.open({ fresh: true, unlessBusy: true })).toEqual(legacy["local-user"]);
+    const runtime = await (await fetch(`${api.baseUrl}/api/workspaces/legacy-ask/runtime`, { method: "POST" })).json() as EnsureWorkspaceRuntimeResponse;
+    expect(runtime.sessionId).toBe(root.sessionId);
+    expect(await db.select().from(assistantExecutions).where(eq(assistantExecutions.conversationKey, "app-assistant:local-user"))).toEqual([]);
   });
 
   it("keeps each team member's conversations to that member", async () => {
