@@ -40,6 +40,13 @@ export interface McpActionPluginOptions {
    * message names it. When absent, the message names no page.
    */
   appConnectHint?: string;
+  /**
+   * The server accepts only tokens from its own OAuth sign-in. A rejected
+   * personal account then tells the user to disconnect it and sign in,
+   * because a pasted token saved before the connect UI stopped offering
+   * token entry never works (CredentialDeclaration.oauthOnly).
+   */
+  oauthOnly?: boolean;
   description?: string;
 }
 
@@ -48,6 +55,7 @@ interface RejectionText {
   /** `displayName`, or `serviceName` when absent. */
   label: string;
   appConnectHint?: string;
+  oauthOnly?: boolean;
 }
 
 interface ResolvedToken {
@@ -82,7 +90,11 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
   const appCredentialService = opts.appCredentialService;
-  const messages: RejectionText = { label: opts.displayName ?? serviceName, appConnectHint: opts.appConnectHint };
+  const messages: RejectionText = {
+    label: opts.displayName ?? serviceName,
+    appConnectHint: opts.appConnectHint,
+    oauthOnly: opts.oauthOnly,
+  };
 
   return {
     service: serviceName,
@@ -156,7 +168,7 @@ async function resolveToken(
 function authRejectionMessage(
   err: unknown,
   source: CredentialSource | undefined,
-  { label, appConnectHint }: RejectionText,
+  { label, appConnectHint, oauthOnly }: RejectionText,
 ): string | undefined {
   if (!source) return undefined;
   if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
@@ -179,6 +191,9 @@ function authRejectionMessage(
     case 'vault':
       return `${label} rejected the token from its 1Password item. Ask the owner of the ${label} item in 1Password to update it, or ${own}.`;
     case 'personal':
+      if (oauthOnly) {
+        return `${label} rejected your connected account. Disconnect ${label} on the Integrations page, then select Connect to sign in with ${label}.`;
+      }
       return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
   }
 }

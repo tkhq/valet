@@ -1087,6 +1087,22 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
     );
   });
 
+  it('tells the user to disconnect and sign in when an oauthOnly server rejects the personal account', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.usepylon.com',
+      serviceName: 'pylon',
+      defaultRiskLevel: 'low',
+      displayName: 'Pylon',
+      oauthOnly: true,
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'pasted-api-token' });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'Pylon rejected your connected account. Disconnect Pylon on the Integrations page, then select Connect to sign in with Pylon.',
+    );
+  });
+
   it('rethrows a non-auth discovery failure unchanged (HTTP 500)', async () => {
     vi.stubGlobal('fetch', makeFetchMockFailingList(500, 'server exploded'));
     const plugin = mcpActionPlugin({

@@ -422,6 +422,18 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json({ error: "createOnly supports direct team tokens. Select team scope and enter a token." }, 400);
   }
 
+  // A provider that accepts only its own OAuth sign-in never accepts a
+  // pasted token (`CredentialDeclaration.oauthOnly`). The row would save,
+  // and every run would then fail at tool discovery. The sign-in callback
+  // stores its token through `routes/credential-connect.ts`, not here.
+  if (findCredentialDeclaration(plugins, service)?.oauthOnly) {
+    const label = serviceDisplayName(service);
+    return c.json(
+      { error: `${label} accepts only its own sign-in, not a pasted token. To connect, select Connect for ${label} on the Integrations page, then select Continue.` },
+      400,
+    );
+  }
+
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
   // rejected — the token could never power a working integration. Org-scope

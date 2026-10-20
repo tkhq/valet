@@ -3136,6 +3136,10 @@ export interface PluginServiceSummary {
   connectLabel?: string;
   configKeys: string[];
   connected: boolean;
+  /** The provider accepts only tokens from its OAuth sign-in
+   * (`CredentialDeclaration.oauthOnly`). The connect UI offers no token
+   * entry, and `PUT /api/credentials/:service` refuses a pasted token. */
+  oauthOnly?: true;
   /** Set (to `true`) only when an `ActionPlugin` for this service declares
    * `resolveActions` — the plugin's action list isn't fully known statically. */
   dynamic?: true;

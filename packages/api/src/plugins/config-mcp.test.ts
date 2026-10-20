@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CredentialProvider } from "@valet/engine";
 import type { McpServerDecl } from "../config/instance-config.js";
 import { InstanceConfigError } from "../config/instance-config.js";
 import { CONFIG_MCP_PLUGIN_PREFIX, configMcpPlugins } from "./config-mcp.js";
@@ -9,6 +10,10 @@ const URL = "https://mcp.example.test/mcp";
 function decl(overrides: Partial<McpServerDecl>): McpServerDecl {
   return { name: "example", url: URL, auth: "none", ...overrides };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("configMcpPlugins", () => {
   it("returns [] for an absent or empty list", () => {
@@ -88,6 +93,25 @@ describe("configMcpPlugins", () => {
     // A borrow approval names the account by the same name.
     expect(plugin.actions?.[0]?.displayName).toBe("Example Cloud");
     expect(plugin.credentials?.[0]?.connectLabel).toBe("Example Cloud API key");
+  });
+
+  it("oauthOnly entries mark the credential and tell a rejected account to sign in, by display name", async () => {
+    // Pylon's MCP server answers every request with 401 when the bearer is not its own OAuth token.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("unauthorized", { status: 401 })));
+    const [plugin] = configMcpPlugins([decl({ name: "pylon", auth: "oauth", oauthOnly: true })], {});
+    expect(plugin.credentials?.[0]?.oauthOnly).toBe(true);
+
+    const credentials: CredentialProvider = {
+      get: async () => ({ accessToken: "pasted-api-token", source: { kind: "personal" } }),
+      request: async () => {
+        throw new Error("discovery never requests a credential");
+      },
+    };
+    const resolveActions = plugin.actions?.[0]?.resolveActions;
+    if (!resolveActions) throw new Error("config MCP plugins discover their tools");
+    await expect(resolveActions({ credentials })).rejects.toThrow(
+      "Pylon rejected your connected account. Disconnect Pylon on the Integrations page, then select Connect to sign in with Pylon.",
+    );
   });
 
   it("defaults displayName to the title-cased entry name", () => {
