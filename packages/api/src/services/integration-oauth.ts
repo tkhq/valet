@@ -8,7 +8,13 @@
  */
 import { eq } from "drizzle-orm";
 import type { CredentialDeclaration, OAuthDeclaration, ValetPlugin } from "@valet/engine";
-import { discoverAuthServer, OAuthTokenError, registerClient, type TokenResponse } from "@valet/sdk";
+import {
+  discoverAuthServer,
+  OAuthTokenError,
+  registerClient,
+  type AuthServerMetadata,
+  type TokenResponse,
+} from "@valet/sdk";
 import { mcpOauthClients } from "../schema/index.js";
 
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -23,6 +29,9 @@ export interface McpClientRow {
   clientId: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
+  /** The scopes the client registered with, sorted. The authorize request
+   * names exactly these; [] sends no scope parameter. */
+  scopes: string[];
 }
 
 /** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
@@ -69,11 +78,31 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
 }
 
 /**
+ * The scopes to request for an entry that declares `declared`: the declared
+ * scopes plus every scope the MCP server's protected resource advertises.
+ * A declared list is a copy of one server version's scopes, and a server
+ * upgrade can gate its tools on new ones (Metabase 1.64 moved every read
+ * tool to `agent:content:read`). The advertised set is what the server
+ * checks now, so requesting it keeps the token valid across upgrades.
+ *
+ * A scopeless entry stays scopeless: those servers grant their default
+ * scopes today, and adding scopes would re-register every bundled MCP
+ * client and stop every connected user's refresh.
+ */
+function requestedScopes(declared: string[], meta: AuthServerMetadata): string[] {
+  if (declared.length === 0) return declared;
+  return normalizeScopes([...new Set([...declared, ...(meta.resource_scopes_supported ?? [])])]);
+}
+
+/**
  * The stored dynamic client for `service`, registering one when none exists
- * or when the DECLARED scope set differs from the registered one. The scope
- * set rides the RFC 7591 registration, not only the authorize request —
- * a server that constrains grants to the registered set would otherwise
- * narrow or refuse authorize-time scopes (TKAI-243).
+ * or when the REQUESTED scope set (`requestedScopes`) differs from the
+ * registered one. The scope set rides the RFC 7591 registration, not only
+ * the authorize request — a server that constrains grants to the registered
+ * set would otherwise narrow or refuse authorize-time scopes (TKAI-243).
+ *
+ * An entry with declared scopes runs discovery on every connect, so a
+ * server upgrade that advertises a new scope re-registers the client.
  *
  * Re-registration replaces the stored client_id, so refresh tokens issued
  * to the old client stop refreshing; users reconnect — the same remedy a
@@ -87,9 +116,15 @@ export async function ensureMcpOAuthClient(
   scopes?: string[],
 ): Promise<McpClientRow> {
   const declared = normalizeScopes(scopes);
+  let meta: AuthServerMetadata | undefined;
+  let requested = declared;
+  if (declared.length > 0) {
+    meta = await discoverAuthServer(serverUrl);
+    requested = requestedScopes(declared, meta);
+  }
   const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
-  if (existing[0] && sameScopes(existing[0].registeredScopes, declared)) {
-    if (declared.length === 0) {
+  if (existing[0] && sameScopes(existing[0].registeredScopes, requested)) {
+    if (requested.length === 0) {
       let advertised = existing[0].scopesSupported;
       if (advertised === null) {
         // Row from before the scopes_supported column: backfill it with one
@@ -114,17 +149,17 @@ export async function ensureMcpOAuthClient(
     return toRow(existing[0]);
   }
 
-  const meta = await discoverAuthServer(serverUrl);
+  meta ??= await discoverAuthServer(serverUrl);
   if (!meta.registration_endpoint) {
     throw new Error(`MCP OAuth: ${service} discovery reported no registration_endpoint`);
   }
-  if (declared.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
+  if (requested.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
     warnScopelessEntry(service, meta.scopes_supported ?? []);
   }
   const client = await registerClient(meta.registration_endpoint, {
     clientName: "Valet",
     redirectUris: [redirectUri],
-    ...(declared.length > 0 ? { scope: declared.join(" ") } : {}),
+    ...(requested.length > 0 ? { scope: requested.join(" ") } : {}),
   });
   const now = Date.now();
   const values = {
@@ -132,20 +167,21 @@ export async function ensureMcpOAuthClient(
     authorizationEndpoint: meta.authorization_endpoint,
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
-    registeredScopes: declared,
+    registeredScopes: requested,
     scopesSupported: meta.scopes_supported ?? [],
     updatedAt: now,
   };
   if (existing[0]) {
-    // Declared scopes changed: replace the stored client in place. Last
+    // Requested scopes changed: replace the stored client in place. Last
     // writer wins on a concurrent scope change — both writers registered
-    // with the same declared set, so either row works.
+    // with the same requested set, so either row works.
     await deps.db.update(mcpOauthClients).set(values).where(eq(mcpOauthClients.service, service));
     // Refresh tokens were issued to the OLD client_id and stop refreshing
     // now. Nothing repairs that automatically — connected users must
     // disconnect and reconnect, so tell the operator while they are looking.
     console.warn(
-      `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}). ` +
+      `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}, ` +
+        `scopes: ${requested.join(" ") || "none"}). ` +
         `Existing ${service} credentials stop refreshing; users must disconnect and reconnect in Integrations.`,
     );
   } else {
@@ -161,12 +197,24 @@ export async function ensureMcpOAuthClient(
   return toRow(stored[0]);
 }
 
+/**
+ * The stored client for `service`, with no discovery or registration. The
+ * OAuth callback uses it: the authorization code belongs to the client the
+ * connect started with, so the callback must not register a replacement.
+ */
+export async function getMcpOAuthClient(deps: OAuthDeps, service: string): Promise<McpClientRow> {
+  const stored = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
+  if (!stored[0]) throw new Error(`MCP OAuth: ${service} has no registered client. Start the connect again.`);
+  return toRow(stored[0]);
+}
+
 function toRow(r: typeof mcpOauthClients.$inferSelect): McpClientRow {
   return {
     service: r.service,
     clientId: r.clientId,
     authorizationEndpoint: r.authorizationEndpoint,
     tokenEndpoint: r.tokenEndpoint,
+    scopes: normalizeScopes(r.registeredScopes ?? undefined),
   };
 }
 

@@ -473,7 +473,11 @@ Auth modes:
   validation refuses it. Declare them for a scope-gated server: Metabase,
   for one, grants a token with no scopes when the request names none —
   the server does not fall back to the registered client's default scope
-  set — and then lists zero tools with no error anywhere. A scope-less
+  set — and then lists zero tools with no error anywhere. For an entry
+  with `scopes`, Valet also requests every scope the server's protected
+  resource metadata advertises, so the list does not need a new scope
+  each time the server adds one (Metabase 1.64 added
+  `agent:content:read`). A scope-less
   entry against a server that advertises `scopes_supported` logs a
   warning at connect naming the entry and the fix. The callback stores
   the scopes the token response grants (RFC 6749 `scope`), not the

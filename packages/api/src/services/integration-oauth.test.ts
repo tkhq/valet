@@ -88,6 +88,55 @@ describe("ensureMcpOAuthClient", () => {
     expect(fake.registrations).toHaveLength(1);
   });
 
+  it("adds the scopes the protected resource advertises to the declared scopes", async () => {
+    // Metabase 1.64: read tools need agent:content:read, which a scope
+    // list copied from 1.63 does not name.
+    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:content:read", "agent:query:run"] });
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+        "agent:search",
+      ]);
+      expect(row.scopes).toEqual(["agent:content:read", "agent:query:run", "agent:search"]);
+      expect(mb.registrations[0]?.scope).toBe("agent:content:read agent:query:run agent:search");
+    } finally {
+      await mb.close();
+    }
+  });
+
+  it("re-registers when a server upgrade advertises a new resource scope", async () => {
+    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:query:run"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const before = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(before.clientId).toBe("client-1");
+
+      mb.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+      const after = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(after.clientId).toBe("client-2");
+      expect(after.scopes).toEqual(["agent:content:read", "agent:query:run"]);
+      expect(mb.registrations[1]?.scope).toBe("agent:content:read agent:query:run");
+    } finally {
+      warn.mockRestore();
+      await mb.close();
+    }
+  });
+
+  it("requests no scope for a scopeless entry, even when the resource advertises scopes", async () => {
+    const linear = await startFakeOAuthServer({ resourceScopesSupported: ["read", "write"] });
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", linear.url, "https://valet.example/cb");
+      expect(row.scopes).toEqual([]);
+      expect(linear.registrations[0]?.scope).toBeUndefined();
+    } finally {
+      await linear.close();
+    }
+  });
+
   it("warns when no scopes are declared but the server advertises scopes_supported", async () => {
     const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query", "mb:full"] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

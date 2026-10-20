@@ -39,6 +39,7 @@ import {
   exchangeAuthorizationCode,
   exchangeAuthorizationCodeRaw,
   findOAuthDeclaration,
+  getMcpOAuthClient,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -192,7 +193,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       redirectUri,
       codeChallenge,
       state,
-      scopes: found.decl.scopes,
+      scopes: clientRow.scopes,
     });
     return c.redirect(url, 302);
   }
@@ -232,12 +233,12 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
 /**
  * Scopes to store on the saved credential: what the token response granted
  * (RFC 6749 §5.1 `scope`, possibly "" for a token with no scopes), falling
- * back to the declared list only when the response names none. Never store
- * the declared list over a narrower grant — it would mask a scope-gated
- * server's refusal (TKAI-242).
+ * back to the requested list only when the response names none (§5.1: the
+ * grant then equals the request). Never store the requested list over a
+ * narrower grant — it would mask a scope-gated server's refusal (TKAI-242).
  */
-function grantedScopes(scope: string | undefined, declared: string[] | undefined): string[] | undefined {
-  if (typeof scope !== "string") return declared;
+function grantedScopes(scope: string | undefined, requested: string[] | undefined): string[] | undefined {
+  if (typeof scope !== "string") return requested;
   return scope.split(" ").filter(Boolean);
 }
 
@@ -285,7 +286,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${landing}error=oauth_state`, 302);
-      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
+      const clientRow = await getMcpOAuthClient({ db }, verified.service);
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,
@@ -297,7 +298,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: grantedScopes(tokens.scope, found.decl.scopes),
+        scopes: grantedScopes(tokens.scope, clientRow.scopes.length > 0 ? clientRow.scopes : undefined),
         metadata: { connectedVia: "oauth" },
       };
     } else if (found.oauth.interpretTokenResponse) {

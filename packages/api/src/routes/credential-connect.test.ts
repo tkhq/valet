@@ -136,6 +136,17 @@ describe("GET /api/credentials/:service/connect", () => {
     expect(location.searchParams.get("state")).toBeTruthy();
   });
 
+  it("mcp mode: the authorize request names the scopes the protected resource advertises", async () => {
+    // The 10-20 Metabase break: the declared list predates agent:content:read,
+    // so every reconnect minted a token that could not call the read tools.
+    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run", "agent:search"])] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location") ?? "");
+    expect(location.searchParams.get("scope")).toBe("agent:content:read agent:query:run agent:search");
+  });
+
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
     api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
     const res = await fetch(`${api.baseUrl}/api/credentials/gmail/connect`, { redirect: "manual" });
@@ -294,6 +305,22 @@ describe("GET /api/credentials/oauth/callback", () => {
 
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
     expect(stored?.scopes).toEqual(["agent:query"]);
+  });
+
+  it("mcp mode: the callback exchanges with the client that started the connect", async () => {
+    fake.resourceScopesSupported = ["agent:query:run"];
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const state = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
+
+    // The server changes its scopes between authorize and callback. The
+    // code belongs to client-1, so the callback must not register client-2.
+    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
+    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
+    expect(fake.tokenRequests[0]?.client_id).toBe("client-1");
+    expect(fake.registrations).toHaveLength(1);
   });
 
   it("provider error param redirects to /integrations with the error code", async () => {

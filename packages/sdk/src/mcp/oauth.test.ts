@@ -60,6 +60,26 @@ describe('discoverAuthServer', () => {
     );
   });
 
+  it('returns the scopes the protected resource advertises apart from the issuer scopes', async () => {
+    // Metabase 1.64 shape: the resource gates tools on five scopes, while
+    // the issuer also lists the scopes of the older tool surface.
+    mockFetchRoutes({
+      'https://mb.example.com/.well-known/oauth-protected-resource/api/metabase-mcp': {
+        resource: 'https://mb.example.com/api/metabase-mcp',
+        authorization_servers: ['https://mb.example.com'],
+        scopes_supported: ['agent:content:read', 'agent:query:run'],
+      },
+      'https://mb.example.com/.well-known/oauth-authorization-server': {
+        ...AS_METADATA,
+        scopes_supported: ['agent:content:read', 'agent:query', 'agent:query:run'],
+      },
+    });
+
+    const meta = await discoverAuthServer('https://mb.example.com/api/metabase-mcp');
+    expect(meta.resource_scopes_supported).toEqual(['agent:content:read', 'agent:query:run']);
+    expect(meta.scopes_supported).toEqual(['agent:content:read', 'agent:query', 'agent:query:run']);
+  });
+
   it('falls back to AS metadata on the MCP origin when there is no protected-resource metadata', async () => {
     mockFetchRoutes({
       'https://mcp.example.com/.well-known/oauth-authorization-server/mcp': AS_METADATA,

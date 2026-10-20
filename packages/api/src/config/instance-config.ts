@@ -74,7 +74,9 @@ export interface McpServerDecl {
   authQueryParam?: string;
   /** OAuth scopes for the authorize request. Only valid when auth is
    * "oauth". Scope-gated servers (e.g. Metabase) issue a token with no
-   * scopes when the request names none, and then list zero tools. */
+   * scopes when the request names none, and then list zero tools. The
+   * request also names every scope the server's protected resource
+   * advertises (integration-oauth design). */
   scopes?: string[];
   /** Connect-UI copy for api_key entry, e.g. "Acme API key". */
   connectLabel?: string;
