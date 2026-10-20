@@ -534,7 +534,8 @@ export interface TeamReadCtx {
    * token (native credential policy, Part B). When it resolves true, a read
    * that ends on a dead team connection or a broken share returns `null`, so
    * the caller goes on to that tier instead of the dead row or the error.
-   * It is called only on those two paths.
+   * It is called only on those paths, and on a team row that is present but
+   * unusable (expired with no refresh token).
    */
   laterTier?: () => Promise<boolean>;
 }
@@ -553,7 +554,9 @@ export interface TeamReadCtx {
  * When nothing up to step 3 answers and another member's share would,
  * `approvalFrom` names that member: the action needs their approval first.
  * With nothing at all, a dead team connection or a broken share is the last
- * answer, unless `laterTier` says a later tier will answer.
+ * answer, unless `laterTier` says a later tier will answer. A team row that
+ * cannot answer for another reason (expired with no refresh token) also asks
+ * `laterTier`, so the caller counts it as a broken connection.
  * A personal-tokenScope 1Password pointer on a team row fails closed through
  * `resolveRow` (`excluded: "resolve"`).
  */
@@ -589,6 +592,11 @@ export async function readTeamCredential(
   // last answer, so with nothing else the caller gets the provider's refusal.
   const deadTeam = fromTeam && isDeadConnection(fromTeam, Date.now()) ? fromTeam : null;
   if (fromTeam && !deadTeam && !isUnusableOAuthCredential(fromTeam, Date.now())) return { credential: fromTeam, source: { kind: "team" } };
+  // A team row that is present but cannot answer (expired with no refresh
+  // token, or a row the resolver returns nothing for) is a broken team
+  // connection, the same as a dead one. A later tier counts it as
+  // `dead_delegated`, not as a team with no connection.
+  const unusableTeam = teamRow !== null && !deadTeam;
   if (orgFallback !== "none") {
     if (orgFallback === "org-provided") {
       const fromOrg = await readOrgRow(deps, readCtx, service, "resolve");
@@ -610,7 +618,7 @@ export async function readTeamCredential(
     // Only an account that would actually answer is worth an approval.
     if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
   }
-  if ((deadTeam || brokenShare) && await ctx.laterTier?.()) return { credential: null };
+  if ((deadTeam || unusableTeam || brokenShare) && await ctx.laterTier?.()) return { credential: null };
   if (deadTeam) return { credential: deadTeam, source: { kind: "team" } };
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);

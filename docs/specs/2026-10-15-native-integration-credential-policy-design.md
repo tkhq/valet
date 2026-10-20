@@ -227,8 +227,10 @@ deployment after merge.
    workflow tool-node reads (`plugins/action-invoker.ts`). Reasons:
    `no_personal` (a user owner had no row), `no_delegated` (a team had no
    share and no team row), `dead_delegated` (a team share or team row
-   existed but could not answer), `approval_pending` (a member's share
-   would answer, and that member has not approved yet), and `org_owner`
+   existed but could not answer: a refused refresh, an expired token
+   with no refresh token, or a row the resolver could not make usable),
+   `approval_pending` (a member's share would answer, and that member has
+   not approved yet), and `org_owner`
    (an org-owned read). The counter counts actions, not reads: only the
    reads an action makes as it executes count (`CredentialRead.forAction`
    in a session; the action's own provider in a workflow run). The

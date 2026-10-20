@@ -186,6 +186,16 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
   });
 
+  it("auto: a team run with an expired team connection falls to the app token and counts dead_delegated", async () => {
+    const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
+    const invoke = invokerFor(appDb, credentials);
+
+    expect(await invoke(node("linear"), teamCtx)).toEqual(bareApp);
+    expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
+  });
+
   it("a team run counts one fallback per action, and none while it parks for a share's approval", async () => {
     const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
     const { appDb, credentials } = await harness();

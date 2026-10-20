@@ -945,6 +945,28 @@ describe("native app credentials", () => {
       await expect(readTeamCredential(deps, { orgId, teamId: "t1", userId }, "linear", "reference-only")).rejects.toBeInstanceOf(CredentialReferenceBrokenError);
     });
 
+    it("asks a later tier when the team row is expired with no refresh token", async () => {
+      const credentials = fakeCredentialStore();
+      await credentials.save({ type: "team", id: "t1" }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
+      let calls = 0;
+
+      const result = await readTeamCredential({ credentials }, { orgId, teamId: "t1", laterTier: async () => { calls += 1; return true; } }, "linear", "reference-only");
+      expect(result).toEqual({ credential: null });
+      // The caller counts this read as a broken connection (dead_delegated).
+      expect(calls).toBe(1);
+      // Without a later tier, the unusable row still never answers.
+      expect(await readTeamCredential({ credentials }, { orgId, teamId: "t1" }, "linear", "reference-only")).toEqual({ credential: null });
+    });
+
+    it("is not consulted when the team has no row and nothing is broken", async () => {
+      const credentials = fakeCredentialStore();
+      let calls = 0;
+
+      const result = await readTeamCredential({ credentials }, { orgId, teamId: "t1", laterTier: async () => { calls += 1; return true; } }, "linear", "reference-only");
+      expect(result).toEqual({ credential: null });
+      expect(calls).toBe(0);
+    });
+
     it("is not consulted when a tier answers", async () => {
       const credentials = fakeCredentialStore();
       await credentials.save({ type: "team", id: "t1" }, "linear", { type: "oauth2", accessToken: "team-linear" });
