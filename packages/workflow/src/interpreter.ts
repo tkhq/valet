@@ -534,9 +534,11 @@ async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisD
     const ownerCheckpoint = checkpoints.find((cp) => cp.nodeId === owner && cp.iteration === ITERATION);
     return ownerCheckpoint === undefined || ownerCheckpoint.status === 'intent';
   };
-  for (const wait of [...run.waitingOn, ...parkedThisDrive]) {
-    if ((open.has(wait.nodeId) || !seen.has(wait.nodeId)) && ownerOpen(wait.nodeId)) add(wait);
-  }
+  // An intent checkpoint that records its dispatched work names that work
+  // exactly. Its node's saved waits are then covered by the receipts: the
+  // foreach items share one node id, so a saved wait for an item that
+  // finished matches no live receipt and is dropped.
+  const withReceipts = new Set<string>();
   for (const cp of checkpoints) {
     if (cp.status !== 'intent' || !cp.effects || !ownerOpen(cp.nodeId)) continue;
     const { sessionId, receipt, childRunId } = cp.effects;
@@ -545,9 +547,18 @@ async function inFlightWaits(store: WorkflowStore, run: WorkflowRun, parkedThisD
       const queueItemId: unknown = Reflect.get(receipt, 'queueItemId');
       if (typeof threadId === 'string' && typeof queueItemId === 'string') {
         add({ kind: 'submission', nodeId: cp.nodeId, sessionId, threadId, queueItemId });
+        withReceipts.add(cp.nodeId);
       }
     }
-    if (typeof childRunId === 'string') add({ kind: 'run', nodeId: cp.nodeId, runId: childRunId });
+    if (typeof childRunId === 'string') {
+      add({ kind: 'run', nodeId: cp.nodeId, runId: childRunId });
+      withReceipts.add(cp.nodeId);
+    }
+  }
+  for (const wait of [...run.waitingOn, ...parkedThisDrive]) {
+    if (!ownerOpen(wait.nodeId)) continue;
+    // No checkpoint yet, or an open node that records no receipt: keep the wait.
+    if (!seen.has(wait.nodeId) || (open.has(wait.nodeId) && !withReceipts.has(wait.nodeId))) add(wait);
   }
   return [...waits.values()];
 }

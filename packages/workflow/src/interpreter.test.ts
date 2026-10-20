@@ -1258,6 +1258,49 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     expect(engine.abort).not.toHaveBeenCalledWith('session-item', 'thread-item', 'queue-3');
   });
 
+  it('cancels the live foreach items without aborting a finished one that shares their node id', async () => {
+    // Items 0 and 2 are still `intent`; item 1 finished. All three saved
+    // waits name the body node, so only the receipts tell them apart.
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const base = makeFakeEngineDeps();
+    const engine = {
+      ...base,
+      abort: vi.fn(async (sessionId: string, threadId: string, queueItemId?: string) => {
+        if (queueItemId === 'queue-1') throw new Error('abort reached a settled submission');
+        return base.abort(sessionId, threadId, queueItemId);
+      }),
+    };
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'each', type: 'foreach', items: '{{trigger.data.rows}}', body: { id: 'item', type: 'orchestrator', prompt: 'Handle the row.' } },
+      ],
+      edges: [{ from: 't', to: 'each' }],
+    };
+    await store.createRun('run-foreach-mixed', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'run-foreach-mixed');
+    const receipt = (i: number) => ({ sessionId: `session-${i}`, receipt: { threadId: `thread-${i}`, queueItemId: `queue-${i}` } });
+    const wait = (i: number) => ({ kind: 'submission' as const, nodeId: 'item', sessionId: `session-${i}`, threadId: `thread-${i}`, queueItemId: `queue-${i}` });
+    await store.putIntent({ runId: 'run-foreach-mixed', nodeId: 'each', iteration: 0, status: 'intent', attempt, createdAt: clock.now() });
+    for (const i of [0, 1, 2]) {
+      await store.putIntent({ runId: 'run-foreach-mixed', nodeId: 'item', iteration: i, status: 'intent', attempt, createdAt: clock.now(), effects: receipt(i) });
+    }
+    await store.completeCheckpoint('run-foreach-mixed', 'item', 1, attempt, {
+      runId: 'run-foreach-mixed', nodeId: 'item', iteration: 1, status: 'completed', attempt, createdAt: clock.now(), effects: receipt(1), result: 'done',
+    });
+    await store.parkRun('run-foreach-mixed', attempt, [wait(0), wait(1), wait(2)]);
+    await store.insertSignal({ runId: 'run-foreach-mixed', signalId: 'cancel', signalType: 'cancel', createdAt: clock.now() });
+
+    const park = await driveUntilPark('run-foreach-mixed', await claimAttempt(store, 'run-foreach-mixed'), { store, engine, clock: clock.now });
+
+    expect(park.outcome).toBe('cancelled');
+    expect(engine.abort).toHaveBeenCalledWith('session-0', 'thread-0', 'queue-0');
+    expect(engine.abort).toHaveBeenCalledWith('session-2', 'thread-2', 'queue-2');
+    expect(engine.abort).not.toHaveBeenCalledWith('session-1', 'thread-1', 'queue-1');
+  });
+
   it('does not abort a submission that finished before a later drive reaches stop', async () => {
     // The first drive parks on the agent and saves its wait on the run. In
     // the second drive the agent completes and the stop ends the run. The
@@ -1350,7 +1393,13 @@ describe('driveUntilPark: in-flight work when a drive keeps going past a parked 
     const second = await driveUntilPark(runId, await claimAttempt(store, runId), { store, engine, clock: clock.now, executors });
 
     expect(second.outcome).toBe(outcome);
-    expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-first');
-    if (end === 'stop') expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-second');
+    // A cancel lands before the agent runs again, so its intent still names
+    // the first submission. A stop comes after the agent dispatched a second
+    // one; the intent then names only that, and the stale first is skipped.
+    if (end === 'cancel') expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-first');
+    if (end === 'stop') {
+      expect(engine.abort).toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-second');
+      expect(engine.abort).not.toHaveBeenCalledWith('session-agent', 'thread-agent', 'queue-first');
+    }
   });
 });
