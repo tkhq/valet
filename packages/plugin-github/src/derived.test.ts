@@ -9,7 +9,10 @@ const HEAD = "aaaa000000000000000000000000000000000001";
 const OLD = "bbbb000000000000000000000000000000000002";
 const PR_SUBJECT = "github:acme/lean-proofs#42";
 
-interface CheckRun { status: string; conclusion: string | null; completed_at?: string }
+interface CheckRun {
+  status: string; conclusion: string | null; completed_at?: string;
+  id?: number; name?: string; check_suite?: { id: number }; app?: { id: number };
+}
 interface SuiteState {
   status: string;
   latest_check_runs_count?: number;
@@ -25,6 +28,7 @@ interface WorkflowState {
   id?: number;
   run_number?: number;
   run_attempt?: number;
+  check_suite_id?: number;
 }
 interface Fixture {
   head?: string;
@@ -38,7 +42,7 @@ interface Fixture {
   pages?: CheckRun[][];
   combined?: { state: string; statuses: { state: string; updated_at?: string }[] };
   /** A path that answers with this HTTP status instead of fixture JSON. */
-  failPath?: { path: string; status: number };
+  failPath?: { path: string; status: number; body?: string; headers?: Record<string, string> };
 }
 
 function stubFetch(fixture: Fixture): { fetch: typeof fetch; calls: string[]; signals: (AbortSignal | null | undefined)[]; auth: (string | null)[] } {
@@ -55,7 +59,7 @@ function stubFetch(fixture: Fixture): { fetch: typeof fetch; calls: string[]; si
     signals.push(init?.signal);
     auth.push(new Headers(init?.headers).get("authorization"));
     if (fixture.failPath && url.pathname === fixture.failPath.path) {
-      return new Response("bad gateway", { status: fixture.failPath.status });
+      return new Response(fixture.failPath.body ?? "bad gateway", { status: fixture.failPath.status, headers: fixture.failPath.headers });
     }
     if (url.pathname === "/repos/acme/lean-proofs/pulls/42") {
       return Response.json({ number: 42, html_url: "https://github.com/acme/lean-proofs/pull/42", head: { sha: ++headReads > 1 ? fixture.finalHead ?? fixture.head ?? HEAD : fixture.head ?? HEAD } });
@@ -153,7 +157,7 @@ describe("checksCompleted (spec B1)", () => {
   });
 
   it.each(["queued", "in_progress", "requested", "waiting", "pending"])("waits for %s suites before a later check exists", async (status) => {
-    const early = stubFetch({ pages: [ok(1)], suites: [{ status }] });
+    const early = stubFetch({ pages: [ok(1)], suites: [{ status, latest_check_runs_count: 1 }] });
     expect(await checksCompleted.derive(ctxWith(early.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
     const later = stubFetch({ pages: [[...ok(1), { status: "queued", conclusion: null }]] });
     expect(await checksCompleted.derive(ctxWith(later.fetch), PR_SUBJECT, source(HEAD))).toBeNull();
@@ -202,6 +206,39 @@ describe("checksCompleted (spec B1)", () => {
     await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toThrow("too many statuses pages");
   });
 
+  it("ignores cancelled jobs from a superseded Actions suite on the same SHA", async () => {
+    const stub = stubFetch({ pages: [[
+      { id: 1, name: "test", app: { id: 1 }, check_suite: { id: 10 }, status: "completed", conclusion: "cancelled" },
+      { id: 2, name: "test", app: { id: 1 }, check_suite: { id: 20 }, status: "completed", conclusion: "success" },
+    ]], suites: [
+      { id: 10, app: { id: 1, slug: "github-actions" }, latest_check_runs_count: 1, status: "completed", conclusion: "cancelled" },
+      { id: 20, app: { id: 1, slug: "github-actions" }, latest_check_runs_count: 1, status: "completed", conclusion: "success" },
+    ], workflows: [
+      { id: 1, workflow_id: 1, check_suite_id: 10, event: "pull_request", status: "completed", conclusion: "cancelled" },
+      { id: 2, workflow_id: 1, check_suite_id: 20, event: "pull_request", status: "completed", conclusion: "success" },
+    ] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
+  it("does not merge independent Actions workflows into one suite", async () => {
+    const stub = stubFetch({ pages: [ok(1)], suites: [
+      { id: 10, app: { id: 1, slug: "github-actions" }, latest_check_runs_count: 1, status: "completed", conclusion: "failure" },
+      { id: 20, app: { id: 1, slug: "github-actions" }, latest_check_runs_count: 1, status: "completed", conclusion: "success" },
+    ], workflows: [
+      { id: 1, workflow_id: 1, check_suite_id: 10, event: "pull_request", status: "completed", conclusion: "failure" },
+      { id: 2, workflow_id: 2, check_suite_id: 20, event: "pull_request", status: "completed", conclusion: "success" },
+    ] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+  });
+
+  it("selects the latest job per App and name across remaining suites", async () => {
+    const stub = stubFetch({ pages: [[
+      { id: 1, name: "test", app: { id: 1 }, check_suite: { id: 10 }, status: "completed", conclusion: "cancelled" },
+      { id: 2, name: "test", app: { id: 1 }, check_suite: { id: 20 }, status: "completed", conclusion: "success" },
+    ]] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+  });
+
   it.each([false, true])("ignores superseded cancelled runs and suites regardless of response order (reverse=%s)", async (reverse) => {
     const workflows: WorkflowState[] = [
       { workflow_id: 1, id: 10, run_number: 1, run_attempt: 1, event: "pull_request", status: "completed", conclusion: "cancelled" },
@@ -226,7 +263,7 @@ describe("checksCompleted (spec B1)", () => {
   it("keeps failures of the latest run of another workflow", async () => {
     const stub = stubFetch({ pages: [ok(1)], workflows: [
       { workflow_id: 1, id: 10, event: "pull_request", status: "completed", conclusion: "failure" },
-      { workflow_id: 2, id: 20, event: "pull_request_target", status: "completed", conclusion: "success" },
+      { workflow_id: 2, id: 20, event: "pull_request", status: "completed", conclusion: "success" },
     ] });
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
   });
@@ -312,6 +349,30 @@ describe("checksCompleted (spec B1)", () => {
   it("throws on a non-2xx answer", async () => {
     const stub = stubFetch({ pages: [ok(1)], failPath: { path: `/repos/acme/lean-proofs/commits/${HEAD}/status`, status: 502 } });
     await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toThrow(/502/);
+  });
+
+  it.each([
+    ["/pulls/42", "pull_requests"], [`/commits/${HEAD}/status`, "statuses"],
+    [`/commits/${HEAD}/check-runs`, "checks"], [`/commits/${HEAD}/check-suites`, "checks"], ["/actions/runs", "actions"],
+  ])("names the endpoint and permission for a denied %s read", async (endpoint, permission) => {
+    const path = `/repos/acme/lean-proofs${endpoint}`;
+    const stub = stubFetch({ pages: [ok(1)], failPath: { path, status: 403 } });
+    await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toThrow(`GitHub GET ${path}`);
+    await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toThrow(`${permission}: read`);
+  });
+
+  it("refreshes once on 401 and uses the new token for later reads", async () => {
+    const stub = stubFetch({ pages: [ok(1)] });
+    let denied = false;
+    const http: typeof fetch = async (input, init) => {
+      if (!denied) { denied = true; return new Response("{}", { status: 401 }); }
+      return stub.fetch(input, init);
+    };
+    const refreshes: (boolean | undefined)[] = [];
+    const context: DeriveContext = { orgId: "org-1", fetch: http, appToken: async (refresh) => { refreshes.push(refresh); return refresh ? "fresh" : "stale"; } };
+    expect((await checksCompleted.derive(context, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(refreshes).toEqual([undefined, true]);
+    expect(stub.auth.every((auth) => auth === "Bearer fresh")).toBe(true);
   });
 
   it("throws with the fix when the org has no app token", async () => {

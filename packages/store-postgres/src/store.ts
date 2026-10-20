@@ -1537,7 +1537,7 @@ export class PgSessionStore implements SessionStore {
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) >= ${EVENT_DELIVERED_MAX_KEYS} OR deadline_at <= $1)))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
@@ -1578,7 +1578,7 @@ export class PgSessionStore implements SessionStore {
     // tell a refusal at the cap from the other refusals.
     const r = await this.db.query(
       `WITH cur AS (
-         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) AS delivered_count, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
+         SELECT COALESCE(event_buffer, '[]')::jsonb AS buf, (COALESCE(event_seen, '[]')::jsonb || COALESCE(event_source_seen, '[]')::jsonb) AS seen
            FROM engine_wakeups WHERE id = $1 AND kind = 'event' AND status = 'running'
        ),
        u AS (
@@ -1599,15 +1599,12 @@ export class PgSessionStore implements SessionStore {
                        WHERE jsonb_array_length(cur.buf) >= $4
                          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(cur.buf) e
                                           WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')
-                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full,
-              EXISTS (SELECT 1 FROM cur WHERE NOT $2::jsonb ? 'derive' AND cur.delivered_count +
-                (SELECT count(*) FROM jsonb_array_elements(cur.buf) e WHERE NOT e ? 'derive') >= $5) AS exhausted`,
+                         AND NOT cur.seen @> jsonb_build_array($2::jsonb->'dedupeKey')) AS full`,
       [id, JSON.stringify(boundEventDigest(digest)), updatedAt, EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS],
     );
     const row = r.rows[0];
     if (row?.appended === true) return true;
     if (row?.full === true) recordEventWaiterBufferFull();
-    if (row?.exhausted === true) console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
     return false;
   }
 

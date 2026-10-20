@@ -923,6 +923,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "source", derive: "checks" }), 26)).toBe(true);
         await store.removeEventMatches("wk_ev", ["source"], 27, "source");
         expect((await store.getWakeup("wk_ev"))?.eventSeen).toHaveLength(EVENT_DELIVERED_MAX_KEYS);
+        expect((await store.listDueWakeups(28, 100)).rows.map((row) => row.id)).toContain("wk_ev");
       });
 
       it("consuming 257 derivation sources cannot evict a delivered completion", async () => {

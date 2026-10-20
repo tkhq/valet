@@ -233,16 +233,25 @@ export async function checkArm(
     return { ok: false, text: R7(parsed.service) };
   }
 
+  const selfRead = Promise.resolve().then(() => deps.selfIds(parsed.service)).catch((error: unknown) => {
+    console.warn("[wait_for_event] the self lookup failed; the wait has an empty self set:", error);
+    return [];
+  });
   let subject = parsed.subject;
   let warning: string | undefined;
   if (parsed.service === "github") {
     const { owner, repo } = parsed.target;
-    const coverage = await bounded(() => deps.githubInstallationCovers(owner, repo), ms, null);
+    const [coverage, initialConfig, read] = await Promise.all([
+      bounded(() => deps.githubInstallationCovers(owner, repo), ms, null),
+      bounded(() => deps.githubIngressConfig(owner, repo), ms, null),
+      bounded(() => deps.readGithub(parsed.target), ms, { readable: false }),
+    ]);
     if (coverage === false) return { ok: false, text: R2(owner, repo) };
     if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
-    let config = await bounded(() => deps.githubIngressConfig(owner, repo), ms, null);
+    let config = initialConfig;
     const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
+      if (req.on.some((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key)) && !["read", "write", "admin"].includes(String(settings.permissions.pull_requests))) missing.push("permission pull_requests: read");
       for (const family of githubSourceFamilies(deps.plugins, req.on)) {
         if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
         if (!settings.events.includes(family)) missing.push(`event ${family}`);
@@ -261,7 +270,6 @@ export async function checkArm(
     } else {
       warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
     }
-    const read = await bounded(() => deps.readGithub(parsed.target), ms, { readable: false });
     if (!read.readable && (parsed.target.sha === undefined || parsed.target.sha.length === 40)) return { ok: false, text: R3(subject) };
     if (parsed.target.sha !== undefined) {
       if ((!read.readable || !read.sha || !/^[0-9a-f]{40}$/i.test(read.sha)) && parsed.target.sha.length !== 40) {
@@ -296,13 +304,7 @@ export async function checkArm(
 
   // No outer limit here: `selfIds` bounds each of its lookups, so a slow
   // bot-id lookup drops only that id, never the owner's link.
-  let self: string[];
-  try {
-    self = await deps.selfIds(parsed.service);
-  } catch (err) {
-    console.warn("[wait_for_event] the self lookup failed; the waiter has an empty self set:", err);
-    self = [];
-  }
+  const self = await selfRead;
   // A derived key's sources can carry only the repository and commit
   // subjects (a commit status names no pull request), so the waiter is
   // indexed by the repository too. Direct clauses still need the pull

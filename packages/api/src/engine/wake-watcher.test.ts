@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  EVENT_DELIVERED_MAX_KEYS,
   InMemorySessionStore,
   SandboxEvictedError,
   SandboxGoneError,
@@ -1141,6 +1142,41 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
       expect(h.prompt).toHaveBeenCalledTimes(1);
       expect(logs).toHaveBeenCalledWith("WakeWatcher: event waiter derivation", expect.objectContaining({ result: "null", sourceDedupeKey: "source-256" }));
     } finally { logs.mockRestore(); }
+  });
+
+  it("ends a stream at the output cap with one corrective signal, log, and metric", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventSeen: Array.from({ length: EVENT_DELIVERED_MAX_KEYS - 1 }, (_, i) => `seen-${i}`), eventBuffer: [digest(1)] }, false));
+    const logs = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const w = h.watcher();
+      await w.sweep(NOW);
+      await w.sweep(NOW + 1);
+      await w.sweep(NOW + 2);
+      expect((await h.store.getWakeup("wk_ev"))).toMatchObject({ status: "done", cause: "output_cap" });
+      expect(h.prompt).toHaveBeenCalledTimes(2);
+      const { content } = signalOf(h.prompt.mock.calls[1]);
+      expect(content).toMatchObject({ signalType: "event.ended", attributes: { cause: "output_cap" }, body: expect.stringContaining("Re-arm a new wait") });
+      expect(logs).toHaveBeenCalledWith("WakeWatcher: event output limit reached; re-arm a new wait", { waiterId: "wk_ev" });
+      expect(logs).toHaveBeenCalledTimes(1);
+      expect(h.wakeupEnded).toHaveBeenCalledExactlyOnceWith("event", "output_cap");
+    } finally { logs.mockRestore(); }
+  });
+
+  it("retains rate-limited sources and retries only after the cooldown", async () => {
+    const h = harness();
+    let now = NOW;
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const derive = vi.fn(async () => ({ result: "error" as const, error: new Error("secondary rate limit"), retryAfterMs: 60_000 }));
+    const w = h.watcher({ deriveEvent: derive, now: () => now });
+    await w.sweep(now);
+    now += 10_000;
+    await w.sweep(now);
+    expect(derive).toHaveBeenCalledTimes(1);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
+    now += 50_000;
+    await w.sweep(now);
+    expect(derive).toHaveBeenCalledTimes(2);
   });
 
   it("consumes permission-denied sources and logs error without retrying the next tick", async () => {

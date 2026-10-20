@@ -324,21 +324,9 @@ export async function githubAppRepositoryAccess(
   orgId: string,
   repository: string,
 ): Promise<boolean | null> {
-  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) return false;
-  const config = await loadAppConfig(deps, orgId);
-  if (!config) return false;
-  const response = await githubFetch(deps)(
-    `${githubApiUrl(deps)}/repos/${repository.split("/").map(encodeURIComponent).join("/")}/installation`,
-    { headers: appJwtHeaders(mintAppJwt(config)), signal: AbortSignal.timeout(5_000) },
-  );
-  if (response.status === 404) return false;
-  if (!response.ok) throw new Error("GitHub App repository access could not be verified.");
-  const body: unknown = await response.json();
-  if (typeof body !== "object" || body === null || !("id" in body) ||
-      typeof body.id !== "number" || !("suspended_at" in body)) {
-    throw new Error("GitHub App repository access could not be verified.");
-  }
-  return body.suspended_at === null;
+  const [owner, repo] = repository.split("/");
+  if (!owner || !repo || repository.split("/").length !== 2) return false;
+  return (await githubRepositoryInstallation(deps, orgId, owner, repo)).covered;
 }
 
 /** Granted installation delivery configuration. A missing value means readiness is unknown. */
@@ -349,80 +337,93 @@ export interface GithubIngressConfig {
 }
 
 const INGRESS_CONFIG_TTL_MS = 60_000;
-const ingressConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<GithubIngressConfig | null> }>>();
+interface GithubRepositoryConfig { covered: boolean | null; config: GithubIngressConfig | null }
+const requestedConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<unknown> }>>();
+const ingressConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<GithubRepositoryConfig> }>>();
 
 function permissionLevel(value: unknown): number {
   return value === "admin" ? 3 : value === "write" ? 2 : value === "read" ? 1 : 0;
 }
 
-/** Cache the installation read briefly across arm calls. Unknown configuration permits arming with a warning. */
-export async function githubIngressConfig(
+/** Coverage and granted settings share one repository read, including concurrent arm calls. */
+async function githubRepositoryInstallation(
   deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
-  orgId: string,
-  owner: string,
-  repo: string,
-  refresh = false,
-): Promise<GithubIngressConfig | null> {
-  let config: GithubAppConfig | null;
-  try {
-    config = await loadAppConfig(deps, orgId);
-  } catch {
-    console.warn("[github-app] ingress configuration credential read failed");
-    return null;
-  }
-  if (!config) return null;
+  orgId: string, owner: string, repo: string, refresh = false,
+): Promise<GithubRepositoryConfig> {
+  const unknown: GithubRepositoryConfig = { covered: null, config: null };
+  let app: GithubAppConfig | null;
+  try { app = await loadAppConfig(deps, orgId); }
+  catch { console.warn("[github-app] ingress configuration credential read failed"); return unknown; }
+  if (!app) return { covered: false, config: null };
+  const key = `${orgId}:${app.appId}:${githubApiUrl(deps)}:${owner}/${repo}`;
   const now = (deps.now ?? Date.now)();
-  const key = `${orgId}:${config.appId}:${githubApiUrl(deps)}:${owner}/${repo}`;
   let cache = ingressConfigs.get(deps.credentials);
-  if (!cache) {
-    cache = new Map();
-    ingressConfigs.set(deps.credentials, cache);
-  }
+  if (!cache) { cache = new Map(); ingressConfigs.set(deps.credentials, cache); }
   const cached = cache.get(key);
   if (!refresh && cached && cached.until > now) return cached.value;
-  const value = (async (): Promise<GithubIngressConfig | null> => {
+  const headers = appJwtHeaders(mintAppJwt(app));
+  const read = async (path: string, timeout: number): Promise<{ status: number; body: unknown } | null> => {
     try {
-      const headers = appJwtHeaders(mintAppJwt(config));
-      const res = await githubFetch(deps)(`${githubApiUrl(deps)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`, {
-        headers, signal: AbortSignal.timeout(2_500),
-      });
-      if (!res.ok) {
-        console.warn("[github-app] granted ingress configuration read failed", { status: res.status });
-        return null;
-      }
-      const body: unknown = await res.json();
-      if (!isRecord(body) || !Array.isArray(body.events) || !body.events.every((e) => typeof e === "string") ||
-          !isRecord(body.permissions) || Array.isArray(body.permissions)) {
-        console.warn("[github-app] granted ingress configuration response is invalid");
-        return null;
-      }
-      const events = body.events;
-      const grantedPermissions = body.permissions;
-      // Requested settings only explain a grant mismatch. They never prove readiness.
-      let pendingApproval = false;
-      try {
-        const requested = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, { headers, signal: AbortSignal.timeout(1_000) });
-        if (requested.ok) {
-          const app: unknown = await requested.json();
-          if (isRecord(app)) {
-            const permissions = isRecord(app.permissions) ? app.permissions : {};
-            pendingApproval = (Array.isArray(app.events) && app.events.some((event) => !events.includes(event))) ||
-              Object.entries(permissions).some(([name, level]) => permissionLevel(level) > permissionLevel(grantedPermissions[name]));
-          }
-        } else {
-          console.warn("[github-app] requested ingress configuration read failed", { status: requested.status });
-        }
-      } catch {
-        console.warn("[github-app] requested ingress configuration read failed");
-      }
-      return { events: body.events, permissions: body.permissions, ...(pendingApproval ? { pendingApproval } : {}) };
-    } catch {
-      console.warn("[github-app] granted ingress configuration read failed");
-      return null;
+      const response = await githubFetch(deps)(`${githubApiUrl(deps)}${path}`, { headers, signal: AbortSignal.timeout(timeout) });
+      return { status: response.status, body: response.ok ? await response.json() : null };
+    } catch { console.warn("[github-app] ingress configuration read failed", { path }); return null; }
+  };
+  const value = (async (): Promise<GithubRepositoryConfig> => {
+    const installation = await read(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`, 2_500);
+    if (installation?.status === 404) return { covered: false, config: null };
+    const body = installation?.body;
+    if (!installation || installation.status !== 200 || !isRecord(body) || typeof body.id !== "number" || !("suspended_at" in body)) {
+      console.warn("[github-app] granted ingress configuration read failed", { status: installation?.status });
+      return unknown;
     }
+    const covered = body.suspended_at === null;
+    if (!Array.isArray(body.events) || !body.events.every((event) => typeof event === "string") || !isRecord(body.permissions) || Array.isArray(body.permissions)) {
+      console.warn("[github-app] granted ingress configuration response is invalid");
+      return { covered, config: null };
+    }
+    const events = body.events;
+    const permissions = body.permissions;
+    return { covered, config: { events, permissions } };
   })();
-  cache.set(key, { until: now + INGRESS_CONFIG_TTL_MS, value });
-  return value;
+  const entry = { until: now + INGRESS_CONFIG_TTL_MS, value };
+  cache.set(key, entry);
+  const result = await value;
+  if (result.covered !== true) entry.until = 0;
+  return result;
+}
+
+/** Granted settings. A fresh read bypasses a cached negative arm decision. */
+export async function githubIngressConfig(
+  deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
+  orgId: string, owner: string, repo: string, refresh = false,
+): Promise<GithubIngressConfig | null> {
+  const installation = githubRepositoryInstallation(deps, orgId, owner, repo, refresh);
+  const requested = (async (): Promise<unknown> => {
+    const app = await loadAppConfig(deps, orgId);
+    if (!app) return null;
+    const key = `${orgId}:${app.appId}:${githubApiUrl(deps)}`;
+    const now = (deps.now ?? Date.now)();
+    let cache = requestedConfigs.get(deps.credentials);
+    if (!cache) { cache = new Map(); requestedConfigs.set(deps.credentials, cache); }
+    const cached = cache.get(key);
+    if (!refresh && cached && cached.until > now) return cached.value;
+    const value = (async (): Promise<unknown> => {
+      const response = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, {
+        headers: appJwtHeaders(mintAppJwt(app)), signal: AbortSignal.timeout(1_000),
+      });
+      return response.ok ? response.json() : null;
+    })().catch(() => { console.warn("[github-app] requested ingress configuration read failed"); return null; });
+    cache.set(key, { until: now + INGRESS_CONFIG_TTL_MS, value });
+    return value;
+  })().catch(() => { console.warn("[github-app] ingress configuration credential read failed"); return null; });
+  const [result, wanted] = await Promise.all([installation, requested]);
+  const config = result.config;
+  if (!config) return null;
+  const pendingApproval = isRecord(wanted) && (
+    (Array.isArray(wanted.events) && wanted.events.some((event) => !config.events.includes(event))) ||
+    (isRecord(wanted.permissions) && Object.entries(wanted.permissions).some(([name, level]) => permissionLevel(level) > permissionLevel(config.permissions[name])))
+  );
+  return { ...config, ...(pendingApproval ? { pendingApproval } : {}) };
 }
 
 // ── Credential verification (`GET /app`) ─────────────────────────────────
@@ -999,6 +1000,7 @@ export async function mintInstallationToken(
   deps: GithubAppDeps,
   orgId: string,
   accountLogin: string,
+  forceRefresh = false,
 ): Promise<string | null> {
   const nowMs = (deps.now ?? Date.now)();
 
@@ -1016,7 +1018,7 @@ export async function mintInstallationToken(
   const row = rows[0];
   if (!row) return null;
 
-  if (row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
+  if (!forceRefresh && row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
     if (row.cachedTokenExpiresAt - CACHED_TOKEN_MARGIN_MS > nowMs) {
       try {
         return decryptSecret(row.cachedToken, deps.key);

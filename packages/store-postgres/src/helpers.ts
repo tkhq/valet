@@ -946,7 +946,7 @@ function isWakeupStatus(v: string): v is WakeupStatus {
 }
 
 function isWakeupCause(v: string): v is WakeupCause {
-  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "output_cap", "fired"].includes(v);
 }
 
 export function rowToWakeup(row: WakeupRow): Wakeup {

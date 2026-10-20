@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import {
+  EVENT_DELIVERED_MAX_KEYS,
   recordLeaseNodeSeconds,
   recordLeaseOrphanReleased,
   recordLeasesActive,
@@ -182,6 +183,7 @@ export class WakeWatcher {
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
   /** Event waiters that ingest appended to since the last light pass read them. */
+  private readonly deriveCooldowns = new Map<string, number>();
   private readonly nudged = new Set<string>();
 
   constructor(private readonly deps: WakeWatcherDeps) {
@@ -271,7 +273,7 @@ export class WakeWatcher {
       if (this.stopping) return;
       try {
         const row = await this.deps.engineStore.getWakeup(id);
-        if (row && row.kind === "event" && row.status === "running" && (row.eventBuffer ?? []).length > 0) rows.push(row);
+        if (row && row.kind === "event" && row.status === "running" && ((row.eventBuffer ?? []).length > 0 || (row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS)) rows.push(row);
       } catch (err) {
         console.error(`WakeWatcher: reading nudged event wakeup ${id} failed; the next full pass handles it:`, err);
       }
@@ -291,6 +293,7 @@ export class WakeWatcher {
   }
 
   private async pass(now: number): Promise<void> {
+    for (const [key, until] of this.deriveCooldowns) if (until <= now) this.deriveCooldowns.delete(key);
     // INV-6 is measured before this pass ends or repairs anything, so the
     // repair cannot hide the violation it repairs (fix wave 3, M2).
     const stale = now - 2 * this.intervalMs;
@@ -469,6 +472,7 @@ export class WakeWatcher {
    * decide on, or null when it is gone, and whether a derive call ran.
    */
   private async deriveStep(row: Wakeup, limit: ConcurrencyLimit): Promise<{ row: Wakeup | null; derived: boolean }> {
+    if ((row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS) return { row, derived: false };
     const groups = deriveGroups(row.eventBuffer ?? []);
     if (groups.length === 0) return { row, derived: false };
     const deriveEvent = this.deps.deriveEvent;
@@ -479,8 +483,10 @@ export class WakeWatcher {
     let ran = false;
     await Promise.all(groups.map((group) => limit(async () => {
       if (this.stopping) return;
-      ran = true;
       const { latest, sources } = group;
+      const cooldownKey = `${row.id}:${latest.derive}`;
+      if ((this.deriveCooldowns.get(cooldownKey) ?? 0) > this.clock()) return;
+      ran = true;
       let outcome: Awaited<ReturnType<EventWaiterDerive>>;
       try {
         outcome = await deriveEvent(row, latest);
@@ -491,6 +497,7 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
+        if (outcome.retryAfterMs) this.deriveCooldowns.set(cooldownKey, this.clock() + outcome.retryAfterMs);
         console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
@@ -588,6 +595,7 @@ export class WakeWatcher {
 
     if (TERMINAL.includes(decision.to) && decision.cause) {
       this.metrics.wakeupEnded(updated.kind, decision.cause);
+      if (decision.cause === "output_cap") console.warn("WakeWatcher: event output limit reached; re-arm a new wait", { waiterId: row.id });
     }
     return updated;
   }

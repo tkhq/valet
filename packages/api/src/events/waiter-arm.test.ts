@@ -24,7 +24,7 @@ function deps(over: Partial<ArmDeps> = {}): ArmDeps {
     plugins: PLUGINS,
     serviceConnected: async () => true,
     githubInstallationCovers: async () => true,
-    githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status", "push"], permissions: { checks: "read", actions: "read", statuses: "read", contents: "read" } }),
+    githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status", "push"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read", contents: "read" } }),
     slackTeamId: async () => "T001",
     readGithub: async () => ({ readable: true, pullRequest: true }),
     readSlackChannel: async () => ({ ok: true, isPrivate: false, isMember: true, name: "general" }),
@@ -113,11 +113,24 @@ describe("checkArm passes", () => {
 
 describe("GitHub arm correctness", () => {
   it.each(["check_run", "check_suite", "workflow_run", "status"])("refuses a derived wait missing event %s", async (family) => {
-    const config = { events: ["check_run", "check_suite", "workflow_run", "status"].filter((e) => e !== family), permissions: { checks: "read", actions: "read", statuses: "read" } };
+    const config = { events: ["check_run", "check_suite", "workflow_run", "status"].filter((e) => e !== family), permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } };
     const result = await checkArm(deps({ githubIngressConfig: async () => config }), CTX, req());
     expect(result).toEqual({ ok: false, text: expect.stringContaining(`event ${family}`) });
     expect(result.ok === false && result.text).toContain('"Permissions & events"');
     expect(result.ok === false && result.text).toContain("org owner approve");
+  });
+
+  it("requires pull_requests read for a derived PR wait", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }) }), CTX, req());
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("permission pull_requests: read") });
+  });
+
+  it("starts coverage, configuration, readability, and self reads in parallel", async () => {
+    const started: string[] = [];
+    const blocked = async (name: string) => { started.push(name); return new Promise<never>(() => undefined); };
+    const result = checkArm(deps({ githubInstallationCovers: () => blocked("coverage"), githubIngressConfig: () => blocked("config"), readGithub: () => blocked("read"), selfIds: async () => { started.push("self"); return []; } }), CTX, req(), { timeoutMs: 10 });
+    await result;
+    expect(started.sort()).toEqual(["config", "coverage", "read", "self"]);
   });
 
   it("refuses a missing read permission", async () => {
@@ -141,7 +154,7 @@ describe("GitHub arm correctness", () => {
 
   it("refreshes a stale negative configuration before refusing", async () => {
     const config = vi.fn(async (_owner: string, _repo: string, refresh?: boolean) => refresh
-      ? { events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }
+      ? { events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } }
       : { events: [], permissions: {} });
     const result = await checkArm(deps({ githubIngressConfig: config }), CTX, req());
     expect(result).toMatchObject({ ok: true });
@@ -221,7 +234,7 @@ describe("checkArm refusals", () => {
       ok: false,
       text: "[wait_for_event] The GitHub App installation does not cover acme/other. Install the app on that repository, then wait again.",
     });
-    expect(readGithub).not.toHaveBeenCalled();
+    expect(readGithub).toHaveBeenCalledWith({ owner: "acme", repo: "other", number: 1 });
   });
 
   it("R3: the session's credential cannot read the repository", async () => {

@@ -323,22 +323,25 @@ subject.
    current head SHA, return `null`.
 2. Read check runs first, then latest status contexts, suites, and workflow runs.
    Read all pages needed to select the current records.
-3. If any check run has a status other than `completed`, return `null` immediately.
-   This case makes no suite, workflow, or status reads.
+3. A pending check without a suite id returns `null` before other reads.
+   Checks with a suite id need suite and workflow selection before their result is known.
    If any latest status context is not `success`, `failure`, or `error`, return `null`.
-   Ignore suites with `latest_check_runs_count = 0`.
-   GitHub creates these suites for Apps that start no checks and Actions workflows skipped by filters.
-   Select the latest suite per App before computing terminality or failure.
-   Suite ids identify the newest suite, independent of response order.
-   Each selected suite must have status `completed`.
-   Workflow terminality applies to events `pull_request` and `pull_request_target`.
-   Select the latest run per workflow across all pages.
+   Select the latest workflow run per workflow across all pages.
    Run number, run id, and attempt number order the workflow runs.
-   A superseded cancelled run or older attempt cannot change the selected result.
-   A push-triggered deploy waiting for environment approval does not block this workflow read.
-   All visible check runs still participate, including checks from other workflow events.
-   Check runs and latest contexts stop at the first nonterminal entry.
-   Suites and workflows need all pages before selecting the latest records.
+   Actions suites belong to workflow runs, not to the App as a whole.
+   Select each workflow's latest suite through its selected workflow run.
+   Preserve independent Actions workflows even when they share an App.
+   For other Apps, select the latest suite per App.
+   Ignore selected suites with `latest_check_runs_count = 0`.
+   GitHub creates these suites for Apps that start no checks and workflows skipped by filters.
+   Each remaining selected suite must have status `completed`.
+   Drop check runs from superseded suites or superseded workflow runs.
+   Select the latest remaining check per `(app.id, name)` across suites.
+   Each selected check run must have status `completed`.
+   A superseded cancelled job cannot change the selected result.
+   Workflow terminality applies only to `pull_request` events on the head SHA.
+   A push-triggered deploy waiting for approval does not block the workflow read.
+   Its current check runs still participate if it creates checks.
    Terminality is independent of the combined status result.
 4. Compute status `failure` when any visible conclusion is `failure`,
    `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
@@ -368,7 +371,7 @@ deadline ends that wait.
 |---|---|
 | Source SHA is an old head | `null` |
 | One check run `in_progress` | `null` |
-| One completed check and a queued suite with runs | `null` |
+| One completed check and a selected queued suite with `latest_check_runs_count > 0` | `null` |
 | One completed check and a queued PR-triggered workflow | `null` |
 | One completed check and a queued zero-run App suite | status `success` |
 | Actions suite with zero runs after workflow filters skip every job | ignored |
@@ -426,7 +429,11 @@ Each write method is one statement.
   It refuses when the buffer holds 200 digests.
   It counts that refusal in `valet_event_waiter_buffer_full_total`.
   A waiter admits at most 4096 delivered output keys, including buffered outputs reserved for delivery.
-  At this budget, append refuses new outputs and logs the waiter id with a re-arm instruction.
+  At this budget, append refuses new outputs without logging each event.
+  Once all reserved outputs have been sent, the WakeWatcher ends the row with cause `output_cap`.
+  It sends one `event.ended` signal that tells the agent to re-arm.
+  Its terminal compare-and-swap owns the single log and `valet.wakeups.total` count with cause `output_cap`.
+  The match receipt records `output_cap` when an append reserves the last slot or hits the limit.
   Source digests can still be consumed without spending this output budget.
   The store retains every delivered key instead of evicting one to admit another.
   Existing rows above the budget keep their keys but cannot admit more outputs.
@@ -442,9 +449,10 @@ Each write method is one statement.
   It refuses removal that would add delivered keys beyond the budget.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
-  empty or whose `deadlineAt` has passed.
+  empty, whose delivered-key budget is exhausted, or whose `deadlineAt` has passed.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
+The replay risk is limited to waiters with more than 256 delivered keys.
 New pods never trim delivered keys.
 Drain old WakeWatchers before new pods handle event waiters to preserve replay protection during rollout.
 Source removal on new pods writes only `event_source_seen` and leaves delivered keys unchanged.
@@ -514,7 +522,15 @@ D1 errata (Task 11):
   A non-404 failure or timeout gives unknown coverage and an arm warning.
   An org with no GitHub App gets R7.
 - GitHub arm checks read granted events and permissions from the repository installation endpoint.
-  The host caches each repository's configuration for 60 seconds.
+  Coverage and settings share one cached repository installation read for 60 seconds.
+  The requested App settings read runs in parallel with that installation read.
+  Coverage, configuration, subject readability, and self-id reads also run in parallel.
+  The default provider timeout is four seconds.
+  Service connection can take four seconds before these reads start.
+  Parallel self-id reads can take eight seconds, including their credential read.
+  A negative settings refresh adds at most four seconds after the initial parallel reads.
+  The worst-case arm bound is 12 seconds with these default timeouts.
+  This bound excludes synchronous parsing and persistence after validation.
   Before refusing missing settings, arm bypasses this cache and reads the installation again.
   Requested settings from `GET /app` explain a pending owner approval, not readiness.
   The refusal names pending approval when requested settings exceed the installation grants.
@@ -522,6 +538,7 @@ D1 errata (Task 11):
   Globs include direct catalog entries only, because glob matches do not trigger derivation.
   `checks_completed` needs `check_run`, `check_suite`, `workflow_run`, and `status`.
   These families need read access to `checks`, `actions`, and `statuses`.
+  Reading the PR head also needs `pull_requests`: read.
   A known missing event or permission refuses the wait.
   The refusal names the missing setting.
   It directs the person to update the App's "Permissions & events".
@@ -611,14 +628,21 @@ step that returns early for an event that no subscription matched.
    The nudge runs a light pass over those rows only (Part F).
 7. Append a receipt stage `waiter_match` with separate counts for newly
    buffered direct matches and derivation sources.
-   A successful lookup with no candidates records outcome `no_candidates`.
+   A successful lookup with no candidates adds no matching stage.
+   This choice avoids a receipt write for every webhook and needs no extra org lookup.
    An evaluation or append failure records outcome `failed`.
    A partial evaluation retains the successful append counts in that failed stage.
    The stage holds metadata only.
    The WakeWatcher logs each later derivation outcome as `event`, `null`, or `error`.
    Each log names the waiter id and source dedupe key.
    Permission-denied derivations log `error` and consume the source.
-   Rate limits and transient read errors retain the source for retry.
+   Rate limits retain the source with a cooldown of at least 60 seconds.
+   A `Retry-After` header can increase that cooldown.
+   A 403 response mentioning a secondary rate limit or abuse is also retryable.
+   A 401 refreshes the cached installation token and retries the request once.
+   Repeated 401 responses keep the source with a one-second cooldown.
+   Cooldowns are in-process and reset on restart.
+   Other transient errors retain the source for retry.
    Source digests carry no receipt id, so these outcomes do not update receipts.
 
 Claims (`2026-10-16-delivery-threads-and-claims-design.md`, Part C)
@@ -668,7 +692,7 @@ subscription outcome or fail ingestion. The matcher increments
 *Depends on: Parts B, C, and E.*
 
 The WakeWatcher processes running event waiters with a non-empty
-`event_buffer`. A full pass handles them after the process, watch, and
+`event_buffer`, an exhausted output budget, or an expired deadline. A full pass handles them after the process, watch, and
 timer rows, so a slow derive never delays those rows. A nudge from ingest
 runs a light pass: it reads the nudged waiters by id and handles only
 those. It lists no due rows, probes no sandbox, and does no lease work.
@@ -692,7 +716,9 @@ The light pass never overlaps a full pass.
 2. Once mode: CAS the row from `running` to `done` with cause `fired`. Then
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
-3. Stream mode: CAS the row's event count, remove the digests it will send
+3. Stream mode: after the delivered-key budget is exhausted, end with cause `output_cap`.
+   Submit one `event.ended` signal with the re-arm instruction.
+   Otherwise CAS the row's event count, remove the digests it will send
    with `removeEventMatches`, then submit one `event.matched` signal with
    them. One signal holds the digests in buffer order while its body and
    its `digests` attribute fit in 64 KiB, and at least one digest. The

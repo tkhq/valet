@@ -367,7 +367,7 @@ export class InMemorySessionStore implements SessionStore {
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
           (w.status === "running" &&
             w.kind === "event" &&
-            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
+            ((w.eventBuffer?.length ?? 0) > 0 || (w.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -409,7 +409,6 @@ export class InMemorySessionStore implements SessionStore {
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
     if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
     if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
-      console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
     if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {

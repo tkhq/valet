@@ -80,9 +80,26 @@ describe("runDerive", () => {
     expect(rec.points).toEqual([{ key: KEY, result: "null" }]);
   });
 
-  it.each([401, 403])("marks HTTP %s permission errors for source consumption", async (statusCode) => {
+  it.each([403])("marks HTTP %s permission errors for source consumption", async (statusCode) => {
     const stub = githubFixture({ statusCode });
     expect(await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(stub.fetch))).toMatchObject({ result: "error", consumeSource: true });
+  });
+
+  it("refreshes a stale installation token after a 401 and keeps the source if it still fails", async () => {
+    const stub = githubFixture({ statusCode: 401 });
+    const refreshes: (boolean | undefined)[] = [];
+    const context = { ...ctx(stub.fetch), appToken: async (refresh?: boolean) => { refreshes.push(refresh); return refresh ? "fresh" : "stale"; } };
+    const out = await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, context);
+    expect(out).toMatchObject({ result: "error", retryAfterMs: 1000 });
+    expect(out.result === "error" && out.consumeSource).not.toBe(true);
+    expect(refreshes).toEqual([undefined, true]);
+  });
+
+  it("retains secondary-limit 403 sources without Retry-After or primary-limit exhaustion", async () => {
+    const limited: typeof fetch = async () => Response.json({ message: "You have exceeded a secondary rate limit" }, { status: 403, headers: { "x-ratelimit-remaining": "4999" } });
+    const out = await runDerive([githubPlugin], "org-1", digest(), PR_SUBJECT, ctx(limited));
+    expect(out).toMatchObject({ result: "error", retryAfterMs: 60_000 });
+    expect(out.result === "error" && out.consumeSource).not.toBe(true);
   });
 
   it("retains rate-limited sources for retry instead of consuming them as permission errors", async () => {

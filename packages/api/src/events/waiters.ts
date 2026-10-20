@@ -11,6 +11,8 @@
  */
 import { eq } from "drizzle-orm";
 import {
+  EVENT_BUFFER_MAX_DIGESTS,
+  EVENT_DELIVERED_MAX_KEYS,
   recordEventMatchFailed,
   type ChannelOrigin,
   recordEventWaiterMatch,
@@ -199,6 +201,7 @@ export async function appendWaiterDigests(
   const result: WaiterAppendResult = { waiters: 0, direct: 0, sources: 0, errors: 0 };
   const metrics = metricsOf(deps);
   const appended: string[] = [];
+  const capped: string[] = [];
   for (const candidate of candidates) {
     if (!candidate.accepted || decisions.get(candidate.waiter.id) === "suppress") continue;
     try {
@@ -208,6 +211,15 @@ export async function appendWaiterDigests(
           any = true;
           if (digest.derive) result.sources++;
           else result.direct++;
+        }
+      }
+      const nearCap = (candidate.waiter.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS - EVENT_BUFFER_MAX_DIGESTS;
+      if (nearCap) {
+        const current = await deps.engineStore.getWakeup(candidate.waiter.id);
+        const used = (current?.eventSeen?.length ?? 0) + (current?.eventBuffer ?? []).filter((digest) => !digest.derive).length;
+        if (current && used >= EVENT_DELIVERED_MAX_KEYS) {
+          result.outputCapped = (result.outputCapped ?? 0) + 1;
+          if (!any) capped.push(candidate.waiter.id);
         }
       }
       if (any) {
@@ -220,7 +232,7 @@ export async function appendWaiterDigests(
       console.error(`[event-waiters] matching failed for waiter ${candidate.waiter.id}`, error);
     }
   }
-  if (appended.length > 0) deps.nudge?.(appended);
+  if (appended.length + capped.length > 0) deps.nudge?.([...appended, ...capped]);
   return { ...result, waiters: appended.length };
 }
 
@@ -229,14 +241,15 @@ export interface WaiterAppendResult {
   direct: number;
   sources: number;
   errors: number;
+  outputCapped?: number;
 }
 
 /** Counts newly buffered direct matches and derivation sources separately. */
 export function waiterMatchStage(result: WaiterAppendResult): { stage: string; outcome: string; detail: string } {
   return {
     stage: "waiter_match",
-    outcome: result.errors > 0 ? "failed" : result.waiters > 0 ? "matched" : "none",
-    detail: `Direct matches: ${result.direct}. Buffered derivation sources: ${result.sources}. Append failures: ${result.errors}.`,
+    outcome: result.errors > 0 ? "failed" : result.outputCapped ? "output_cap" : result.waiters > 0 ? "matched" : "none",
+    detail: `Direct matches: ${result.direct}. Buffered derivation sources: ${result.sources}. Append failures: ${result.errors}.${result.outputCapped ? ` Output limit reached for ${result.outputCapped} ${result.outputCapped === 1 ? "wait" : "waits"}. Re-arm a new wait.` : ""}`,
   };
 }
 

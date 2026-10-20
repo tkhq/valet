@@ -137,11 +137,16 @@ export interface NormalizedEvent {
 /** A permission denial consumes the source instead of repeating the read each tick. */
 export class DerivePermissionError extends Error {}
 
+/** A transient provider failure retains its source and delays the next attempt. */
+export class DeriveRetryError extends Error {
+  constructor(message: string, readonly retryAfterMs = 60_000) { super(message); }
+}
+
 /** What a `DerivedEventDef.derive` call receives (spec Part B). */
 export interface DeriveContext {
   orgId: string;
   /** Org app credential for the plugin's service. Null when not connected. */
-  appToken(): Promise<string | null>;
+  appToken(forceRefresh?: boolean): Promise<string | null>;
   fetch: typeof fetch;
 }
 

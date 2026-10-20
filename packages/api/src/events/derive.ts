@@ -9,7 +9,7 @@
  * records exactly one result per call.
  */
 import { eq } from "drizzle-orm";
-import { DerivePermissionError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
+import { DerivePermissionError, DeriveRetryError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
 import { resolveInstallationApiToken, type GitHubTokenDeps } from "../services/github-tokens.js";
@@ -18,7 +18,7 @@ import { toDigest } from "./waiter-match.js";
 export type RunDeriveResult =
   | { result: "event"; digest: EventMatchDigest }
   | { result: "null" }
-  | { result: "error"; error: unknown; consumeSource?: boolean };
+  | { result: "error"; error: unknown; consumeSource?: boolean; retryAfterMs?: number };
 
 function findDerived(plugins: ValetPlugin[], key: string): DerivedEventDef | undefined {
   for (const plugin of plugins) {
@@ -84,16 +84,16 @@ export async function runDerive(
     return { result: "event", digest: toDigest(derived) };
   } catch (error) {
     record(key, "error");
-    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}) };
+    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}), ...(error instanceof DeriveRetryError ? { retryAfterMs: error.retryAfterMs } : {}) };
   }
 }
 
 /** Mints the org's app token for a GitHub owner, or null when none resolves. */
-export type GithubTokenFor = (orgId: string, owner: string | undefined) => Promise<string | null>;
+export type GithubTokenFor = (orgId: string, owner: string | undefined, forceRefresh?: boolean) => Promise<string | null>;
 
 /** The production `GithubTokenFor`: the org's GitHub App installation token for the owner. */
 export function githubInstallationTokenFor(deps: GitHubTokenDeps): GithubTokenFor {
-  return (orgId, owner) => resolveInstallationApiToken(deps, orgId, owner);
+  return (orgId, owner, forceRefresh) => resolveInstallationApiToken(deps, orgId, owner, forceRefresh);
 }
 
 /**
@@ -112,7 +112,7 @@ export function githubDeriveContext(
   fetchImpl: typeof fetch = fetch,
 ): DeriveContext {
   const owner = /^github:([^/#@\s]+)/.exec(subject)?.[1]?.toLowerCase();
-  return { orgId, appToken: () => tokenFor(orgId, owner), fetch: fetchImpl };
+  return { orgId, appToken: (refresh) => refresh ? tokenFor(orgId, owner, true) : tokenFor(orgId, owner), fetch: fetchImpl };
 }
 
 /**

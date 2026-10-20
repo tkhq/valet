@@ -224,6 +224,7 @@ export {
   type NormalizedEvent,
   type EventCatalogEntry,
   DerivePermissionError,
+  DeriveRetryError,
   type DeriveContext,
   type DerivedEventDef,
   type EventSubjects,
