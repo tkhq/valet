@@ -273,7 +273,7 @@ it("shows one place with its listeners, threads of its child places, and recent 
 
   const missing = await fetch(`${api.baseUrl}/api/presence/places/${encodeURIComponent("github:acme/nothing")}?scope=user`);
   expect(missing.status).toBe(404);
-  expect((await missing.json() as { error: string }).error).toMatch(/Open Places/);
+  expect((await missing.json() as { error: string }).error).toMatch(/Open Presence/);
 });
 
 it("lists what feeds a thread: own, existing, and subject listeners, and own and existing routines", async () => {

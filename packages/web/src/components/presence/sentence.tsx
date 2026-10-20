@@ -1,9 +1,10 @@
 /**
  * A sentence of Presence, as text with reference tokens: each place, thread,
  * workflow, and person the sentence names renders as a `Ref`. A place links
- * to its place page, a thread to its thread page when the sentence knows its
- * id (an archived thread shows as a disabled link), and a workflow to its
- * editor. A person has no page.
+ * to its place page, or stays a plain token when it has no page (`page:
+ * false`); a thread to its thread page when the sentence knows its id (an
+ * archived thread shows as a disabled link); and a workflow to its editor.
+ * A person has no page.
  *
  * `links={false}` renders the tokens without links, for a sentence inside a
  * dialog that is still collecting input: a link there would close the
@@ -39,7 +40,7 @@ export function SentencePartView({ part, links = true, readAs }: { part: Sentenc
     case "text":
       return <>{part.text}</>;
     case "place":
-      return links
+      return links && part.page !== false
         ? <Ref kind="place" service={part.service} text={part.text} readAs={readAs} to="/presence/places/$subject" params={{ subject: part.subject }} />
         : <Ref kind="place" service={part.service} text={part.text} readAs={readAs} />;
     case "thread":
