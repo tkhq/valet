@@ -32,7 +32,7 @@ export function buildAssistantTarget(deps: {
   /** The org's Slack credential, to classify a channel a pinned thread would record. */
   slackAccess: NonNullable<AssistantDeliveryDeps["slackAccess"]>;
 }): AssistantDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, destination, inbound, author, appearance, slackChannel }) =>
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, destination, inbound, author, appearance, unattended, slackChannel }) =>
     // Every subscription resolves the singleton runtime of its owner.
     deliverToAssistantThread(deps, {
       orgId,

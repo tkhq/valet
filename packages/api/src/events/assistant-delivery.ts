@@ -1,4 +1,4 @@
-import type { Appearance } from "@valet/shared";
+import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
@@ -112,6 +112,12 @@ export interface AssistantDeliveryArgs {
   signal: SignalContent;
   /** The rule's reply identity. The queue item carries it as `metadata.presence`, the engine's name. */
   appearance?: Appearance;
+  /**
+   * No person waits on this delivery: an automated event or a schedule. Its
+   * turn refuses questions and approvals at once instead of parking the
+   * thread, so one stuck delivery cannot hold back the ones queued after it.
+   */
+  unattended?: boolean;
   dispatchId: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
@@ -376,12 +382,12 @@ async function deliverToAssistantThreadInner(
   // (`isAutomatedDeliveryThread`). Record it before the turn is admitted.
   if (!args.unattended) await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
   const metadata = {
-    ...(args.presence ? { presence: args.presence } : {}),
+    ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
-    ...(args.appearance ? { metadata: { presence: args.appearance } } : {}),
+    ...(Object.keys(metadata).length ? { metadata } : {}),
     author: args.author ?? { id: args.actorUserId },
   });
   if (args.inbound) {

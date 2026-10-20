@@ -28,7 +28,9 @@ import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dia
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { WorkflowCreation } from "~/components/workflows/workflow-creation";
-import { relativeTime } from "~/lib/relative-time";
+import { WorkspaceClause } from "~/components/workspace-clause";
+import { relativeTime, timeUntil } from "~/lib/relative-time";
+import { formatWhen } from "~/lib/format-when";
 import { useListOwner } from "~/lib/use-list-owner";
 import { redirectToPresence } from "./-presence-redirects";
 
@@ -206,7 +208,10 @@ function DefinitionRow({
         )}
 
         <p className="basis-full text-xs leading-5 text-muted">Updated {relativeTime(workflow.updatedAt)}</p>
-        <p className="basis-full text-xs text-muted">{nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : scheduleCount > 0 ? "Routine off" : eventCount > 0 ? "Runs when its event happens" : "Run when needed"}{workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status}` : " · No runs yet"}</p>
+        <p className="basis-full text-xs text-muted">
+          {nextFireAt ? <span title={new Date(nextFireAt).toLocaleString()}>Next run {formatWhen(nextFireAt)} ({timeUntil(nextFireAt)})</span> : scheduleCount > 0 ? "Routine off" : eventCount > 0 ? "Runs when a matching event arrives" : "Run when needed"}
+          {workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status} ${relativeTime(workflow.latestRun.createdAt)}` : " · No runs yet"}
+        </p>
       </div>
       {hasSchema && (
         <RunWorkflowDialog

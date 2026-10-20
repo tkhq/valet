@@ -207,7 +207,7 @@ function RunRow({ row, prompt }: { row: GlobalWorkflowRunSummary; prompt?: strin
   const failed = !row.needsApproval && row.outcome === "failed";
   const label = row.needsApproval ? "Approval needed" : failed ? "Failed" : row.status === "parked" ? "Waiting" : row.status === "pending" ? "Queued" : row.status === "terminalizing" ? "Finishing" : "Running";
   return <WorkRow title={<Link to="/workflows/runs/$runId" params={{ runId: row.runId }}>{row.workflowName}</Link>}
-    badge={<Badge variant={runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
+    badge={<Badge variant={failed ? "danger" : runCategory(row) === "attention" ? "warning" : "neutral"}>{label}</Badge>} time={row.updatedAt} detail={prompt}
     actions={failed ? <Button variant="ghost" size="sm" disabled={dismiss.isPending} onClick={() => dismiss.mutate(row.runId)}>Dismiss</Button> : undefined} />;
 }
 function ResultGroupRow({ group }: { group: ResultItem[] }) {

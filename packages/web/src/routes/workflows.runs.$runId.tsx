@@ -1,9 +1,9 @@
 import { RunWorkspace } from "~/components/workflows/run-workspace";
 import { textParam } from "~/lib/search-params";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail, WorkflowRunProvenance } from "@valet/api/wire";
-import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
+import { useCancelRun, useRetryRun, useRunDetail, useWorkflow } from "~/api/workflows";
 import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import { CheckpointList } from "~/components/workflows/checkpoint-list";
@@ -26,6 +26,7 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 import { formatUsdPrecise } from "~/lib/format-usage";
+import { useNow } from "~/lib/use-now";
 import { errorText } from "~/lib/error-text";
 import { isNotFound, retryUnlessNotFound } from "~/lib/not-found";
 
@@ -48,6 +49,10 @@ export function RunDetailPage() {
   const search = Route.useSearch();
   // A missing run stays missing: a 404 shows its text at once, with no retries.
   const { data, isLoading, error } = useRunDetail(runId, { retry: retryUnlessNotFound });
+  // The header names the workflow. A viewer who can see the run but not
+  // the workflow keeps the generic back link.
+  const workflow = useWorkflow(data?.run.workflowId ?? "", { retry: false });
+  const workflowName = workflow.data?.name;
   // Arriving from a run notification for a team's run: move the switcher to
   // the run's workspace so the nav matches the page instead of showing
   // Personal. `data` is undefined while loading; adoption waits for it.
@@ -74,18 +79,22 @@ export function RunDetailPage() {
     return <RunLoadError error={error} />;
   }
 
+  // With conversations, the tab bar holds the back link: the details
+  // header is hidden while the conversation tab is open.
+  const hasConversations = (data.conversations ?? []).length > 0;
+  const back = workflowName
+    ? <Link to="/workflows/$workflowId" params={{ workflowId: data.run.workflowId }} className="inline-flex min-h-11 max-w-full items-center truncate text-xs text-muted hover:text-ink sm:min-h-0" title={workflowName}>← {workflowName}</Link>
+    : <Link to="/workflows" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">← Workflows</Link>;
+
   return (
     <div className="min-w-0 flex-1 flex flex-col min-h-0">
-      <div className="px-4 py-4 sm:px-6 border-b border-line">
-        <Link to="/workflows/runs" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
-          ← Runs
-        </Link>
-      </div>
       <RunWorkspace conversations={data.conversations ?? []} view={search.view} conversationId={search.conversation}
+        back={hasConversations ? back : undefined}
         onSelect={(view, conversation) => void navigate({ to: "/workflows/runs/$runId", params: { runId }, search: { view, conversation }, replace: true })}>
       <RunDetailBody
         runId={runId}
         data={data}
+        back={hasConversations ? undefined : back}
         onCancel={() => cancelRun.mutate()}
         cancelPending={cancelRun.isPending}
         onRetry={(from) => {
@@ -144,6 +153,8 @@ export function RunLoadError({ error }: { error: unknown }) {
 export interface RunDetailBodyProps {
   runId: string;
   data: WorkflowRunDetail;
+  /** The link back to the run's workflow, above the heading. */
+  back?: ReactNode;
   onCancel: () => void;
   cancelPending: boolean;
   onRetry: (from: "failed_step" | "start") => void;
@@ -161,6 +172,7 @@ export interface RunDetailBodyProps {
 export function RunDetailBody({
   runId,
   data,
+  back,
   onCancel,
   cancelPending,
   onRetry,
@@ -188,7 +200,17 @@ export function RunDetailBody({
     .map(([id]) => id);
   // The answer the person came for. Present only once the run has settled.
   const result = deriveRunResult(run, checkpoints);
-  const duration = formatRunDuration(run.createdAt, run.updatedAt);
+  // A live clock while the run goes: the elapsed time and each running
+  // step's time tick instead of appearing only at the end.
+  const now = useNow(1000, nonTerminal);
+  const duration = formatRunDuration(run.createdAt, nonTerminal ? now : run.updatedAt);
+  const timeline = { start: run.createdAt, end: nonTerminal ? now : run.updatedAt };
+  // Steps as the list shows them: a step that ran per item counts once, and
+  // its items are counted on their own.
+  const perStep = new Map<string, number>();
+  for (const cp of checkpoints) perStep.set(cp.nodeId, (perStep.get(cp.nodeId) ?? 0) + 1);
+  const stepCount = perStep.size;
+  const itemCount = [...perStep.values()].filter((count) => count > 1).reduce((sum, count) => sum + count, 0);
   const provenance = data.provenance;
   const changedSince = run.status === "settled" ? changesSinceRun(provenance) : [];
 
@@ -209,9 +231,12 @@ export function RunDetailBody({
             `min-width: auto`, so without `min-w-0` the heading refuses to
             shrink and pushes the status chip and the run controls off the
             row. */}
-        <h1 className="min-w-0 break-words text-lg sm:truncate font-semibold tracking-tight text-ink font-display" title={run.runId}>
-          {runLabel(run)}
-        </h1>
+        <div className="min-w-0">
+          {back}
+          <h1 className="min-w-0 break-words text-lg sm:truncate font-semibold tracking-tight text-ink font-display" title={run.runId}>
+            {runLabel(run)}
+          </h1>
+        </div>
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <RunStatusChip
             status={run.status}
@@ -256,7 +281,8 @@ export function RunDetailBody({
         }}
       />
 
-      <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+      <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="mx-auto max-w-5xl space-y-4">
         {/* Above the answer: with no edit, a changed model is the likely
             reason a result differs from the last run. The Steps list marks
             the changed steps. */}
@@ -284,8 +310,9 @@ export function RunDetailBody({
           Started {formatWhen(run.createdAt)}
           {/* `updatedAt` is the last write, not the current time. It gives a
               true duration only after the run stops writing. */}
-          {run.status === "settled" && duration && ` · Ran for ${duration}`}
-          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "step" : "steps"}`}
+          {duration && (run.status === "settled" ? ` · Ran for ${duration}` : ` · Running for ${duration}`)}
+          {` · ${stepCount} ${stepCount === 1 ? "step" : "steps"}`}
+          {itemCount > 0 && ` · ${itemCount} ${itemCount === 1 ? "item" : "items"}`}
           {provenance?.workflowVersion !== undefined && ` · Workflow version ${provenance.workflowVersion}`}
           {provenance?.build && ` · Valet build ${shortSha(provenance.build)}`}
         </p>
@@ -330,7 +357,7 @@ export function RunDetailBody({
             )}
           </h2>
           <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} modelChanges={modelChanges}
-            onExplainFailure={run.status === "settled" ? onExplainFailure : undefined} />
+            onExplainFailure={run.status === "settled" ? onExplainFailure : undefined} timeline={timeline} now={now} />
         </div>
         {definition && (
           <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>
@@ -340,6 +367,7 @@ export function RunDetailBody({
             )}
           </details>
         )}
+      </div>
       </div>
     </>
   );
