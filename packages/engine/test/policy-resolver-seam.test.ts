@@ -531,6 +531,9 @@ describe("policyResolver seam: unattended workflow task", () => {
     expect(result.text).toContain("move github.get_issue to a Tool step, which asks for approval on each run");
     expect(result.text).not.toContain("Approval step");
     expect(result.text).toContain("Review permissions");
+    // The engine cannot tell who started the run, so the result names the
+    // case where saved permissions do not apply.
+    expect(result.text).toContain("Saved permissions do not apply to a run that an agent started or retried.");
     // Since build-time approval, saving a workflow allows nothing.
     expect(result.text).not.toContain("saving the workflow approves");
   });
