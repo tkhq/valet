@@ -93,6 +93,9 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
           noAuth: entry.auth === "none",
           staticToken,
           authQueryParam: entry.authQueryParam,
+          // An oauth entry's `scopes` come from this file, so a missing
+          // scope is fixed by editing the entry.
+          scopesInConfig: entry.auth === "oauth",
           description: entry.description,
         }),
         // Approval cards name the account by this, as the connect UI does.

@@ -861,6 +861,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       serviceName: 'metabase',
       defaultRiskLevel: 'low',
       displayName: 'Turnkey Metabase',
+      scopesInConfig: true,
     });
     const credentials = fakeCredentialProvider({
       accessToken: 'tok',
@@ -874,6 +875,31 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       error:
         'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
         "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
+    });
+  });
+
+  it('names the missing scope but keeps the account fix when config cannot supply scopes', async () => {
+    // A bundled plugin keeps its scopes in code: no admin can add one.
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="admin:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      displayName: 'Linear',
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['read'] });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error:
+        'Linear needs the admin:read scope for this call. ' +
+        'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
     });
   });
 

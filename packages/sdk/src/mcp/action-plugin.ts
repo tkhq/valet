@@ -40,6 +40,12 @@ export interface McpActionPluginOptions {
    * message names it. When absent, the message names no page.
    */
   appConnectHint?: string;
+  /**
+   * True when an `auth: oauth` mcpServers entry supplies this service's
+   * scopes, so an admin fixes a missing scope by editing the entry. Other
+   * services keep their scopes in code or have no scopes to edit.
+   */
+  scopesInConfig?: boolean;
   description?: string;
 }
 
@@ -85,6 +91,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const staticToken = opts.staticToken;
   const appCredentialService = opts.appCredentialService;
   const messages: RejectionText = { label: opts.displayName ?? serviceName, appConnectHint: opts.appConnectHint };
+  const scopesInConfig = opts.scopesInConfig ?? false;
 
   return {
     service: serviceName,
@@ -102,7 +109,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
         throw rejection ? new Error(rejection) : err;
       }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages, scopesInConfig),
       );
     },
   };
@@ -186,26 +193,45 @@ function authRejectionMessage(
 }
 
 /**
- * A 403 with `error="insufficient_scope"` (RFC 6750 §3.1): the token is valid
- * but lacks a scope the call needs. Reconnecting requests the same scopes, so
- * the fix is a config change: name the scopes the credential lacks. The
- * challenge `scope` may also list scopes the token holds (Metabase does), so
- * those are removed when the grant is known. Returns undefined for any other
- * failure, or when no missing scope can be named.
+ * The scopes a 403 `error="insufficient_scope"` challenge (RFC 6750 §3.1)
+ * names that the credential lacks. The challenge `scope` may also list
+ * scopes the token holds (Metabase does), so those are removed when the
+ * grant is known. Undefined for any other failure, or when none is named.
  */
-function insufficientScopeMessage(err: unknown, grantedScopes: string[] | undefined, label: string): string | undefined {
+function missingScopes(err: unknown, grantedScopes: string[] | undefined): string[] | undefined {
   if (!(err instanceof McpHttpError) || err.status !== 403 || !err.wwwAuthenticate) return undefined;
   if (!/error="insufficient_scope"/.test(err.wwwAuthenticate)) return undefined;
   const challenge = /(?:^|[\s,])scope="([^"]*)"/.exec(err.wwwAuthenticate)?.[1] ?? '';
   const held = new Set(grantedScopes ?? []);
   const missing = challenge.split(' ').filter((s) => s && !held.has(s));
-  if (missing.length === 0) return undefined;
+  return missing.length > 0 ? missing : undefined;
+}
+
+/**
+ * The error for a refused call. Reconnecting requests the same scopes, so
+ * when config supplies the scopes, a missing one is fixed by an admin
+ * editing the entry. Otherwise the message names the scope and keeps the
+ * fix for whoever holds the account.
+ */
+function rejectionMessage(
+  err: unknown,
+  { source, scopes }: ResolvedToken,
+  text: RejectionText,
+  scopesInConfig: boolean,
+): string | undefined {
+  const missing = missingScopes(err, scopes);
+  const accountFix = authRejectionMessage(err, source, text);
+  if (!missing) return accountFix;
   const list = missing.join(', ');
   const noun = missing.length === 1 ? 'scope' : 'scopes';
-  return (
-    `${label} refused this call: the connection does not hold the ${list} ${noun}. ` +
-    `Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`
-  );
+  const { label } = text;
+  if (scopesInConfig) {
+    return (
+      `${label} refused this call: the connection does not hold the ${list} ${noun}. ` +
+      `Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`
+    );
+  }
+  return accountFix ? `${label} needs the ${list} ${noun} for this call. ${accountFix}` : undefined;
 }
 
 function mapToolToAction(
@@ -217,6 +243,7 @@ function mapToolToAction(
   staticToken: string | undefined,
   appCredentialService: string | undefined,
   messages: RejectionText,
+  scopesInConfig: boolean,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -232,12 +259,12 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const { token, source, scopes } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
+      const resolved = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
-        const result = await client.callTool(token, tool.name, args);
+        const result = await client.callTool(resolved.token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = insufficientScopeMessage(err, scopes, messages.label) ?? authRejectionMessage(err, source, messages);
+        const rejection = rejectionMessage(err, resolved, messages, scopesInConfig);
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
