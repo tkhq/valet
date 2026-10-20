@@ -429,7 +429,11 @@ event wakeups spec Part A.
   `metadata.slackChannels` of the thread and the threads above it. A reader
   needs access to every private channel among them. Thread lists, thread
   routes, `thread_read`, attention routing, and the shared team views
-  (briefings, outcomes) apply the same rule.
+  (briefings, outcomes) apply the same rule. Every engine writer of thread
+  metadata (`addToMetadataList`, tool focus, the continuation ceiling)
+  patches the current value through one queued path,
+  `patchThreadMetadata`. So no writer can erase a recorded channel with a
+  copy it took before an await.
 - **`slackEventsThreadKey` stays.** The dispatcher no longer uses it as a
   destination (Part B step 6). The workflow attention audience keys still
   use it, so the function stays for them.

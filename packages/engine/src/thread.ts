@@ -612,6 +612,8 @@ export class Thread {
   /** Creation-time user timezone from persisted thread state (TKAI-584). */
   private readonly threadUserTimezone: string | undefined;
   private threadMetadata: Record<string, unknown> | undefined;
+  /** Tail of the metadata write queue. See `patchThreadMetadata`. */
+  private metadataWrites: Promise<void> = Promise.resolve();
   /** Durable leaf used to link each new entry into the active transcript path. */
   private activeLeafEntryId: string | undefined;
 
@@ -5391,9 +5393,49 @@ export class Thread {
   private async persistContinuationToolScope(): Promise<void> {
     const scope = this.toolScopeCeiling();
     if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
-    const metadata = { ...this.threadMetadata, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} };
-    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
-    this.threadMetadata = metadata;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+  }
+
+  /**
+   * The one read-modify-write path for thread metadata. Every writer goes
+   * through it, and the writes run one at a time.
+   *
+   * `patch` always runs against the current `threadMetadata`, never a copy
+   * taken before an await. Thus a write cannot erase a value that another
+   * writer added while it waited. This matters for security: a lost
+   * `slackChannels` entry reopens the private-channel read gate.
+   *
+   * - "before-save" publishes the patch in memory at once, then persists it.
+   *   Use it for values that only narrow access. If the save fails, the value
+   *   stays in memory, and the next save persists it.
+   * - "after-save" persists first and publishes only after the save succeeds.
+   *   Use it for values that can widen access. A failed save cannot change
+   *   live access.
+   */
+  private patchThreadMetadata(
+    patch: (current: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
+    publish: "before-save" | "after-save",
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    if (publish === "before-save") {
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return Promise.resolve();
+      this.threadMetadata = next;
+    }
+    const write = this.metadataWrites.then(async () => {
+      if (publish === "before-save") {
+        await store.saveThread(this.session.id, this.toThreadData());
+        return;
+      }
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return;
+      await store.saveThread(this.session.id, { ...this.toThreadData(), metadata: next });
+      // Apply the patch again to the value as it is now. A "before-save"
+      // writer may have changed memory while the save above waited.
+      this.threadMetadata = patch(this.threadMetadata) ?? this.threadMetadata;
+    });
+    this.metadataWrites = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   toolScopeCeiling(): ToolScope | undefined {
@@ -5414,21 +5456,20 @@ export class Thread {
    * The in-memory metadata takes the value before the write, so a save that
    * runs while this one waits carries it too. Such a fact narrows who may
    * read the thread, so if the write fails the value stays in memory, and the
-   * next save persists it.
+   * next save persists it. Other metadata writers patch the current value
+   * (see `patchThreadMetadata`), so they cannot erase it.
    */
   async addToMetadataList(key: string, value: string): Promise<void> {
-    const current = this.threadMetadata?.[key];
-    const list = Array.isArray(current) ? current.filter((item): item is string => typeof item === "string") : [];
-    if (list.includes(value)) return;
-    this.threadMetadata = { ...this.threadMetadata, [key]: [...list, value] };
-    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
+    await this.patchThreadMetadata((current) => {
+      const listed = current?.[key];
+      const items = Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
+      return items.includes(value) ? undefined : { ...current, [key]: [...items, value] };
+    }, "before-save");
   }
 
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
-    const metadata = { ...this.threadMetadata, [TOOL_SCOPE_KEY]: scope ?? {} };
-    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
-    this.threadMetadata = metadata;
+    await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
     this.nativeImages.invalidatePermission();
     this.agent.state.tools = this.buildTools();
   }
