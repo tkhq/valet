@@ -148,6 +148,7 @@ trigger nodes is deferred — see Out of scope.)
 | `event_id`, `subscription_id` | fks |
 | `status` | `pending` → `delivered` \| `failed` → `dead` |
 | `attempts`, `next_attempt_at`, `last_error`, `delivered_at` | retry bookkeeping |
+| `queue_item_id` | the engine queue item an assistant delivery admitted; null for workflow and signal deliveries |
 
 ### `linear_installations`
 
@@ -272,6 +273,24 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     shape (see `event_subscriptions` table notes).
 - Retries: backoff 30s → 2m → 10m → 30m, then `dead`. `last_error` recorded;
   dead deliveries visible in the UI feed.
+- A failed assistant turn: an assistant delivery is `delivered` once its
+  prompt is queued, and the dispatcher records the queue item in
+  `queue_item_id`. If that turn settles `failed` (an output limit, a provider
+  error), `events/delivery-turn.ts` moves the delivery to `dead` with
+  `last_error` = "The assistant turn failed: " plus the engine's reason. The
+  statement finds the turn through the dispatch id `event:{deliveryId}`, so a
+  delivery admitted before `queue_item_id` existed is also marked, and it
+  records the queue item. Three callers run it: the settle watcher, the
+  dispatcher right after its "delivered" write (the turn can settle first),
+  and a dispatcher sweep every 60 seconds over rows delivered in the last 24
+  hours. The sweep exists because the watcher's write can fail or the API can
+  exit before it. The delivery is not retried: a retry only recovers the same
+  admission. Limits: an `aborted` turn (a person stopped it) stays delivered;
+  a delivery merged into an overheard digest is not followed to the digest's
+  turn; a turn that fails more than 24 hours after its delivery and that the
+  watcher misses stays delivered.
+- The events Log shows a failed event's reason as its detail
+  (`services/event-log.ts`), so the Problems filter names why.
 
 ## Linear installation flow
 

@@ -2124,6 +2124,9 @@ export const eventDeliveries = pgTable(
      * and claims, Part C step 6). NULL means resolve at dispatch from the
      * binding and the policy only (no waiter consult, Part C step 7). */
     destination: jsonb("destination"),
+    /** The engine queue item an assistant delivery admitted. Its turn's
+     * outcome decides whether the delivery stays delivered. */
+    queueItemId: text("queue_item_id"),
   },
   (t) => [
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),

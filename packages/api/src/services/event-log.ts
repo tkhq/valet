@@ -1,7 +1,8 @@
 /**
  * Workspace delivery history, optionally merged with organization-wide diagnostics.
  * Each source uses keyset order. Diagnostics and delivery history share one cursor.
- * Problems-only mode keeps failed deliveries and any requested diagnostics.
+ * Problems-only mode keeps failed deliveries and any requested diagnostics. A
+ * delivery whose assistant turn failed is dead (`events/delivery-turn.ts`).
  */
 import { sql, type SQL } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
@@ -115,7 +116,8 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<Eve
         SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
           CASE WHEN e.service = 'slack' THEN COALESCE(e.refs->>'channel', e.payload->'item'->>'channel', e.payload->>'channel_id',
             e.payload->'channel'->>'id', e.payload->>'channel') END AS slack_channel,
-          MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason
+          MIN(d.last_error) FILTER (WHERE d.status = 'skipped') AS skipped_reason,
+          MIN(d.last_error) FILTER (WHERE d.status IN ('failed','dead')) AS failed_reason
         FROM events e JOIN event_deliveries d ON d.event_id = e.id JOIN event_subscriptions s ON s.id = d.subscription_id
         WHERE ${sql.join(scoped, sql` AND `)}
         GROUP BY e.id
@@ -124,7 +126,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<Eve
         LIMIT ${take}`) as { rows: Array<{
           id: string; service: string; event_key: string; summary: string | null; actor: unknown;
           received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
-          slack_channel: string | null;
+          failed_reason: string | null; slack_channel: string | null;
         }> };
       const kept = query.keepEvents ? await query.keepEvents(result.rows.map((row) => row.id)) : undefined;
       for (const row of result.rows) {
@@ -134,7 +136,9 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<Eve
         eventRows.push({
           kind: "event", id: row.id, at: Number(row.received_at), status: row.status,
           service: row.service, eventKey: row.event_key, summary: row.summary, actor: actor?.login ?? actor?.externalId ?? null,
-          reason: null, detail: row.status === "skipped" ? row.skipped_reason : null, deliveryCount: Number(row.deliveries),
+          reason: null, deliveryCount: Number(row.deliveries),
+          // A failed event names why, such as the assistant turn that failed after its prompt was queued.
+          detail: row.status === "skipped" ? row.skipped_reason : row.status === "failed" ? row.failed_reason : null,
         });
       }
       const last = result.rows.at(-1);

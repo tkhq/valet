@@ -226,7 +226,8 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     const args = { orgId: ORG, owner: OWNER, actorUserId: USER,
       destination: { kind: "target" as const, sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
       dispatchId: "event:pr-cutover", mismatchReason: "test" };
-    await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id, recovered: true });
+    // Recovery answers with the original admission, so the dispatcher records that queue item.
+    await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id, queueItemId: admitted.queueItemId, recovered: true });
     await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
     expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
     await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
@@ -611,7 +612,8 @@ describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery thre
     const destination = { kind: "key" as const, key: "sub:rule-eng", title: "ENG triage" };
     const first = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42"), dispatchId: "event:d1" });
     const second = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-43"), dispatchId: "event:d2" });
-    expect(second).toEqual(first);
+    // Each delivery queues its own item in the one thread.
+    expect(second).toMatchObject({ sessionId: first.sessionId, threadId: first.threadId });
     expect(await threadsWithKey("sub:rule-eng")).toEqual([{ id: first.threadId }]);
     expect((await mirrorRow(first.threadId))?.title).toBe("ENG triage");
     const session = engineHost.liveSession(first.sessionId);
@@ -635,7 +637,7 @@ describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery thre
     const destination = { kind: "key" as const, key: "subject:github:acme/api#12", title: "acme/api#12" };
     const review = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("review"), dispatchId: "event:rule-a-delivery" });
     const checks = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("checks"), dispatchId: "event:rule-b-delivery" });
-    expect(checks).toEqual(review);
+    expect(checks).toMatchObject({ sessionId: review.sessionId, threadId: review.threadId });
     expect(await threadsWithKey("subject:github:acme/api#12")).toHaveLength(1);
   });
 
@@ -645,7 +647,7 @@ describe("deliverToAssistantThread: destinations (spec 2026-10-16: delivery thre
     const first = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42"), dispatchId: "event:d1" });
     await testDb.appDb.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, first.threadId));
     const again = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42 again"), dispatchId: "event:d2" });
-    expect(again).toEqual(first);
+    expect(again).toMatchObject({ sessionId: first.sessionId, threadId: first.threadId });
     expect((await mirrorRow(first.threadId))?.archivedAt).toBeNull();
   });
 
