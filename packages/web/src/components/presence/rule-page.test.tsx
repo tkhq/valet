@@ -3,7 +3,7 @@
  * One line of presence on its page (docs/specs/2026-10-16-presence-hub-design.md
  * Part D; acceptance P7, P8, P18): the place breadcrumb, the sentence as
  * the title, the status line with Edit and the overflow menu, the health
- * strip, the problem with the picker, How it works, Activity with its
+ * strip, the problem with the picker, How it works (the inline form), Activity with its
  * chips, Diagnostics for an organization admin, and the paused copy.
  *
  * The api client is mocked at the transport, so the real query hooks run.
@@ -77,6 +77,7 @@ vi.mock("~/api/settings", () => ({
 /** The editor is its own suite's (its Where and review copy are tested
  * there); here it records the mode it opened on. */
 vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
+vi.mock("~/components/presence/editor/inline-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).inlineStubModule);
 
 /** The picker lists real threads in its own suite; here one pick stands in. */
 vi.mock("./thread-picker", () => ({
@@ -199,11 +200,13 @@ describe("RulePage", () => {
     await waitFor(() => expect(patchEventSubscription).toHaveBeenCalledWith("R4", { enabled: true }));
   });
 
-  it("opens the editor on this line from Edit", async () => {
+  it("edits this line inline under How it works, with no Edit button or sheet", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks");
+    const how = await screen.findByRole("region", { name: "How it works" });
+    expect(within(how).getByTestId("inline-editor").textContent).toBe("Inline: edit Failed checks");
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByTestId("line-editor")).toBeNull();
   });
 
   it("shows the place breadcrumb and the sentence as the title with tokens (P7)", async () => {
@@ -242,7 +245,7 @@ describe("RulePage", () => {
     expect(screen.queryByText("Runs in")).toBeNull();
   });
 
-  it("reads the status line: name, who set it up and when, the switch, Edit, and the menu", async () => {
+  it("reads the status line: name, who set it up and when, the switch, and the menu", async () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ createdAt: NOW - 3 * 86_400_000 })] });
     renderPage();
     const setUp = await screen.findByText("set up by", { exact: false });
@@ -252,11 +255,9 @@ describe("RulePage", () => {
     expect(setUp.textContent).toBe("set up by Conner 3d ago");
     expect(within(status).getByRole("switch", { name: "Turn off Failed checks" })).toBeTruthy();
     expect(within(status).getByText("On")).toBeTruthy();
-    expect(within(status).getByRole("button", { name: "Edit" })).toBeTruthy();
+    // Appears as is a section of the form on the page, so the menu holds Delete only.
     await userEvent.click(within(status).getByRole("button", { name: "More for Failed checks" }));
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Appears as", "Delete"]);
-    await userEvent.click(screen.getByRole("menuitem", { name: "Appears as" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks at appears");
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Delete"]);
   });
 
   it("names someone as the creator the directory does not hold", async () => {
@@ -286,63 +287,6 @@ describe("RulePage", () => {
     expect(await within(strip).findByText("Platform CI is archived")).toBeTruthy();
     expect(within(strip).getByText("14")).toBeTruthy();
     expect(within(strip).getByText("2h ago")).toBeTruthy();
-  });
-
-  it("explains When, Do, and Where, and each Change opens the editor", async () => {
-    listEventSubscriptions.mockResolvedValue({
-      subscriptions: [listener({
-        filters: [{ field: "repo", op: "eq", value: "acme/api" }, { field: "branch", op: "eq", value: "main" }],
-        target: { kind: "assistant", appearance: { displayName: "SRE Bot" }, thread: { mode: "subject" } },
-      })],
-    });
-    renderPage();
-    const how = await screen.findByRole("region", { name: "How it works" });
-    const columns = Array.from(how.querySelectorAll<HTMLElement>("[data-section]"));
-    expect(columns.map((column) => column.textContent)).toEqual([
-      "Whena check completes on acme/apiOnly the main branch.Change",
-      "Dowork on it as SRE BotValet reads the event and acts in the thread. It appears as SRE Bot.Change",
-      "Wherein one thread per pull requestEach pull request gets its own thread; every event for it lands there.Change",
-    ]);
-    fireEvent.click(within(how).getByRole("button", { name: "Change Where" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit Failed checks at where");
-  });
-
-  it("opens the editor on the section each Change names", async () => {
-    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
-    renderPage();
-    const how = await screen.findByRole("region", { name: "How it works" });
-    for (const section of ["When", "Do", "Where"]) {
-      fireEvent.click(within(how).getByRole("button", { name: `Change ${section}` }));
-      expect(screen.getByTestId("line-editor").textContent).toBe(`Editor: edit Failed checks at ${section.toLowerCase()}`);
-    }
-  });
-
-  it("explains a pinned thread as one place for the history", async () => {
-    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({})] });
-    renderPage();
-    const how = await screen.findByRole("region", { name: "How it works" });
-    expect(within(how).getByText("Every event lands in this one thread, so the history stays in one place.")).toBeTruthy();
-  });
-
-  it("explains a mention line: it replies where it was mentioned, a fresh thread each time", async () => {
-    listEventSubscriptions.mockResolvedValue({
-      subscriptions: [listener({
-        eventKeys: ["slack.app_mention"],
-        filters: [{ field: "channel", op: "eq", value: "C900", label: "#incidents" }],
-        target: { kind: "assistant", follow: true, appearance: { displayName: "Ops Bot" }, thread: { mode: "new" } },
-      })],
-    });
-    renderPage();
-    const how = await screen.findByRole("region", { name: "How it works" });
-    expect(within(how).getByText("Valet reads the message and replies. It appears as Ops Bot.")).toBeTruthy();
-    expect(within(how).getByText("Valet replies where it was mentioned. Every event starts a fresh thread.")).toBeTruthy();
-  });
-
-  it("explains a workflow line's Where as a run", async () => {
-    listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ target: { kind: "workflow", workflowId: "wf-1" } })] });
-    renderPage();
-    const how = await screen.findByRole("region", { name: "How it works" });
-    expect(within(how).getByText("A workflow run has no thread. Open the run from Activity to follow it.")).toBeTruthy();
   });
 
   it("lists acted and skipped entries; the chips keep one kind (P18)", async () => {
@@ -607,11 +551,8 @@ describe("RulePage", () => {
     listEventSubscriptions.mockResolvedValue({ subscriptions: [listener({ ownerType: "team", ownerId: "sre" })] });
     renderPage();
     expect(await screen.findByText("Only members of SRE can change this.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("switch", { name: "Turn off Failed checks" }).hasAttribute("disabled")).toBe(true);
-    for (const name of ["Change When", "Change Do", "Change Where"]) {
-      expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true);
-    }
+    expect(screen.getByTestId("inline-editor").textContent).toBe("Inline: edit Failed checks (read-only)");
     await userEvent.click(screen.getByRole("button", { name: "More for Failed checks" }));
     for (const item of screen.getAllByRole("menuitem")) expect(item.getAttribute("aria-disabled")).toBe("true");
   });
@@ -631,8 +572,7 @@ describe("RulePage", () => {
     });
     renderPage();
     expect(await screen.findByText("Org")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(false);
-    expect(screen.getByRole("button", { name: "Change When" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByTestId("inline-editor").textContent).toBe("Inline: edit Failed checks");
     await pickDelete();
     expect(await screen.findByText("This is the organization's line. Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
   });

@@ -70,9 +70,13 @@ describe("ThreadProblem", () => {
   });
 
   it("names the edit path when no workspace lists threads", () => {
-    render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} onPick={vi.fn()} />);
-    expect(screen.getByText("Select Edit, then choose another option under Where.")).toBeTruthy();
+    const { unmount } = render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} onPick={vi.fn()} />);
+    // A page shows Where under the problem; a row opens it through Edit.
+    expect(screen.getByText("Choose another option under Where on this page.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
+    unmount();
+    render(<ThreadProblem problem={PIN_UNAVAILABLE} workspace={undefined} variant="inline" onPick={vi.fn()} />);
+    expect(screen.getByText("Select Edit, then choose another option under Where.")).toBeTruthy();
   });
 
   it("draws a box by default and none inline under a row", () => {

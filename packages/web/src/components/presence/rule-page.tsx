@@ -2,10 +2,10 @@
  * One line of presence on its own page (docs/specs/2026-10-16-presence-hub-design.md
  * Part D). Its parts, in order: the breadcrumb, the sentence as the title
  * with the service mark, the status line (name, who set it up and when,
- * the switch, **Edit**, and the overflow menu with Appears as and Delete),
- * a proposal's review, the health strip, the problem with the thread
- * picker, How it works, Activity, and, for an organization admin,
- * Diagnostics.
+ * the switch, and the overflow menu with Delete), a proposal's review, the
+ * health strip, the problem with the thread picker, How it works as the
+ * editor with every section open, Activity, and, for an organization
+ * admin, Diagnostics.
  *
  * A line the assistant proposed shows its review above the health strip:
  * what turning it on turns off, **Turn on** (the editor in review
@@ -26,13 +26,11 @@ import {
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
-import { selectsSlackMention } from "~/lib/slack-mention";
 import { Diagnostics } from "./diagnostics";
-import { LineEditor, type EditorMode } from "./editor/line-editor";
-import type { SectionId } from "./editor/section";
+import { InlineEditor } from "./editor/inline-editor";
+import { LineEditor } from "./editor/line-editor";
 import { staleProposalText, type StaleProposal } from "./editor/side-pane";
 import { HealthStrip } from "./health-strip";
-import { HowItWorks, type HowColumn } from "./how-it-works";
 import { ActivityTimeline, type TimelineEntry } from "./line-activity";
 import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage, type PresenceCrumb } from "./page-shell";
 import { DeleteLineDialog, PausedLine, TurnOnAnyway, switchFailure } from "./presence-line";
@@ -44,11 +42,9 @@ import { Ref } from "./ref";
 import { Sentence } from "./sentence";
 import { ServiceMark } from "./service-mark";
 import {
-  deadErrorSentence, doExplanation, doParts, lineEntryParts, partsText, presenceSentenceParts, presenceWhenParts, replies, tookInWords,
-  filterLabels, whenExplanation, whereExplanation, whereParts, type LineEntryNames, type SentenceNames, type SentencePart, type SentenceService, type ThreadTitles,
-  type WorkflowNames,
+  deadErrorSentence, filterLabels, lineEntryParts, partsText, presenceSentenceParts, replies, tookInWords,
+  type LineEntryNames, type SentenceNames, type SentencePart, type SentenceService,
 } from "./sentences";
-import { displayThreadPolicy, subjectKindForKeys } from "./thread-policy-copy";
 import { useSentenceNames } from "./use-sentence-names";
 
 /** The one place a line names in its filters, as a crumb label and a place
@@ -103,28 +99,6 @@ function lineService(sub: EventSubscriptionWire): SentenceService | null {
   return null;
 }
 
-/** How it works for a line: When, Do, and Where, each with its explanation (spec Part D step 1.6). */
-export function lineColumns(
-  sub: EventSubscriptionWire,
-  whenParts: readonly SentencePart[],
-  workflows: WorkflowNames,
-  threads: ThreadTitles,
-  names: SentenceNames = {},
-): HowColumn[] {
-  const subjectKind = subjectKindForKeys(sub.eventKeys);
-  const where: HowColumn = sub.target.kind === "workflow"
-    ? { section: "where", value: [{ kind: "text", text: "in a workflow run" }], explanation: "A workflow run has no thread. Open the run from Activity to follow it." }
-    : (() => {
-      const policy = displayThreadPolicy(sub.target, sub.eventKeys);
-      return { section: "where", value: whereParts(policy, subjectKind, threads), explanation: whereExplanation(policy, subjectKind, "presence", { mention: selectsSlackMention(sub.eventKeys) }) };
-    })();
-  return [
-    { section: "when", value: whenParts, explanation: whenExplanation(sub.filters, sub.eventKeys, names) },
-    { section: "do", value: doParts(sub, workflows), explanation: doExplanation(sub, workflows) },
-    where,
-  ];
-}
-
 /** The right column of a dead entry: `gave up` for an archived pin, whose
  * left text names the thread, else the error once, as a sentence. */
 function deadColumn(entry: LineActivityEntryWire, names: LineEntryNames): string | undefined {
@@ -166,8 +140,8 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
   const place = linePlace(sub, names);
   const placeKey = usePlaceSubject(place?.key ?? "");
   const { readOnly, readOnlyText, teams } = useLineAccess(sub);
-  // What the editor opens on, or null while it is closed.
-  const [editing, setEditing] = useState<{ review: boolean; section?: SectionId } | null>(null);
+  // True while the review sheet is open (a proposal's Turn on).
+  const [reviewing, setReviewing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [collision, setCollision] = useState<string | null>(null);
@@ -203,23 +177,12 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
     replies: replies(sub),
   };
   const entries = pages.flatMap((page) => page.entries).map((entry) => lineTimelineEntry(entry, entryNames));
-  const columns = lineColumns(
-    sub,
-    withPlaceKey(presenceWhenParts(sub, catalog.data?.catalog, names), place?.key, placeKey),
-    workflowNames,
-    pinTitles,
-    names,
-  );
 
   function save(body: Parameters<typeof patch.mutate>[0]["body"]) {
     setError(null);
     setCollision(null);
     patch.mutate({ id: sub.id, body }, { onError: switchFailure(body, setError, setCollision) });
   }
-
-  const editorMode: EditorMode = editing?.review === true
-    ? { kind: "review", line: sub, ...(replaced !== undefined ? { replaces: { id: replaced.id, name: replaced.name } } : {}) }
-    : { kind: "edit", line: sub, ...(editing?.section !== undefined ? { initialSection: editing.section } : {}) };
 
   return (
     <PresenceDetailPage
@@ -245,24 +208,22 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
                 {sub.enabled ? "On" : "Off"}
               </label>
             )}
-            <span className="ml-auto flex items-center gap-2">
-              <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing({ review: false })}>Edit</Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button type="button" variant="ghost" size="icon" aria-label={`More for ${sub.name}`}>
-                    <MoreHorizontal className="h-4 w-4" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem disabled={readOnly} onSelect={() => setEditing({ review: false, section: "appears" })}>Appears as</DropdownMenuItem>
-                  {!proposal && (
+            {!proposal && (
+              <span className="ml-auto flex items-center gap-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="ghost" size="icon" aria-label={`More for ${sub.name}`}>
+                      <MoreHorizontal className="h-4 w-4" aria-hidden />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
                     <DropdownMenuItem disabled={readOnly} className="text-danger-500" onSelect={() => setDeleting(true)}>
                       Delete
                     </DropdownMenuItem>
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </span>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </span>
+            )}
           </div>
           {readOnly && !sub.problem && !proposal && <p className="text-xs text-muted">{readOnlyText}</p>}
           {pausedByTeam(sub) && <PausedLine sub={sub} teams={teams} readOnly={readOnly} />}
@@ -285,7 +246,7 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
                 ? <p className="text-xs text-muted">{readOnlyText}</p>
                 : (
                   <div className="flex flex-wrap gap-2">
-                    {staleProposal === undefined && <Button size="sm" onClick={() => setEditing({ review: true })}>Turn on</Button>}
+                    {staleProposal === undefined && <Button size="sm" onClick={() => setReviewing(true)}>Turn on</Button>}
                     <Button size="sm" variant={staleProposal !== undefined ? "primary" : "secondary"} onClick={() => setDeleting(true)}>Delete</Button>
                   </div>
                 )}
@@ -315,7 +276,13 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
           )}
         </section>
 
-        <HowItWorks columns={columns} readOnly={readOnly} onChange={(section) => setEditing({ review: false, section })} />
+        <InlineEditor
+          mode={{ kind: "edit", line: sub }}
+          readOnly={readOnly}
+          // The line refetches with the subscription list; the Activity
+          // refetches here so the change reads at once.
+          onSaved={() => { void activityQ.refetch(); }}
+        />
 
         <ActivityTimeline
           entries={entries}
@@ -331,11 +298,9 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
         {me.data?.orgRole === "admin" && <Diagnostics id={sub.id} name={sub.name} />}
 
         <LineEditor
-          open={editing !== null}
-          onOpenChange={(open) => { if (!open) setEditing(null); }}
-          mode={editorMode}
-          // The line itself refetches with the subscription list; the
-          // Activity refetches here so the change reads at once.
+          open={reviewing}
+          onOpenChange={setReviewing}
+          mode={{ kind: "review", line: sub, ...(replaced !== undefined ? { replaces: { id: replaced.id, name: replaced.name } } : {}) }}
           onSaved={() => { void activityQ.refetch(); }}
         />
         <DeleteLineDialog

@@ -6,6 +6,7 @@
  * workspace offers more than one.
  */
 import { useId, useRef } from "react";
+import { useAutosizeTextarea } from "~/hooks/use-autosize-textarea";
 import { fieldLabel } from "~/components/events/filter-editor";
 import { unionFilterFields, type CatalogService } from "~/components/events/subscription-match";
 import {
@@ -90,6 +91,8 @@ export function DoSection({
 }) {
   const id = useId();
   const box = useRef<HTMLTextAreaElement>(null);
+  const instructionsBox = useRef<HTMLTextAreaElement>(null);
+  useAutosizeTextarea(instructionsBox, draft.instructions);
   const routine = draft.service === "schedule";
   const stored = mode.kind !== "create";
   // The team Slack setup fixes the team's assistant.
@@ -105,6 +108,7 @@ export function DoSection({
   // only for a mention). A Slack line without one offers Work on it.
   const mention = selectsSlackMention([...draft.events]);
   const replyNeedsMention = !stored && !routine && draft.service === "slack" && !mention;
+  const chosen = cards(routine).find((card) => card.kind === draft.doKind);
 
   function pick(kind: DoKind) {
     if (kind === draft.doKind || fixedWorkflow) return;
@@ -134,44 +138,51 @@ export function DoSection({
 
   return (
     <>
-      <div role="radiogroup" aria-label="Do" className="grid gap-2.5 sm:grid-cols-3">
-        {cards(routine).map((card) => {
-          const on = draft.doKind === card.kind;
-          // A Reply already picked stays open, so the reader can see it and move off it.
-          const off = stored || (fixedWorkflow && card.kind !== "workflow") || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
-          const lineId = `${id}-line-${card.kind}`;
-          return (
-            <label
-              key={card.kind}
-              className={cn(
-                "grid cursor-pointer gap-1 rounded-lg border border-line px-3.5 py-3 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent-500",
-                on && "border-ink ring-1 ring-ink",
-                off && !on && "cursor-not-allowed opacity-60",
-              )}
-            >
-              <input
-                type="radio"
-                name={`${id}-do`}
-                className="sr-only"
-                aria-label={card.title}
-                aria-describedby={lineId}
-                checked={on}
-                disabled={off}
-                onChange={() => pick(card.kind)}
-              />
-              <span className="text-[15px] font-medium text-ink">{card.title}</span>
-              <span id={lineId} className="text-[13px] leading-snug text-muted">{card.line}</span>
-            </label>
-          );
-        })}
-      </div>
+      {stored ? (
+        // What a stored line does is fixed (a PATCH cannot change it), so
+        // the page shows the one choice, with how to change it inside it.
+        <div className="grid gap-1 rounded-lg border border-line px-3.5 py-3">
+          <span className="text-[15px] font-medium text-ink">{chosen?.title}</span>
+          <span className="text-[13px] leading-snug text-muted">{chosen?.line}</span>
+          <span className="mt-1 text-xs text-muted">
+            This stays fixed. To change it, delete this {routine ? "routine" : "line"} and make a new one.
+          </span>
+        </div>
+      ) : (
+        <div role="radiogroup" aria-label="Do" className="grid gap-2.5 sm:grid-cols-3">
+          {cards(routine).map((card) => {
+            const on = draft.doKind === card.kind;
+            // A Reply already picked stays open, so the reader can see it and move off it.
+            const off = (fixedWorkflow && card.kind !== "workflow") || (card.kind === "reply" && (draft.service !== "slack" || (replyNeedsMention && !on)));
+            const lineId = `${id}-line-${card.kind}`;
+            return (
+              <label
+                key={card.kind}
+                className={cn(
+                  "grid cursor-pointer gap-1 rounded-lg border border-line px-3.5 py-3 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent-500",
+                  on && "border-ink ring-1 ring-ink",
+                  off && !on && "cursor-not-allowed opacity-60",
+                )}
+              >
+                <input
+                  type="radio"
+                  name={`${id}-do`}
+                  className="sr-only"
+                  aria-label={card.title}
+                  aria-describedby={lineId}
+                  checked={on}
+                  disabled={off}
+                  onChange={() => pick(card.kind)}
+                />
+                <span className="text-[15px] font-medium text-ink">{card.title}</span>
+                <span id={lineId} className="text-[13px] leading-snug text-muted">{card.line}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
       {replyNeedsMention && !fixedWorkflow && (
         <p className="text-xs text-muted">Reply answers a mention. To reply, pick the mention in When.</p>
-      )}
-      {stored && (
-        <p className="text-xs text-muted">
-          To change what Valet does, delete this {mode.kind === "edit-routine" ? "routine" : "line"} and make a new one.
-        </p>
       )}
 
       {draft.doKind === "workflow" && (
@@ -225,14 +236,16 @@ export function DoSection({
       {assistant && (
         <div className="grid gap-1.5">
           <Label htmlFor={`${id}-instructions`}>{required ? "Instructions (required)" : "Instructions (optional)"}</Label>
+          {/* Six rows at least, and it grows with the text, so a long prompt reads whole. */}
           <Textarea
+            ref={instructionsBox}
             id={`${id}-instructions`}
-            rows={3}
+            rows={6}
             value={draft.instructions}
             required={required}
             onChange={(e) => onChange({ ...draft, instructions: e.target.value })}
             placeholder={routine ? "Summarize what changed overnight." : "If the check failed, find the failing job and summarize the cause."}
-            className="min-h-[84px] resize-y"
+            className="resize-none overflow-hidden"
           />
           <p className="text-xs text-muted">{routine ? "Plain words." : "Plain words. Valet also receives the event itself."}</p>
           {routine && <p className="text-xs text-muted">Valet sends this to the assistant each time the routine runs.</p>}

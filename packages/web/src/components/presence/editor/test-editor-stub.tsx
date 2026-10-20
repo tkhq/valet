@@ -1,12 +1,14 @@
 /**
- * A stand-in for `LineEditor` in tests of its launch points. It renders the
- * mode it was opened with as one line of text, so a test asserts which
- * mode each launch point passes without mounting the editor and its reads.
+ * Stand-ins for `LineEditor` and `InlineEditor` in tests of the pages that
+ * mount them. Each renders its mode as one line of text, so a test asserts
+ * which mode a page passes without mounting the editor and its reads.
  *
- * Use it from a `vi.mock` factory:
+ * Use them from a `vi.mock` factory:
  * `vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);`
+ * `vi.mock("~/components/presence/editor/inline-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).inlineStubModule);`
  */
 import type { EditorMode } from "./draft";
+import type { InlineMode } from "./inline-editor";
 
 /** A mode in words: `create place slack:T1:C900`, `edit R4 at appears`, `review R4 replaces R1`. */
 export function editorModeText(mode: EditorMode): string {
@@ -37,3 +39,14 @@ export function LineEditorStub({ open, mode }: { open: boolean; mode: EditorMode
 }
 
 export const stubModule = { LineEditor: LineEditorStub };
+
+/** The page's inline form as a region named like the real one, with its mode in words. */
+export function InlineEditorStub({ mode, readOnly }: { mode: InlineMode; readOnly: boolean }) {
+  return (
+    <section aria-label="How it works">
+      <p data-testid="inline-editor">Inline: {editorModeText(mode)}{readOnly ? " (read-only)" : ""}</p>
+    </section>
+  );
+}
+
+export const inlineStubModule = { InlineEditor: InlineEditorStub };
