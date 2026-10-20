@@ -3,6 +3,7 @@ import type { EventCatalogEntry } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, teams, teamMembers } from "../schema/index.js";
 import { isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
+import { isAssistantKind } from "./target-names.js";
 
 /** Evaluate current team coverage at dispatch, including retries, not symbolic overlap.
  * `event.subjects` comes from the stored event row (spec 2026-10-15: event wakeups,
@@ -16,7 +17,7 @@ export async function hasTeamCoverage(
 ): Promise<boolean> {
   const target = personal.target;
   if (personal.ownerType !== "user" || typeof target !== "object" || target === null ||
-      !("kind" in target) || target.kind !== "orchestrator" || !("deliveryPolicy" in target)) return false;
+      !("kind" in target) || !isAssistantKind(target.kind) || !("deliveryPolicy" in target)) return false;
   const policy = target.deliveryPolicy;
   if (policy !== "ignoreIfMyTeamSubscribed" && policy !== "ignoreIfAnyTeamSubscribed") return false;
   let after: string | undefined;

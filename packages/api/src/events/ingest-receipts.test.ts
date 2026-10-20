@@ -26,7 +26,7 @@ describe("generic ingest receipt diagnostics", () => {
       id: "receipt-sub", orgId: ORG, ownerType: "user", ownerId: "owner", createdBy: "owner",
       name: "Subscription", eventKeys: ["slack.message"],
       filters: filtered ? [{ field: "channel", op: "eq", value: "C_ELSEWHERE" }] : [],
-      target: { kind: "orchestrator" }, enabled, createdAt: 1, updatedAt: 1,
+      target: { kind: "assistant" }, enabled, createdAt: 1, updatedAt: 1,
     });
   }
   function ingest(dedupeKey: string) {

@@ -312,7 +312,7 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
 - Replacement proposals: `events.propose_subscription` takes an optional
   `replaces`, the ID of an enabled assistant subscription
-  (`target.kind: "orchestrator"`) with the same owner, and stores it as
+  (`target.kind: "assistant"`; rows written before the 2026-10-16 presence hub rename store `"orchestrator"`) with the same owner, and stores it as
   `target.replaces`. The action refuses an unknown ID, an ID from another
   workspace, a workflow trigger, and a disabled subscription. When a person
   enables the proposal, the PATCH route disables the replaced subscription in

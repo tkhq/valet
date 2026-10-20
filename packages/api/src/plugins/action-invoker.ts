@@ -1,5 +1,5 @@
 import { actionInScope, scopeRefusal, type ToolScope } from "@valet/shared";
-import { mergePresence, readPresence, type Presence } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 /**
  * Headless ActionInvoker (plugin-system-v2 plan Task 6) — the real
  * implementation behind the workflow `tool` node's `engine.invokeAction`
@@ -95,7 +95,7 @@ const ACTION_TIMEOUT_MS = 120_000;
  */
 export interface ActionInvocationContext {
   toolScope?: ToolScope;
-  presence?: Presence;
+  presence?: Appearance;
   /** The assistant this invocation belongs to, when the caller can name
    * one. It keys the carried-over sender profile (`workspaceSenderIdentity`). */
   assistantId?: string;
@@ -1327,7 +1327,7 @@ function buildActionContext(
   db: AppDb,
 ): PluginActionContext {
   const sessionId = `wf:invoke:${req.invocationId}`;
-  const presence = mergePresence(readPresence(ctx.presence));
+  const presence = mergeAppearance(readAppearance(ctx.presence));
   return {
     toolScope: ctx.toolScope,
     // Headless actions have no mutable focus. Their delegated scope is the ceiling.
@@ -1346,7 +1346,7 @@ function buildActionContext(
     summary: undefined,
     credentials,
     // Workflow actions use the same owner identity as session-backed actions.
-    resolveOutboundSender: async () => mergePresence(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner, ctx.assistantId), presence),
+    resolveOutboundSender: async () => mergeAppearance(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner, ctx.assistantId), presence),
     sandbox: throwingSandbox(sessionId),
     // Unlike the capabilities stubbed out below, document extraction is
     // genuinely available here: it is a pure call over bytes against the

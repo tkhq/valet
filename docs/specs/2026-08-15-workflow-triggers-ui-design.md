@@ -80,7 +80,7 @@ Schedules (wrap `schedule-service`):
 
 - `POST /api/workflows/schedules` — body: `name`, `cron`, `timezone?`,
   target (`{ kind: "workflow", workflowId, input? }` or
-  `{ kind: "orchestrator", prompt }`), `enabled?`, and `thread?` for an
+  `{ kind: "assistant", prompt }`; the old value `"orchestrator"` is accepted for one release), `enabled?`, and `thread?` for an
   assistant-prompt schedule. Invalid cron returns 400
   with the parse error and an example expression.
 - `PATCH /api/workflows/schedules/:id` — partial update of the same

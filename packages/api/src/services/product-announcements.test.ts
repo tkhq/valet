@@ -10,6 +10,14 @@ let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
 
 describe("product announcements", () => {
+  it("points the workflow notice at /workflows and keeps its released id", () => {
+    expect(WORKFLOW_THREADS_ANNOUNCEMENT).toEqual({
+      id: "workflow-run-threads-in-automations-v1",
+      title: "Workflows have their own nav entry",
+      body: "Open Workflows to find workflow runs and their conversations. Your existing run history is still available.",
+      action: { label: "Open Workflows", href: "/workflows" },
+    });
+  });
   it("limits the audience to existing visible run threads and persists idempotent acknowledgement", async () => {
     api = await bootTestApi();
     const deps = api.providers; const db = deps.db;

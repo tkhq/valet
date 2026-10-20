@@ -3,7 +3,6 @@ import {
   carriesSlackConversation,
   defaultWizardThreadPolicy,
   displayThreadPolicy,
-  runsInLabel,
   sameThreadPolicy,
   subjectKindForKeys,
 } from "./thread-policy-copy";
@@ -40,22 +39,6 @@ describe("subjectKindForKeys", () => {
 
   it("uses the first key that names a subject", () => {
     expect(subjectKindForKeys(["webhook.received", "linear.issue.created"])).toBe("issue");
-  });
-});
-
-describe("runsInLabel", () => {
-  it("labels each mode", () => {
-    expect(runsInLabel({ mode: "new" }, "channel", "listener")).toBe("A new thread each time");
-    expect(runsInLabel({ mode: "subject" }, "pull request", "listener")).toBe("One thread per pull request");
-    expect(runsInLabel({ mode: "own" }, null, "listener")).toBe("This listener's thread");
-    expect(runsInLabel({ mode: "own" }, null, "routine")).toBe("This routine's thread");
-    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "routine", "Deploys"))
-      .toBe("The thread Deploys");
-  });
-
-  it("falls back when the picked thread has no known title", () => {
-    expect(runsInLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "listener"))
-      .toBe("The thread you picked");
   });
 });
 

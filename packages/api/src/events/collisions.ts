@@ -25,12 +25,13 @@
  *   (the write commits; the response carries the warning).
  * - Two workflow targets pointing at DIFFERENT workflows never collide —
  *   running two distinct workflows off one event is intentional fan-out.
- * - A workflow target never blocks an orchestrator target (or the reverse);
+ * - A workflow target never blocks an assistant target (or the reverse);
  *   the pair is at most a warning. Blocking is reserved for rules that would
  *   race the same kind of consumer.
  */
 import type { EventCatalogEntry } from "@valet/engine";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
+import { assistantScopeOf, isAssistantKind } from "./target-names.js";
 
 // Duplicated from mention-scope.ts so this module stays pure (mention-scope
 // does IO). `subscriptionMatchesEvent` fails closed on a mention subscription
@@ -43,7 +44,7 @@ export interface CollisionTarget {
   kind: string;
   workflowId?: string;
   follow?: boolean;
-  orchestrator?: "user" | "team" | "org";
+  assistant?: "user" | "team" | "org";
 }
 
 export interface CollisionCandidate {
@@ -213,7 +214,8 @@ function severity(
 ): "blocking" | "overlapping" | null {
   if (cand.kind === "workflow" && exist.kind === "workflow") {
     if (cand.workflowId !== exist.workflowId) return null;
-  } else if (cand.kind !== exist.kind) {
+  } else if (isAssistantKind(cand.kind) !== isAssistantKind(exist.kind)) {
+    // Either spelling of the assistant kind is one kind (`target-names.ts`).
     return "overlapping";
   }
   return relation === "equal" || relation === "superset" ? "blocking" : "overlapping";
@@ -221,8 +223,8 @@ function severity(
 
 /** Team membership replaces stored creator filters, including interim rows. */
 function teamMention(sub: CollisionCandidate): boolean {
-  return sub.target.kind === "orchestrator" &&
-    (sub.ownerType === "team" || (sub.ownerType === undefined && sub.target.orchestrator === "team")) &&
+  return isAssistantKind(sub.target.kind) &&
+    (sub.ownerType === "team" || (sub.ownerType === undefined && assistantScopeOf(sub.target) === "team")) &&
     eventKeyMatches(SLACK_MENTION_KEY, sub.eventKeys);
 }
 

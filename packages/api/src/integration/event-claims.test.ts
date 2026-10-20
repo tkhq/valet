@@ -229,7 +229,7 @@ describe("api integration: claims acceptance scenario", () => {
     // Team sre and its rule M: mentions in C900, a thread per mention, follow.
     await createIncidentTeam(u);
     await p.db.insert(eventSubscriptions).values(
-      ruleRow("M", SRE, ["slack.app_mention"], IN_C900, { kind: "orchestrator", follow: true, thread: { mode: "new" } }),
+      ruleRow("M", SRE, ["slack.app_mention"], IN_C900, { kind: "assistant", follow: true, thread: { mode: "new" } }),
     );
     // t-s: a mention in Slack thread X2 before E2 opens an sre thread and binds X2 to it.
     const x2 = await mention(u, "U001", `<@${BOT_USER}> what is the rollback plan?`);
@@ -244,7 +244,7 @@ describe("api integration: claims acceptance scenario", () => {
     expect(tS.threadId).not.toBe(tInc.threadId);
     // Rule P: channel messages in C900, grouped by the channel.
     await p.db.insert(eventSubscriptions).values(
-      ruleRow("P", SRE, ["slack.message"], IN_C900, { kind: "orchestrator", thread: { mode: "subject" } }),
+      ruleRow("P", SRE, ["slack.message"], IN_C900, { kind: "assistant", thread: { mode: "subject" } }),
     );
 
     // u-001: t-pr waits on #12 and #14 and opened #14; t-tri waits on ENG-42.
@@ -267,9 +267,9 @@ describe("api integration: claims acceptance scenario", () => {
       definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now,
     });
     await p.db.insert(eventSubscriptions).values([
-      ruleRow("R1", U001_OWNER, ["github.pull_request_review.submitted", "github.check_run.completed"], IN_API, { kind: "orchestrator", thread: { mode: "subject" } }),
-      ruleRow("R3", U001_OWNER, ["linear.issue.update"], [{ field: "team", op: "eq", value: "ENG" }], { kind: "orchestrator", thread: { mode: "own" } }),
-      ruleRow("R5", U001_OWNER, ["github.issue_comment.created"], IN_API, { kind: "orchestrator", thread: { mode: "subject" } }),
+      ruleRow("R1", U001_OWNER, ["github.pull_request_review.submitted", "github.check_run.completed"], IN_API, { kind: "assistant", thread: { mode: "subject" } }),
+      ruleRow("R3", U001_OWNER, ["linear.issue.update"], [{ field: "team", op: "eq", value: "ENG" }], { kind: "assistant", thread: { mode: "own" } }),
+      ruleRow("R5", U001_OWNER, ["github.issue_comment.created"], IN_API, { kind: "assistant", thread: { mode: "subject" } }),
       ruleRow("W", U001_OWNER, ["github.pull_request_review.submitted"], IN_API, { kind: "workflow", workflowId: WORKFLOW_ID }),
     ]);
 
@@ -384,7 +384,7 @@ describe("api integration: claims acceptance scenario", () => {
     await p.db.insert(teams).values({ id: PLATFORM, orgId: ORG, name: "Platform", createdAt: Date.now() });
     await p.db.insert(teamMembers).values({ teamId: PLATFORM, userId: USER, role: "member" });
     await p.db.insert(eventSubscriptions).values(
-      ruleRow("M-platform", { type: "team", id: PLATFORM }, ["slack.app_mention"], IN_C900, { kind: "orchestrator", follow: true, thread: { mode: "new" } }),
+      ruleRow("M-platform", { type: "team", id: PLATFORM }, ["slack.app_mention"], IN_C900, { kind: "assistant", follow: true, thread: { mode: "new" } }),
     );
     const c6Text = `<@${BOT_USER}> who owns db-2?`;
     await mention(u, "U001", c6Text);

@@ -1,5 +1,5 @@
 /**
- * Copy and defaults for a rule's thread policy, the **Runs in** control
+ * Copy and defaults for a rule's thread policy, the **Where** section
  * (docs/specs/2026-10-16-presence-hub-design.md Part C steps 2 and 3, and
  * docs/specs/2026-10-16-delivery-threads-and-claims-design.md Part A).
  * Pure, so the rules are tested without a render.
@@ -9,10 +9,10 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 /** The grouping unit a rule's events name, in UI words. */
 export type SubjectKind = "channel" | "pull request" | "issue" | "repository";
 
-/** Which rule the policy belongs to: an event listener or a schedule. */
-export type RuleKind = "listener" | "routine";
+/** What the policy belongs to: a line of presence (an event subscription) or a routine (a schedule). */
+export type RuleKind = "presence" | "routine";
 
-/** The automation wizard's outcomes, as far as the default policy cares. */
+/** What a new line does, as far as the default policy cares. */
 export type WizardOutcome = "reply" | "workflow" | "notify" | "advanced" | "schedule" | "thread";
 
 const GITHUB_PULL_REQUEST = /(^|[._])(pr|pull|pull_request|review|check|check_run|check_suite|status)([._]|$)/;
@@ -42,36 +42,12 @@ export function subjectKindForKeys(keys: readonly string[]): SubjectKind | null 
 
 /** The option copy for the subject mode. */
 export function subjectOptionLabel(subjectKind: SubjectKind | null): string {
-  return `One thread per ${subjectKind ?? "subject"}`;
+  return `One thread per ${subjectKind ?? "place"}`;
 }
 
-/** The rule's own thread, named for its kind. */
+/** The rule's own thread. A line of presence has no category noun, so it reads `Its own thread`. */
 export function ownOptionLabel(ruleKind: RuleKind): string {
-  return ruleKind === "listener" ? "This listener's thread" : "This routine's thread";
-}
-
-/**
- * Where a rule's deliveries land, as one phrase. `threadTitle` names an
- * `existing` thread; without it the phrase falls back to a generic name.
- */
-export function runsInLabel(
-  policy: AssistantThreadPolicy,
-  subjectKind: SubjectKind | null,
-  ruleKind: RuleKind,
-  threadTitle?: string,
-): string {
-  switch (policy.mode) {
-    case "new":
-      return "A new thread each time";
-    case "subject":
-      return subjectOptionLabel(subjectKind);
-    case "own":
-      return ownOptionLabel(ruleKind);
-    case "existing":
-      return threadTitle !== undefined && threadTitle.trim().length > 0
-        ? `The thread ${threadTitle}`
-        : "The thread you picked";
-  }
+  return ruleKind === "presence" ? "Its own thread" : "This routine's thread";
 }
 
 /**
@@ -101,11 +77,11 @@ export function displayThreadPolicy(
   return { mode: "own" };
 }
 
-/** The note under Runs in when one thread would hold several Slack conversations. */
+/** The note under Where when one thread would hold several Slack conversations. */
 export const SHARED_SLACK_THREAD_NOTE = "Messages from several Slack conversations will share this thread.";
 
 /**
- * The wizard's starting policy: a mention rule replies in a new thread; a
+ * A new line's starting policy: a mention rule replies in a new thread; a
  * notification or a workflow event whose keys name a subject groups by that
  * subject; everything else uses the rule's own thread.
  */

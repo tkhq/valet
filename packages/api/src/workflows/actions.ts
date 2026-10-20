@@ -1477,7 +1477,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, presence },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, appearance: presence },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1563,18 +1563,18 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const proposeTrigger = action(Type.Intersect([createTrigger.parameters, proposalKeySchema]))({
     id: "workflows.propose_trigger",
     name: "Propose workflow event trigger",
-    description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Events.",
+    description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on in Presence.",
     riskLevel: "low",
     execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, presence,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, appearance: presence,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
         ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
-          ...(result.trigger.presence ? { presence: result.trigger.presence } : {}),
+          ...(result.trigger.appearance ? { appearance: result.trigger.appearance } : {}),
         },
       }) };
     },
@@ -1582,7 +1582,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   const proposeSchedule = action(Type.Intersect([createSchedule.parameters, proposalKeySchema]))({
     id: "workflows.propose_schedule",
     name: "Propose schedule",
-    description: "Save a disabled cron schedule for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Scheduled.",
+    description: "Save a disabled cron schedule for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and turn it on under On a schedule in Presence.",
     riskLevel: "low",
     execute: async ({ workflow_id, prompt, name, cron, timezone, input, proposal_key }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -1667,7 +1667,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Update a cron schedule by id. Changing cron or timezone recomputes next fire time. " +
       "Setting enabled=false pauses the schedule; re-enabling recomputes next fire time so a stale slot does not fire at once. " +
-      "Target kind (workflow vs orchestrator) cannot change — delete and recreate to switch.",
+      "Target kind (workflow or assistant) cannot change. Delete and recreate the schedule to switch.",
     // A schedule or event trigger keeps prompting the assistant after the
     // conversation ends, so a person approves it by default (risk default
     // for "high"). Agents can steer the assistant through threads.

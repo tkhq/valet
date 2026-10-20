@@ -1,5 +1,5 @@
 export { readAppPageHint, type AppPageHint } from "./app-page-hint.js";
-export * from './presence.js';
+export * from './appearance.js';
 export * from './types/index.js';
 export * from './types/message-parts.js';
 export * from './types/plugin-entitlements.js';
@@ -8,6 +8,7 @@ export * from './artifact-page.js';
 export * from './errors.js';
 export * from './format-bytes.js';
 export * from './scope-key.js';
+export * from './schedule-run-id.js';
 export * from './resource-quantity.js';
 export * from './search-query.js';
 export * from './sandbox-resources.js';

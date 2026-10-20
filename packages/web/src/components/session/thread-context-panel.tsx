@@ -6,6 +6,7 @@ import type { Message, ThreadPullRequest } from "@valet/api/wire";
 import { api, type OwnerFilter } from "~/api/client";
 import { qkCatchUp } from "~/api/catch-up";
 import { useThreadChannelActivity } from "~/api/channels";
+import { usePlaceSubject } from "~/api/presence";
 import { relativeTime } from "~/lib/relative-time";
 import { BackgroundWorkSection } from "./background-work";
 
@@ -13,6 +14,12 @@ import { BackgroundWorkSection } from "./background-work";
 function PullRequestIcon({ state }: { state: ThreadPullRequest["state"] }) {
   const Icon = state === "merged" ? GitMerge : state === "closed" ? GitPullRequestClosed : GitPullRequest;
   return <Icon className="h-4 w-4 shrink-0" aria-hidden />;
+}
+
+/** The link to the channel's place page, by its team-qualified place key. */
+function ChannelPlaceLink({ channelKey }: { channelKey: string }) {
+  const subject = usePlaceSubject(channelKey);
+  return <Link to="/presence/places/$subject" params={{ subject }} className="text-xs hover:text-ink">Open channel</Link>;
 }
 
 /** `repo #n`, the way the thread header names a pull request. */
@@ -130,7 +137,7 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
         <section aria-label="Channel" className="border-t border-line py-3">
           <div className="mb-2 flex items-center justify-between text-muted">
             <h2 className="font-medium">Channel</h2>
-            <Link to="/channel" search={{ key: latest.channelKey }} className="text-xs hover:text-ink">Open channel</Link>
+            <ChannelPlaceLink channelKey={latest.channelKey} />
           </div>
           <p className="text-xs text-muted">
             {channelActivity.total} {channelActivity.total === 1 ? "message" : "messages"} in the channel · latest {relativeTime(latest.createdAt)}

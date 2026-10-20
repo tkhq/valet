@@ -13,7 +13,9 @@ import type {
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
-  ChannelDetailResponse,
+  ListPresencePlacesResponse,
+  ListThreadFeedersResponse,
+  PresencePlaceDetailResponse,
   ThreadChannelActivity,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -24,6 +26,7 @@ import type {
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
@@ -142,6 +145,7 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
   ListWorkflowVersionsResponse,
@@ -204,6 +208,8 @@ import type {
   EventLogResponse,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
+  ListSubscriptionDeliveriesResponse,
+  LineActivityResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
@@ -625,8 +631,15 @@ export const api = {
     request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
   clearIntegrationLimit: (owner: OwnerFilter) =>
     request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
-  getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
-    request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
+  /** `scope` is the workspace key: `user`, or a team id. */
+  listPresencePlaces: (scope: string) =>
+    request<ListPresencePlacesResponse>("GET", `/presence/places?scope=${encodeURIComponent(scope)}`),
+  getPresencePlace: (scope: string, subject: string) =>
+    request<PresencePlaceDetailResponse>("GET", `/presence/places/${encodeURIComponent(subject)}?scope=${encodeURIComponent(scope)}`),
+  /** The listeners and routines that feed a thread (spec Part G). 404s when
+   * the viewer cannot read the thread. */
+  getThreadFeeders: (sessionId: string, threadId: string) =>
+    request<ListThreadFeedersResponse>("GET", `/presence/feeders?sessionId=${encodeURIComponent(sessionId)}&threadId=${encodeURIComponent(threadId)}`),
   getThreadChannelActivity: (threadId: string) =>
     request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
@@ -1108,17 +1121,19 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; cursor?: string }) => {
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; place?: string; cursor?: string }) => {
     const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
     if (params.problems) qs.set("problems", "1");
     if (params.diagnostics) qs.set("diagnostics", "1");
     if (params.q) qs.set("q", params.q);
+    if (params.place) qs.set("place", params.place);
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
-  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number; subscriptionId?: string } = {}) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
+    if (params.subscriptionId) qs.set("subscriptionId", params.subscriptionId);
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
@@ -1128,6 +1143,21 @@ export const api = {
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: (owner?: OwnerFilter) =>
     request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
+  listSubscriptionDeliveries: (id: string, limit?: number) =>
+    request<ListSubscriptionDeliveriesResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/deliveries${limit !== undefined ? `?limit=${limit}` : ""}`,
+    ),
+  /** One line's Activity, newest first, with the health strip's counts. `before` is the previous page's `nextCursor`. */
+  getLineActivity: (id: string, params: { before?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.before !== undefined) qs.set("before", params.before);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<LineActivityResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/activity${qs.size ? `?${qs}` : ""}`,
+    );
+  },
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
@@ -1141,7 +1171,7 @@ export const api = {
   // workflow webhook URL management. Schedules and event triggers are the
   // flat trigger surface below, not this per-workflow one.
   getWorkflowWebhook: (id: string) =>
-    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+    request<GetWorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
   mintWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
   deleteWorkflowWebhook: (id: string) =>
@@ -1159,6 +1189,14 @@ export const api = {
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
   listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
+  /** Every workflow run in one workspace, newest first. Paged by `nextCursor`. */
+  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (page?.limit) qs.set("limit", String(page.limit));
+    if (page?.cursor) qs.set("cursor", page.cursor);
+    const joined = [qs.toString(), ownerParams(owner)].filter(Boolean).join("&");
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${joined ? `?${joined}` : ""}`);
+  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>

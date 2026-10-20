@@ -14,7 +14,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
-import { PRESENCE_DISPLAY_NAME_MAX_LENGTH, validatePresence } from "@valet/shared";
+import { APPEARANCE_DISPLAY_NAME_MAX_LENGTH, validateAppearance } from "@valet/shared";
 import { LEGACY_RUNTIME_MARKER, type AppDb } from "../lib/drizzle.js";
 
 export interface LegacyAssistantProfile {
@@ -33,7 +33,7 @@ export interface LegacyAssistantProfile {
 
 /**
  * The stored name as one trimmed line of at most 80 UTF-16 units: Slack's
- * `username` limit, and the cap `validatePresence` applies to every other
+ * `username` limit, and the cap `validateAppearance` applies to every other
  * display name. The old API stored any string, so a stored name can hold
  * line breaks or run long. Control and line-separator characters become
  * spaces, so the name cannot break out of the "You are <name>." line into
@@ -46,18 +46,18 @@ function displayName(value: unknown): string | undefined {
   const line = value.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
   let capped = "";
   for (const char of line) {
-    if (capped.length + char.length > PRESENCE_DISPLAY_NAME_MAX_LENGTH) break;
+    if (capped.length + char.length > APPEARANCE_DISPLAY_NAME_MAX_LENGTH) break;
     capped += char;
   }
   return capped.trim() || undefined;
 }
 
-/** A trimmed https URL that `validatePresence` accepts, without the inner
+/** A trimmed https URL that `validateAppearance` accepts, without the inner
  * whitespace the old API also refused. */
 function avatarUrl(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const url = value.trim();
-  return url && !/\s/.test(url) && validatePresence({ avatarUrl: url }) === null ? url : undefined;
+  return url && !/\s/.test(url) && validateAppearance({ avatarUrl: url }) === null ? url : undefined;
 }
 
 /**

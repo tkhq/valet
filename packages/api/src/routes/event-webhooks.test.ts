@@ -57,7 +57,7 @@ async function seedSubscription(a: TestApi, eventKeys: string[]): Promise<void> 
     name: "test subscription",
     eventKeys,
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "local-user",
     createdAt: now,

@@ -17,6 +17,7 @@ import {
 } from "./channel-messages.js";
 import { workspaceSessionIds } from "../assistants/service.js";
 import { parsePullRequestUrl } from "./thread-pull-requests.js";
+import { isAssistantKind } from "../events/target-names.js";
 
 /** Resolves Slack channel ids to names. Missing ids keep their id. */
 export type ChannelNames = (channelIds: string[]) => Promise<Map<string, string>>;
@@ -33,7 +34,7 @@ interface Loaded {
 }
 
 /** The session of the workspace's runtime, or null before its first use. */
-async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Promise<string | null> {
+export async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Promise<string | null> {
   const [row] = await db.select({ sessionId: assistants.sessionId }).from(assistants)
     .where(and(eq(assistants.orgId, orgId), eq(assistants.ownerType, owner.type), eq(assistants.ownerId, owner.id),
       sql`${assistants.archivedAt} IS NULL`))
@@ -41,7 +42,8 @@ async function runtimeSessionId(db: AppDb, orgId: string, owner: Principal): Pro
   return row?.sessionId ?? null;
 }
 
-function channelFilterIds(filters: unknown): { ids: string[]; labels: Map<string, string> } {
+/** The channel ids an exact `channel` filter names, and the names the filter carries. */
+export function channelFilterIds(filters: unknown): { ids: string[]; labels: Map<string, string> } {
   const ids: string[] = [];
   const labels = new Map<string, string>();
   if (!Array.isArray(filters)) return { ids, labels };
@@ -118,7 +120,7 @@ async function loadChannels(db: AppDb, orgId: string, owner: Principal, names: C
   for (const rule of rules) {
     const keys = Array.isArray(rule.eventKeys) ? rule.eventKeys.filter((k): k is string => typeof k === "string") : [];
     const target = rule.target as { kind?: unknown } | null;
-    if (!selectsSlackMention(keys) || target?.kind !== "orchestrator") continue;
+    if (!selectsSlackMention(keys) || !isAssistantKind(target?.kind)) continue;
     const { ids, labels: ruleLabels } = channelFilterIds(rule.filters);
     for (const [id, label] of ruleLabels) labels.set(id, label);
     const own = rule.ownerType === owner.type && rule.ownerId === owner.id;

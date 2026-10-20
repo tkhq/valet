@@ -58,7 +58,7 @@ const ORG = "local-org";
 const USER = "local-user";
 const OTHER_USER = "test-member";
 
-const PIN_UNAVAILABLE = "Pick another thread for this rule in Presence.";
+const PIN_UNAVAILABLE = "Pick another thread in Presence.";
 const CROSS_OWNER = "This thread belongs to another owner. Pick a thread in your workspace.";
 
 // GitHub universe.
@@ -444,7 +444,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
       name: "acme/api reviews and checks",
       eventKeys: ["github.pull_request_review.submitted", "github.check_run.completed"],
       filters: [repoFilter],
-      target: { kind: "orchestrator", thread: { mode: "subject" } },
+      target: { kind: "assistant", thread: { mode: "subject" } },
     });
     await postGithub(api, "pull_request_review", review(12));
     const t1 = await settled(api, r1, 1);
@@ -453,7 +453,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
     expect(await threadsLike(api, "subject:%")).toHaveLength(1);
     // The delivery list names the thread (Part E step 2).
     const t1Event = (await (await call(api, "GET", `/api/events/${t1[0]?.eventId}`)).json()) as GetEventResponse;
-    expect(t1Event.deliveries.find((d) => d.id === t1[0]?.id)?.thread).toEqual({ sessionId: pr12.sessionId, threadId: pr12.id });
+    expect(t1Event.deliveries.find((d) => d.id === t1[0]?.id)?.thread).toEqual({ sessionId: pr12.sessionId, threadId: pr12.id, title: "acme/api#12" });
 
     // T2: a check run completes on #12. The same thread holds it.
     await postGithub(api, "check_run", checkRun("test", "success", [12]));
@@ -474,7 +474,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
       name: "ENG triage",
       eventKeys: ["linear.issue.update"],
       filters: [{ field: "team", op: "eq", value: "ENG" }],
-      target: { kind: "orchestrator", thread: { mode: "own" } },
+      target: { kind: "assistant", thread: { mode: "own" } },
     });
     await postLinearUpdate(api, "ENG-42");
     await postLinearUpdate(api, "ENG-43");
@@ -490,7 +490,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
       name: "acme/api failures",
       eventKeys: ["github.check_run.completed"],
       filters: [repoFilter],
-      target: { kind: "orchestrator", thread: { mode: "new" } },
+      target: { kind: "assistant", thread: { mode: "new" } },
     });
     await postGithub(api, "check_run", checkRun("lint", "failure", []));
     await postGithub(api, "check_run", checkRun("build", "failure", []));
@@ -552,7 +552,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
 
     // T9: S1 keeps its own thread across two fires.
     const created = await call(api, "POST", "/api/workflows/schedules", {
-      name: "Morning summary", cron: "0 9 * * *", target: { kind: "orchestrator", prompt: "Summarize the night." }, thread: { mode: "own" },
+      name: "Morning summary", cron: "0 9 * * *", target: { kind: "assistant", prompt: "Summarize the night." }, thread: { mode: "own" },
     });
     expect(created.status, await created.clone().text()).toBe(201);
     const s1 = ((await created.json()) as WorkflowScheduleResponse).schedule.scheduleId;
@@ -574,7 +574,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
       name: "C900 mentions",
       eventKeys: ["slack.app_mention"],
       filters: [{ field: "channel", op: "eq", value: "C900" }],
-      target: { kind: "orchestrator", follow: true, thread: { mode: "new" } },
+      target: { kind: "assistant", follow: true, thread: { mode: "new" } },
     });
     const threadX = `${++slackTs}.000100`;
     await postSlack(api, {

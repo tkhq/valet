@@ -1,4 +1,4 @@
-import type { Presence } from "@valet/shared";
+import type { Appearance } from "@valet/shared";
 /**
  * Event-delivery dispatcher: drains `event_deliveries` rows into their
  * subscription targets (workflow run start / assistant signal prompt /
@@ -65,6 +65,7 @@ import {
   type DeliveryDestinationMetricReason,
   type DestinationRecorder,
 } from "../observability/delivery-metrics.js";
+import { readStoredTarget } from "./target-names.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -89,7 +90,7 @@ export interface AssistantDeliverFn {
      */
     actorUserId: string;
     signal: SignalContent;
-  presence?: Presence;
+    appearance?: Appearance;
     dispatchId: string;
     /** Where the delivery lands: the resolved destination (spec 2026-10-16:
      * delivery threads, Part B). A skip never reaches this seam. */
@@ -213,6 +214,12 @@ export function deliveryThreadPolicy(
   return { mode: "own" };
 }
 
+/** A stored event's natural subject from the plugin that owns its service, or null (spec Part D). */
+export function eventNaturalSubject(plugins: readonly ValetPlugin[], event: typeof events.$inferSelect): { subject: string; label: string } | null {
+  const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
+  return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
+}
+
 /** The stored event row as the plugin contract's `NormalizedEvent`, for `naturalSubject`. */
 function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEvent {
   const actor = event.actor;
@@ -259,17 +266,18 @@ interface OwnedElsewhere {
   reason: "follow_routed" | "mention_covered";
 }
 
-/** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
+/** The `target` jsonb column's shape, read through `readStoredTarget` so old
+ * names arrive renamed. Written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
-  kind: "workflow" | "orchestrator" | "signal";
+  kind: "workflow" | "assistant" | "signal";
   /** The assistant thread policy (spec 2026-10-16: delivery threads, Part
    * A). Read through `deliveryThreadPolicy`; absent reads as `new` for a
    * delivery with a channel origin, `subject` for other Slack channel
    * events, else `own`. */
   thread?: unknown;
   workflowId?: string;
-  presence?: Presence;
-  /** When true, an orchestrator channel delivery follows the thread: later
+  appearance?: Appearance;
+  /** When true, an assistant channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
   pauseOnOverlap?: boolean;
@@ -381,7 +389,7 @@ export class EventDispatcher {
       if (event) await this.recoverClaimedDigest(delivery.destination, event);
       await db
         .update(eventDeliveries)
-        .set({ status: "dead", lastError: "event or subscription vanished" })
+        .set({ status: "dead", lastError: "The event or its line was deleted. Nothing is left to send." })
         .where(eq(eventDeliveries.id, deliveryId));
       return;
     }
@@ -390,9 +398,9 @@ export class EventDispatcher {
       // Both jsonb shapes are owned by their writers: `target` by the
       // subscriptions CRUD validator, `refs` by ingest (NormalizedEvent.refs
       // is Record<string, string>). Same narrowing convention as ingest.ts.
-      const target = sub.target as SubscriptionTarget;
+      const target = readStoredTarget(sub.target) as SubscriptionTarget;
       const refs = event.refs as Record<string, string>;
-      if (event.orgId !== sub.orgId) throw new Error("Event and subscription organizations differ.");
+      if (event.orgId !== sub.orgId) throw new Error("The event and the line of presence belong to different organizations.");
       const covered = sub.enabled && await hasTeamCoverage(db, sub, event, allCatalogEntries(this.deps.plugins ?? []));
       if (!sub.enabled || covered) {
         let paused = false;
@@ -411,14 +419,14 @@ export class EventDispatcher {
         // dedupe keys. That duplication is accepted (spec Deviations).
         await this.recoverClaimedDigest(delivery.destination, event);
         await db.update(eventDeliveries).set({ status: "skipped", lastError: covered
-          ? `Skipped — matching team subscription.${paused ? " Personal subscription paused until you re-enable it." : ""}`
-          : "Skipped — subscription is disabled." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
+          ? `The team already listens for this.${paused ? " This personal line is paused." : ""}`
+          : "This line is off. Turn it on to receive these events." }).where(and(eq(eventDeliveries.id, delivery.id), eq(eventDeliveries.eventId, event.id)));
         return;
       }
 
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy, target.presence);
-      } else if (target.kind === "orchestrator") {
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy, target.appearance);
+      } else if (target.kind === "assistant") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
         // A verified mention carries a human actor. Other shared event work
@@ -562,7 +570,7 @@ export class EventDispatcher {
               attributes,
               origin: origin ?? undefined,
             },
-            ...(target.presence ? { presence: target.presence } : {}),
+            ...(target.appearance ? { appearance: target.appearance } : {}),
             dispatchId: eventDeliveryDispatchId(delivery.id),
             destination,
             ...(inbound ? { inbound } : {}),
@@ -642,7 +650,7 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: actorUserId,
-              // Followed replies need the source rule for current presence
+              // Followed replies need the source rule for current appearance
               // settings and, for teams, audience authorization.
               subscriptionId: sub.id,
               preserveBinding,
@@ -687,8 +695,7 @@ export class EventDispatcher {
 
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */
   private naturalSubject(event: typeof events.$inferSelect): { subject: string; label: string } | null {
-    const plugin = (this.deps.plugins ?? []).find((p) => (p.triggers ?? []).some((t) => t.service === event.service));
-    return plugin?.naturalSubject?.(normalizedEventFromRow(event)) ?? null;
+    return eventNaturalSubject(this.deps.plugins ?? [], event);
   }
 
   /**
@@ -758,6 +765,8 @@ export class EventDispatcher {
     // delivers it, or the reply reaches no thread.
     if (route && route.ownerType === sub.ownerType && route.ownerId === sub.ownerId && sameThread
       && followRouterPassed(route, event.payload)) {
+      // The delivery-threads spec (C3b) names this stored text.
+      // copy-lint: allow delivery
       return { text: "the followed thread delivers this reply", reason: "follow_routed" };
     }
     const plugins = this.deps.plugins ?? [];
@@ -768,6 +777,8 @@ export class EventDispatcher {
     const catalog = allCatalogEntries(plugins);
     const covered = await mentionCoveredBy(db, subs, { type: sub.ownerType, id: sub.ownerId }, twin, catalog,
       (rule, mention) => hasTeamCoverage(db, rule, { eventKey: mention.key, payload: mention.payload, subjects: mention.subjects ?? null }, catalog));
+    // The delivery-threads spec (C2b, C5) names this stored text.
+    // copy-lint: allow delivery
     return covered ? { text: "the mention delivers this post", reason: "mention_covered" } : null;
   }
 
@@ -835,7 +846,7 @@ export class EventDispatcher {
     refs: Record<string, string>,
     /** Creator attribution applies only to personal workflows. */
     createdBy: string,
-    presence?: Presence,
+    presence?: Appearance,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
     // definitionVersionId, owner resolved from the definition row. The org

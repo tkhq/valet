@@ -116,7 +116,7 @@ describe("WorkflowScheduler fire ownership", () => {
  it("delivers a team prompt schedule without its creator's identity", async () => {
     await db.insert(workflowSchedules).values({
       id: "team-prompt", orgId: "org-1", ownerType: "team", ownerId: "team-1",
-      targetKind: "orchestrator", prompt: "A teammate changed this prompt", name: "Team prompt",
+      targetKind: "assistant", prompt: "A teammate changed this prompt", name: "Team prompt",
       cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
       createdBy: "original-creator", createdAt: 100, updatedAt: 200,
     });
@@ -137,7 +137,7 @@ describe("WorkflowScheduler thread policy", () => {
   async function seedPromptSchedule(id: string, threadPolicy: unknown) {
     await db.insert(workflowSchedules).values({
       id, orgId: "org-1", ownerType: "user", ownerId: "user-1",
-      targetKind: "orchestrator", prompt: "Summarize the night", name: "Morning summary",
+      targetKind: "assistant", prompt: "Summarize the night", name: "Morning summary",
       cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
       createdBy: "user-1", createdAt: 100, updatedAt: 100, threadPolicy,
     });
@@ -185,7 +185,8 @@ describe("WorkflowScheduler thread policy", () => {
     expect(destinations).toEqual([{ kind: "target", sessionId: "sess-1", threadId: "thr-1", reason: "policy_existing" }]);
     const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-pin"));
     expect(row?.enabled).toBe(false);
-    expect(PIN_UNAVAILABLE_MESSAGE).toBe("Pick another thread for this rule in Presence.");
+    expect(row?.disabledReason).toBe(PIN_UNAVAILABLE_MESSAGE);
+    expect(PIN_UNAVAILABLE_MESSAGE).toBe("Pick another thread in Presence.");
   });
 
   it("counts a dead pin once, when it disables the schedule", async () => {
@@ -212,5 +213,41 @@ describe("WorkflowScheduler thread policy", () => {
     // does not page again.
     expect(await scheduler.fireNow({ userId: "user-1", orgId: "org-1" }, "sched-pin-count")).toEqual({ error: PIN_UNAVAILABLE_MESSAGE });
     expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
+  });
+});
+
+describe("WorkflowScheduler disable reasons", () => {
+  const scheduler = () => new WorkflowScheduler({
+    db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+    deliverToAssistant: async () => LANDED, now: () => 1_000,
+  });
+  const base = {
+    orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Broken routine",
+    timezone: "UTC", enabled: true, nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+  } as const;
+  async function reasonFor(id: string): Promise<{ enabled: boolean | undefined; disabledReason: string | null | undefined }> {
+    await scheduler().tick();
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+    return { enabled: row?.enabled, disabledReason: row?.disabledReason };
+  }
+
+  it("names the fix when a prompt routine has no prompt", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "no-prompt", targetKind: "assistant", prompt: "  ", cron: "0 * * * *" });
+    expect(await reasonFor("no-prompt")).toEqual({ enabled: false, disabledReason: "Its prompt is empty. Edit the routine and add a prompt." });
+  });
+
+  it("names the fix when a routine's workflow was deleted", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "wf-gone", targetKind: "workflow", workflowId: "wf_deleted", cron: "0 * * * *" });
+    expect(await reasonFor("wf-gone")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
+  });
+
+  it("names the fix when a workflow routine has no workflow", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "wf-null", targetKind: "workflow", workflowId: null, cron: "0 * * * *" });
+    expect(await reasonFor("wf-null")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
+  });
+
+  it("names the fix when a routine's schedule does not parse", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "bad-cron", targetKind: "assistant", prompt: "p", cron: "not a cron" });
+    expect(await reasonFor("bad-cron")).toEqual({ enabled: false, disabledReason: "Its schedule does not parse. Edit the routine and fix the schedule." });
   });
 });

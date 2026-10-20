@@ -1236,7 +1236,7 @@ export async function installWorkflowTemplate(
             error:
               `This template watches for events filtered by "${filter.fromInput}", and no value for it arrived. ` +
               `Supply "${filter.fromInput}" when you install it.`,
-            errors: [`Event trigger "${event.name}" needs input "${filter.fromInput}" for its ${filter.field} filter.`],
+            errors: [`Event "${event.name}" needs input "${filter.fromInput}" for its ${filter.field} filter.`],
           };
         }
         filters.push({ field: filter.field, op: filter.op, value: supplied });
@@ -1247,7 +1247,7 @@ export async function installWorkflowTemplate(
           ok: false,
           code: "broken_template",
           error: `Template "${templateId}" from "${owned.pluginName}" declares an event filter with no value, so it cannot be installed. Report the template id.`,
-          errors: [`Event trigger "${event.name}" has a ${filter.field} filter with neither "value" nor "fromInput".`],
+          errors: [`Event "${event.name}" has a ${filter.field} filter with neither "value" nor "fromInput".`],
         };
       }
       filters.push({ field: filter.field, op: filter.op, value: filter.value });
@@ -1275,7 +1275,7 @@ export async function installWorkflowTemplate(
       return {
         ok: false,
         code: "broken_template",
-        error: `Template "${templateId}" from "${owned.pluginName}" declares an event trigger that cannot be armed, so it cannot be installed. Report the template id.`,
+        error: `Template "${templateId}" from "${owned.pluginName}" declares an event that Valet cannot listen for, so it cannot be installed. Report the template id.`,
         errors: [write.error],
       };
     }
@@ -1292,7 +1292,7 @@ export async function installWorkflowTemplate(
       if (!subscription.eventKeys.some((key) => key.startsWith("github."))) continue;
       const repoFilter = subscription.filters.find((filter) => filter.field === "repo" && filter.op === "eq");
       if (!repoFilter || typeof repoFilter.value !== "string") {
-        return { ok: false, code: "invalid_input", error: "Choose an exact repository for this team's GitHub trigger.", errors: ["A repository equality filter is required."] };
+        return { ok: false, code: "invalid_input", error: "Choose an exact repository for this team's GitHub events.", errors: ["A repository equality filter is required."] };
       }
       repositories.add(repoFilter.value);
     }

@@ -1,13 +1,12 @@
-import type { AssistantThreadPolicy, Presence } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
 import { displayThreadPolicy, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
-import type { DeliveryPreferencesValue } from "./delivery-preferences";
 /**
- * The pure diff behind the edit-subscription dialog: compare the form state
- * against the stored row and build the PATCH body of only the changed
- * fields. Kept apart from the dialog so the rules are testable without a
- * render — the same split the trigger dialog's edit branch encodes inline.
+ * The pure diff behind the editor's Save: compare the draft against the
+ * stored line and build the PATCH body of only the changed fields. Kept
+ * apart from the editor so the rules are testable without a render.
  */
 import type {
+  EventDeliveryPolicy,
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
   PatchEventSubscriptionRequest,
@@ -15,6 +14,9 @@ import type {
 import { selectsSlackMention, storedAnyChannel } from "~/lib/slack-mention";
 import { sameWireFilters } from "./filter-editor";
 import type { PromptFieldsValue } from "./prompt-fields";
+
+/** A personal line's choice when a team line also matches the event. */
+export type DeliveryPreferencesValue = { deliveryPolicy: EventDeliveryPolicy; pauseOnOverlap: boolean };
 
 function sameKeySet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
@@ -49,7 +51,7 @@ export function buildSubscriptionPatch(
     eventKeys: string[];
     filters: EventSubscriptionFilterWire[];
     anyChannel: boolean;
-    presence?: Presence;
+    appearance?: Appearance;
     prompts?: PromptFieldsValue;
     deliveryPreferences?: DeliveryPreferencesValue;
     thread?: AssistantThreadPolicy;
@@ -74,7 +76,7 @@ export function buildSubscriptionPatch(
     body.anyChannel = true;
   }
 
-  if (form.prompts && sub.target.kind === "orchestrator") {
+  if (form.prompts && sub.target.kind === "assistant") {
     const target = sub.target;
     for (const field of ["systemPrompt", "userPromptTemplate"] as const) {
       const next = form.prompts[field].trim();
@@ -84,21 +86,21 @@ export function buildSubscriptionPatch(
     }
   }
 
-  if (form.thread !== undefined && sub.target.kind === "orchestrator" &&
+  if (form.thread !== undefined && sub.target.kind === "assistant" &&
     !sameThreadPolicy(form.thread, displayThreadPolicy(sub.target, sub.eventKeys))) {
     body.thread = form.thread;
   }
 
-  if (form.deliveryPreferences && sub.ownerType === "user" && sub.target.kind === "orchestrator") {
+  if (form.deliveryPreferences && sub.ownerType === "user" && sub.target.kind === "assistant") {
     const next = form.deliveryPreferences;
     if (next.deliveryPolicy !== (sub.target.deliveryPolicy ?? "always")) body.deliveryPolicy = next.deliveryPolicy;
     if (next.deliveryPolicy !== "always" && next.pauseOnOverlap !== (sub.target.pauseOnOverlap ?? false)) body.pauseOnOverlap = next.pauseOnOverlap;
   }
 
-  if (form.presence !== undefined) {
-    const stored = sub.target.presence ?? {};
-    if (form.presence.displayName !== stored.displayName || form.presence.avatarUrl !== stored.avatarUrl) {
-      body.presence = Object.keys(form.presence).length > 0 ? form.presence : null;
+  if (form.appearance !== undefined) {
+    const stored = sub.target.appearance ?? {};
+    if (form.appearance.displayName !== stored.displayName || form.appearance.avatarUrl !== stored.avatarUrl) {
+      body.appearance = Object.keys(form.appearance).length > 0 ? form.appearance : null;
     }
   }
 

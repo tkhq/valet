@@ -23,6 +23,7 @@ import type {
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
   ListWorkflowActionRequiredResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowsResponse,
   ListWorkflowTriggersResponse,
@@ -40,7 +41,7 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter, type WorkflowRunPage } from "./client";
+import { api, type OwnerFilter, type WorkflowRunPage } from "./client";
 
 export const qkWorkflows = {
   /** The owner is a trailing element, so `["workflows"]` stays the prefix
@@ -161,6 +162,21 @@ export function useWorkflowRuns(
     queryKey: qkWorkflows.runs(id, page),
     queryFn: () => api.listWorkflowRuns(id, page),
     enabled: !!id,
+    ...opts,
+  });
+}
+
+/** Every run in one workspace, newest first: the Presence Runs tab. Polls,
+ * because runs move; the same cadence as run detail. */
+export function useAllWorkflowRuns(
+  owner: OwnerFilter | undefined,
+  page?: WorkflowRunPage,
+  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
+) {
+  return useQuery<ListAllWorkflowRunsResponse>({
+    queryKey: qkWorkflows.allRuns(owner, page),
+    queryFn: () => api.listAllWorkflowRuns(owner, page),
+    refetchInterval: 5000,
     ...opts,
   });
 }
@@ -453,19 +469,13 @@ export function useDismissRun() {
 
 // ── Triggers: webhook, schedules, event triggers ─────────────────────────
 
-/** The webhook status read treats "no webhook configured" (404) as `null`
- * rather than an error — absence is the normal starting state. */
+/** The workflow's webhook, or `null` when it has none yet. The server answers
+ * a missing webhook with 200 `{ webhook: null }`, since absence is the normal
+ * starting state; a 404 means the workflow itself is gone. */
 export function useWorkflowWebhook(id: string) {
   return useQuery<WorkflowWebhookResponse | null>({
     queryKey: qkWorkflows.webhook(id),
-    queryFn: async () => {
-      try {
-        return await api.getWorkflowWebhook(id);
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 404) return null;
-        throw err;
-      }
-    },
+    queryFn: async () => (await api.getWorkflowWebhook(id)).webhook,
   });
 }
 
@@ -544,6 +554,14 @@ export function useDeleteSchedule() {
   });
 }
 
+/** True for a `qkWorkflows.runs(id)` key of any workflow. */
+export function isWorkflowRunsKey(key: readonly unknown[]): boolean {
+  return key[0] === "workflows" && key[2] === "runs";
+}
+
+/** Fires a schedule now. The mutation knows only the schedule id, so it
+ * refreshes every workflow's runs: a workflow routine's page reads its
+ * Activity, count, and pulse from its workflow's runs. */
 export function useRunScheduleNow() {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, string>({
@@ -551,6 +569,7 @@ export function useRunScheduleNow() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
       void qc.invalidateQueries({ queryKey: qkWorkflows.allRuns() });
+      void qc.invalidateQueries({ predicate: (query) => isWorkflowRunsKey(query.queryKey) });
     },
   });
 }

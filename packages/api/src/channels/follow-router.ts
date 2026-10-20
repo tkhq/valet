@@ -1,4 +1,4 @@
-import { readPresence } from "@valet/shared";
+import { readAppearance } from "@valet/shared";
 import { and, eq } from "drizzle-orm";
 import { eventSubscriptions } from "../schema/index.js";
 /**
@@ -16,6 +16,7 @@ import { findFollowedThread, touchFollowedThread } from "../events/followed-thre
 import { followBindingAuthorized, followedMessageActor, newcomerAuthor } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { inboundSlackMessage } from "../services/channel-messages.js";
+import { appearanceOf } from "../events/target-names.js";
 
 export interface FollowRouterDeps {
   /** Bot identity from the verified org credential. */
@@ -223,7 +224,8 @@ async function routeFollowedMessage(
       eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.ownerType, follow.ownerType),
       eq(eventSubscriptions.ownerId, follow.ownerId))).limit(1) : [];
   const target = subscription?.target;
-  const presence = target && typeof target === "object" && "presence" in target ? readPresence(target.presence) : undefined;
+  // Stored rows may carry the old `presence` name (`target-names.ts`).
+  const appearance = readAppearance(appearanceOf(target));
   const inbound = inboundSlackMessage(threadKey, f.ts, sender, normalized.text);
   const author = follow.ownerType === "team" ? actorUserId ? await newcomerAuthor(deps.db, orgId, actorUserId, f.user, sender) : undefined : undefined;
   try {
@@ -237,7 +239,7 @@ async function routeFollowedMessage(
       destination: follow.sessionId !== null && follow.threadId !== null
         ? { kind: "target", sessionId: follow.sessionId, threadId: follow.threadId, reason: "conversation_follow" }
         : { kind: "key", key: threadKey },
-      ...(presence ? { presence } : {}),
+      ...(appearance ? { appearance } : {}),
       signal: {
         kind: "signal",
         signalType: "slack.message",

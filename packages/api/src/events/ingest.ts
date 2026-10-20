@@ -26,6 +26,14 @@ import { isPrincipalType, mentionCoveredBy, resolveClaims, withTwinCandidates, t
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
+import { isAssistantKind } from "./target-names.js";
+import { placeOfSubject } from "../services/presence-places.js";
+
+/** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
+function receiptTargetKind(target: unknown): string {
+  if (!isRecord(target) || typeof target.kind !== "string") return "unknown";
+  return isAssistantKind(target.kind) ? "assistant" : target.kind;
+}
 
 export interface IngestDeps {
   db: AppDb;
@@ -42,7 +50,7 @@ export interface IngestDeps {
 export const CLAIM_FAILURE_STAGE = {
   stage: "claim_resolution",
   outcome: "failed",
-  detail: "Claim resolution failed. The deliveries land by their conversation binding or thread policy, and every matching waiter appends its digest.",
+  detail: "Claim resolution failed. Each line's work lands by its conversation binding or thread policy, and every matching waiter appends its digest.",
 } as const;
 
 /**
@@ -195,7 +203,7 @@ async function logFilterExcludedDrop(
   reason = "filter_excluded",
 ): Promise<void> {
   if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
-  const message = detail ?? `A ${eventKey} event arrived, but every subscription in the organization for it excluded it by filter. Check the filters on the ${eventKey} subscriptions.`;
+  const message = detail ?? `A ${eventKey} event arrived, but the filters on every line for it in the organization excluded it. Check the filters on the ${eventKey} lines.`;
   try {
     await writeDropLog(db, {
       orgId,
@@ -222,7 +230,7 @@ export async function logSlackMessageBotNearMiss(
   payload: unknown,
 ): Promise<void> {
   await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.message", "filter_excluded",
-    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.", catalogForService(deps.plugins, "slack"));
+    "A Slack bot message arrived, but `slack.message` accepts only human messages. To act on bot messages, add a line for `slack.bot_message`.", catalogForService(deps.plugins, "slack"));
 }
 
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
@@ -262,6 +270,19 @@ function failedFilterFields(filters: unknown, key: string, payload: unknown, cat
     !filtersMatch(payload, key, [f], catalog, subjects)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
 }
 
+/**
+ * The place key a receipt records for an event: its natural subject's place
+ * (`services/presence-places.ts`), so a line's Activity can place a skip
+ * whose event was not stored. A Slack receipt keeps its channel metadata
+ * instead. Null when the plugin names no place.
+ */
+function receiptPlace(plugins: readonly ValetPlugin[], service: string, event: NormalizedEvent): string | null {
+  if (service === "slack") return null;
+  const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === service));
+  const natural = plugin?.naturalSubject?.(event) ?? null;
+  return natural ? placeOfSubject(natural.subject) : null;
+}
+
 export async function ingestEvent(
   deps: IngestDeps,
   args: { orgId: string; service: string; event: NormalizedEvent; receiptId?: string },
@@ -269,8 +290,10 @@ export async function ingestEvent(
   const { orgId, service, event } = args;
   const receiptId = args.receiptId ?? await createEventReceipt(deps.db, { orgId, service, externalId: event.dedupeKey });
   if (!args.receiptId) await appendReceiptStage(deps.db, receiptId, { stage: "receipt", outcome: "received", detail: "An event reached normalized ingestion. Verification is handled by the source adapter." });
-  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` }, { eventKey: event.key });
-  let phase = "subscription lookup";
+  const place = receiptPlace(deps.plugins, service, event);
+  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` },
+    { eventKey: event.key, ...(place !== null ? { metadata: { place } } : {}) });
+  let phase = "the line lookup";
   try {
     const now = Date.now();
     const eventId = randomUUID();
@@ -305,14 +328,14 @@ export async function ingestEvent(
     const decisions: ReceiptSubscriptionDecision[] = [];
     const matched: typeof subs = [];
     let authorizationDenied = false;
-    phase = "subscription filter and sender authorization checks";
+    phase = "the line filter and sender checks";
     for (const sub of subs) {
       const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
       if (outcome === "matched") matched.push(sub);
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
         id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown",
+        target: receiptTargetKind(sub.target),
         outcome: outcome === "not_matched" ? "filter_excluded" : outcome,
         ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target), event.subjects) } : {}),
         ...(isRecord(sub.target) && sub.target.kind === "workflow" && typeof sub.target.workflowId === "string" ? { targetId: sub.target.workflowId } : {}),
@@ -320,11 +343,11 @@ export async function ingestEvent(
     }
     for (const sub of configured.filter(sub => !sub.enabled && subscriptionNamesKey(sub, event.key))) {
       decisions.push({ id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown", outcome: "disabled" });
+        target: receiptTargetKind(sub.target), outcome: "disabled" });
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
-      detail: `${subs.length} enabled subscriptions checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 matching-key subscriptions.`,
+      detail: `${subs.length} enabled lines of presence checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 lines that name this key.`,
     }, { subscriptions: decisions });
     // Event waiters evaluate before the early return for an unmatched event,
     // and claims resolve before the deliveries are inserted (spec
@@ -399,11 +422,11 @@ export async function ingestEvent(
     }
     if (matched.length === 0) {
       await appendDigests(claims?.waiters);
-      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the subscription decisions." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No line took this event, so its payload was not stored. Check the match decisions below." });
       return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 
-    phase = "event and delivery persistence";
+    phase = "event storage";
     const persist = () => deps.db.transaction(async (tx) => {
       const inserted = await tx
         .insert(events)
@@ -463,16 +486,16 @@ export async function ingestEvent(
     await appendDigests(claims?.waiters);
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
-      detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored with ${result.deliveries} pending deliveries. Open its activity entry for delivery attempts and workflow results.`,
+      detail: result.duplicate ? "This provider event was already stored. No line acted on it again." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
     }, result.linkedEventId ? { eventId: result.linkedEventId } : undefined);
     if (!result.duplicate && result.deliveries > 0) {
-      phase = "dispatcher wake after storing pending deliveries";
+      phase = "the dispatcher wake after event storage";
       deps.onIngest?.();
-      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "Delivery records are pending. Enqueueing does not mean a workflow has completed." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "The lines' work is queued. A queued workflow has not completed yet." });
     }
     return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
-    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Check server logs using this receipt reference; no exception payload is retained here.` });
+    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Search the server logs for this event's ID; the error itself is not kept here.` });
     console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }

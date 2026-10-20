@@ -150,17 +150,17 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
   return async (row, digest) => {
     const subject = row.subjects?.[0];
     if (subject === undefined || digest.derive === undefined) {
-      return { result: "error", error: new Error(`Event waiter ${row.id} has no subject or digest ${digest.dedupeKey} has no derive key.`) };
+      return { result: "error", error: new Error(`Waiter ${row.id} has no key, or digest ${digest.dedupeKey} has no derive key.`) };
     }
     const orgId = await deps.sessionOrg(row.sessionId);
     if (orgId === null) {
-      return { result: "error", error: new Error(`The session ${row.sessionId} of event waiter ${row.id} no longer exists.`) };
+      return { result: "error", error: new Error(`The session ${row.sessionId} of waiter ${row.id} no longer exists.`) };
     }
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<RunDeriveResult>((resolve) => {
       timer = setTimeout(() => {
-        const error = new Error(`The derive of ${digest.derive} for event waiter ${row.id} passed its ${deadlineMs} ms deadline.`);
+        const error = new Error(`The derive of ${digest.derive} for waiter ${row.id} passed its ${deadlineMs} ms deadline.`);
         controller.abort(error);
         resolve({ result: "error", error });
       }, deadlineMs);

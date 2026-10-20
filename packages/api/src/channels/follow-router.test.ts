@@ -90,7 +90,7 @@ describe("handleFollowedMessage", () => {
     faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")));
     const first = { displayName: "Release helper", avatarUrl: "https://example.com/first.webp" };
     const edited = { displayName: "Incident helper" };
-    const target = { kind: "orchestrator", orchestrator: "user" };
+    const target = { kind: "assistant", assistant: "user" };
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "presence-follow", orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER,
       name: "Replies", eventKeys: ["slack.app_mention"], filters: [], target: { ...target, presence: first },
@@ -195,7 +195,7 @@ describe("handleFollowedMessage", () => {
     expect(await followedMessageActor(testDb.appDb, teamOnly, "OTHER")).toBeNull();
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "org-wide-rule", orgId: ORG, ownerType: "team", ownerId: "team-follow", createdBy: USER, name: "Org wide",
-      eventKeys: ["slack.app_mention"], filters: [], target: { kind: "orchestrator", follow: true }, audience: "organization",
+      eventKeys: ["slack.app_mention"], filters: [], target: { kind: "assistant", follow: true }, audience: "organization",
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     });
     const follow = { ...teamOnly, subscriptionId: "org-wide-rule" };
@@ -247,7 +247,7 @@ describe("handleFollowedMessage", () => {
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "sub-follow", orgId: ORG, ownerType: "team", ownerId: "team-follow",
       name: "Team replies", eventKeys: ["slack.app_mention"], filters: [],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-follow" },
+      target: { kind: "assistant", assistant: "team", teamId: "team-follow" },
       audience, enabled: true, createdBy: USER, createdAt: now, updatedAt: now,
     });
   }

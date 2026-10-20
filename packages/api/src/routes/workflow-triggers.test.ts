@@ -162,7 +162,7 @@ describe("POST /api/workflows/schedules", () => {
     expect(await a.providers.db.select().from(workflowSchedules)).toEqual([]);
   });
 
-  it("201s an orchestrator-target schedule with nextFireAt > now", async () => {
+  it("201s an assistant-target schedule with nextFireAt > now", async () => {
     const a = await boot();
     const before = Date.now();
     const res = await fetch(`${a.baseUrl}/api/workflows/schedules`, {
@@ -171,12 +171,12 @@ describe("POST /api/workflows/schedules", () => {
       body: JSON.stringify({
         name: "daily standup",
         cron: VALID_CRON,
-        target: { kind: "orchestrator", prompt: "Run the daily report" },
+        target: { kind: "assistant", prompt: "Run the daily report" },
       } satisfies CreateWorkflowScheduleRequest),
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as WorkflowScheduleResponse;
-    expect(body.schedule.targetKind).toBe("orchestrator");
+    expect(body.schedule.targetKind).toBe("assistant");
     expect(body.schedule.nextFireAt).toBeGreaterThan(before);
     expect(body.schedule.scheduleId).toBeTruthy();
   });
@@ -191,7 +191,7 @@ describe("POST /api/workflows/schedules", () => {
       body: JSON.stringify({
         name: "bad",
         cron: "bad",
-        target: { kind: "orchestrator", prompt: "hello" },
+        target: { kind: "assistant", prompt: "hello" },
       } satisfies CreateWorkflowScheduleRequest),
     });
     expect(res.status).toBe(400);
@@ -229,9 +229,8 @@ describe("POST /api/workflows/schedules", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     // The service's exactly-one-of validation: workflow_id "" is treated as
-    // absent (falsy), and no prompt was given — so service returns the
-    // exactly-one-of error.
-    expect(body.error).toContain("exactly one of");
+    // absent (falsy), and no prompt was given, so the service names the fix.
+    expect(body.error).toBe("Give the routine a prompt, or pick a workflow for it to run.");
   });
 });
 
@@ -253,7 +252,7 @@ describe("POST /api/workflows/schedules — orchestrator-prompt workspace scope"
     const res = await createPromptSchedule(a, {
       name: "team standup",
       cron: VALID_CRON,
-      target: { kind: "orchestrator", prompt: "post the standup" },
+      target: { kind: "assistant", prompt: "post the standup" },
       teamId: "team_a",
     });
     expect(res.status).toBe(201);
@@ -275,7 +274,7 @@ describe("POST /api/workflows/schedules — orchestrator-prompt workspace scope"
     const res = await createPromptSchedule(a, {
       name: "sneaky",
       cron: VALID_CRON,
-      target: { kind: "orchestrator", prompt: "hi" },
+      target: { kind: "assistant", prompt: "hi" },
       teamId: "team_x",
     });
     expect(res.status).toBe(404);
@@ -290,7 +289,7 @@ describe("POST /api/workflows/schedules — orchestrator-prompt workspace scope"
     const res = await createPromptSchedule(a, {
       name: "my standup",
       cron: VALID_CRON,
-      target: { kind: "orchestrator", prompt: "remind me" },
+      target: { kind: "assistant", prompt: "remind me" },
     });
     expect(res.status).toBe(201);
     const scheduleId = ((await res.json()) as WorkflowScheduleResponse).schedule.scheduleId;
@@ -321,6 +320,8 @@ describe("GET /api/workflows/triggers", () => {
     expect(schedule).toBeDefined();
     expect(event).toBeDefined();
     expect(schedule!.detail).toHaveProperty("cron", VALID_CRON);
+    // The routine page scopes its thread picker to the schedule's owner.
+    expect(schedule!.detail).toMatchObject({ ownerType: "user", ownerId: "local-user" });
     expect(event!.workflowId).toBe(wfId);
   });
 
@@ -376,7 +377,7 @@ describe("PATCH /api/workflows/schedules/:id", () => {
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Confirm the id");
+    expect(body.error).toBe("This routine was not found. Refresh Presence and try again.");
   });
 });
 
@@ -394,6 +395,10 @@ describe("DELETE /api/workflows/schedules/:id", () => {
 
     const second = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_del`, { method: "DELETE" });
     expect(second.status).toBe(404);
+    expect(((await second.json()) as { error: string }).error).toBe("This routine was not found. Refresh Presence and try again.");
+    const fire = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_del/run`, { method: "POST" });
+    expect(fire.status).toBe(404);
+    expect(((await fire.json()) as { error: string }).error).toBe("This routine was not found. Refresh Presence and try again.");
   });
 });
 
@@ -422,7 +427,7 @@ describe("POST /api/workflows/schedules/:id/run", () => {
 // ── 9. POST/PATCH/DELETE /api/workflows/event-triggers round trip + 400 ──
 
 describe("event-trigger CRUD", () => {
-  it("PATCH 404 error body contains corrective suffix", async () => {
+  it("PATCH and DELETE 404 with text that names the fix", async () => {
     const a = await boot();
     const res = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_missing`, {
       method: "PATCH",
@@ -431,27 +436,52 @@ describe("event-trigger CRUD", () => {
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Confirm the id");
+    expect(body.error).toBe("This routine was not found. Refresh Presence and try again.");
+    // Review A7: DELETE answers with the same text.
+    const gone = await fetch(`${a.baseUrl}/api/workflows/event-triggers/trig_missing`, { method: "DELETE" });
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toEqual({ error: "This routine was not found. Refresh Presence and try again." });
   });
 
-  it("stores trigger presence under workflow ownership and rejects invalid identity", async () => {
+  it("stores the trigger appearance under workflow ownership and rejects invalid identity", async () => {
     const a = await boot();
-    const workflowId = await createWorkflow(a.baseUrl, "presence_workflow");
-    const presence = { displayName: "Review helper", avatarUrl: "https://example.com/reviewer.webp" };
-    const create = (identity: unknown) => fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+    const workflowId = await createWorkflow(a.baseUrl, "appearance_workflow");
+    const appearance = { displayName: "Review helper", avatarUrl: "https://example.com/reviewer.webp" };
+    const create = (fields: Record<string, unknown>) => fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workflowId, name: "PR review", eventKeys: ["github.pull_request.opened"], presence: identity }),
+      body: JSON.stringify({ workflowId, name: "PR review", eventKeys: ["github.pull_request.opened"], ...fields }),
     });
-    const response = await create(presence);
+    const response = await create({ appearance });
     expect(response.status).toBe(201);
     const created = await response.json() as WorkflowEventTriggerResponse;
+    expect(created.trigger.appearance).toEqual(appearance);
     const [stored] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.trigger.triggerId));
     const [workflow] = await a.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
-    expect(stored).toMatchObject({ ownerType: workflow!.ownerType, ownerId: workflow!.ownerId, target: { kind: "workflow", workflowId, presence } });
-    const invalid = await create({ avatarUrl: "http://example.com/reviewer.webp" });
+    expect(stored).toMatchObject({ ownerType: workflow!.ownerType, ownerId: workflow!.ownerId, target: { kind: "workflow", workflowId, appearance } });
+    const invalid = await create({ appearance: { avatarUrl: "http://example.com/reviewer.webp" } });
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toMatchObject({ error: expect.stringContaining("HTTPS") });
     expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
+
+  it("accepts the old presence field on a trigger, emits appearance, and refuses both", async () => {
+    const a = await boot();
+    const workflowId = await createWorkflow(a.baseUrl, "legacy_presence_workflow");
+    const appearance = { displayName: "Review helper" };
+    const create = (fields: Record<string, unknown>) => fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflowId, name: "PR review", eventKeys: ["github.pull_request.opened"], ...fields }),
+    });
+    const both = await create({ presence: appearance, appearance });
+    expect(both.status).toBe(400);
+    expect(await both.json()).toEqual({ error: "Send appearance, not presence." });
+    const old = await create({ presence: appearance });
+    expect(old.status).toBe(201);
+    const created = await old.json() as WorkflowEventTriggerResponse;
+    expect(created.trigger.appearance).toEqual(appearance);
+    expect(created.trigger).not.toHaveProperty("presence");
+    const [stored] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.trigger.triggerId));
+    expect(stored!.target).toEqual({ kind: "workflow", workflowId, appearance });
   });
 
   it("round-trips create/patch/delete and 400s a bogus event key on create", async () => {
@@ -697,7 +727,7 @@ describe("same-org owner scoping", () => {
       body: JSON.stringify({
         name: "mine",
         cron: VALID_CRON,
-        target: { kind: "orchestrator", prompt: "check my PRs" },
+        target: { kind: "assistant", prompt: "check my PRs" },
       } satisfies CreateWorkflowScheduleRequest),
     });
     expect(createRes.status).toBe(201);
@@ -915,9 +945,9 @@ describe("GET /api/workflows/{triggers,runs}?ownerType=&ownerId=", () => {
 });
 
 describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
-  const NO_SUBJECT = "This rule's events have no subject to group by. Pick another thread option.";
+  const NO_SUBJECT = "These events have no natural thread. Pick another choice under Where: its own thread or a new thread.";
 
-  async function createSchedule(a: TestApi, thread: unknown, target: unknown = { kind: "orchestrator", prompt: "Summarize the morning" }): Promise<Response> {
+  async function createSchedule(a: TestApi, thread: unknown, target: unknown = { kind: "assistant", prompt: "Summarize the morning" }): Promise<Response> {
     return fetch(`${a.baseUrl}/api/workflows/schedules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1002,7 +1032,7 @@ describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
     const create = (thread: unknown) => fetch(`${a.baseUrl}/api/workflows/schedules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "orchestrator", prompt: "Summarize" }, teamId: "team_a", thread }),
+      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "assistant", prompt: "Summarize" }, teamId: "team_a", thread }),
     });
 
     const refused = await create({ mode: "existing", ...personal });
@@ -1032,7 +1062,7 @@ describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
     const create = (thread: unknown) => fetch(`${a.baseUrl}/api/workflows/schedules`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "orchestrator", prompt: "Summarize" }, teamId: "team_a", thread }),
+      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "assistant", prompt: "Summarize" }, teamId: "team_a", thread }),
     });
 
     for (const pinned of [hidden, helper]) {
@@ -1070,5 +1100,71 @@ describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
     const item = listed.triggers.find((t) => t.id === "sched_legacy");
     expect(item?.kind).toBe("schedule");
     expect(item?.kind === "schedule" ? item.detail.thread : "missing").toBeUndefined();
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part H step 5: the schedule `target_kind`
+// value `orchestrator` became `assistant`, with accept-both on write.
+describe("Part H rename of the schedule target kind", () => {
+  async function createPrompt(a: TestApi, kind: string): Promise<Response> {
+    return fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `${kind} prompt`, cron: VALID_CRON, target: { kind, prompt: "Summarize" } }),
+    });
+  }
+
+  it.each(["assistant", "orchestrator"])("accepts target kind %s, stores and emits assistant", async (kind) => {
+    const a = await boot();
+    const res = await createPrompt(a, kind);
+    expect(res.status).toBe(201);
+    const body = await res.json() as WorkflowScheduleResponse;
+    expect(body.schedule.targetKind).toBe("assistant");
+    const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, body.schedule.scheduleId));
+    expect(row!.targetKind).toBe("assistant");
+  });
+
+  it("reads a stored orchestrator schedule as assistant", async () => {
+    const a = await boot();
+    await seedScheduleRow(a, "legacy-schedule", "local-org", { owner: { type: "user", id: "local-user" } });
+    const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "legacy-schedule"));
+    expect(row!.targetKind).toBe("orchestrator");
+    const list = await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json() as ListWorkflowTriggersResponse;
+    const item = list.triggers.find((t) => t.id === "legacy-schedule");
+    expect(item?.kind === "schedule" ? item.detail.targetKind : undefined).toBe("assistant");
+    // A prompt edit still applies to the stored legacy row.
+    const patched = await fetch(`${a.baseUrl}/api/workflows/schedules/legacy-schedule`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "New prompt" }),
+    });
+    expect(patched.status).toBe(200);
+    expect((await patched.json() as WorkflowScheduleResponse).schedule.targetKind).toBe("assistant");
+  });
+});
+
+// Spec 2026-10-16 presence hub, Part D: a schedule the scheduler disabled for
+// a dead pin carries the reason, so the routine page can show its problem.
+describe("schedule disabledReason", () => {
+  const PIN_TEXT = "Pick another thread in Presence.";
+
+  it("lists the reason in the trigger detail and clears it on enable", async () => {
+    const a = await boot();
+    await seedScheduleRow(a, "sched_dead_pin", "local-org", { owner: { type: "user", id: "local-user" } });
+    await seedScheduleRow(a, "sched_fine", "local-org", { owner: { type: "user", id: "local-user" } });
+    await a.providers.db.update(workflowSchedules).set({ enabled: false, disabledReason: PIN_TEXT })
+      .where(eq(workflowSchedules.id, "sched_dead_pin"));
+
+    const listed = (await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json()) as ListWorkflowTriggersResponse;
+    const dead = listed.triggers.find((t) => t.id === "sched_dead_pin");
+    const fine = listed.triggers.find((t) => t.id === "sched_fine");
+    expect(dead?.kind === "schedule" ? dead.detail.disabledReason : "missing").toBe(PIN_TEXT);
+    expect(fine?.kind === "schedule" ? fine.detail.disabledReason : "missing").toBeUndefined();
+
+    const patched = await fetch(`${a.baseUrl}/api/workflows/schedules/sched_dead_pin`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }),
+    });
+    expect(patched.status).toBe(200);
+    const body = await patched.json() as WorkflowScheduleResponse;
+    expect(body.schedule.enabled).toBe(true);
+    expect(body.schedule.disabledReason).toBeUndefined();
   });
 });

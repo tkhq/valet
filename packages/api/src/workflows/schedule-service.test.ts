@@ -63,7 +63,15 @@ describe("scheduledRunId", () => {
     const a = scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000);
     expect(a).toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 1000));
     expect(a).not.toBe(scheduledRunId("0a1b2c3d-4e5f-6789-abcd-ef0123456789", 2000));
-    expect(a).toMatch(/^wfrun_sch_[a-z0-9]{8}_1000$/);
+    expect(a).toMatch(/^wfrun_sch_[0-9a-f]{14}_1000$/);
+  });
+
+  // Review S5: the run id hashes the whole schedule id, so two proposal
+  // routines never share a run id for one slot.
+  it("gives two proposal routines distinct run ids, as the web prefix reads them", () => {
+    expect(scheduledRunId("proposal-aaa", 1000)).not.toBe(scheduledRunId("proposal-bbb", 1000));
+    // The same example routine-page.test.tsx asserts for scheduleRunPrefix.
+    expect(scheduledRunId("proposal-aaa", 1000)).toBe("wfrun_sch_1a2834f7313832_1000");
   });
 });
 
@@ -102,6 +110,11 @@ describe("createWorkflowSchedule authorization", () => {
       updatedAt: 1_000,
     });
   }
+
+  it("names the fix when a routine has neither a prompt nor a workflow", async () => {
+    const result = await createWorkflowSchedule(armDeps(), { userId: "u-1", orgId: "org-1" }, { name: "empty", cron: "0 * * * *" });
+    expect(result).toEqual({ ok: false, error: "Give the routine a prompt, or pick a workflow for it to run." });
+  });
 
   it("rejects scheduling a workflow owned by a different user in the SAME org", async () => {
     await seedWorkflow("wf_1", "owner-user", "org-1");
@@ -282,7 +295,7 @@ describe("createWorkflowSchedule authorization", () => {
 
     expect(created.ok).toBe(true);
     expect(await db.select().from(workflowSchedules)).toEqual([
-      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "orchestrator" }),
+      expect.objectContaining({ ownerType: "team", ownerId: "team_prompt", targetKind: "assistant" }),
     ]);
   });
 

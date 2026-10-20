@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Bell, Clock, Eye, Lock, Terminal, Timer, type LucideIcon } from "lucide-react";
-import type { LeaseSummary, ListSessionWakeupsResponse, WakeupSummary } from "@valet/api/wire";
+import type { LeaseSummary, ListSessionWakeupsResponse, ListThreadFeedersResponse, WakeupSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
+import { useThreadFeeders } from "~/api/presence-feeders";
 import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger, Tooltip } from "~/components/primitives";
+import { Ref } from "~/components/presence/ref";
 import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
 
@@ -118,7 +120,8 @@ const KIND_NOUN: Record<BackgroundItem["kind"], [singular: string, plural: strin
   process: ["process", "processes"],
   watch: ["watch", "watches"],
   timer: ["timer", "timers"],
-  event: ["event waiter", "event waiters"],
+  // The Terminology word for a thread waiting on a place (presence hub spec).
+  event: ["active", "active"],
   hold: ["hold", "holds"],
 };
 
@@ -194,7 +197,7 @@ const KIND_LABEL: Record<BackgroundItem["kind"], string> = {
   process: "Process",
   watch: "Watch",
   timer: "Timer",
-  event: "Event waiter",
+  event: "Active",
   hold: "Hold",
 };
 
@@ -250,6 +253,45 @@ export function eventSectionDetail(item: BackgroundItem, now: number = Date.now(
   const clauses = item.clauseCount !== undefined ? `${item.clauseCount} ${item.clauseCount === 1 ? "clause" : "clauses"}` : undefined;
   const deadline = item.deadlineAt !== undefined ? `deadline ${timeUntil(item.deadlineAt, now)}` : undefined;
   return { label, ...(clauses !== undefined ? { clauses } : {}), ...(deadline !== undefined ? { deadline } : {}) };
+}
+
+/** One link in the "Fed by" line: a listener or a routine that delivers
+ * into this thread (spec Part G). */
+export interface FeederLink {
+  kind: "listener" | "routine";
+  id: string;
+  name: string;
+}
+
+/** Pure: the "Fed by" line's links, listeners before routines. Empty when
+ * the thread has no feeders, or the read is still loading or 404s. */
+export function feederLinks(feeders: ListThreadFeedersResponse | undefined): FeederLink[] {
+  if (!feeders) return [];
+  return [
+    ...feeders.listeners.map((f) => ({ kind: "listener" as const, id: f.id, name: f.name })),
+    ...feeders.routines.map((f) => ({ kind: "routine" as const, id: f.id, name: f.name })),
+  ];
+}
+
+/** The "Fed by" line: the listeners and routines that deliver into this
+ * thread, each a reference token that links its own page. Renders nothing
+ * for an empty list. */
+function FeedByLine({ feeders }: { feeders: ListThreadFeedersResponse | undefined }) {
+  const links = feederLinks(feeders);
+  if (links.length === 0) return null;
+  return (
+    <p className="text-xs text-muted">
+      Fed by:{" "}
+      {links.map((link, index) => (
+        <Fragment key={`${link.kind}-${link.id}`}>
+          {index > 0 && ", "}
+          {link.kind === "listener"
+            ? <Ref kind="line" text={link.name} to="/presence/rules/$id" params={{ id: link.id }} />
+            : <Ref kind="line" text={link.name} to="/presence/routines/$id" params={{ id: link.id }} />}
+        </Fragment>
+      ))}
+    </p>
+  );
 }
 
 /** Pure: the exact time behind an item's relative time, for a hover title. */
@@ -479,7 +521,11 @@ export function BackgroundWorkStatusLine({
 /**
  * The thread context card's "Background work" section: every active item
  * of this thread, with its state, its time, and a Cancel when the person
- * may stop it. Renders nothing while the thread has no background work.
+ * may stop it. The section also names what feeds the thread: the listeners
+ * and routines that deliver into it (spec Part G), as one "Fed by" line.
+ * The line sits under the first event waiter when the thread holds one,
+ * else on its own after the list. Renders nothing while the thread has no
+ * background work and no feeders.
  */
 export function BackgroundWorkSection({
   sessionId,
@@ -494,11 +540,17 @@ export function BackgroundWorkSection({
   const { own } = splitByThread(backgroundItems(data), threadId);
   const now = useNow(own.length > 0);
   const { ask, dialog } = useBackgroundWorkCancel(sessionId);
-  if (own.length === 0) return <>{dialog}</>;
+  // The feeders read names what delivers into this thread (spec Part G): a
+  // rule's own thread, an existing pin, or a place's thread. Those threads
+  // usually hold no waiter, so every thread reads it (one small read, cached).
+  const feeders = useThreadFeeders(sessionId, threadId, { enabled: sessionId.length > 0 });
+  const fedBy = feederLinks(feeders.data).length > 0;
+  const feedById = own.find((item) => item.kind === "event")?.id;
+  if (own.length === 0 && !fedBy) return <>{dialog}</>;
   return (
     <section aria-label="Background work" className="border-t border-line py-3">
       <h2 className="mb-2 font-medium text-muted">Background work</h2>
-      <ul>
+      {own.length > 0 && <ul>
         {own.map((item) => {
           const event = item.kind === "event" ? eventSectionDetail(item, now) : null;
           return (
@@ -507,14 +559,18 @@ export function BackgroundWorkSection({
               <div className="min-w-0 flex-1">
                 <p className="truncate text-ink" title={item.reason}>{item.reason}</p>
                 {event ? (
-                  <p className="text-xs" title={itemTimeTitle(item)}>
-                    {item.subjectUrl ? (
-                      <a href={item.subjectUrl} target="_blank" rel="noreferrer" className="text-moss hover:underline">{event.label}</a>
-                    ) : (
-                      event.label
-                    )}
-                    {[event.clauses, event.deadline].filter((part): part is string => part !== undefined).map((part) => ` · ${part}`)}
-                  </p>
+                  <>
+                    <p className="text-xs" title={itemTimeTitle(item)}>
+                      {"Active: "}
+                      {item.subjectUrl ? (
+                        <a href={item.subjectUrl} target="_blank" rel="noreferrer" className="text-moss hover:underline">{event.label}</a>
+                      ) : (
+                        event.label
+                      )}
+                      {[event.clauses, event.deadline].filter((part): part is string => part !== undefined).map((part) => ` · ${part}`)}
+                    </p>
+                    {item.id === feedById && <FeedByLine feeders={feeders.data} />}
+                  </>
                 ) : (
                   <p className="text-xs" title={itemTimeTitle(item)}>{sectionDetail(item, now)}</p>
                 )}
@@ -527,7 +583,8 @@ export function BackgroundWorkSection({
             </li>
           );
         })}
-      </ul>
+      </ul>}
+      {feedById === undefined && <FeedByLine feeders={feeders.data} />}
       {dialog}
     </section>
   );

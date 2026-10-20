@@ -8,7 +8,7 @@
  * mocking.
  */
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -17,7 +17,8 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import type { WorkflowPendingGate, WorkflowRunDetail } from "@valet/api/wire";
-import { RunDetailBody } from "./workflows.runs.$runId";
+import { ApiError } from "~/api/client";
+import { RunDetailBody, RunLoadError } from "./workflows.runs.$runId";
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
@@ -81,6 +82,19 @@ function renderInRouter(ui: React.ReactElement) {
   });
   return render(<RouterProvider router={router} />);
 }
+
+describe("RunLoadError (L7)", () => {
+  it("says a missing run was not found and links to the run list", async () => {
+    renderInRouter(<RunLoadError error={new ApiError(404, "not found", { error: "run not found" })} />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("This run was not found. It may have been deleted."));
+    expect(screen.getByRole("link", { name: "Back to Runs" }).getAttribute("href")).toBe("/workflows/runs");
+  });
+
+  it("names the server's reason for any other failure", async () => {
+    renderInRouter(<RunLoadError error={new ApiError(500, "boom", { error: "The database is down. Try again later." })} />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("The database is down. Try again later."));
+  });
+});
 
 describe("RunDetailBody", () => {
   it("keeps the diagram collapsed after the steps and names the waiting step", () => {

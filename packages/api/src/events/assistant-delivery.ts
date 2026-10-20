@@ -1,4 +1,4 @@
-import { UNATTENDED_DELIVERY_KEY, type Presence } from "@valet/shared";
+import { UNATTENDED_DELIVERY_KEY, type Appearance } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
@@ -68,7 +68,18 @@ export type DeliveryDestination =
   | { kind: "target"; sessionId: string; threadId: string; reason?: DestinationReason };
 
 /** The dead-letter text for an `existing` pin that cannot receive a delivery (spec Part B step 4). */
-export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread for this rule in Presence.";
+export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread in Presence.";
+
+/** The pin text before `PIN_UNAVAILABLE_MESSAGE`. Rows dead-lettered then
+ * keep it, so the problem query still matches it. Nothing writes it now. */
+// Stored text: the problem query matches it, so its words stay as written.
+// copy-lint: allow rule
+export const PIN_UNAVAILABLE_LEGACY_MESSAGE = "Pick another thread for this rule in Presence.";
+
+/** Whether a stored dead-letter text is the pin text, current or legacy. */
+export function isPinUnavailableMessage(text: string | null): boolean {
+  return text === PIN_UNAVAILABLE_MESSAGE || text === PIN_UNAVAILABLE_LEGACY_MESSAGE;
+}
 
 /** The dead-letter text for a delivery that would hide a shared pinned thread from readers outside a private channel. */
 export function pinNarrowsMessage(channel: string): string {
@@ -99,7 +110,8 @@ export interface AssistantDeliveryArgs {
   actorUserId: string;
   destination: DeliveryDestination;
   signal: SignalContent;
-  presence?: Presence;
+  /** The rule's reply identity. The queue item carries it as `metadata.presence`, the engine's name. */
+  appearance?: Appearance;
   /**
    * No person waits on this delivery: an automated event or a schedule. Its
    * turn refuses questions and approvals at once instead of parking the
@@ -206,7 +218,7 @@ export async function deliverToAssistantThread(
       throw new PinUnavailableError();
     }
     if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, destination.sessionId))) {
-      throw new Error("The original conversation is unavailable. Restore its owner before retrying delivery.");
+      throw new Error("The original conversation is unavailable. Restore its owner, then redeliver the event.");
     }
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, destination.sessionId),
       eq(agentSessions.orgId, args.orgId), eq(agentSessions.ownerType, args.owner.type), eq(agentSessions.ownerId, args.owner.id))).limit(1);
@@ -241,14 +253,14 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
     WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
     LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
   if (result.rows.length === 0) return null;
-  if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
+  if (result.rows.length !== 1) throw new Error("This event reached its thread more than once. Check the thread's messages, then redeliver the event if one is missing.");
   const prior = result.rows[0]!;
   if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
-    throw new Error("The original event owner differs from this delivery. Inspect its subscription before retrying delivery.");
+    throw new Error("The event's first owner is not this line's owner. Check who owns the line, then redeliver the event.");
   }
   const content: unknown = typeof prior.content === "string" ? JSON.parse(prior.content) : prior.content;
   if (typeof content !== "object" || content === null || !("body" in content) || typeof content.body !== "string") {
-    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
   }
   // First channel admissions include fetched history. Compare the original
   // signal beneath that known wrapper without fetching mutable history again.
@@ -258,11 +270,11 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   const expected: unknown = JSON.parse(JSON.stringify({ ...args.signal, tagName: args.signal.tagName ?? "signal" }));
   const tagName = "tagName" in content ? content.tagName ?? "signal" : "signal";
   if (!isDeepStrictEqual({ ...content, body, tagName }, expected)) {
-    throw new Error("The original event submission has different content. Inspect its receipt before retrying delivery.");
+    throw new Error("The thread already holds this event with other content. Check the thread's messages, then redeliver the event.");
   }
   if (prior.status !== "settled") {
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, prior.session_id), eq(agentSessions.orgId, args.orgId))).limit(1);
-    if (!row || row.status === "deleted") throw new Error("The original event session was deleted. Inspect its submission before retrying delivery.");
+    if (!row || row.status === "deleted") throw new Error("The session that first took this event was deleted. Pick another thread in Presence, then redeliver the event.");
     // Session recovery already owns queued, interrupted, and approval-blocked
     // work. Restoring it never requires another prompt admission here.
     await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
@@ -314,9 +326,9 @@ async function deliverToAssistantThreadInner(
       orgId: args.orgId,
       reason: args.mismatchReason,
       conversationKey: args.dispatchId,
-      detail: `assistant session ${session.id} belongs to org ${data.orgId}, delivery belongs to org ${args.orgId}`,
+      detail: `The assistant session ${session.id} belongs to organization ${data.orgId}, and the event belongs to organization ${args.orgId}. Check the line's workspace.`,
     });
-    throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
+    throw new Error(`The assistant belongs to another organization (${data.orgId}, not ${args.orgId}). Check the line's workspace.`);
   }
   const destination = args.destination;
   const thread = destination.kind === "target" ? session.threadById(destination.threadId) : await deps.engineHost.ensureFreshThread(session, destination.key, {
@@ -324,7 +336,7 @@ async function deliverToAssistantThreadInner(
     orgId: data.orgId,
     workspace: data.workspace,
   }, args.actorUserId, newThreadInit(destination.title, args.slackChannel));
-  if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
+  if (!thread) throw new Error("The original thread is unavailable. Restore it, then redeliver the event.");
   // A pinned thread is not this rule's own thread, and other people may read
   // it. A private channel recorded on it would hide it from every reader
   // outside that channel, so the delivery dead-letters instead (spec
@@ -375,7 +387,7 @@ async function deliverToAssistantThreadInner(
   }
   if (destination.kind === "target") {
     if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, destination))) {
-      throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+      throw new Error("The original conversation was archived or deleted. Restore it, then redeliver the event.");
     }
   }
   // A person waits on an attended delivery, so its thread is a conversation
@@ -383,7 +395,7 @@ async function deliverToAssistantThreadInner(
   // (`isAutomatedDeliveryThread`). Record it before the turn is admitted.
   if (!args.unattended) await thread.setMetadataFlag(CONVERSATIONAL_THREAD_KEY);
   const metadata = {
-    ...(args.presence ? { presence: args.presence } : {}),
+    ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
   await thread.submitPrompt(signal, {

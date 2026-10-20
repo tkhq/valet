@@ -360,6 +360,8 @@ describe("workspace singleton repair on an already migrated database", () => {
     const rows = await db.query("SELECT id, target, updated_at FROM event_subscriptions WHERE org_id = 'strip-org' ORDER BY id");
     expect(rows.rows).toEqual([
       { id: "clean-rule", target: { kind: "workflow", workflowId: "w1" }, updated_at: 1 },
+      // The repair removes only `assistantId`. No backfill renames the stored
+      // `orchestrator` names; reads accept both (presence hub spec, Part H step 5).
       { id: "legacy-rule", target: { kind: "orchestrator", orchestrator: "user", follow: true }, updated_at: expect.anything() },
     ]);
     await db.query("DELETE FROM event_subscriptions WHERE org_id = 'strip-org'");

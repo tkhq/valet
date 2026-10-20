@@ -1,9 +1,9 @@
 /** Labels for the problem reasons ingest, the webhook routes, and the
  * channel host record, and the stage each one happens in. An unknown reason
- * falls back to its raw string rather than hiding. Used by the Events Log. */
+ * falls back to its raw string rather than hiding. Used by the Activity page. */
 const REASON_LABEL: Record<string, string> = {
   slack_classifier_rejected: "Classification rejected",
-  no_subscription_match: "No subscription",
+  no_subscription_match: "No one listening",
   filter_excluded: "Filtered out",
   bad_signature: "Bad signature",
   foreign_workspace: "Wrong workspace",
@@ -14,10 +14,10 @@ const REASON_LABEL: Record<string, string> = {
   unlinked_sender: "Unlinked sender",
   channel_reply_failed: "Reply not posted",
   child_reply_failed: "Delegated reply not posted",
-  duplicate: "Duplicate delivery",
+  duplicate: "Duplicate event",
   unsupported_kind: "Unsupported message",
   unsupported_event: "Unhandled event type",
-  stale_delivery: "Delivery too old",
+  stale_delivery: "Event too old",
   verify_failed: "Verification failed",
   malformed_callback: "Malformed callback",
   unauthorized: "Not authorized",
@@ -30,11 +30,11 @@ const REASON_LABEL: Record<string, string> = {
 
 export function problemStage(reason: string): string {
   if (reason === "slack_classifier_rejected" || reason === "slack_interaction_unmatched") return "Classification";
-  if (reason === "filter_excluded") return "Subscription filter";
-  if (reason === "no_subscription_match") return "Subscription match";
+  if (reason === "filter_excluded") return "Filters";
+  if (reason === "no_subscription_match") return "Match";
   if (reason.startsWith("workflow_")) return "Workflow routing";
-  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Receipt and verification";
-  return "Delivery and authorization";
+  if (["bad_signature", "foreign_workspace", "unknown_org", "slack_retry", "unsupported_event", "stale_delivery"].includes(reason)) return "Intake and verification";
+  return "Sending and authorization";
 }
 
 /** A reason's label, or the raw reason when it has none, so nothing hides. */

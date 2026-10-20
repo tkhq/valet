@@ -8,7 +8,7 @@
  * Scoped deliberately to workflow targets: orchestrator/signal
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
-import { readPresence, type Presence } from "@valet/shared";
+import { readAppearance, type Appearance } from "@valet/shared";
 import { linearEventArmBlock } from "../services/linear-ingress.js";
 import { proposalId } from "../events/proposals.js";
 import { randomUUID } from "node:crypto";
@@ -33,9 +33,10 @@ import {
   type WorkflowOwner,
   type WorkflowOwnerRef,
 } from "./service.js";
+import { appearanceOf } from "../events/target-names.js";
 
 export interface WorkflowTriggerSummary {
-  presence?: Presence;
+  appearance?: Appearance;
   triggerId: string;
   workflowId: string;
   name: string;
@@ -69,11 +70,12 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
 }
 
 function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTriggerSummary | null {
-  const target = row.target as { kind?: string; workflowId?: string; presence?: unknown };
+  const target = row.target as { kind?: string; workflowId?: string };
   if (target?.kind !== "workflow" || typeof target.workflowId !== "string") return null;
-  const presence = readPresence(target.presence);
+  // Stored rows may carry the old `presence` name (`events/target-names.ts`).
+  const appearance = readAppearance(appearanceOf(row.target));
   return {
-    ...(presence ? { presence } : {}),
+    ...(appearance ? { appearance } : {}),
     triggerId: row.id,
     workflowId: target.workflowId,
     name: row.name,
@@ -93,10 +95,10 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
-  input: { workflowId: string; name: string; presence?: Presence; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
+  input: { workflowId: string; name: string; appearance?: Appearance; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const db = deps.db;
-  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.presence !== undefined ? { presence: input.presence } : {}) };
+  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.appearance !== undefined ? { appearance: input.appearance } : {}) };
   const write = await validateSubscriptionWrite(
     db,
     deps.plugins,
@@ -129,7 +131,7 @@ export async function createWorkflowTrigger(
       // jsonb, so drizzle types the column `unknown`; the dag validator ran
       // before any definition reached the row.
       definition: owned.definition as WorkflowDefinition,
-      step: "create the trigger",
+      step: "save the line",
     });
     if (blocked) return { ok: false, error: blocked };
   }
@@ -186,7 +188,7 @@ export async function createWorkflowTrigger(
       },
     );
     if (!rows?.[0]) {
-      return { ok: false, error: "Team or trigger target is no longer available. Refresh and select an active target." };
+      return { ok: false, error: "The team or the target is no longer available. Refresh and select an active target." };
     }
     insertedRow = rows[0];
   } else {
@@ -195,7 +197,7 @@ export async function createWorkflowTrigger(
   }
 
   const trigger = rowToTrigger(insertedRow!);
-  if (!trigger) return { ok: false, error: "trigger insert produced an unexpected row shape" };
+  if (!trigger) return { ok: false, error: "The new line could not be read back. Refresh Presence and try again." };
   return { ok: true, trigger };
 }
 
@@ -283,7 +285,7 @@ export async function updateWorkflowTrigger(
 > {
   const { db, plugins } = deps;
   const accessible = await accessibleTriggerRow(db, owner, triggerId);
-  if (!accessible) return { ok: false, status: 404, error: "trigger not found" };
+  if (!accessible) return { ok: false, status: 404, error: "This routine was not found. Refresh Presence and try again." };
   const current = accessible.trigger;
 
   const name = patch.name ?? current.name;
@@ -324,7 +326,7 @@ export async function updateWorkflowTrigger(
     .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)))
     .returning();
   const trigger = rowToTrigger(updated[0]!);
-  if (!trigger) return { ok: false, status: 400, error: "trigger update produced an unexpected row shape" };
+  if (!trigger) return { ok: false, status: 400, error: "The changed line could not be read back. Refresh Presence and try again." };
   return { ok: true, trigger };
 }
 

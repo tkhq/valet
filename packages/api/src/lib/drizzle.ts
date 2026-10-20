@@ -2000,6 +2000,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "thread_policy" jsonb',
   },
   {
+    // Why the scheduler disabled a schedule (spec 2026-10-16: presence hub,
+    // Part D). Null means no recorded reason, so existing rows need no backfill.
+    describe: "workflow_schedules.disabled_reason column",
+    probe: { kind: "column", table: "workflow_schedules", column: "disabled_reason" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "disabled_reason" text',
+  },
+  {
     // The assistant thread a follow binds to (spec 2026-10-16: delivery
     // threads, Part B step 5). Null keeps the Slack thread key route.
     describe: "followed_threads.session_id column",
@@ -2018,6 +2025,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "event_deliveries.destination column",
     probe: { kind: "column", table: "event_deliveries", column: "destination" },
     sql: 'ALTER TABLE "event_deliveries" ADD COLUMN IF NOT EXISTS "destination" jsonb',
+  },
+  {
+    // The rule list reads each rule's latest delivery for its problem state
+    // (spec 2026-10-16: presence hub, Part C step 5).
+    describe: "event_deliveries_subscription index",
+    probe: { kind: "index", index: "event_deliveries_subscription" },
+    sql: 'CREATE INDEX IF NOT EXISTS "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at")',
   },
 
 ];

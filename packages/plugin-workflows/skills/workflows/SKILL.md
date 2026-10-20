@@ -194,7 +194,7 @@ ordinary tool approval as a substitute for the resource's admin check.
 Set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
 Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
 For an uploaded photo, call `profile_pictures.publish_avatar` in its chat and save the returned `avatar_url` as `presence.avatarUrl`.
-An event subscription's `target.presence` overrides individual workflow fields. Unset fields inherit the workflow, then workspace default.
+An event subscription's `target.appearance` overrides individual workflow fields. Unset fields inherit the workflow, then workspace default.
 Tool steps, agent tool calls, automatic replies, and approval cards inherit this identity without extra prompt instructions or `set` nodes.
 Explicit Slack `sender_name` / `sender_avatar_url` arguments still override one message; use them only for deliberate exceptions.
 These settings customize messages, not the Slack account or DM conversation. See the `slack-tools` skill.

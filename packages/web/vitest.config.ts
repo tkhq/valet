@@ -1,7 +1,21 @@
 import { defineConfig } from "vitest/config";
+import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import { resolve } from "node:path";
 
 export default defineConfig({
+  // The route tree (`src/routeTree.gen.ts`) is generated, not committed.
+  // The dev server and the build generate it through this plugin; the
+  // tests that mount the real route tree (the Presence acceptance walk,
+  // the no-tabs invariant) need it too, so vitest generates it as well.
+  // Code splitting stays off here: the tests import route modules
+  // directly, and split virtual modules add nothing under vitest.
+  plugins: [
+    TanStackRouterVite({
+      routesDirectory: "./src/routes",
+      generatedRouteTree: "./src/routeTree.gen.ts",
+      autoCodeSplitting: false,
+    }),
+  ],
   test: {
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],

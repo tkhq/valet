@@ -1,7 +1,7 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
-import { mergePresence, readPresence, type Presence } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -720,7 +720,7 @@ export class Thread {
     }
     const requestedMode = opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
-    const effectiveMode: QueueMode = requestedMode === "collect" && readPresence(opts.metadata?.presence)
+    const effectiveMode: QueueMode = requestedMode === "collect" && readAppearance(opts.metadata?.presence)
       ? "followup" : requestedMode;
 
     // Validate a per-item model pin at admission, the same way setModel
@@ -791,7 +791,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author, readPresence(admitted.metadata?.presence)),
+          this.coalesceQueuedOverheard(coalesceKey, item.author, readAppearance(admitted.metadata?.presence)),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -822,7 +822,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Presence): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Appearance): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -831,8 +831,8 @@ export class Thread {
           i.threadId === this.id &&
           i.status === "queued" &&
           // Only combine messages that use the same sender identity.
-          readPresence(i.metadata?.presence)?.displayName === presence?.displayName &&
-          readPresence(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
+          readAppearance(i.metadata?.presence)?.displayName === presence?.displayName &&
+          readAppearance(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
           i.author?.id === author?.id &&
@@ -5492,7 +5492,7 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
-    const presence = mergePresence(readPresence(this.runningItem?.metadata?.presence));
+    const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
     const resolveDefaultSender = session.options.resolveOutboundSender;
     const actorId = this.runningItem?.author?.id
       ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
@@ -5548,7 +5548,7 @@ export class Thread {
       origin,
       sharedTranscript: session.options.sharedTranscript,
       resolveOutboundSender: presence
-        ? async () => mergePresence(await resolveDefaultSender?.(), presence)
+        ? async () => mergeAppearance(await resolveDefaultSender?.(), presence)
         : resolveDefaultSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,

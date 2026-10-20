@@ -1150,6 +1150,9 @@ CREATE TABLE "workflow_schedules" (
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- Why the scheduler disabled this schedule: the pin text when its
+	-- `existing` thread cannot receive deliveries. NULL otherwise.
+	"disabled_reason" text,
 	-- `repo` rows are armed from a mirrored workflow file. The sync updates
 	-- and deletes only these, so a schedule a person armed on the same
 	-- workflow is never touched.
@@ -1194,6 +1197,9 @@ CREATE TABLE "event_deliveries" (
 CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_event" ON "event_deliveries" ("event_id");
+--> statement-breakpoint
+-- The rule list reads each rule's latest delivery for its problem state.
+CREATE INDEX "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at");
 --> statement-breakpoint
 CREATE TABLE "linear_installations" (
 	"id" text PRIMARY KEY NOT NULL,

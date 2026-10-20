@@ -1,5 +1,5 @@
-import { validatePresence } from "@valet/shared";
-import { PresenceSettings } from "~/components/presence-settings";
+import { validateAppearance } from "@valet/shared";
+import { AppearanceSettings } from "~/components/presence/appearance-settings";
 /**
  * Editor composition (plan decision 10 / Task 10): owns the
  * `WorkflowDefinition` state and wires the palette, canvas, inspector, and
@@ -165,7 +165,7 @@ function EditorDraft({
   const inspectorBackRef = useRef<HTMLButtonElement>(null);
   const canvasViewRef = useRef<HTMLButtonElement>(null);
   const wasInspectingRef = useRef(false);
-  const [presenceOpen, setPresenceOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // Raised when the stored definition moved while the user has unsaved
   // edits. Adopting would throw their work away, so the editor asks.
@@ -333,7 +333,7 @@ function EditorDraft({
   async function handleSave() {
     if (readOnly) return;
     setSaveError(null);
-    const presenceError = validatePresence(definition.presence ?? {});
+    const presenceError = validateAppearance(definition.presence ?? {});
     if (presenceError) { setSaveError(presenceError); return; }
     try {
       await onSave(definition);
@@ -368,7 +368,7 @@ function EditorDraft({
 
   useImperativeHandle(ref, () => ({ showAssistant }));
 
-  const saveDisabled = !effectiveDirty || !validation.ok || validatePresence(definition.presence ?? {}) !== null || saving === true;
+  const saveDisabled = !effectiveDirty || !validation.ok || validateAppearance(definition.presence ?? {}) !== null || saving === true;
 
   // The form for whatever is selected, or null when nothing is. JSON mode
   // edits the whole definition as text, so a selection made on the canvas
@@ -413,7 +413,7 @@ function EditorDraft({
             <TabBar label="Workflow view" active={mainView} onSelect={setMainView}
               tabs={[{ id: "steps", label: "Steps" }, { id: "map", label: "Map" }]} />
           )}
-          <Button variant="secondary" size="sm" aria-expanded={presenceOpen} onClick={() => setPresenceOpen(!presenceOpen)}>Presence</Button>
+          <Button variant="secondary" size="sm" aria-expanded={appearanceOpen} onClick={() => setAppearanceOpen(!appearanceOpen)}>Appears as</Button>
           {effectiveDirty && (
             <StatusDot data-testid="unsaved-indicator" title="Unsaved changes" tone="warning" />
           )}
@@ -456,8 +456,8 @@ function EditorDraft({
         )}
       </div>
 
-      {presenceOpen && <div className="max-h-72 overflow-y-auto border-b border-line p-3">
-        <PresenceSettings value={definition.presence ?? {}} disabled={readOnly || saving === true} onChange={(presence) => {
+      {appearanceOpen && <div className="max-h-72 overflow-y-auto border-b border-line p-3">
+        <AppearanceSettings value={definition.presence ?? {}} disabled={readOnly || saving === true} onChange={(presence) => {
           const next = { ...definition };
           if (Object.keys(presence).length === 0) delete next.presence;
           else next.presence = presence;

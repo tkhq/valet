@@ -31,7 +31,7 @@ Ownership and audience are separate. The team owns and administers its assistant
 - `team` admits the owning team's current members, checked with `isCurrentTeamActor`. This is the behavior every earlier rule has.
 - `organization` admits any current member of the organization that owns the team, checked with `isCurrentOrgActor`. That check keeps the organization-membership join and the team-belongs-to-this-organization condition, and drops only the team-membership join.
 
-A null or absent audience reads as `team`, so no stored rule changes meaning. Only a rule whose target is a team assistant (`kind: "orchestrator"` with `orchestrator: "team"`) may carry an audience. The write gate refuses one on a personal, organization, or workflow target and names the corrective action. Workflow mention triggers stay creator-scoped in this pass, including team-owned workflows.
+A null or absent audience reads as `team`, so no stored rule changes meaning. Only a rule whose target is a team assistant (`kind: "assistant"` with `assistant: "team"`; older rows store `kind: "orchestrator"` with `orchestrator: "team"`) may carry an audience. The write gate refuses one on a personal, organization, or workflow target and names the corrective action. Workflow mention triggers stay creator-scoped in this pass, including team-owned workflows.
 
 The decision: a bot invited into a channel answers explicit mentions from any organization member in that channel. The wizard defaults a new team mention rule to the organization audience, and the team-only choice stays one click away.
 

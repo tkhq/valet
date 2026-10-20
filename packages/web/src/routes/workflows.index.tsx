@@ -1,128 +1,94 @@
-import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type {
   WorkflowDefinitionSummary,
   WorkflowTriggerItem,
 } from "@valet/api/wire";
 import { triggerDataSchema, visibleTriggerFields } from "@valet/workflow";
-import { AlertCircle, Clock, Trash2, Zap, MoreHorizontal } from "lucide-react";
+import { AlertCircle, Clock, MoreHorizontal, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 import {
-  useDeleteWorkflow,
   useSetWorkflowEnabled,
   useStartRun,
   useWorkflows,
   useWorkflowTriggers,
 } from "~/api/workflows";
-import { WorkflowCreation } from "~/components/workflows/workflow-creation";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "~/components/primitives/dropdown-menu";
 import { OwnerBadge } from "~/components/owner-badge";
-import { Button, ConfirmDialog, Spinner, Switch, TabBar } from "~/components/primitives";
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+  Switch,
+} from "~/components/primitives";
+import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
 import { ImportV1Dialog } from "~/components/workflows/import-v1-dialog";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
-import { TriggerList } from "~/components/workflows/trigger-list";
+import { WorkflowCreation } from "~/components/workflows/workflow-creation";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { relativeTime, timeUntil } from "~/lib/relative-time";
 import { formatWhen } from "~/lib/format-when";
 import { useListOwner } from "~/lib/use-list-owner";
+import { redirectToPresence } from "./-presence-redirects";
 
-/** Workflow definitions and schedules; failures link directly to run details. */
-type HubTab = "workflows" | "scheduled";
-
+/** `/workflows`: the workflow list and composer, back at its own top-nav
+ * entry (spec Part A, Part G step 1). A pre-revision-1 `?tab=` URL redirects
+ * from `beforeLoad` (`-presence-redirects.ts`, INV-H1); every other URL
+ * serves the list. The redirect reads the raw `location.search`, so
+ * `validateSearch` keeps only `workspace`. */
 export const Route = createFileRoute("/workflows/")({
-  component: WorkflowsIndexPage,
-  validateSearch: (search: Record<string, unknown>): { workspace?: string; tab?: HubTab; run?: string; gate?: string; review?: string } => ({
+  beforeLoad: redirectToPresence("/workflows"),
+  component: WorkflowsTab,
+  validateSearch: (search: Record<string, unknown>): { workspace?: string } => ({
     workspace: typeof search.workspace === "string" ? search.workspace : undefined,
-    tab:
-      search.tab === "scheduled" || search.tab === "triggers"
-        ? "scheduled"
-        : undefined,
-    run: typeof search.run === "string" ? search.run : undefined,
-    review: typeof search.review === "string" ? search.review : undefined,
-    gate: typeof search.gate === "string" ? search.gate : undefined,
   }),
 });
 
-const TABS: { id: HubTab; label: string }[] = [
-  { id: "workflows", label: "Workflows" },
-  { id: "scheduled", label: "Scheduled" },
-];
-
-export function WorkflowsIndexPage() {
-  // Use the top-level useSearch hook so the test mock works without
-  // Route.useSearch() requiring a real router context.
-  const search = useSearch({ strict: false }) as {
-    tab?: HubTab;
-    run?: string;
-    gate?: string;
-    review?: string;
-  };
-  const navigate = useNavigate();
-  const tab: HubTab = search.tab ?? "workflows";
+export function WorkflowsTab() {
   const [creating, setCreating] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [v1Open, setV1Open] = useState(false);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="min-w-0 border-b border-line">
-        <div className="mx-auto w-full max-w-5xl px-4 pt-6 sm:px-6 sm:pt-10">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-              <h1 className="font-display text-2xl text-ink">Automation</h1>
-              <WorkspaceClause />
-            </div>
-            <div className="flex items-center gap-2">
-            <Button size="sm" onClick={() => { setCreating(true); void navigate({ to: "/workflows", search: {} }); }}>New workflow</Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="Workflow options"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => setImportOpen(true)}>Import workflow</DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setV1Open(true)}>Import from V1</DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setNewOpen(true)}>Manual setup</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            </div>
-          </div>
-          <div className="mt-6">
-            <TabBar
-              tabs={TABS}
-              active={tab}
-              label="Automation sections"
-              onSelect={(id) => void navigate({ to: "/workflows", search: id === "workflows" ? {} : { tab: id } })}
-            />
-          </div>
-        </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button size="sm" onClick={() => setCreating(true)}>New workflow</Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="Workflow options"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => setImportOpen(true)}>Import workflow</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setV1Open(true)}>Import from V1</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setNewOpen(true)}>Manual setup</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
       <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
       <ImportV1Dialog open={v1Open} onOpenChange={setV1Open} />
 
-      <div className="mx-auto flex min-h-0 w-full min-w-0 max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6">
-        {tab === "workflows" && <WorkflowsTab creating={creating} onBegin={() => setCreating(true)} onBack={() => setCreating(false)} />}
-        {tab === "scheduled" && <ScheduledTab reviewId={search.review} onReviewClose={() => void navigate({ to: "/workflows", search: { tab: "scheduled" } })} />}
-      </div>
+      <WorkflowList creating={creating} onBegin={() => setCreating(true)} onBack={() => setCreating(false)} />
     </div>
   );
 }
 
-
-function WorkflowsTab({ creating, onBegin, onBack }: { creating: boolean; onBegin: () => void; onBack: () => void }) {
+function WorkflowList({ creating, onBegin, onBack }: { creating: boolean; onBegin: () => void; onBack: () => void }) {
   // The nav's workspace switcher decides which workspace this list is FOR.
   // Without it the list answers with the caller's own workflows plus every
   // team's, which is a union that does not change when the switcher does —
   // so switching appeared to do nothing.
   const owner = useListOwner();
   const { data, isLoading, error } = useWorkflows(owner, { refetchInterval: 5_000, enabled: owner !== undefined });
-  // Scoped to the same workspace, so the per-row schedule/event badge counts
+  // Scoped to the same workspace, so the per-row routine and listener counts
   // match the list they annotate rather than the caller's whole reach.
   const triggersQ = useWorkflowTriggers(undefined, owner);
   const workflows = data?.workflows ?? [];
 
-  // Group triggers by workflowId for per-row badges.
+  // Group the listeners and routines by workflow for the per-row badges.
   const triggersByWf = new Map<string, WorkflowTriggerItem[]>();
   for (const t of triggersQ.data?.triggers ?? []) {
     if (!t.workflowId) continue;
@@ -147,7 +113,7 @@ function WorkflowsTab({ creating, onBegin, onBack }: { creating: boolean; onBegi
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-muted">{workflows.length} workflow{workflows.length === 1 ? "" : "s"} in this workspace</p><p className="text-xs text-muted">Open a workflow to edit its steps and schedule.</p></div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-muted">{workflows.length} workflow{workflows.length === 1 ? "" : "s"} in this workspace</p><p className="text-xs text-muted">Open a workflow to edit its steps and what starts it.</p></div>
     <ul className="space-y-3">
       {workflows.map((wf) => (
         <DefinitionRow key={wf.id} workflow={wf} triggers={triggersByWf.get(wf.id) ?? []} />
@@ -165,20 +131,18 @@ function DefinitionRow({
   triggers: WorkflowTriggerItem[];
 }) {
   const startRun = useStartRun(workflow.id);
-  // On while any trigger can start it. The switch flips them all, and its
-  // label reads the saved state the server returns.
+  // On while any listener or routine can start it. The switch flips them
+  // all, and its label reads the saved state the server returns.
   const setEnabled = useSetWorkflowEnabled();
   const on = triggers.some((trigger) => trigger.enabled);
-  const del = useDeleteWorkflow();
   const navigate = useNavigate();
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
 
-  // A trigger with declared, visible inputs routes through the run dialog;
-  // without one — including a trigger whose only field is `hidden`, an
-  // event maps that in, not a person — Run starts immediately as before
-  // (no empty-dialog flash).
+  // A start node with declared, visible inputs routes through the run
+  // dialog. Without one (a start node whose only field is `hidden` is one an
+  // event maps in, not a person) Run starts immediately, with no empty
+  // dialog.
   const schema = visibleTriggerFields(triggerDataSchema(workflow.definition));
   const hasSchema = Object.keys(schema).length > 0;
 
@@ -207,19 +171,6 @@ function DefinitionRow({
     }
     const result = await startRun.mutateAsync();
     goToRun(result.runId);
-  }
-
-  async function handleDelete() {
-    setDeleteError(null);
-    try {
-      await del.mutateAsync(workflow.id);
-      setDeleteOpen(false);
-    } catch (err) {
-      // 409 = active runs; surface the server's actionable message. The
-      // dialog stays open so the message sits beside the button that
-      // caused it, and a retry needs no second trip through the row.
-      setDeleteError(err instanceof Error ? err.message : "Delete failed.");
-    }
   }
 
   return (
@@ -258,7 +209,7 @@ function DefinitionRow({
 
         <p className="basis-full text-xs leading-5 text-muted">Updated {relativeTime(workflow.updatedAt)}</p>
         <p className="basis-full text-xs text-muted">
-          {nextFireAt ? <span title={new Date(nextFireAt).toLocaleString()}>Next run {formatWhen(nextFireAt)} ({timeUntil(nextFireAt)})</span> : scheduleCount > 0 ? "Schedule paused" : eventCount > 0 ? "Runs when a matching event arrives" : "Run when needed"}
+          {nextFireAt ? <span title={new Date(nextFireAt).toLocaleString()}>Next run {formatWhen(nextFireAt)} ({timeUntil(nextFireAt)})</span> : scheduleCount > 0 ? "Routine off" : eventCount > 0 ? "Runs when a matching event arrives" : "Run when needed"}
           {workflow.latestRun ? ` · Last run ${workflow.latestRun.outcome ?? workflow.latestRun.status} ${relativeTime(workflow.latestRun.createdAt)}` : " · No runs yet"}
         </p>
       </div>
@@ -275,7 +226,7 @@ function DefinitionRow({
       <div className="relative z-10 flex max-w-full flex-wrap items-center gap-2">
         {scheduleCount > 0 && (
           <span
-            aria-label={`${scheduleCount} schedule${scheduleCount === 1 ? "" : "s"}`}
+            aria-label={`${scheduleCount} routine${scheduleCount === 1 ? "" : "s"}`}
             title={nextFireAt ? `Next run ${new Date(nextFireAt).toLocaleString()}` : undefined}
             className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
@@ -284,7 +235,7 @@ function DefinitionRow({
         )}
         {eventCount > 0 && (
           <span
-            aria-label={`${eventCount} event trigger${eventCount === 1 ? "" : "s"}`}
+            aria-label={`${eventCount} ${eventCount === 1 ? "event" : "events"}`}
             className="inline-flex items-center gap-1 rounded-full bg-ink-wash-strong px-2 py-0.5 text-xs text-muted"
           >
             <Zap className="h-3 w-3" /> {eventCount}
@@ -315,34 +266,15 @@ function DefinitionRow({
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => {
-                setDeleteError(null);
-                setDeleteOpen(true);
-              }}
-              disabled={del.isPending}
+              onClick={() => setDeleteOpen(true)}
               aria-label={`Delete ${workflow.name}`}
             >
               <Trash2 className="h-4 w-4" />
             </Button>
-            <ConfirmDialog
-              open={deleteOpen}
-              onOpenChange={setDeleteOpen}
-              title={`Delete "${workflow.name}"?`}
-              description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
-              confirmLabel="Delete workflow"
-              pendingLabel="Deleting…"
-              pending={del.isPending}
-              error={deleteError}
-              onConfirm={() => void handleDelete()}
-            />
+            <DeleteWorkflowDialog workflow={workflow} open={deleteOpen} onOpenChange={setDeleteOpen} />
           </>
         )}
       </div>
     </li>
-  );
-}
-
-function ScheduledTab({ reviewId, onReviewClose }: { reviewId?: string; onReviewClose?: () => void }) {
-  const owner = useListOwner();
-  return <TriggerList owner={owner} schedulesOnly reviewId={reviewId} onReviewClose={onReviewClose} />;
+  )
 }

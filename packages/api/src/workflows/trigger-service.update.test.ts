@@ -119,7 +119,7 @@ describe("updateWorkflowTrigger", () => {
       name: "orch sub",
       eventKeys: ["github.pull_request.opened"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: OWNER.userId,
       createdAt: now,

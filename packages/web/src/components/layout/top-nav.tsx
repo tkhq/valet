@@ -192,8 +192,8 @@ export function TopNav() {
   const destinations: Array<{ to: string; label: string; active?: boolean }> = [
     { to: "/chat", label: "Threads" },
     { to: "/artifacts", label: "Artifacts" },
-    { to: "/workflows", label: "Automation" },
-    { to: "/events", label: "Events" },
+    { to: "/presence", label: "Presence" },
+    { to: "/workflows", label: "Workflows" },
     { to: "/usage", label: "Usage" },
     { to: "/skills", label: "Skills" },
     { to: "/integrations", label: "Integrations" },

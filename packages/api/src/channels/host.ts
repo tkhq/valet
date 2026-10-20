@@ -1,4 +1,4 @@
-import { mergePresence, readPresence } from "@valet/shared";
+import { mergeAppearance, readAppearance } from "@valet/shared";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -1014,7 +1014,7 @@ export class ChannelHost {
         return "not_live";
       }
       const item = feedback.queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, feedback.queueItemId) : undefined;
-      const presence = readPresence(item?.metadata?.presence);
+      const presence = readAppearance(item?.metadata?.presence);
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -1114,7 +1114,7 @@ export class ChannelHost {
     try {
       const base = await assistantSessionSender(this.deps.db, sessionId);
       const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
-      return mergePresence(base, readPresence(item?.metadata?.presence));
+      return mergeAppearance(base, readAppearance(item?.metadata?.presence));
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);

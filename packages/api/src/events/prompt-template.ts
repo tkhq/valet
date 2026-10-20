@@ -77,7 +77,7 @@ export function truncateWellFormed(text: string, max: number): string {
 }
 
 /** The heading above the rendered `systemPrompt` in the delivered body. */
-const INSTRUCTIONS_HEADING = "Instructions for this subscription:";
+const INSTRUCTIONS_HEADING = "Instructions for this line:";
 
 /** The two template fields. Each one takes its own variable set. */
 export type PromptField = "systemPrompt" | "userPromptTemplate";

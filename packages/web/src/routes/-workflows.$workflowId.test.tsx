@@ -60,6 +60,7 @@ let permissionsData: {
   }>;
 } = { definitionToken: "review-a", nodes: [] };
 const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
+const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
@@ -102,6 +103,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/workflows", () => ({
   downloadWorkflowFile: (...args: unknown[]) => downloadWorkflowFile(...args),
+  useDeleteWorkflow: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
   useCopyWorkflow: () => ({ mutateAsync: vi.fn().mockResolvedValue({ id: "wf_copy" }), isPending: false }),
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
@@ -161,6 +163,21 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({ data: { catalog: [] } }),
 }));
 
+// The panel lists the listeners that run this workflow from the rules list.
+vi.mock("~/api/events", () => ({
+  useEventSubscriptions: () => ({ data: { subscriptions: [] }, isPending: false, error: null }),
+}));
+
+// Thread titles for pinned listeners and routines; none here pins a thread.
+// The sentences name the viewer and the org members; this suite names no one.
+vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { id: "u-001" } }),
+  useOrgDirectory: () => ({ data: { users: [] } }),
+}));
+vi.mock("~/api/rule", () => ({ usePinnedThreadTitles: () => ({}) }));
+
+vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
+
 /** The assistant has a stable conversation address. SessionView renders its
  * header through a stub, so page tests do not need the chat transport. */
 vi.mock("~/hooks/use-workflow-assistant", () => ({
@@ -193,6 +210,7 @@ describe("WorkflowEditorPage", () => {
   beforeEach(() => {
     navigate.mockClear();
     downloadWorkflowFile.mockClear();
+    deleteMutateAsync.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
     blockerProceed.mockClear();
@@ -356,20 +374,51 @@ describe("WorkflowEditorPage", () => {
     expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
   });
 
-  it("renders the scoped triggers panel for this workflow", () => {
-    useWorkflowTriggersMock.mockClear();
+  it("deletes from the overflow menu with the list's confirm, then goes to the list (L8)", async () => {
     render(<WorkflowEditorPage workflowId="wf_1" />);
-    // The panel lives in the Triggers drawer, which starts closed, so the
-    // scoped read only happens after the toolbar button opens it.
-    fireEvent.click(screen.getByRole("button", { name: "Triggers" }));
-    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Settled run history is kept/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete workflow" }));
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/workflows", ignoreBlocker: true }));
   });
 
-  it("opens a new trigger of the chosen kind when created from the new-workflow dialog", async () => {
+  it("keeps a refused delete open with the server's reason", async () => {
+    deleteMutateAsync.mockRejectedValueOnce(new Error("The workflow has active runs. Cancel them, then delete it."));
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete workflow" }));
+    expect(await screen.findByText("The workflow has active runs. Cancel them, then delete it.")).toBeTruthy();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("offers no Delete for a mirrored workflow", async () => {
+    Object.assign(workflowData, { origin: "repo", upstream: { repoFullName: "tkhq/automation", ref: "main", path: "w.yaml" } });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    await screen.findByText("Download");
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
+  });
+
+  it("renders the listeners and routines panel for this workflow", () => {
+    useWorkflowTriggersMock.mockClear();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    // The panel lives in a drawer, which starts closed, so the scoped read
+    // only happens after the toolbar button opens it.
+    fireEvent.click(screen.getByRole("button", { name: "What starts it" }));
+    expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
+    expect(screen.queryByText(/Triggers/)).toBeNull();
+  });
+
+  it("opens the editor on a line for this workflow when created from the new-workflow dialog", async () => {
     useWorkflowTriggersMock.mockClear();
     render(<WorkflowEditorPage workflowId="wf_1" newTrigger="event" />);
     expect(useWorkflowTriggersMock).toHaveBeenCalledWith("wf_1");
-    expect(await screen.findByRole("dialog", { name: "New trigger" })).toBeTruthy();
+    expect((await screen.findByTestId("line-editor")).textContent).toBe("Editor: create fixed workflow wf_1");
   });
 
   it("history drawer lists versions newest-first with a current badge, restore only on older ones", async () => {

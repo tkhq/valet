@@ -56,7 +56,7 @@ function ownDestination(rule: DestinationInput["rule"]): KeyDestination {
 /** The `new`-mode destination for a subscription: one key per delivery. */
 function newSubscriptionDestination(rule: DestinationInput["rule"], event: DestinationInput["event"]): Destination {
   if (event === undefined) {
-    throw new Error("A subscription rule's new-mode destination needs the event.");
+    throw new Error("A new-mode destination for an event needs the event.");
   }
   return {
     kind: "key",
@@ -69,7 +69,7 @@ function newSubscriptionDestination(rule: DestinationInput["rule"], event: Desti
 /** The `new`-mode destination for a schedule: one key per fire time. */
 function newScheduleDestination(rule: DestinationInput["rule"], fireAt: number | undefined): Destination {
   if (fireAt === undefined) {
-    throw new Error("A schedule rule's new-mode destination needs fireAt.");
+    throw new Error("A new-mode destination for a schedule needs fireAt.");
   }
   return {
     kind: "key",
@@ -96,6 +96,8 @@ function resolveByPolicy(input: DestinationInput): Destination {
     }
     // No plugin named a subject for this event (or this is a schedule, which
     // carries no event at all). Fall back to the rule's own thread.
+    // A stored stamp note that no reader shows.
+    // copy-lint: allow subject
     return { ...ownDestination(rule), note: "subject mode with no natural subject" };
   }
   // policy.mode === "own"

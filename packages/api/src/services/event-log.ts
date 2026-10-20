@@ -27,10 +27,17 @@ export function dropStatus(reason: string): EventLogStatus {
   return "failed";
 }
 
+/** A dead delivery that a later delivery for the same event and line settled,
+ * such as a redelivery. It no longer counts as a failure. */
+const SUPERSEDED = sql`EXISTS (SELECT 1 FROM event_deliveries later
+  WHERE later.event_id = d.event_id AND later.subscription_id = d.subscription_id
+    AND later.status = 'delivered' AND later.created_at > d.created_at)`;
+
 /** An event's status from this workspace's deliveries: a failure wins, then
- * work in flight, then a delivery. Only skipped deliveries read as skipped. */
+ * work in flight, then a delivery. A superseded dead delivery is no failure.
+ * Only skipped deliveries read as skipped. */
 const EVENT_STATUS = sql`CASE
-  WHEN BOOL_OR(d.status IN ('failed','dead')) THEN 'failed'
+  WHEN BOOL_OR(d.status = 'failed' OR (d.status = 'dead' AND NOT ${SUPERSEDED})) THEN 'failed'
   WHEN BOOL_OR(d.status = 'pending') THEN 'pending'
   WHEN BOOL_OR(d.status = 'delivered') THEN 'delivered'
   ELSE 'skipped' END`;
@@ -51,6 +58,10 @@ export interface EventLogQuery {
   /** Whether the viewer may see a Slack channel (`slack:<id>`). A Slack event
    * from a channel they may not see stays out of their Log, as its page does. */
   channelVisible?: (channelKey: string) => Promise<boolean>;
+  /** The ids of the events to keep from one scanned batch, such as the events
+   * in one place. Rows it drops do not count toward the page, like hidden
+   * channels. Absent keeps every event. */
+  keepEvents?: (ids: readonly string[]) => Promise<ReadonlySet<string>>;
 }
 
 function escapeLike(value: string): string {
@@ -60,13 +71,28 @@ function escapeLike(value: string): string {
 /** How many pages of events one Log read scans past hidden rows. */
 const MAX_SCAN_BATCHES = 20;
 
-export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ items: EventLogItem[]; hasMore: boolean }> {
+/** One Log page. `next` is the sort key the next page reads before, or null
+ * when nothing older remains. */
+export interface EventLogPage {
+  items: EventLogItem[];
+  hasMore: boolean;
+  next: { at: number; id: string } | null;
+}
+
+/** Whether `a` sorts at or before `b`, newest first by time, then by id. */
+function atOrNewer(a: { at: number; id: string }, b: { at: number; id: string }): boolean {
+  return a.at > b.at || (a.at === b.at && a.id >= b.id);
+}
+
+export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<EventLogPage> {
   const { orgId, owner, problemsOnly, limit } = query;
   const like = query.q ? `%${escapeLike(query.q)}%` : undefined;
   const take = limit + 1;
 
   const eventRows: EventLogItem[] = [];
   let moreEvents = false;
+  // The last event row the scan read when it stopped at its bound.
+  let frontier: { at: number; id: string } | undefined;
   {
     const where: SQL[] = [
       sql`e.org_id = ${orgId}`,
@@ -83,7 +109,7 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     // the events run out. The scan is bounded; past it the page says more.
     let before = query.before;
     for (let batch = 0; eventRows.length < take; batch++) {
-      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; break; }
+      if (batch === MAX_SCAN_BATCHES) { moreEvents = true; frontier = before; break; }
       const scoped = before ? [...where, sql`(e.received_at, e.id) < (${before.at}, ${before.id})`] : where;
       const result = await db.execute(sql`
         SELECT e.id, e.service, e.event_key, e.summary, e.actor, e.received_at, ${EVENT_STATUS} AS status, COUNT(d.id)::int AS deliveries,
@@ -100,7 +126,9 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
           received_at: string | number; status: EventLogStatus; deliveries: number; skipped_reason: string | null;
           slack_channel: string | null;
         }> };
+      const kept = query.keepEvents ? await query.keepEvents(result.rows.map((row) => row.id)) : undefined;
       for (const row of result.rows) {
+        if (kept && !kept.has(row.id)) continue;
         if (row.slack_channel && query.channelVisible && !(await query.channelVisible(`slack:${row.slack_channel}`))) continue;
         const actor = row.actor && typeof row.actor === "object" ? row.actor as { login?: string; externalId?: string } : null;
         eventRows.push({
@@ -145,8 +173,48 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
     }
   }
 
-  const merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-  return { items: merged.slice(0, limit), hasMore: merged.length > limit || moreEvents };
+  let merged = [...eventRows, ...problemRows].sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  // A scan that stopped at its bound read no event older than its frontier,
+  // so the page ends there: an older problem waits for the next page, which
+  // reads on from the frontier. A page whose scan kept no row still carries
+  // the frontier, so the reader can continue past rows it may not see.
+  if (frontier !== undefined) {
+    const end = frontier;
+    merged = merged.filter((item) => atOrNewer(item, end));
+  }
+  const items = merged.slice(0, limit);
+  const last = items.at(-1);
+  const next = merged.length > limit && last ? { at: last.at, id: last.id } : frontier ?? null;
+  return { items, hasMore: next !== null, next };
+}
+
+/** One delivery row as `supersedingDeliveries` reads it. */
+export interface SupersessionRow {
+  id: string;
+  eventId: string;
+  subscriptionId: string;
+  status: string;
+  createdAt: number;
+}
+
+/**
+ * For each dead delivery that a later delivery for the same event and line
+ * settled, the id of that later delivery. The earliest settling delivery
+ * wins. Matches `SUPERSEDED`, which decides the event's status.
+ */
+export function supersedingDeliveries(rows: readonly SupersessionRow[]): Map<string, string> {
+  const result = new Map<string, string>();
+  for (const dead of rows) {
+    if (dead.status !== "dead") continue;
+    let settledBy: SupersessionRow | undefined;
+    for (const later of rows) {
+      if (later.status !== "delivered" || later.eventId !== dead.eventId || later.subscriptionId !== dead.subscriptionId) continue;
+      if (later.createdAt <= dead.createdAt) continue;
+      if (settledBy === undefined || later.createdAt < settledBy.createdAt) settledBy = later;
+    }
+    if (settledBy !== undefined) result.set(dead.id, settledBy.id);
+  }
+  return result;
 }
 
 /** When anything last reached ingest: a stored event or a visible problem. */

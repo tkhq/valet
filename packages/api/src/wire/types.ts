@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Presence } from "@valet/shared";
-export type { Presence } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
+export type { Appearance } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -1087,6 +1087,71 @@ export interface ChannelDetailResponse {
   conversations: ChannelConversation[];
   /** Newest first. */
   messages: ChannelMessage[];
+}
+
+// ── Presence hub places (spec 2026-10-16: presence hub, Parts B and G) ──
+
+/** A service that has places. */
+export type PresencePlaceService = "slack" | "github" | "linear";
+
+/**
+ * One place a workspace is present in, keyed by its subject: a Slack channel
+ * (`slack:<team>/<channel>`), a repository (`github:<owner>/<repo>`), a pull
+ * request or issue (`github:<owner>/<repo>#<n>`), a Linear team
+ * (`linear:team/<KEY>`) or issue (`linear:<ID>`). A parent row holds the
+ * listeners that name no single place: `slack:<team>` (the Slack workspace),
+ * a repository, a Linear team, or `github:*` and `linear:*` for a listener
+ * that names no repository or team.
+ */
+export interface PresencePlaceWire {
+  subject: string;
+  /** The concrete name: `#incidents`, `acme/api`, `acme/api#12`, `ENG`, `ENG-42`, `Slack`, `GitHub`, `Linear`. */
+  label: string;
+  /** Set only on a parent row with listeners: the reach of the listeners that
+   * list there, such as `Across acme/api`, `Across ENG`, or `Everywhere in Slack`. */
+  scopeLabel?: string;
+  service: PresencePlaceService;
+  /** The parent place's subject, or null for a top-level row. Every parent a row names is also a row. */
+  parent: string | null;
+  /** Listeners placed at this row. A listener that names no single place counts at its parent only. */
+  listenerCount: number;
+  /** Threads with a running event waiter on this place. */
+  activeThreadCount: number;
+  lastActivityAt: number | null;
+}
+
+/** `GET /api/presence/places?scope=<workspace>`. Rows are ordered Slack, GitHub, Linear, then newest activity first. */
+export interface ListPresencePlacesResponse {
+  places: PresencePlaceWire[];
+}
+
+/** `GET /api/presence/places/:subject?scope=<workspace>`. A parent row's thread lists include its child places' threads. */
+export interface PresencePlaceDetailResponse {
+  place: PresencePlaceWire;
+  /** The listeners placed at this row. */
+  listeners: EventSubscriptionWire[];
+  threads: {
+    /** Subject threads (`subject:<key>`) of this place and its child places. */
+    subject: ChannelConversation[];
+    /** Threads that follow a Slack thread in this place. */
+    following: ChannelConversation[];
+    /** Threads with a running event waiter on this place. */
+    active: ChannelConversation[];
+  };
+  /** Events from the last 30 days that reached this workspace's listeners, newest first. */
+  activity: EventSummaryWire[];
+}
+
+/** A listener or routine that delivers into a thread. */
+export interface ThreadFeederWire {
+  id: string;
+  name: string;
+}
+
+/** `GET /api/presence/feeders?sessionId=<id>&threadId=<id>`. */
+export interface ListThreadFeedersResponse {
+  listeners: ThreadFeederWire[];
+  routines: ThreadFeederWire[];
 }
 
 /** `GET /api/sessions/:id/threads/:threadId/channel-activity`. */
@@ -2628,6 +2693,13 @@ export interface WorkflowWebhookResponse {
   updatedAt: number;
 }
 
+/** `GET /api/workflows/:id/webhook`. `null` when the workflow has no webhook
+ * yet: that is the normal starting state, not an error, so the read answers
+ * 200 and the editor logs nothing. */
+export interface GetWorkflowWebhookResponse {
+  webhook: WorkflowWebhookResponse | null;
+}
+
 export interface DeleteWorkflowWebhookResponse {
   deleted: boolean;
 }
@@ -2646,6 +2718,8 @@ export interface WorkflowScheduleWire {
   enabled: boolean;
   lastFiredAt: number | null;
   nextFireAt: number;
+  /** See `WorkflowScheduleTriggerDetail.disabledReason`. */
+  disabledReason?: string;
 }
 
 export interface ListWorkflowSchedulesResponse {
@@ -2847,7 +2921,7 @@ export interface ListWorkflowActionRequiredResponse {
 export interface WorkflowScheduleTriggerDetail {
   cron: string;
   timezone: string;
-  targetKind: "workflow" | "orchestrator";
+  targetKind: "workflow" | "assistant";
   prompt?: string;
   /** Where an assistant-prompt schedule's prompts land. Absent reads as
    * `{ mode: "own" }`. Never `subject`: a schedule has no subject. */
@@ -2855,6 +2929,16 @@ export interface WorkflowScheduleTriggerDetail {
   input?: unknown;
   nextFireAt: number;
   lastFiredAt: number | null;
+  /** Why the scheduler disabled this schedule, as a sentence that names the
+   * fix: the pin text when its `existing` thread cannot receive deliveries,
+   * or an empty prompt, a deleted workflow, or a schedule that does not
+   * parse. Absent when it recorded none. Enabling the schedule or changing
+   * its pin clears it. */
+  disabledReason?: string;
+  /** The workspace the schedule belongs to. For an assistant-prompt
+   * schedule, its thread picker lists this workspace's threads. */
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
 }
 
 export interface WorkflowEventTriggerDetail {
@@ -2904,7 +2988,8 @@ export type CreateWorkflowScheduleRequest = {
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
   | {
       target: {
-        kind: "orchestrator";
+        /** `"orchestrator"` is the old value, accepted for one release. Reads emit `"assistant"`. */
+        kind: "assistant" | "orchestrator";
         prompt: string;
       };
     }
@@ -2925,7 +3010,7 @@ export interface UpdateWorkflowScheduleRequest {
 export interface WorkflowScheduleResponse {
   schedule: {
     scheduleId: string;
-    targetKind: "workflow" | "orchestrator";
+    targetKind: "workflow" | "assistant";
     workflowId?: string;
     prompt?: string;
     /** See `CreateWorkflowScheduleRequest.thread`. */
@@ -2937,11 +3022,16 @@ export interface WorkflowScheduleResponse {
     input?: unknown;
     lastFiredAt: number | null;
     nextFireAt: number;
+    /** See `WorkflowScheduleTriggerDetail.disabledReason`. */
+    disabledReason?: string;
   };
 }
 
 export interface CreateWorkflowEventTriggerRequest {
-  presence?: Presence;
+  /** The display name and avatar Valet uses when it replies. */
+  appearance?: Appearance;
+  /** @deprecated Send `appearance`. Accepted for one release; a request that sends both is refused. */
+  presence?: Appearance;
   workflowId: string;
   name: string;
   eventKeys: string[];
@@ -2965,7 +3055,7 @@ export interface UpdateWorkflowEventTriggerRequest {
 
 export interface WorkflowEventTriggerResponse {
   trigger: {
-    presence?: Presence;
+    appearance?: Appearance;
     triggerId: string;
     workflowId: string;
     name: string;
@@ -4893,15 +4983,24 @@ export interface FilterOptionsResponse {
 // validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignoreIfAnyTeamSubscribed";
 
+/**
+ * A rule's target. Reads always carry these names. For one release, a write
+ * may also send the old names (spec 2026-10-16: presence hub, Part H):
+ * `presence` for `appearance`, `kind: "orchestrator"` for
+ * `kind: "assistant"`, and the field `orchestrator` for `assistant`. A write
+ * that sends both names for one field is refused (`events/target-names.ts`).
+ */
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string; presence?: Presence }
-  /** `teamId` is required when `orchestrator` is `"team"`, and refused
-   * otherwise — the two fields are one choice, and a `teamId` alongside
+  | { kind: "workflow"; workflowId: string; appearance?: Appearance }
+  /** `teamId` is required when `assistant` is `"team"`, and refused
+   * otherwise. The two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
   | {
-      kind: "orchestrator";
-      presence?: Presence;
-      orchestrator?: "user" | "team" | "org";
+      kind: "assistant";
+      /** The display name and avatar Valet uses when it replies. UI copy calls it "Appears as". */
+      appearance?: Appearance;
+      /** Which assistant receives the deliveries. Absent reads as `user`. */
+      assistant?: "user" | "team" | "org";
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
@@ -4983,6 +5082,18 @@ export interface EventSubscriptionWire {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+  /** The rule's open problem, read from its deliveries on the list route
+   * and on a place page's listeners: the pin text when its latest settled delivery since its last
+   * edit dead-lettered because the pinned thread cannot receive deliveries
+   * (spec 2026-10-16: presence hub, Part C step 5). Absent otherwise. */
+  problem?: string;
+  /** The key of the Presence row the server lists the rule at, on the list
+   * route and on a place page's listeners: a Slack channel, a repository, a
+   * Linear team, or a service's top row (spec Part B steps 2 and 3). A rule
+   * that names a pull request or a Linear issue lists at its parent row.
+   * Absent for a rule with no place service, and for a Slack rule while the
+   * org has no Slack workspace connected. */
+  placeKey?: string;
 }
 
 // ─── Action policies (action-policies plan, Task 4) ─────────────────────────
@@ -5075,8 +5186,10 @@ export interface ListEventSubscriptionsResponse {
 }
 
 export interface PatchEventSubscriptionRequest {
-  /** Replace channel identity. Null clears the override; omission preserves it. */
-  presence?: Presence | null;
+  /** Replace the reply identity. Null clears the override; omission preserves it. */
+  appearance?: Appearance | null;
+  /** @deprecated Send `appearance`. Accepted for one release; a patch that sends both is refused. */
+  presence?: Appearance | null;
   deliveryPolicy?: EventDeliveryPolicy;
   pauseOnOverlap?: boolean;
   name?: string;
@@ -5132,6 +5245,16 @@ export interface EventSummaryWire {
   receivedAt: number;
 }
 
+/** A thread a delivery reached or that claimed it. `title` is present when
+ * the thread has one; `archived` is present, and true, when the thread is
+ * archived and no longer takes deliveries. */
+export interface EventDeliveryThreadRef {
+  sessionId: string;
+  threadId: string;
+  title?: string;
+  archived?: true;
+}
+
 export interface EventDeliveryWire {
   id: string;
   subscriptionId: string;
@@ -5149,14 +5272,78 @@ export interface EventDeliveryWire {
   subscriptionName?: string;
   /** The assistant thread that received this delivery. Absent when the
    * delivery reached no thread, or when the viewer may not open it. */
-  thread?: { sessionId: string; threadId: string };
+  thread?: EventDeliveryThreadRef;
   /** The assistant thread whose event waiter claimed this skipped delivery
    * (spec 2026-10-16: delivery threads and claims, Part E step 2). Absent
    * when no waiter claimed it, or when the viewer may not open the thread. */
-  claimedBy?: { sessionId: string; threadId: string };
+  claimedBy?: EventDeliveryThreadRef;
   /** The workflow run this delivery started. Absent when no run started, or
    * when the viewer may not open it. */
   runId?: string;
+  /** On a `dead` delivery, the id of a later delivery for the same event and
+   * the same subscription that was delivered, such as a redelivery. The dead
+   * row is then settled and is not a fault. Only `GET /api/events/log` sets
+   * it; absent everywhere else. */
+  supersededBy?: string;
+}
+
+/** `GET /api/event-subscriptions/:id/deliveries`: one listener's latest
+ * deliveries, newest first, each with the event it carried. */
+export interface ListSubscriptionDeliveriesResponse {
+  deliveries: Array<EventDeliveryWire & { event: EventSummaryWire }>;
+}
+
+/** What one acted entry on a line's Activity reached: the delivery's status,
+ * and the thread or run when the viewer may open it. `deadText` is the
+ * delivery's last error when it is `dead`. */
+export interface LineActivityOutcome {
+  status: EventDeliveryWire["status"];
+  thread?: EventDeliveryThreadRef;
+  runId?: string;
+  deadText?: string;
+  /** How many delivery attempts the dispatcher recorded for this entry. */
+  attempts: number;
+}
+
+/** Why a line skipped an event (spec 2026-10-16: presence hub, Part D step 1.7). */
+export type LineActivitySkipReason = "filters" | "sender" | "off" | "claimed" | "other";
+
+/** One entry on a line's Activity: a delivery the line made (`acted`), or an
+ * event it skipped (`skipped`). */
+export interface LineActivityEntryWire {
+  /** The delivery id, or `receipt:<receipt id>` for a skip read from a receipt. */
+  id: string;
+  kind: "acted" | "skipped";
+  at: number;
+  /** Null when the event was skipped by every line, so it was not stored. */
+  eventId: string | null;
+  eventKey: string;
+  /** The event's place key, such as `slack:T1/C1`, or null when it names none. */
+  place: string | null;
+  placeLabel: string | null;
+  /** On an acted entry. */
+  outcome?: LineActivityOutcome;
+  /** On an acted entry that was delivered: deliveredAt minus the delivery's createdAt. */
+  tookMs?: number;
+  /** On a skipped entry. */
+  reason?: LineActivitySkipReason;
+  /** For `filters`, the first filter the event failed, in words (`the
+   * repository filter`, or `its filters`). For `other`, the recorded skip text
+   * when there is one. */
+  reasonText?: string;
+}
+
+/** `GET /api/event-subscriptions/:id/activity?before=<cursor>&limit=50`:
+ * one line's timeline, newest first, and the counts its health strip shows. */
+export interface LineActivityResponse {
+  entries: LineActivityEntryWire[];
+  nextCursor?: string;
+  /** When the line last delivered an event, or null when it never did. */
+  lastActedAt: number | null;
+  /** The sum of `perDay`. */
+  actedLast30Days: number;
+  /** 30 counts of delivered entries, one per UTC day, oldest first; the last is today. */
+  perDay: number[];
 }
 
 /** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
@@ -5170,7 +5357,9 @@ export interface RedeliverEventResponse {
 }
 
 export interface GetEventResponse {
-  event: EventSummaryWire & { payload: unknown };
+  /** `place` names the event's place as the Activity row does
+   * (`EventLogItem.place`). Absent when the event's plugin names no place. */
+  event: EventSummaryWire & { payload: unknown; place?: string };
   deliveries: EventDeliveryWire[];
 }
 
@@ -5191,9 +5380,23 @@ export interface EventLogItem {
   reason: string | null;
   detail: string | null;
   deliveryCount: number;
+  /** A stored event's place, by its concrete name (`#incidents`,
+   * `acme/api#12`). Absent when the event's plugin names no place. */
+  place?: string;
+  /** The key of `place` (`slack:T1/C900`, `github:acme/api#12`), so a row can
+   * link the place's page. Present exactly when `place` is. */
+  placeKey?: string;
+  /** A stored event's deliveries to this workspace's rules (and the org's),
+   * newest first, as the event page lists them. Absent on a problem. */
+  deliveries?: EventDeliveryWire[];
 }
 
-/** `GET /api/events/log`. */
+/** `GET /api/events/log`. Query: `ownerType` and `ownerId` name the
+ * workspace; `problems=1` keeps failed events and problems; `diagnostics=1`
+ * adds the org's recorded problems; `q` searches; `place=<key>` keeps the
+ * events whose place is that key or inside it (`github:acme/api` keeps its
+ * pull requests; `github:*` keeps every repository), and no problems;
+ * `cursor` and `limit` page. */
 export interface EventLogResponse {
   items: EventLogItem[];
   nextCursor: string | null;
