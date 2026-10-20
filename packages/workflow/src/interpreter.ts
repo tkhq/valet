@@ -431,16 +431,27 @@ async function driveLoop(runId: string, attempt: number, deps: InterpreterDeps, 
 // ─── Cancel + settle ─────────────────────────────────────────────────────────
 
 async function cancelRun(run: WorkflowRun, attempt: number, deps: InterpreterDeps, parkedThisDrive: RunWaitCondition[]): Promise<RunParkState> {
+  await abortInFlight(deps, run.runId, await inFlightWaits(deps.store, run, parkedThisDrive));
+  return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
+}
+
+/**
+ * Abort each submission and cancel each child run before the run settles.
+ * Best-effort, like `foreach`'s own aborts: a wait can name work that has
+ * already finished (a `foreach` stays `intent` while a later item runs, so
+ * an earlier item's saved wait still looks live), and one failed abort must
+ * neither keep the run from settling nor skip the aborts after it.
+ */
+async function abortInFlight(deps: InterpreterDeps, runId: string, waits: RunWaitCondition[]): Promise<void> {
   const { store, engine, clock } = deps;
-  for (const wait of await inFlightWaits(store, run, parkedThisDrive)) {
-    if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
-    }
-    if (wait.kind === 'run') {
-      await cancelChildRun(store, wait.runId, clock);
+  for (const wait of waits) {
+    try {
+      if (wait.kind === 'submission') await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
+      if (wait.kind === 'run') await cancelChildRun(store, wait.runId, clock);
+    } catch (err) {
+      console.warn(`workflow run ${runId}: stopping in-flight work for node "${wait.nodeId}" failed; settling anyway:`, err);
     }
   }
-  return await twoPhaseSettle(deps, run.runId, attempt, 'cancelled');
 }
 
 /**
@@ -520,15 +531,7 @@ async function terminateSettle(
   waitingOn: RunWaitCondition[],
   outcome: 'completed' | 'failed',
 ): Promise<RunParkState> {
-  const { store, engine, clock } = deps;
-  for (const wait of waitingOn) {
-    if (wait.kind === 'submission') {
-      await engine.abort(wait.sessionId, wait.threadId, wait.queueItemId);
-    }
-    if (wait.kind === 'run') {
-      await cancelChildRun(store, wait.runId, clock);
-    }
-  }
+  await abortInFlight(deps, runId, waitingOn);
   return await twoPhaseSettle(deps, runId, attempt, outcome);
 }
 
