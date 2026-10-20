@@ -274,13 +274,17 @@ describe("api integration: claims acceptance scenario", () => {
     ]);
 
     // C1: a top-level message with no mention. t-inc claims it and gets one
-    // digest; P skips and opens no channel thread.
+    // digest; P skips and opens no channel thread. t-inc is itself the
+    // channel's subject thread (delivery threads, Part A step 3), so the
+    // check is that no thread joins it under that key.
+    const channelKey = `subject:slack:${SLACK_TEAM}/C900`;
+    const channelThreads = (await threadsKeyed(u, channelKey)).map((thread) => thread.id).sort();
     await postSlack(u, slackMessage("C900", "U001", "checking the dashboards"));
     expect(await settled(u, "P", 1)).toMatchObject(skippedFor(tInc));
     await tick(u);
     const [c1] = await awaitSignals(u, "event.matched", 1, tInc.sessionId, tInc.threadId);
     expect(c1?.content).toContain("checking the dashboards");
-    expect(await threadsKeyed(u, `subject:slack:${SLACK_TEAM}/C900`)).toEqual([]);
+    expect((await threadsKeyed(u, channelKey)).map((thread) => thread.id).sort()).toEqual(channelThreads);
 
     // C2: a mention in a new Slack thread X. M redirects it to t-inc as one
     // inbound turn with the Slack origin, the waiter appends no digest, and a
@@ -417,7 +421,9 @@ describe("api integration: claims acceptance scenario", () => {
     expect(c2bTurns).toHaveLength(2);
 
     // C7: the agent in t-inc cancels its waiter. P then delivers a channel
-    // message to a new subject thread for the channel.
+    // message to the channel's subject thread. t-inc is that thread
+    // (delivery threads, Part A step 3), so the post lands there as a
+    // delivery, not a claim.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U001", "incident closed, stop watching"));
     expect(await settled(u, "P", 9)).toMatchObject(skippedFor(tInc));
@@ -429,11 +435,9 @@ describe("api integration: claims acceptance scenario", () => {
     expect(c7.status).toBe("delivered");
     const [channelThread] = await landings(u, c7.id);
     if (!channelThread) throw new Error("P's delivery landed nowhere");
-    expect(channelThread.threadId).not.toBe(tInc.threadId);
-    // A `slack.message` event names no channel, so the label falls back to
-    // the channel id (spec Part D). A team thread's governing thread in the
-    // assistant session shares the key.
-    expect(await threadsKeyed(u, `subject:slack:${SLACK_TEAM}/C900`)).toContainEqual({ id: channelThread.threadId, sessionId: channelThread.sessionId, title: "C900" });
+    // A team thread's governing thread in the assistant session shares the
+    // key with the execution thread the delivery landed on.
+    expect((await threadsKeyed(u, `subject:slack:${SLACK_TEAM}/C900`)).map((thread) => thread.id)).toContain(channelThread.threadId);
 
     // C8: a human review on #12. t-pr claims it and gets one digest; R1
     // skips and opens no subject thread; W starts a workflow run.

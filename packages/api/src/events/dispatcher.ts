@@ -712,12 +712,15 @@ export class EventDispatcher {
     if (found?.via === "legacy_follow") {
       return { kind: "key", key: found.key, title: summaryTitle(event.summary), reason: "conversation_follow" };
     }
+    const naturalSubject = this.naturalSubject(event);
     return resolveDestination({
-      rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, { channelOrigin: origin !== null }) },
+      rule: { id: sub.id, kind: "subscription", name: sub.name, policy: deliveryThreadPolicy(target, {
+        channelOrigin: origin !== null, slackChannel: slackEventChannel(event) !== undefined, naturalSubject: naturalSubject !== null,
+      }) },
       event: {
         deliveryId,
         summary: event.summary,
-        naturalSubject: this.naturalSubject(event),
+        naturalSubject,
         conversational: isConversationalEvent(bindingEvent, origin, found),
       },
       binding: found,
