@@ -753,6 +753,20 @@ cross-tool restrictions require the session's sandbox/egress policy to enforce
 them. Do not describe the browser facade alone as credential isolation from the
 coding agent.
 
+### Distrusted root certificates
+
+On 2026-10-20 the eMudhra intermediate CA keys were compromised. The affected roots are "emSign ECC Root CA - G3" and "Comodo AAA Services root". The sandbox and API images distrust both roots. `docker/distrust-compromised-roots.sh` does this.
+
+The script disables both roots in the Debian system store. It fails the build if either root fingerprint is in `/etc/ssl/certs/ca-certificates.crt` or in the hashed `/etc/ssl/certs` directory. The check compares SHA-256 fingerprints, not file names.
+
+Playwright's Chrome for Testing has its own root store and ignores the system store. With `--chromium-policy`, the script writes a managed policy to `/etc/opt/chrome_for_testing/policies/managed`. The policy uses `CADistrustedCertificates`.
+
+The confined launcher builds a new filesystem with bwrap, and that filesystem has no `/etc`. The launcher therefore binds the managed policy directory read-only into the namespace. It binds only that directory, and only when the directory exists. `chromium-wrapper-args.ts` builds the bwrap arguments.
+
+Node uses `NODE_OPTIONS=--use-openssl-ca` so that it reads the patched system store. `--use-system-ca` only adds to the bundled store and does not remove the roots. Browser-workload execs on the docker provider set `NODE_OPTIONS=--use-openssl-ca` and drop any user value. A user `NODE_OPTIONS` replaces the image default, so a user override removes the protection.
+
+Remove the script when the Debian `ca-certificates` package ships the distrust. Known gaps: Bun 1.4.3 ignores every system-CA option, so the compiled `valet` binary still trusts the roots. The legacy and compose-only images are not changed. The docker provider's default `node:20-bookworm` image is an upstream image and is not changed. No RDS CA is provisioned.
+
 ## 10. Files, tools and diagnostics
 
 ### Downloads and uploads
