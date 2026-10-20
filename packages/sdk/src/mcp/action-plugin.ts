@@ -54,6 +54,8 @@ interface ResolvedToken {
   token: string | undefined;
   /** Absent for `noAuth`/`staticToken`: no personal or app connection to name. */
   source?: CredentialSource;
+  /** The scopes the credential's grant holds, when the host stored them. */
+  scopes?: string[];
 }
 
 /**
@@ -130,10 +132,10 @@ async function resolveToken(
   if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
   // A host that does not say whose account it is gives the caller's own.
-  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' } };
+  if (cred) return { token: cred.accessToken, source: cred.source ?? { kind: 'personal' }, scopes: cred.scopes };
   if (appCredentialService) {
     const appCred = await credentials.get(appCredentialService);
-    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' } };
+    if (appCred) return { token: appCred.accessToken, source: { kind: 'app' }, scopes: appCred.scopes };
   }
   throw new Error(`${serviceName}: no credential connected`);
 }
@@ -183,6 +185,29 @@ function authRejectionMessage(
   }
 }
 
+/**
+ * A 403 with `error="insufficient_scope"` (RFC 6750 §3.1): the token is valid
+ * but lacks a scope the call needs. Reconnecting requests the same scopes, so
+ * the fix is a config change: name the scopes the credential lacks. The
+ * challenge `scope` may also list scopes the token holds (Metabase does), so
+ * those are removed when the grant is known. Returns undefined for any other
+ * failure, or when no missing scope can be named.
+ */
+function insufficientScopeMessage(err: unknown, grantedScopes: string[] | undefined, label: string): string | undefined {
+  if (!(err instanceof McpHttpError) || err.status !== 403 || !err.wwwAuthenticate) return undefined;
+  if (!/error="insufficient_scope"/.test(err.wwwAuthenticate)) return undefined;
+  const challenge = /(?:^|[\s,])scope="([^"]*)"/.exec(err.wwwAuthenticate)?.[1] ?? '';
+  const held = new Set(grantedScopes ?? []);
+  const missing = challenge.split(' ').filter((s) => s && !held.has(s));
+  if (missing.length === 0) return undefined;
+  const list = missing.join(', ');
+  const noun = missing.length === 1 ? 'scope' : 'scopes';
+  return (
+    `${label} refused this call: the connection does not hold the ${list} ${noun}. ` +
+    `Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`
+  );
+}
+
 function mapToolToAction(
   tool: McpTool,
   client: McpClient,
@@ -207,12 +232,12 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const { token, source } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
+      const { token, source, scopes } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = authRejectionMessage(err, source, messages);
+        const rejection = insufficientScopeMessage(err, scopes, messages.label) ?? authRejectionMessage(err, source, messages);
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }

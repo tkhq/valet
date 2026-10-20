@@ -15,7 +15,7 @@ import type { ListCredentialsResponse } from "../wire/types.js";
 import { verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
-import { teams, credentials, orgMembers } from "../schema/index.js";
+import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
 import { buildAppDb } from "../lib/drizzle.js";
 import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
@@ -136,15 +136,20 @@ describe("GET /api/credentials/:service/connect", () => {
     expect(location.searchParams.get("state")).toBeTruthy();
   });
 
-  it("mcp mode: the authorize request names the scopes the protected resource advertises", async () => {
-    // The 10-20 Metabase break: the declared list predates agent:content:read,
-    // so every reconnect minted a token that could not call the read tools.
+  it("mcp mode: the authorize request names only the declared scopes", async () => {
+    // The server advertises more, but Valet never grants a scope the entry
+    // does not declare.
     fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run", "agent:search"])] });
-    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect`, { redirect: "manual" });
-    expect(res.status).toBe(302);
-    const location = new URL(res.headers.get("location") ?? "");
-    expect(location.searchParams.get("scope")).toBe("agent:content:read agent:query:run agent:search");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect`, { redirect: "manual" });
+      expect(res.status).toBe(302);
+      const location = new URL(res.headers.get("location") ?? "");
+      expect(location.searchParams.get("scope")).toBe("agent:query:run agent:search");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
@@ -307,31 +312,15 @@ describe("GET /api/credentials/oauth/callback", () => {
     expect(stored?.scopes).toEqual(["agent:query"]);
   });
 
-  it("mcp mode: the callback exchanges with the client that started the connect", async () => {
-    fake.resourceScopesSupported = ["agent:query:run"];
-    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
-    const state = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
-
-    // The server changes its scopes between authorize and callback. The
-    // code belongs to client-1, so the callback must not register client-2.
-    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
-    const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
-      redirect: "manual",
-    });
-    expect(cb.headers.get("location")).toBe("/integrations?connected=linear");
-    expect(fake.tokenRequests[0]?.client_id).toBe("client-1");
-    expect(fake.registrations).toHaveLength(1);
-  });
-
   it("mcp mode: the callback refuses a code when another connect replaced the client", async () => {
-    fake.resourceScopesSupported = ["agent:query:run"];
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
     const first = (await startConnect(api.baseUrl, "linear")).searchParams.get("state") ?? "";
 
-    // A server upgrade, then a second connect that re-registers client-2.
-    fake.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
-    await startConnect(api.baseUrl, "linear");
-    expect(fake.registrations).toHaveLength(2);
+    // Another connect re-registered the client after this authorize.
+    await api.providers.db
+      .update(mcpOauthClients)
+      .set({ clientId: "client-2" })
+      .where(eq(mcpOauthClients.service, "linear"));
 
     const cb = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(first)}`, {
       redirect: "manual",

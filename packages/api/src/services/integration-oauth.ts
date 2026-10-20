@@ -8,13 +8,7 @@
  */
 import { eq } from "drizzle-orm";
 import type { CredentialDeclaration, OAuthDeclaration, ValetPlugin } from "@valet/engine";
-import {
-  discoverAuthServer,
-  OAuthTokenError,
-  registerClient,
-  type AuthServerMetadata,
-  type TokenResponse,
-} from "@valet/sdk";
+import { discoverAuthServer, OAuthTokenError, registerClient, type TokenResponse } from "@valet/sdk";
 import { mcpOauthClients } from "../schema/index.js";
 
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -78,42 +72,29 @@ function warnScopelessEntry(service: string, scopesSupported: string[]): void {
 }
 
 /**
- * The scopes to request for an entry that declares `declared`: the declared
- * scopes plus every scope the MCP server's protected resource advertises.
- * A declared list is a copy of one server version's scopes, and a server
- * upgrade can gate its tools on new ones (Metabase 1.64 moved every read
- * tool to `agent:content:read`). The advertised set is what the server
- * checks now, so requesting it keeps the token valid across upgrades.
- *
- * When discovery returns no resource scope list (no metadata, or a failed
- * read), the stored set stands in for it. A transient metadata failure
- * then never re-registers the shared client with fewer scopes, which would
- * stop every user's refresh. The cost: without metadata, removing a
- * declared scope does not narrow the stored client.
- *
- * A scopeless entry stays scopeless: those servers grant their default
- * scopes today, and adding scopes would re-register every bundled MCP
- * client and stop every connected user's refresh.
+ * A declared entry can drift from its server: Metabase 1.64 moved every
+ * read tool to `agent:content:read`, a scope the deployed list never named,
+ * and each reconnect minted a token those tools refused. Valet requests only
+ * the declared scopes, so name the advertised ones the entry lacks on every
+ * connect. The protected resource's list (RFC 9728) is what the server
+ * checks; the issuer's own list can name scopes for other resources.
  */
-function requestedScopes(
-  declared: string[],
-  meta: AuthServerMetadata,
-  stored: string[] | null | undefined,
-): string[] {
-  if (declared.length === 0) return declared;
-  const advertised = meta.resource_scopes_supported ?? stored ?? [];
-  return normalizeScopes([...new Set([...declared, ...advertised])]);
+function warnUndeclaredResourceScopes(service: string, declared: string[], advertised: string[] | undefined): void {
+  const missing = (advertised ?? []).filter((s) => !declared.includes(s));
+  if (missing.length === 0) return;
+  console.warn(
+    `MCP OAuth: "${service}" does not declare scopes its server advertises (${missing.join(", ")}). ` +
+      `Tools that need one fail with insufficient_scope. If this instance needs them, add them to the ` +
+      `mcpServers "${service}" entry's scopes, then reconnect ${service}.`,
+  );
 }
 
 /**
  * The stored dynamic client for `service`, registering one when none exists
- * or when the REQUESTED scope set (`requestedScopes`) differs from the
- * registered one. The scope set rides the RFC 7591 registration, not only
- * the authorize request — a server that constrains grants to the registered
- * set would otherwise narrow or refuse authorize-time scopes (TKAI-243).
- *
- * An entry with declared scopes runs discovery on every connect, so a
- * server upgrade that advertises a new scope re-registers the client.
+ * or when the DECLARED scope set differs from the registered one. The scope
+ * set rides the RFC 7591 registration, not only the authorize request —
+ * a server that constrains grants to the registered set would otherwise
+ * narrow or refuse authorize-time scopes (TKAI-243).
  *
  * Re-registration replaces the stored client_id, so refresh tokens issued
  * to the old client stop refreshing; users reconnect — the same remedy a
@@ -128,28 +109,8 @@ export async function ensureMcpOAuthClient(
 ): Promise<McpClientRow> {
   const declared = normalizeScopes(scopes);
   const existing = await deps.db.select().from(mcpOauthClients).where(eq(mcpOauthClients.service, service));
-  let meta: AuthServerMetadata | undefined;
-  let requested = declared;
-  if (declared.length > 0) {
-    try {
-      meta = await discoverAuthServer(serverUrl);
-    } catch (err) {
-      // A discovery outage must not block a connect the stored client can
-      // serve. A first registration or a new declared scope needs
-      // discovery, so those still fail.
-      const stored = existing[0];
-      const storedScopes = new Set(stored?.registeredScopes ?? []);
-      if (!stored || !declared.every((s) => storedScopes.has(s))) throw err;
-      console.warn(
-        `MCP OAuth: ${service} discovery failed; connecting with the stored client:`,
-        err instanceof Error ? err.message : String(err),
-      );
-      return toRow(stored);
-    }
-    requested = requestedScopes(declared, meta, existing[0]?.registeredScopes);
-  }
-  if (existing[0] && sameScopes(existing[0].registeredScopes, requested)) {
-    if (requested.length === 0) {
+  if (existing[0] && sameScopes(existing[0].registeredScopes, declared)) {
+    if (declared.length === 0) {
       let advertised = existing[0].scopesSupported;
       if (advertised === null) {
         // Row from before the scopes_supported column: backfill it with one
@@ -170,21 +131,34 @@ export async function ensureMcpOAuthClient(
         }
       }
       if (advertised && advertised.length > 0) warnScopelessEntry(service, advertised);
+    } else {
+      // The stored client serves this connect, so a discovery outage only
+      // skips the warning.
+      try {
+        const meta = await discoverAuthServer(serverUrl);
+        warnUndeclaredResourceScopes(service, declared, meta.resource_scopes_supported);
+      } catch (err) {
+        console.warn(
+          `MCP OAuth: ${service} discovery failed; scope check skipped (connect continues):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
     return toRow(existing[0]);
   }
 
-  meta ??= await discoverAuthServer(serverUrl);
+  const meta = await discoverAuthServer(serverUrl);
   if (!meta.registration_endpoint) {
     throw new Error(`MCP OAuth: ${service} discovery reported no registration_endpoint`);
   }
-  if (requested.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
+  if (declared.length === 0 && (meta.scopes_supported?.length ?? 0) > 0) {
     warnScopelessEntry(service, meta.scopes_supported ?? []);
   }
+  if (declared.length > 0) warnUndeclaredResourceScopes(service, declared, meta.resource_scopes_supported);
   const client = await registerClient(meta.registration_endpoint, {
     clientName: "Valet",
     redirectUris: [redirectUri],
-    ...(requested.length > 0 ? { scope: requested.join(" ") } : {}),
+    ...(declared.length > 0 ? { scope: declared.join(" ") } : {}),
   });
   const now = Date.now();
   const values = {
@@ -192,21 +166,20 @@ export async function ensureMcpOAuthClient(
     authorizationEndpoint: meta.authorization_endpoint,
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
-    registeredScopes: requested,
+    registeredScopes: declared,
     scopesSupported: meta.scopes_supported ?? [],
     updatedAt: now,
   };
   if (existing[0]) {
-    // Requested scopes changed: replace the stored client in place. Last
+    // Declared scopes changed: replace the stored client in place. Last
     // writer wins on a concurrent scope change — both writers registered
-    // with the same requested set, so either row works.
+    // with the same declared set, so either row works.
     await deps.db.update(mcpOauthClients).set(values).where(eq(mcpOauthClients.service, service));
     // Refresh tokens were issued to the OLD client_id and stop refreshing
     // now. Nothing repairs that automatically — connected users must
     // disconnect and reconnect, so tell the operator while they are looking.
     console.warn(
-      `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}, ` +
-        `scopes: ${requested.join(" ") || "none"}). ` +
+      `MCP OAuth: "${service}" re-registered for scope change (client ${existing[0].clientId} → ${client.client_id}). ` +
         `Existing ${service} credentials stop refreshing; users must disconnect and reconnect in Integrations.`,
     );
   } else {

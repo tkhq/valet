@@ -818,11 +818,11 @@ describe('mcpActionPlugin appCredentialService fallback', () => {
 
 // ── auth-rejection messages on HTTP 401/403 (fix round 1) ───────────────
 
-function errorResponse(status: number, body: string): Response {
-  return new Response(body, { status });
+function errorResponse(status: number, body: string, headers: Record<string, string> = {}): Response {
+  return new Response(body, { status, headers });
 }
 
-function makeFetchMockFailingCall(status: number, body = 'nope') {
+function makeFetchMockFailingCall(status: number, body = 'nope', headers: Record<string, string> = {}) {
   return vi.fn(async (url: string | URL, init?: RequestInit) => {
     const reqBody = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
     if (reqBody.method === 'initialize') {
@@ -840,13 +840,43 @@ function makeFetchMockFailingCall(status: number, body = 'nope') {
       return jsonResponse({ jsonrpc: '2.0', id: reqBody.id, result: { tools: [fixtureTools[0]] } });
     }
     if (reqBody.method === 'tools/call') {
-      return errorResponse(status, body);
+      return errorResponse(status, body, headers);
     }
     throw new Error(`unexpected MCP method in test fixture: ${reqBody.method}`);
   });
 }
 
 describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
+  it('names the missing scope and the config fix on an insufficient_scope 403', async () => {
+    // Metabase 1.64: the challenge lists the scopes the token holds plus
+    // the one the tool needs. Reconnecting alone cannot add it.
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMockFailingCall(403, 'forbidden', {
+        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mb.example.com/api/metabase-mcp',
+      serviceName: 'metabase',
+      defaultRiskLevel: 'low',
+      displayName: 'Turnkey Metabase',
+    });
+    const credentials = fakeCredentialProvider({
+      accessToken: 'tok',
+      scopes: ['agent:query:run'],
+      source: { kind: 'team' },
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    expect(await action.execute({}, fakeContext(credentials))).toEqual({
+      success: false,
+      error:
+        'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
+        "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
+    });
+  });
+
   it('names the Valet app and the admin fix when the APP token is rejected', async () => {
     vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
     const plugin = mcpActionPlugin({

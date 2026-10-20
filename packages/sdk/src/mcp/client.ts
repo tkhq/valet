@@ -11,11 +11,15 @@ import type { McpTool, McpToolResult, JsonRpcRequest, JsonRpcResponse } from './
  */
 export class McpHttpError extends Error {
   readonly status: number;
+  /** The response's `WWW-Authenticate` header, when present. A 403 with
+   * `error="insufficient_scope"` names the scopes the call needs. */
+  readonly wwwAuthenticate?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, wwwAuthenticate?: string) {
     super(message);
     this.name = 'McpHttpError';
     this.status = status;
+    this.wwwAuthenticate = wwwAuthenticate;
   }
 }
 
@@ -101,6 +105,7 @@ export class McpClient {
       throw new McpHttpError(
         `MCP ${this.serviceName} ${method} failed: HTTP ${res.status}${body ? ` — ${body.slice(0, 200)}` : ''}`,
         res.status,
+        res.headers.get('www-authenticate') ?? undefined,
       );
     }
 

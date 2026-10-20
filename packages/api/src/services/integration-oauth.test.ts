@@ -88,59 +88,30 @@ describe("ensureMcpOAuthClient", () => {
     expect(fake.registrations).toHaveLength(1);
   });
 
-  it("adds the scopes the protected resource advertises to the declared scopes", async () => {
-    // Metabase 1.64: read tools need agent:content:read, which a scope
-    // list copied from 1.63 does not name.
+  it("requests only the declared scopes and warns naming the advertised ones it lacks", async () => {
+    // Metabase 1.64: read tools need agent:content:read, which a scope list
+    // copied from 1.63 does not name. Valet must not grant it on its own.
     const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:content:read", "agent:query:run"] });
-    try {
-      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
-        "agent:query:run",
-        "agent:search",
-      ]);
-      expect(row.scopes).toEqual(["agent:content:read", "agent:query:run", "agent:search"]);
-      expect(mb.registrations[0]?.scope).toBe("agent:content:read agent:query:run agent:search");
-    } finally {
-      await mb.close();
-    }
-  });
-
-  it("re-registers when a server upgrade advertises a new resource scope", async () => {
-    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:query:run"] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const before = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
-        "agent:query:run",
-      ]);
-      expect(before.clientId).toBe("client-1");
-
-      mb.resourceScopesSupported = ["agent:content:read", "agent:query:run"];
-      const after = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
-        "agent:query:run",
-      ]);
-      expect(after.clientId).toBe("client-2");
-      expect(after.scopes).toEqual(["agent:content:read", "agent:query:run"]);
-      expect(mb.registrations[1]?.scope).toBe("agent:content:read agent:query:run");
-    } finally {
-      warn.mockRestore();
-      await mb.close();
-    }
-  });
-
-  it("keeps the stored client when the resource metadata cannot be read", async () => {
-    const mb = await startFakeOAuthServer({ resourceScopesSupported: ["agent:content:read", "agent:query:run"] });
-    try {
-      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", ["agent:query:run"]);
-
-      // A transient 404 or 5xx on the resource metadata must not narrow the
-      // shared client: that would stop every connected user's refresh.
-      mb.resourceScopesSupported = undefined;
       const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
         "agent:query:run",
       ]);
-      expect(row.clientId).toBe("client-1");
-      expect(row.scopes).toEqual(["agent:content:read", "agent:query:run"]);
+      expect(row.scopes).toEqual(["agent:query:run"]);
+      expect(mb.registrations[0]?.scope).toBe("agent:query:run");
+      const named = (m: string) => m.includes('"metabase"') && m.includes("agent:content:read");
+      expect(warn.mock.calls.map((c) => String(c[0])).some(named)).toBe(true);
+
+      // A later connect reuses the client and warns again.
+      warn.mockClear();
+      const again = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", mb.url, "https://valet.example/cb", [
+        "agent:query:run",
+      ]);
+      expect(again.clientId).toBe("client-1");
       expect(mb.registrations).toHaveLength(1);
+      expect(warn.mock.calls.map((c) => String(c[0])).some(named)).toBe(true);
     } finally {
+      warn.mockRestore();
       await mb.close();
     }
   });
