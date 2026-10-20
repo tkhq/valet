@@ -4,6 +4,7 @@ export * from './types/index.js';
 export * from './types/message-parts.js';
 export * from './types/plugin-entitlements.js';
 export * from './types/runner-protocol.js';
+export * from './action-params-label.js';
 export * from './artifact-page.js';
 export * from './errors.js';
 export * from './format-bytes.js';

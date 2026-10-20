@@ -290,12 +290,32 @@ function dynamicActionGranted(rows: PolicyResolutionRows, service: string, actio
     { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }));
 }
 
+/** The Tool step a run is parked on, and the policy source that held it. */
+export interface ParkedToolGate {
+  nodeId: string;
+  actionId: string;
+  provenance: string | undefined;
+}
+
+/** Sources a workflow grant can replace: defaults, not rules a person wrote. */
+const DEFAULT_SOURCES: ReadonlySet<string> = new Set(["risk_default", "plugin_default"]);
+
+/** A Tool step's dynamic action has no risk to read before a run, so the
+ * review reports it as "unknown". A run that parked on it read the risk.
+ * When a default held it, the run's approval card can grant that action. */
+function grantsParkedGate(node: WorkflowNodePermissionWire, parked: ParkedToolGate): boolean {
+  const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
+  return node.nodeId === parked.nodeId && node.mode === "unknown" && node.agentStep !== true
+    && actionId === parked.actionId && parked.provenance !== undefined && DEFAULT_SOURCES.has(parked.provenance);
+}
+
 /** Grants only the stored workflow's declared gating actions, never caller-invented actions. */
 export async function prepareWorkflowPermissions(
   deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
   workflowId: string,
   actionIds: string[] | undefined,
+  parked?: ParkedToolGate,
 ): Promise<AllowWorkflowPermissionsOutcome> {
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
   if (!summary) return null;
@@ -312,6 +332,8 @@ export async function prepareWorkflowPermissions(
   for (const node of analysis) {
     if (needsGrant(node) && node.actionId !== null) {
       gating.set(node.actionId, node.service);
+    } else if (parked && grantsParkedGate(node, parked)) {
+      gating.set(parked.actionId, node.service);
     }
   }
 

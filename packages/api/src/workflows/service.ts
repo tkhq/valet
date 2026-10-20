@@ -2091,7 +2091,11 @@ export async function resolveWorkflowApproval(
     if (!current || !sameWorkflowSteps(current.definition, run.definition)) return "stale_workflow";
     if (!accountForWorkflow) {
       const actionId = node.action.includes(".") ? node.action : `${node.service}.${node.action}`;
-      workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId]);
+      // The gate records why policy held this run. A default can be granted
+      // here even for a dynamic action the review cannot resolve. An
+      // explicit rule cannot, and it still wins over the grant at run time.
+      const provenance = typeof checkpoint?.effects?.provenance === "string" ? checkpoint.effects.provenance : undefined;
+      workflowPermission = await prepareWorkflowPermissions(deps, owner, run.params.workflowId, [actionId], { nodeId: input.nodeId, actionId, provenance });
       if (!workflowPermission?.ok || !workflowPermission.result.allowed.includes(actionId)) return "forbidden_workflow";
     }
   }

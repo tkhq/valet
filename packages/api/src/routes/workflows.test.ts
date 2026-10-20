@@ -13,7 +13,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { persistInvocationAudit } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicy } from "../policies/service.js";
 import {
   actionInvocations,
   actionPolicies,
@@ -1475,6 +1475,33 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     });
     expect(res.status).toBe(409);
     expect(await localApi.providers.db.select().from(workflowActionGrants)).toHaveLength(0);
+  });
+
+  it.each([
+    { provenance: "risk_default", granted: true },
+    { provenance: "plugin_default", granted: true },
+    { provenance: "org_policy", granted: false },
+    { provenance: "resolver_error", granted: false },
+  ])("a Tool step card grants its dynamic action for this workflow only when a default held it ($provenance)", async ({ provenance, granted }) => {
+    // widgets.nuke is not in the static catalog, like every MCP action, so the
+    // permission review reports it as "unknown". The run read its risk.
+    const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    api = localApi;
+    const gateId = "approval:gate:gate:1";
+    await localApi.providers.workflowStore.putIntent({ runId, nodeId: "gate", iteration: 0, status: "intent", attempt: 1, createdAt: 1,
+      effects: { gate: true, gateId, riskLevel: "critical", provenance } });
+    await localApi.providers.workflowStore.parkRun(runId, 1, [{ kind: "signal", signalType: "approval:gate", nodeId: "gate" }]);
+    const res = await fetch(`${localApi.baseUrl}/api/workflows/runs/${runId}/approvals/gate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approved: true, scope: "workflow", gateId }),
+    });
+    expect(res.status).toBe(granted ? 200 : 403);
+    expect(await localApi.providers.db.select({ actionId: workflowActionGrants.actionId }).from(workflowActionGrants))
+      .toEqual(granted ? [{ actionId: "widgets.nuke" }] : []);
+    expect(await localApi.providers.workflowStore.listSignals(runId)).toHaveLength(granted ? 1 : 0);
+    // A run of these steps no longer stops at the action.
+    const decision = await resolveActionPolicy(localApi.providers.db, { orgId: "local-org", userId: "local-user", service: "widgets",
+      actionId: "widgets.nuke", riskLevel: "critical", params: {}, appliesIn: "workflow", workflowExecutionId: runId, pluginDefault: undefined, now: Date.now() });
+    expect(decision.provenance.source).toBe(granted ? "workflow_grant" : "risk_default");
   });
 
   it("legacy always scope cannot create an org-wide grant for an undiscoverable action", async () => {
