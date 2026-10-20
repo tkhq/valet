@@ -12,10 +12,10 @@ import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
-import { verifyOAuthConnectState } from "./credential-connect.js";
+import { parseAddScopes, verifyOAuthConnectState } from "./credential-connect.js";
 import { createTeam, addMember, removeMember, setRole, deleteTeam } from "../services/teams.js";
 import { and, eq } from "drizzle-orm";
-import { teams, credentials, orgMembers, mcpOauthClients } from "../schema/index.js";
+import { teams, credentials, orgMembers, mcpOauthClients, agentSessions } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { buildAppDb } from "../lib/drizzle.js";
@@ -151,6 +151,24 @@ describe("GET /api/credentials/:service/connect", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("step-up: the authorize request asks for the declared scopes plus the added ones", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query:run"])] });
+    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(new URL(res.headers.get("location") ?? "").searchParams.get("scope")).toBe("agent:content:read agent:query:run");
+  });
+
+  it("step-up: refuses malformed scopes and a session the caller does not own", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const bad = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent('read "quoted"')}`, { redirect: "manual" });
+    expect(bad.status).toBe(400);
+    await api.providers.db.insert(agentSessions).values({ id: "someone-else", userId: "test-member", orgId: "local-org",
+      ownerType: "user", ownerId: "test-member", workspace: "w", createdAt: 1, updatedAt: 1 });
+    const foreign = await fetch(`${api.baseUrl}/api/credentials/linear/connect?addScopes=write&session=someone-else`, { redirect: "manual" });
+    expect(foreign.status).toBe(404);
+    expect(parseAddScopes(" b a  b ")).toEqual(["a", "b"]);
   });
 
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
@@ -907,6 +925,27 @@ describe("team OAuth connections", () => {
     const publicOutput = `${response.headers.get("location")} ${await listed.text()}`;
     expect(publicOutput).not.toContain("team-access");
     expect(publicOutput).not.toContain("team-refresh");
+  });
+
+  it("lets a member grant an added scope through the conversation, replacing the live team connection", async () => {
+    const { app, team } = await setup();
+    await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    await app.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "oauth2", accessToken: "old-team", scopes: ["read"] });
+    await app.providers.db.insert(agentSessions).values({ id: "team-thread-session", userId: "test-member", orgId: "local-org",
+      ownerType: "team", ownerId: team.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    const started = await fetch(`${app.baseUrl}/api/credentials/linear/connect?addScopes=read+write&session=team-thread-session`, {
+      redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(started.status).toBe(302);
+    const authorize = new URL(started.headers.get("location") ?? "");
+    expect(authorize.searchParams.get("scope")).toBe("read write");
+    fake.tokenResponse = { access_token: "stepped-up", refresh_token: "stepped-refresh", expires_in: 3600 };
+    const response = await finish(app.baseUrl, authorize.searchParams.get("state") ?? "", "test-member");
+    expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+    // The token response named no scope, so the requested set is stored.
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+      accessToken: "stepped-up", scopes: ["read", "write"],
+    });
   });
 
   it("lets a team member connect a team account", async () => {

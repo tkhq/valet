@@ -23,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
 import {
-  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, teamConnectionIsDead,
+  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, replaceTeamCredentialForStepUp, teamConnectionIsDead,
 } from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
@@ -42,6 +42,8 @@ import {
   getMcpOAuthClient,
 } from "../services/integration-oauth.js";
 import { missingClientEnv } from "../services/integration-availability.js";
+import { and, eq } from "drizzle-orm";
+import { agentSessions } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import {
   identityForExternal,
@@ -66,6 +68,11 @@ interface OAuthConnectState {
   returnTo?: string;
   /** Replace the team's dead connection (see `isDeadConnection`). */
   reconnect?: true;
+  /** Step-up: the scopes the authorize request asked for, stored when the
+   * token response names none. */
+  scopes?: string[];
+  /** Step-up on a team: replace the team's live connection. */
+  stepUp?: true;
   nonce: string;
   exp: number;
 }
@@ -78,7 +85,7 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, stepUp } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
@@ -86,12 +93,16 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     if (clientId !== undefined && typeof clientId !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
+    if (stepUp !== undefined && (stepUp !== true || typeof teamId !== "string")) return null;
+    if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
       ...(typeof clientId === "string" ? { clientId } : {}),
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
+      ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
+      ...(stepUp === true ? { stepUp } : {}),
     };
   });
 }
@@ -134,6 +145,34 @@ export function resolveReturnOrigin(reqUrl: string, referer: string | undefined,
   return allowed.has(refererOrigin) ? refererOrigin : "";
 }
 
+/** RFC 6749 §3.3 scope-token characters. */
+const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]{1,200}$/;
+
+/**
+ * The `addScopes` of a step-up link (space-separated): undefined when absent,
+ * null when malformed, else the sorted unique list.
+ */
+export function parseAddScopes(raw: string | undefined): string[] | undefined | null {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const scopes = raw.split(/\s+/).filter(Boolean);
+  if (scopes.length > 32 || !scopes.every((scope) => SCOPE_TOKEN.test(scope))) return null;
+  return [...new Set(scopes)].sort();
+}
+
+/**
+ * Whose connection a step-up link from a conversation refers to: the team that
+ * owns the session, or the caller's own account. Null for a session in another
+ * organization, another person's session, or one with any other owner.
+ */
+async function stepUpOwner(db: AppQueryable, user: { id: string; orgId: string }, sessionId: string): Promise<{ teamId?: string } | null> {
+  const [row] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .from(agentSessions).where(and(eq(agentSessions.id, sessionId), eq(agentSessions.orgId, user.orgId))).limit(1);
+  if (!row) return null;
+  if (row.ownerType === "team") return { teamId: row.ownerId };
+  if (row.ownerType === "user" && row.ownerId === user.id) return {};
+  return null;
+}
+
 credentialConnectRouter.get("/:service/connect", async (c) => {
   const service = c.req.param("service");
   const user = c.var.user;
@@ -146,13 +185,32 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (scope !== undefined && scope !== "team" && scope !== "user") {
     return c.json({ error: "Choose Personal or a team before connecting." }, 400);
   }
-  const teamId = c.req.query("teamId");
+  // Step-up (insufficient_scope): the scopes to add, and the conversation whose
+  // connection lacks them. The session names the team, so the link need not.
+  const addScopes = parseAddScopes(c.req.query("addScopes"));
+  if (addScopes === null) {
+    return c.json({ error: "The requested scopes are not valid. Open the link from the assistant's message again." }, 400);
+  }
+  if (addScopes && found.oauth.mode !== "mcp") {
+    return c.json({ error: "Only an MCP sign-in can add scopes. Reconnect this service on the Integrations page." }, 400);
+  }
+  let teamId = c.req.query("teamId");
+  const sessionId = c.req.query("session");
+  if (sessionId !== undefined) {
+    const owner = addScopes ? await stepUpOwner(db, user, sessionId) : null;
+    if (!owner || (owner.teamId !== undefined && teamId !== undefined && teamId !== owner.teamId)) {
+      return c.json({ error: "Conversation not found. Open the link from the assistant's message again." }, 404);
+    }
+    teamId = owner.teamId;
+  }
+  const stepUp = addScopes !== undefined && teamId !== undefined;
   // Every connect lands on /integrations. An old `?landing=` link is
   // ignored, so the callback cannot be steered.
   if (scope === "user" && teamId !== undefined) {
     return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
   }
   if (c.req.query("scope") === "team" && !teamId) return c.json({ error: "Choose a team before connecting." }, 400);
+  if (stepUp && c.req.query("reconnect") === "1") return c.json({ error: "Open the link from the assistant's message again." }, 400);
   const reconnect = c.req.query("reconnect") === "1";
   if (reconnect && teamId === undefined) return c.json({ error: "Choose the team whose connection to reconnect." }, 400);
   if (teamId !== undefined) {
@@ -176,6 +234,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
     ...(reconnect ? { reconnect: true as const } : {}),
+    ...(stepUp ? { stepUp: true as const } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -191,9 +250,12 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
+    // A step-up asks for the declared scopes plus the ones the server
+    // challenged for; the person approves the set on the provider's screen.
+    const scopes = addScopes ? [...new Set([...clientRow.scopes, ...addScopes])].sort() : clientRow.scopes;
     const state = signState<OAuthConnectState>(
       "integration-connect",
-      { ...base, codeVerifier, clientId: clientRow.clientId },
+      { ...base, codeVerifier, clientId: clientRow.clientId, ...(addScopes ? { scopes } : {}) },
       key,
     );
     const url = buildAuthorizationUrl({
@@ -202,7 +264,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       redirectUri,
       codeChallenge,
       state,
-      scopes: clientRow.scopes,
+      scopes,
     });
     return c.redirect(url, 302);
   }
@@ -314,7 +376,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: grantedScopes(tokens.scope, clientRow.scopes.length > 0 ? clientRow.scopes : undefined),
+        scopes: grantedScopes(tokens.scope, verified.scopes ?? (clientRow.scopes.length > 0 ? clientRow.scopes : undefined)),
         metadata: { connectedVia: "oauth" },
       };
     } else if (found.oauth.interpretTokenResponse) {
@@ -371,6 +433,11 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
         };
+        if (verified.stepUp) {
+          const replaced = await replaceTeamCredentialForStepUp(tx, encryptionKey, teamId, verified.service, credential);
+          if (replaced) await invalidateWorkflowSources(tx, { teamId });
+          return replaced ? null : "team_connection_removed";
+        }
         if (verified.reconnect) {
           const replaced = await replaceDeadTeamCredential(tx, encryptionKey, teamId, verified.service, credential, Date.now());
           if (replaced) await invalidateWorkflowSources(tx, { teamId });

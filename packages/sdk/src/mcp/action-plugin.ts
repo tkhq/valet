@@ -271,12 +271,22 @@ function missingScopes(err: unknown, grantedScopes: string[] | undefined): strin
  * a missing scope that a config entry does not declare is fixed by an admin
  * editing the entry. A declared scope the server did not grant, or a
  * service with no config scopes, keeps the fix for whoever holds the account.
+ *
+ * Step-up (MCP authorization, "Scope Challenge Handling"): for an undeclared
+ * scope on the caller's own connection or the team's, the message links to
+ * the connect route with the held and missing scopes, so the person can
+ * approve the added scope on the provider's screen and then ask for a retry.
+ * `configScopes` is set only for an `auth: oauth` config entry, so the link
+ * always has a sign-in to go to. `session` lets the route find the team
+ * without the link naming it. Any other connection (an app, org, vault or
+ * another member's shared account) keeps the admin fix.
  */
 function rejectionMessage(
   err: unknown,
   { source, scopes }: ResolvedToken,
   text: RejectionText,
   configScopes: string[] | undefined,
+  stepUp: { service: string; sessionId: string },
 ): string | undefined {
   const missing = missingScopes(err, scopes);
   const accountFix = authRejectionMessage(err, source, text);
@@ -286,10 +296,16 @@ function rejectionMessage(
   const undeclared = configScopes ? missing.filter((s) => !configScopes.includes(s)) : [];
   if (undeclared.length > 0) {
     const list = undeclared.join(', ');
-    return (
-      `${label} refused this call: the connection does not hold the ${list} ${noun(undeclared)}. ` +
-      `Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`
-    );
+    const refused = `${label} refused this call: the connection does not hold the ${list} ${noun(undeclared)}.`;
+    const kind = source?.kind;
+    if (kind === 'personal' || kind === 'team') {
+      const addScopes = [...new Set([...(scopes ?? []), ...missing])].sort().join(' ');
+      const query = new URLSearchParams({ addScopes, ...(kind === 'team' ? { session: stepUp.sessionId } : {}) });
+      const link = `/api/credentials/${encodeURIComponent(stepUp.service)}/connect?${query.toString()}`;
+      const team = kind === 'team' ? ` This replaces the team's ${label} connection with your own ${label} account.` : '';
+      return `${refused} To grant it, open ${link} and approve the request on ${label}'s screen. Then ask me to retry.${team}`;
+    }
+    return `${refused} Ask an admin to add ${list} to the ${label} integration's scopes. Then reconnect ${label}.`;
   }
   if (!accountFix) return undefined;
   return `${label} has not granted the ${missing.join(', ')} ${noun(missing)} to this connection. ${accountFix}`;
@@ -325,7 +341,7 @@ function mapToolToAction(
         const result = await client.callTool(resolved.token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = rejectionMessage(err, resolved, messages, configScopes);
+        const rejection = rejectionMessage(err, resolved, messages, configScopes, { service: serviceName, sessionId: ctx.sessionId });
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }

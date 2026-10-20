@@ -283,3 +283,14 @@ Limits:
 - Results stay in process memory. Each api replica probes on its own, and a restart forgets them.
 - A run that gets a 401 or 403 does not update the probe. The run's own error names the fix (`authRejectionMessage`).
 - A server that publishes no `securitySchemes` and gates scopes only at call time is not detected before a call.
+
+### Step-up for insufficient scope (2026-10-20)
+
+An MCP server answers a call that needs a scope the token lacks with HTTP 403 and `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. The MCP authorization specification ("Scope Challenge Handling") says a client that acts for a person should re-authorize with the added scopes and retry. Valet does this through the existing connect route, with no new gate:
+
+- `rejectionMessage` in the MCP action plugin handles a missing scope that the integration's config does not declare. Reconnecting cannot fix that, because a reconnect requests only the declared scopes. For the caller's own connection or the team's, on an `auth: oauth` config entry, the message links to `/api/credentials/:service/connect?addScopes=<held and missing>`; a team link adds `session=<sessionId>`. It says to approve the request on the provider's screen and then ask for a retry. Any other connection (app, organization, vault, or another member's shared account) keeps the admin fix: add the scope to the integration's config. A declared scope that the server did not grant keeps the account's reconnect message.
+- The connect route accepts `addScopes` for MCP sign-in only. It refuses a malformed list (RFC 6749 scope tokens, at most 32). The authorize request asks for the declared scopes plus the added ones, and the signed state carries that set, so a token response that names no `scope` stores it.
+- `session` resolves the team from the session's owner: a team-owned session in the caller's organization, or the caller's own session. The route then applies the normal team checks. Any team member may step up a team connection, as for a dead one, and the callback replaces the live connection (`replaceTeamCredentialForStepUp`). The new row holds the signing-in member's account, and the message says so.
+- The shared registered client keeps its declared scope set. A provider that refuses scopes beyond the client's registration returns an error to `/integrations`; the fix is then the integration's config.
+
+Limits: the person retries by asking again; the turn does not wait for the grant. An unattended run gets the same message and cannot act on it. The link is relative, so it opens in the web app, not in Slack. The health probe's missing-scope note is unchanged and still says to ask an admin.

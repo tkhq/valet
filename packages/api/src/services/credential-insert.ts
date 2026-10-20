@@ -63,6 +63,23 @@ export async function replaceDeadTeamCredential(
   return true;
 }
 
+/**
+ * Replaces the team's connection with one that holds more scopes (step-up
+ * after an `insufficient_scope` answer). Any member may do this, as for a
+ * dead connection: the new row holds the signing-in member's account. A
+ * connection removed while the member signed in is not restored. Call inside
+ * the transaction that holds `lockTeamCredentialRole`.
+ */
+export async function replaceTeamCredentialForStepUp(
+  tx: AppTx, encryptionKey: string, teamId: string,
+  service: string, credential: StoredCredential,
+): Promise<boolean> {
+  const row = await teamConnectionRow(tx, teamId, service, true);
+  if (!row) return false;
+  await replaceCredential(tx, encryptionKey, { type: "team", id: teamId }, service, credential);
+  return true;
+}
+
 function encryptedCredentialValues(
   encryptionKey: string, owner: CredentialOwner,
   service: string, credential: StoredCredential,

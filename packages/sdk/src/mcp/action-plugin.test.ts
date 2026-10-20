@@ -847,15 +847,13 @@ function makeFetchMockFailingCall(status: number, body = 'nope', headers: Record
 }
 
 describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
-  it('names the missing scope and the config fix on an insufficient_scope 403', async () => {
-    // Metabase 1.64: the challenge lists the scopes the token holds plus
-    // the one the tool needs. Reconnecting alone cannot add it.
-    vi.stubGlobal(
-      'fetch',
-      makeFetchMockFailingCall(403, 'forbidden', {
-        'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
-      }),
-    );
+  // Metabase 1.64: the challenge lists the scopes the token holds plus the
+  // one the tool needs.
+  const metabaseScopeChallenge = {
+    'www-authenticate': 'Bearer error="insufficient_scope", scope="agent:query:run agent:content:read"',
+  };
+  async function insufficientScopeError(source: CredentialSource): Promise<unknown> {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(403, 'forbidden', metabaseScopeChallenge));
     const plugin = mcpActionPlugin({
       mcpUrl: 'https://mb.example.com/api/metabase-mcp',
       serviceName: 'metabase',
@@ -863,19 +861,31 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       displayName: 'Turnkey Metabase',
       configScopes: ['agent:query:run'],
     });
-    const credentials = fakeCredentialProvider({
-      accessToken: 'tok',
-      scopes: ['agent:query:run'],
-      source: { kind: 'team' },
-    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok', scopes: ['agent:query:run'], source });
     const [action] = await plugin.resolveActions!({ credentials });
+    const result = await action.execute({}, fakeContext(credentials));
+    return result.success ? undefined : result.error;
+  }
 
-    expect(await action.execute({}, fakeContext(credentials))).toEqual({
-      success: false,
-      error:
-        'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
+  it('links the caller to grant the missing scope on their own connection (step-up)', async () => {
+    expect(await insufficientScopeError({ kind: 'personal' })).toBe(
+      'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
+        'To grant it, open /api/credentials/metabase/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun ' +
+        "and approve the request on Turnkey Metabase's screen. Then ask me to retry.",
+    );
+  });
+
+  it('links a team step-up through the session, and says it swaps the team account', async () => {
+    const error = await insufficientScopeError({ kind: 'team' });
+    expect(error).toContain('/api/credentials/metabase/connect?addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun&session=session-1');
+    expect(error).toContain("This replaces the team's Turnkey Metabase connection with your own Turnkey Metabase account.");
+  });
+
+  it('keeps the admin fix for a connection the caller cannot re-grant', async () => {
+    expect(await insufficientScopeError({ kind: 'app' })).toBe(
+      'Turnkey Metabase refused this call: the connection does not hold the agent:content:read scope. ' +
         "Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes. Then reconnect Turnkey Metabase.",
-    });
+    );
   });
 
   // The scope is declared, but the server granted less (the user lacks the
@@ -947,7 +957,8 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     const [action] = await plugin.resolveActions!({ credentials });
 
     const result = await action.execute({}, fakeContext(credentials));
-    expect(result.error).toContain("Ask an admin to add agent:content:read to the Turnkey Metabase integration's scopes.");
+    expect(result.error).toContain('the connection does not hold the agent:content:read scope.');
+    expect(result.error).toContain('addScopes=agent%3Acontent%3Aread+agent%3Aquery%3Arun');
   });
 
   it('names the missing scope but keeps the account fix when config cannot supply scopes', async () => {
