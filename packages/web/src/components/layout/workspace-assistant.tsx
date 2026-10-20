@@ -81,6 +81,9 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
       if (prompt) prefillComposerDraft(shown.sessionId, shown.threadId, prompt);
       return;
     }
+    // While the panel opens, a plain open keeps the request in flight, so it
+    // cannot replace the conversation of a contextual prompt.
+    if (visible && !prompt && !errors[workspace]) return;
     await start(prompt ? { fresh: true } : { fresh: true, unlessBusy: true }, prompt);
   }
   async function start(request: EnsureWorkspaceConversationRequest, prompt?: string) {

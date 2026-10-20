@@ -339,6 +339,29 @@ describe("Ask Valet conversations", () => {
     expect(await assistantMemoryNamespace(api.providers.db, second.sessionId, "memory-team", "local-org")).toBe(first.sessionId);
   });
 
+  it("replaces a deleted private execution of a legacy team member", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({ id: "legacy-deleted", orgId: "local-org", name: "Legacy", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "legacy-deleted", userId: "local-user", role: "admin" });
+    const owner = { type: "team" as const, id: "legacy-deleted" };
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { orgId: "local-org", actorUserId: "local-user" });
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: root.assistant.id, sessionId: root.sessionId,
+      orgId: "local-org", ownerType: "team", ownerId: owner.id });
+    const legacy = await root.session.createThread("app-assistant:local-user");
+    await db.insert(legacyAssistantConversations).values({ threadId: legacy.id, sessionId: root.sessionId, conversationKey: legacy.key });
+    const { open } = conversations("legacy-deleted");
+    const first = await open({ fresh: true });
+    expect(first.sessionId).toMatch(/^execution:/);
+    await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, first.sessionId));
+    const response = await fetch(`${api.baseUrl}/api/workspaces/legacy-deleted/conversation`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fresh: true }) });
+    expect(response.status).toBe(200);
+    const replacement = await response.json() as EnsureWorkspaceConversationResponse;
+    expect(replacement.sessionId).toMatch(/^execution:/);
+    expect(replacement.sessionId).not.toBe(first.sessionId);
+  });
+
   it("keeps each team member's conversations to that member", async () => {
     api = await bootTestApi();
     await api.providers.db.insert(teams).values({ id: "ask-team", orgId: "local-org", name: "Ask", createdAt: 1 });

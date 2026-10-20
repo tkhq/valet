@@ -142,6 +142,19 @@ describe("Ask Valet conversation rule", () => {
     expect(draft("contextual")).toBe("Explain this error");
   });
 
+  it("keeps the contextual conversation when Ask Valet is pressed while it opens", async () => {
+    let finish: (conversation: { sessionId: string; threadId: string }) => void = () => undefined;
+    const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    renderAt("/chat");
+    await userEvent.click(await screen.findByRole("button", { name: "Try in chat" }));
+    await userEvent.click(screen.getByRole("button", { name: "Ask Valet" }));
+    expect(ensure.mock.calls).toEqual([["user", { fresh: true }]]);
+    await act(async () => finish({ sessionId: "s1", threadId: "contextual" }));
+    expect(await screen.findByText("Conversation s1/contextual")).toBeTruthy();
+    expect(draft("contextual")).toBe("Summarize this page");
+  });
+
   it("starts a new chat from the header and reopens a recent conversation", async () => {
     const ensure = vi.spyOn(api, "ensureWorkspaceConversation")
       .mockResolvedValueOnce({ sessionId: "s1", threadId: "first" })
