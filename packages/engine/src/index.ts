@@ -3,6 +3,8 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
+export { subjectService } from "./events/subjects.js";
+export { boundEventDigest, cutUtf8 } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
 // can type model handles and run side completions without their own pi-ai
 // dependency edge (which pnpm may peer-fork into a second instance with its
@@ -22,6 +24,7 @@ export {
   SandboxSupersededError,
   SandboxUnavailableError,
   SandboxEvictedError,
+  SandboxGoneError,
   SandboxStartupError,
   SandboxPreparationError,
   SandboxConnectionError,
@@ -93,6 +96,10 @@ export {
 } from "./tracing.js";
 export {
   recordCredentialRead,
+  recordLeaseNodeSeconds,
+  recordLeasesActive,
+  recordLeasesOverDeadline,
+  recordLeasesUnannotated,
   recordSandboxCapacityWait,
   recordSandboxCreated,
   recordSandboxDestroyed,
@@ -100,12 +107,30 @@ export {
   recordSandboxFlagged,
   recordSandboxProvision,
   recordSandboxWorkspaceGrow,
+  recordScratchRefused,
+  recordScratchRequested,
   recordSettlement,
   recordToolExecution,
   recordTurn,
+  recordWakeupEnded,
+  recordWakeupSignalLost,
+  recordWakeupKillFailed,
+  recordWakeupsActive,
+  recordChildSettleOverDeadline,
+  recordLeaseOrphanReleased,
+  recordWakeupBadRow,
+  recordEventWaiterBufferFull,
+  recordEventWaiterMatch,
+  recordEventDerive,
+  recordEventMatchFailed,
+  recordWakeupSweepFailed,
+  recordWakeupSweepOk,
+  recordJobLogsPruned,
+  recordDockerJobOutputDropped,
   type SandboxDestroyReason,
   type SandboxFlagKind,
   type WorkspaceGrowOutcome,
+  type EventDeriveResult,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
@@ -136,6 +161,7 @@ export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
 export {
   builtinTools,
+  DEFAULT_WAKEUP_LIMITS,
   readTool,
   writeTool,
   editTool,
@@ -197,6 +223,10 @@ export {
   type VerifiedEvent,
   type NormalizedEvent,
   type EventCatalogEntry,
+  type DeriveContext,
+  type DerivedEventDef,
+  type EventSubjects,
+  type StatusResolver,
   type FilterOption,
   type FilterOptionContext,
   type FilterOptionResolver,

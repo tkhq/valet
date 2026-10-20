@@ -1,0 +1,276 @@
+/**
+ * Every old Events, Automation, Workflows tab, Routines, and channel URL redirects to
+ * its new URL and keeps its search params (spec Part A step 4, INV-H1). One
+ * test per row of the table, one per legacy `tab` value, one for a
+ * `/workflows` URL that no row takes, and one for the thrown redirect each
+ * old route's `beforeLoad` uses.
+ */
+import { isRedirect } from "@tanstack/react-router";
+import { describe, expect, it } from "vitest";
+import {
+  LEGACY_EVENTS_TABS,
+  PRESENCE_REDIRECTS,
+  presenceRedirectFor,
+  redirectToPresence,
+  type LegacyRoute,
+} from "./-presence-redirects";
+
+function target(from: LegacyRoute, params: Record<string, string>, search: Record<string, unknown>) {
+  return presenceRedirectFor(from, params, search);
+}
+
+describe("presence redirect table", () => {
+  it("covers every replaced route", () => {
+    const froms = new Set(PRESENCE_REDIRECTS.map((row) => row.from));
+    expect([...froms].sort()).toEqual([
+      "/channel",
+      "/events",
+      "/events/$eventId",
+      "/presence/listeners/$id",
+      "/presence/routines",
+      "/presence/runs",
+      "/presence/runs/$runId",
+      "/presence/workflows",
+      "/presence/workflows/$workflowId",
+      "/workflows",
+    ]);
+  });
+
+  it("sends /events with no tab to Presence and keeps the workspace", () => {
+    expect(target("/events", {}, { workspace: "t1" })).toEqual({ to: "/presence", params: {}, search: { workspace: "t1" } });
+  });
+
+  it("sends the Channels tab and an unknown tab to Presence", () => {
+    expect(target("/events", {}, { tab: "channels" })).toEqual({ to: "/presence", params: {}, search: {} });
+    expect(target("/events", {}, { tab: "nonsense", q: "deploy" })).toEqual({ to: "/presence", params: {}, search: { q: "deploy" } });
+  });
+
+  it("sends a Subscriptions review link to the rule page and drops review, as the Workflows rows do", () => {
+    expect(target("/events", {}, { tab: "subscriptions", review: "sub-1", workspace: "t1" })).toEqual({
+      to: "/presence/rules/$id",
+      params: { id: "sub-1" },
+      search: { workspace: "t1" },
+    });
+  });
+
+  it("sends the Subscriptions tab without a review to Presence", () => {
+    expect(target("/events", {}, { tab: "subscriptions" })).toEqual({ to: "/presence", params: {}, search: {} });
+  });
+
+  describe("legacy Log tab values open Activity", () => {
+    const expected: Record<(typeof LEGACY_EVENTS_TABS)[number], Record<string, unknown>> = {
+      log: { q: "deploy" },
+      activity: { q: "deploy" },
+      logs: { q: "deploy" },
+      problems: { status: "problems", q: "deploy" },
+      receipts: { q: "deploy" },
+    };
+    it.each(LEGACY_EVENTS_TABS)("tab=%s", (tab) => {
+      expect(target("/events", {}, { tab, q: "deploy" })).toEqual({ to: "/presence/activity", params: {}, search: expected[tab] });
+    });
+  });
+
+  it("maps tab=receipts&status=problems as the Events page did: the tab wins, and receipts open the whole Log", () => {
+    expect(target("/events", {}, { tab: "receipts", status: "problems" })).toEqual({
+      to: "/presence/activity",
+      params: {},
+      search: {},
+    });
+  });
+
+  it("keeps a valid Log status, drops an invalid one, and reads the old problemsQ search", () => {
+    expect(target("/events", {}, { tab: "log", status: "problems" })?.search).toEqual({ status: "problems" });
+    expect(target("/events", {}, { tab: "log", status: "all" })?.search).toEqual({});
+    expect(target("/events", {}, { tab: "log", problemsQ: "timeout" })?.search).toEqual({ q: "timeout" });
+    expect(target("/events", {}, { tab: "log", q: "a", problemsQ: "b" })?.search).toEqual({ q: "a" });
+  });
+
+  it("sends one event to its Presence URL", () => {
+    expect(target("/events/$eventId", { eventId: "ev-1" }, {})).toEqual({
+      to: "/presence/events/$eventId",
+      params: { eventId: "ev-1" },
+      search: {},
+    });
+  });
+
+  it("sends the legacy workflow list to /workflows and keeps its params", () => {
+    expect(target("/presence/workflows", {}, { workspace: "t1", run: "r1", gate: "g1" })).toEqual({
+      to: "/workflows",
+      params: {},
+      search: { workspace: "t1", run: "r1", gate: "g1" },
+    });
+  });
+
+  it("sends one legacy workflow to its new URL and keeps newTrigger", () => {
+    expect(target("/presence/workflows/$workflowId", { workflowId: "wf-1" }, { newTrigger: "event" })).toEqual({
+      to: "/workflows/$workflowId",
+      params: { workflowId: "wf-1" },
+      search: { newTrigger: "event" },
+    });
+  });
+
+  it("sends the legacy Runs list to /workflows/runs and keeps its params", () => {
+    expect(target("/presence/runs", {}, { workspace: "t1" })).toEqual({
+      to: "/workflows/runs",
+      params: {},
+      search: { workspace: "t1" },
+    });
+  });
+
+  it("sends one legacy run to its new URL and keeps gate, view, and conversation", () => {
+    expect(target("/presence/runs/$runId", { runId: "run-1" }, { gate: "n1", view: "details", conversation: "c1" })).toEqual({
+      to: "/workflows/runs/$runId",
+      params: { runId: "run-1" },
+      search: { gate: "n1", view: "details", conversation: "c1" },
+    });
+  });
+
+  it("sends a revision 1 listener page to its rule page and keeps its params", () => {
+    expect(target("/presence/listeners/$id", { id: "sub-1" }, { review: "sub-1", workspace: "t1" })).toEqual({
+      to: "/presence/rules/$id",
+      params: { id: "sub-1" },
+      search: { review: "sub-1", workspace: "t1" },
+    });
+  });
+
+  describe("pre-revision-1 Workflows tabs", () => {
+    it.each(["scheduled", "triggers"])("tab=%s opens Presence and keeps the workspace", (tab) => {
+      expect(target("/workflows", {}, { tab, workspace: "t1" })).toEqual({
+        to: "/presence",
+        params: {},
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("tab=scheduled with a review opens that routine's page", () => {
+      expect(target("/workflows", {}, { tab: "scheduled", review: "sched-1", workspace: "t1" })).toEqual({
+        to: "/presence/routines/$id",
+        params: { id: "sched-1" },
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("tab=triggers with a review opens that rule's page, because the tab held event rules", () => {
+      expect(target("/workflows", {}, { tab: "triggers", review: "sub-1", workspace: "t1" })).toEqual({
+        to: "/presence/rules/$id",
+        params: { id: "sub-1" },
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("tab=runs opens the Runs view and keeps the workspace", () => {
+      expect(target("/workflows", {}, { tab: "runs", workspace: "t1" })).toEqual({
+        to: "/workflows/runs",
+        params: {},
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("every other /workflows URL matches no row and serves the list", () => {
+      expect(target("/workflows", {}, {})).toBeUndefined();
+      expect(target("/workflows", {}, { workspace: "t1" })).toBeUndefined();
+      expect(target("/workflows", {}, { tab: "workflows" })).toBeUndefined();
+      expect(target("/workflows", {}, { review: "sched-1" })).toBeUndefined();
+    });
+  });
+
+  it("sends both old routine links to the routine's page (Review Focus 5)", () => {
+    expect(target("/presence/routines", {}, { routine: "sch-1", workspace: "team-1" })).toEqual({
+      to: "/presence/routines/$id",
+      params: { id: "sch-1" },
+      search: { workspace: "team-1" },
+    });
+    expect(target("/workflows", {}, { tab: "scheduled", review: "sch-1" })).toEqual({
+      to: "/presence/routines/$id",
+      params: { id: "sch-1" },
+      search: {},
+    });
+  });
+
+  it("sends an old Triggers review link to the rule page, not a routine page (Review Focus 5)", () => {
+    expect(target("/workflows", {}, { tab: "triggers", review: "sub-1" })).toEqual({
+      to: "/presence/rules/$id",
+      params: { id: "sub-1" },
+      search: {},
+    });
+  });
+
+  describe("the revision 2 Routines pane", () => {
+    it("sends /presence/routines?routine= to the routine's page and keeps the workspace", () => {
+      expect(target("/presence/routines", {}, { routine: "sched-1", workspace: "t1" })).toEqual({
+        to: "/presence/routines/$id",
+        params: { id: "sched-1" },
+        search: { workspace: "t1" },
+      });
+    });
+
+    it("sends /presence/routines without a routine to Presence", () => {
+      expect(target("/presence/routines", {}, { workspace: "t1" })).toEqual({ to: "/presence", params: {}, search: { workspace: "t1" } });
+      expect(target("/presence/routines", {}, { routine: "" })).toEqual({ to: "/presence", params: {}, search: {} });
+    });
+  });
+
+  it("sends /channel?key= to the place page", () => {
+    expect(target("/channel", {}, { key: "slack:C123", workspace: "t1" })).toEqual({
+      to: "/presence/places/$subject",
+      params: { subject: "slack:C123" },
+      search: { workspace: "t1" },
+    });
+  });
+
+  it("sends /channel without a key to Presence", () => {
+    expect(target("/channel", {}, {})).toEqual({ to: "/presence", params: {}, search: {} });
+    expect(target("/channel", {}, { key: "" })).toEqual({ to: "/presence", params: {}, search: {} });
+  });
+
+  it("reads a tab that is not text as no tab", () => {
+    expect(target("/events", {}, { tab: 7 })).toEqual({ to: "/presence", params: {}, search: {} });
+  });
+
+  it("reads a search that is not an object as empty", () => {
+    expect(presenceRedirectFor("/presence/workflows", {}, "tab=scheduled")).toEqual({ to: "/workflows", params: {}, search: {} });
+  });
+
+  it("matches every row with at least one test above", () => {
+    // Walks the table: each row resolves for a search built to select it.
+    for (const row of PRESENCE_REDIRECTS) {
+      const resolved = presenceRedirectFor(row.from, row.example.params, row.example.search);
+      expect(resolved?.to, `${row.from} (${row.when})`).toBe(row.to);
+    }
+  });
+});
+
+describe("redirectToPresence", () => {
+  it("returns without a redirect when no row takes the URL", () => {
+    expect(() => redirectToPresence("/workflows")({ params: {}, location: { search: { workspace: "t1" } } })).not.toThrow();
+  });
+
+  it("throws a redirect for a /workflows tab that moved", () => {
+    let thrown: unknown;
+    try {
+      redirectToPresence("/workflows")({ params: {}, location: { search: { tab: "scheduled", review: "sched-1" } } });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRedirect(thrown)).toBe(true);
+    if (!isRedirect(thrown)) return;
+    expect(thrown.options).toMatchObject({ to: "/presence/routines/$id", params: { id: "sched-1" }, search: {}, replace: true });
+  });
+
+  it("throws a replace redirect built from the table", () => {
+    let thrown: unknown;
+    try {
+      redirectToPresence("/channel")({ params: {}, location: { search: { key: "slack:C1" } } });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(isRedirect(thrown)).toBe(true);
+    if (!isRedirect(thrown)) return;
+    expect(thrown.options).toMatchObject({
+      to: "/presence/places/$subject",
+      params: { subject: "slack:C1" },
+      search: {},
+      replace: true,
+    });
+  });
+});

@@ -19,6 +19,7 @@ export const parseStorageQuantity = parseResourceQuantity;
  * plain bytes) — the doubles of any whole-Mi quantity stay whole. */
 export function formatStorageQuantity(bytes: number): string {
   for (const [suffix, unit] of [
+    ["Ti", 2 ** 40],
     ["Gi", 2 ** 30],
     ["Mi", 2 ** 20],
     ["Ki", 2 ** 10],

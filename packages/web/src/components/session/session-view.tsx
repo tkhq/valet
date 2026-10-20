@@ -32,11 +32,14 @@ import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tab
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
 import { useBrowserWatch } from "~/components/session/browser/use-browser-watch";
 import { ThreadContextPanel } from "~/components/session/thread-context-panel";
+import { BackgroundWorkStatusLine } from "~/components/session/background-work";
+import { useCanAdministerSession } from "~/components/session/use-can-administer-session";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
+import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, LoadingRow } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
@@ -123,6 +126,10 @@ export function SessionView({
   // engine persists the CompactionEntry before emitting `compaction_end`,
   // and this refetch is what pulls it into the transcript.
   useInvalidateMessagesOnCompaction(sessionId);
+  // Signal turns (child.settled, process.exited, timer.fired, watch.event)
+  // reach the client through REST only. A queue change is the cue to
+  // refetch, in every view that renders a session, not only the assistant chat.
+  useInvalidateMessagesOnQueueState(sessionId, activeThreadId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
   const setTab = onTabChange ?? setLocalTab;
   const viewRef = useRef<HTMLDivElement>(null);
@@ -136,6 +143,8 @@ export function SessionView({
     setTab(next);
   }
   const threads = useThreads(sessionId, undefined, activeThreadId);
+  // Stopping background work is a lifecycle control, like pause.
+  const canCancelWork = useCanAdministerSession(session.data?.owner);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
@@ -277,6 +286,7 @@ export function SessionView({
                   key={`${sessionId}:${effectiveThreadId}`}
                   owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
                   sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+                  canCancelWork={canCancelWork}
                   pullRequests={helperThread?.pullRequests}
                   onCreate={() => {
                     const key = draftKey(sessionId, effectiveThreadId);
@@ -382,6 +392,14 @@ export function SessionView({
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
+            statusLine={
+              <BackgroundWorkStatusLine
+                sessionId={sessionId}
+                threadId={effectiveThreadId}
+                canCancel={canCancelWork}
+                className="mt-1.5 self-start"
+              />
+            }
           />}
         </PageDropTarget>
         </div>

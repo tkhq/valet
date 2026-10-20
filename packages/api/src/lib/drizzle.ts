@@ -523,6 +523,8 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
 )` },
   { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
+  // The dispatcher appends a delivery's destination stage by event id.
+  { describe: "event receipts event index", probe: { kind: "index", index: "event_receipts_event" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_event" ON "event_receipts" ("org_id", "event_id")' },
   {
     describe: "workspace assistant singleton cutover",
     prepare: classifyLegacyRuntimes,
@@ -1754,6 +1756,118 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
   {
+    // engine_wakeups table (spec 2026-10-08: sandbox scratch, wakeups, and
+    // leases). Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups table (spec 2026-10-08)",
+    probe: { kind: "table", table: "engine_wakeups" },
+    sql: `CREATE TABLE IF NOT EXISTS "engine_wakeups" (
+  "id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "kind" text NOT NULL, "status" text NOT NULL, "reason" text NOT NULL,
+  "command" text, "prompt" text, "exec_id" text, "lease_id" text,
+  "fire_at" bigint, "deadline_at" bigint, "exit_code" integer, "cause" text,
+  "log_offset" bigint NOT NULL DEFAULT 0, "log_tail" text NOT NULL DEFAULT '', "event_count" integer NOT NULL DEFAULT 0,
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "ended_at" bigint,
+  "origin_json" text, "window_start_at" bigint, "window_count" integer,
+  "watch_buffer" text, "last_emit_at" bigint
+)`,
+  },
+  {
+    // Fix wave 2 (H3): the channel origin a wakeup signal replies to.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.origin_json column",
+    probe: { kind: "column", table: "engine_wakeups", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // Fix wave 2 (B7): the watch rate window.
+    describe: "engine_wakeups.window_start_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_start_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_start_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.window_count column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_count" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_count" integer',
+  },
+  {
+    // Fix wave 3 (M1): lines a watch holds between coalesced emits.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.watch_buffer column",
+    probe: { kind: "column", table: "engine_wakeups", column: "watch_buffer" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "watch_buffer" text',
+  },
+  {
+    describe: "engine_wakeups.last_emit_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "last_emit_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "last_emit_at" bigint',
+  },
+  {
+    // Event waiters (spec 2026-10-15: event wakeups, Part C). Engine table:
+    // the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.match_json column",
+    probe: { kind: "column", table: "engine_wakeups", column: "match_json" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "match_json" text',
+  },
+  {
+    describe: "engine_wakeups.subjects column",
+    probe: { kind: "column", table: "engine_wakeups", column: "subjects" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "subjects" text[]',
+  },
+  {
+    describe: "engine_wakeups.event_buffer column",
+    probe: { kind: "column", table: "engine_wakeups", column: "event_buffer" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_buffer" text',
+  },
+  {
+    describe: "engine_wakeups.event_seen column",
+    probe: { kind: "column", table: "engine_wakeups", column: "event_seen" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_seen" text',
+  },
+  {
+    describe: "engine_wakeups_session index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_wakeups_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_session" ON "engine_wakeups" ("session_id","status")',
+  },
+  {
+    describe: "engine_wakeups_due index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_wakeups_due" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    // After the subjects column repair, which it indexes (spec 2026-10-15, Part C).
+    describe: "engine_wakeups_event_subjects index",
+    probe: { kind: "index", index: "engine_wakeups_event_subjects" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_event_subjects" ON "engine_wakeups" USING gin ("subjects") WHERE "kind" = \'event\' AND "status" = \'running\'',
+  },
+  {
+    // engine_leases table (spec 2026-10-08). Engine table: the same caveat.
+    describe: "engine_leases table (spec 2026-10-08)",
+    probe: { kind: "table", table: "engine_leases" },
+    sql: `CREATE TABLE IF NOT EXISTS "engine_leases" (
+  "id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "sandbox_id" text,
+  "owner_kind" text NOT NULL, "owner_id" text, "reason" text NOT NULL,
+  "created_at" bigint NOT NULL, "deadline_at" bigint NOT NULL, "released_at" bigint, "release_cause" text,
+  "thread_id" text, "origin_json" text
+)`,
+  },
+  {
+    // Fix wave 2 (M17): the thread that receives `lease.expired`.
+    describe: "engine_leases.thread_id column",
+    probe: { kind: "column", table: "engine_leases", column: "thread_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
+  {
+    // Fix wave 2 (H3).
+    describe: "engine_leases.origin_json column",
+    probe: { kind: "column", table: "engine_leases", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    describe: "engine_leases_active index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_leases_active" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_leases_active" ON "engine_leases" ("session_id") WHERE "released_at" IS NULL',
+  },
+  {
     // Team `vlt_` key pin (TKAI-396). Nullable: a personal key has none.
     // Pre-1.0 there are no team keys to backfill; the team route writes
     // the column and `metadata.teamId` in one statement from now on.
@@ -1867,6 +1981,58 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   // After every rollup and its views: the backfill moves facts, and their
   // triggers move the hours and days.
   { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
+
+  {
+    // Normalized subjects on the stored event (spec 2026-10-15: event
+    // wakeups, Part G). Delivery-time rechecks (team-coverage, redeliver)
+    // read this column so they match the implicit `subject` filter the same
+    // way ingest did; a row stored before this column existed reads null,
+    // which that matching treats as no subjects (fails closed).
+    describe: "events.subjects column",
+    probe: { kind: "column", table: "events", column: "subjects" },
+    sql: 'ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "subjects" text[]',
+  },
+  {
+    // A schedule's thread policy (spec 2026-10-16: delivery threads, Part
+    // A). Null reads as `{ mode: "own" }`, so existing rows need no backfill.
+    describe: "workflow_schedules.thread_policy column",
+    probe: { kind: "column", table: "workflow_schedules", column: "thread_policy" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "thread_policy" jsonb',
+  },
+  {
+    // Why the scheduler disabled a schedule (spec 2026-10-16: presence hub,
+    // Part D). Null means no recorded reason, so existing rows need no backfill.
+    describe: "workflow_schedules.disabled_reason column",
+    probe: { kind: "column", table: "workflow_schedules", column: "disabled_reason" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "disabled_reason" text',
+  },
+  {
+    // The assistant thread a follow binds to (spec 2026-10-16: delivery
+    // threads, Part B step 5). Null keeps the Slack thread key route.
+    describe: "followed_threads.session_id column",
+    probe: { kind: "column", table: "followed_threads", column: "session_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "session_id" text',
+  },
+  {
+    describe: "followed_threads.thread_id column",
+    probe: { kind: "column", table: "followed_threads", column: "thread_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
+  {
+    // The Destination resolved at ingest (spec 2026-10-16: delivery threads
+    // and claims, Part C step 6). Null means resolve at dispatch from the
+    // binding and the policy only (no waiter consult).
+    describe: "event_deliveries.destination column",
+    probe: { kind: "column", table: "event_deliveries", column: "destination" },
+    sql: 'ALTER TABLE "event_deliveries" ADD COLUMN IF NOT EXISTS "destination" jsonb',
+  },
+  {
+    // The rule list reads each rule's latest delivery for its problem state
+    // (spec 2026-10-16: presence hub, Part C step 5).
+    describe: "event_deliveries_subscription index",
+    probe: { kind: "index", index: "event_deliveries_subscription" },
+    sql: 'CREATE INDEX IF NOT EXISTS "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at")',
+  },
 
 ];
 

@@ -165,6 +165,8 @@ describe("ChannelHost.handleUpdate", () => {
     }
 
     engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider,
       eventStream,
@@ -343,7 +345,7 @@ describe("ChannelHost.handleUpdate", () => {
       host.handleUpdate("fake", inbound({ dispatchId: "concurrent-dm-1" })),
       deliverToAssistantThread({ db: testDb.appDb, engineHost }, {
         orgId: ORG_ID, owner: { type: "user", id: USER_ID }, actorUserId: USER_ID,
-        threadKey: "fake:99", dispatchId: "concurrent-event",
+        destination: { kind: "key", key: "fake:99" }, dispatchId: "concurrent-event",
         signal: { kind: "signal", signalType: "fake.message", body: "event", attributes: {} },
         mismatchReason: "event_target_mismatch",
       }),

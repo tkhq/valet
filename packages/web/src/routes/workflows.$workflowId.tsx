@@ -36,6 +36,7 @@ import {
   DropdownMenuTrigger,
   Spinner,
 } from "~/components/primitives";
+import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
 import { Editor, type EditorHandle } from "~/components/workflows/editor/editor";
@@ -43,7 +44,7 @@ import { WorkflowPreview } from "~/components/workflows/preview";
 import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
 import { TriggersPanel } from "~/components/workflows/triggers-drawer";
-import type { TriggerKind } from "~/components/workflows/trigger-dialog";
+import type { TriggerKind } from "~/components/workflows/triggers-drawer";
 import { useSendPrompt } from "~/api/queries";
 import { useWorkflowAssistant } from "~/hooks/use-workflow-assistant";
 import { useWorkflowPatchWatch } from "~/hooks/use-workflow-patch-watch";
@@ -56,16 +57,14 @@ import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { prefillComposerDraft } from "~/stores/composer-drafts";
 
 /**
- * `/workflows/$workflowId` — the visual editor page (plan decision 11):
- * canvas + inspector + Save (Task 8-10's `Editor`) plus a Run button and a
- * collapsible runs section. Replaces the old index-page JSON create/edit
- * form as the place definitions are actually edited; `workflows.index.tsx`
- * now only links here.
+ * `/workflows/$workflowId`: the visual editor page (spec Part G step 1). The
+ * page has the canvas, the inspector, Save, Run, and side drawers for runs,
+ * history, and the listeners and routines that start the workflow.
  */
 export const Route = createFileRoute("/workflows/$workflowId")({
   component: WorkflowEditorRoute,
   // `newTrigger` comes from the new-workflow dialog: the workflow was just
-  // created to run on a schedule or an event, so its trigger form opens next.
+  // created to run on a schedule or an event, so the editor opens next.
   // `explainRun` + `explainStep` come from a failed run's "Explain this
   // failure": the editor's assistant gets the question once.
   validateSearch: (search: Record<string, unknown>): { newTrigger?: TriggerKind; explainRun?: string; explainStep?: string; explainIteration?: number } => ({
@@ -76,7 +75,7 @@ export const Route = createFileRoute("/workflows/$workflowId")({
   }),
 });
 
-function WorkflowEditorRoute() {
+export function WorkflowEditorRoute() {
   const { workflowId } = Route.useParams();
   const { newTrigger, explainRun, explainStep, explainIteration } = Route.useSearch();
   const explain = explainRun && explainStep ? { runId: explainRun, nodeId: explainStep, iteration: explainIteration } : undefined;
@@ -186,7 +185,8 @@ function WorkflowEditorPane({
   newTrigger,
   explain,
 }: {
-  /** Open the Triggers drawer on a new trigger of this kind (from the create dialog). */
+  /** Open the listeners and routines drawer, and its wizard on this kind
+   * (from the create dialog). */
   newTrigger?: TriggerKind;
   /** Ask the assistant to explain this failed step, once. */
   explain?: ExplainFailureRequest;
@@ -209,9 +209,10 @@ function WorkflowEditorPane({
   allowPermissions: ReturnType<typeof useAllowWorkflowPermissions>;
   navigate: ReturnType<typeof useNavigate>;
 }) {
-  // Right-side drawer: runs list / version history / triggers. Header
+  // Right-side drawer: runs list / version history / listeners and routines. Header
   // buttons toggle it — the old bottom collapsible was invisible under a
   // full-height canvas ("no way to view the list of runs").
+  // copy-lint: allow trigger
   const [drawer, setDrawer] = useState<"runs" | "history" | "triggers" | null>(newTrigger ? "triggers" : null);
   // The assistant is the editor's right-hand column, not one of the overlay
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
@@ -253,6 +254,7 @@ function WorkflowEditorPane({
   const [committedName, setCommittedName] = useState(initialName);
   const nameDirty = name !== committedName;
   const [runOpen, setRunOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [preapproveOpen, setPreapproveOpen] = useState(false);
   const [reviewedAccountConsent, setReviewedAccountConsent] = useState<GetWorkflowPermissionsResponse["accountConsent"]>();
   const [reviewedDefinitionToken, setReviewedDefinitionToken] = useState<string | undefined>();
@@ -287,7 +289,7 @@ function WorkflowEditorPane({
   const gatingActions = useMemo(() => {
     const seen = new Map<string, WorkflowNodePermissionWire>();
     for (const node of permissions?.nodes ?? []) {
-      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown")) && node.actionId !== null && !seen.has(node.actionId)) {
+      if ((node.mode === "require_approval" || (node.agentStep && node.mode === "unknown" && !node.granted)) && node.actionId !== null && !seen.has(node.actionId)) {
         seen.set(node.actionId, node);
       }
     }
@@ -405,9 +407,10 @@ function WorkflowEditorPane({
           <Button
             size="sm"
             variant={drawer === "triggers" ? "secondary" : "ghost"}
+            // copy-lint: allow trigger
             onClick={() => setDrawer((d) => (d === "triggers" ? null : "triggers"))}
           >
-            Triggers
+            What starts it
           </Button>
 
 
@@ -457,8 +460,21 @@ function WorkflowEditorPane({
               >
                 Download
               </DropdownMenuItem>
+              {/* A mirrored workflow lives in a repository, so the list offers no Delete for it either. */}
+              {!mirrored && (
+                <DropdownMenuItem className="text-danger-500" onSelect={() => setDeleteOpen(true)}>
+                  Delete
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
+          <DeleteWorkflowDialog
+            workflow={{ id: workflowId, name: committedName }}
+            open={deleteOpen}
+            onOpenChange={setDeleteOpen}
+            // The workflow is gone, so an unsaved draft has nothing to save into.
+            onDeleted={() => void navigate({ to: "/workflows", ignoreBlocker: true })}
+          />
         </div>
       </div>
 
@@ -624,7 +640,7 @@ function WorkflowEditorPane({
         </div>
         {drawer === "runs" && <RunsDrawer runsQuery={runsQuery} onClose={() => setDrawer(null)} />}
         {drawer === "triggers" && (
-          <DrawerShell title="Triggers" onClose={() => setDrawer(null)}>
+          <DrawerShell title="What starts it" onClose={() => setDrawer(null)}>
             <TriggersPanel workflowId={workflowId} startNew={newTrigger} />
           </DrawerShell>
         )}
@@ -700,7 +716,7 @@ function RunsDrawer({
         <div className="px-4 py-3 text-xs text-danger-500">Failed to load runs.</div>
       )}
       {!runsQuery.isLoading && runsQuery.error == null && runs.length === 0 && (
-        <div className="px-4 py-3 text-xs text-muted">No runs yet — press Run to start one.</div>
+        <div className="px-4 py-3 text-xs text-muted">No runs yet. Press Run to start one.</div>
       )}
       <ul className="divide-y divide-line">
         {runs.map((r) => (
@@ -745,7 +761,8 @@ export function restoreErrorMessage(err: unknown): string {
   const invalid = validationMessages(err);
   if (!invalid) return errorText(err, "The restore failed. Try again.");
   return (
-    "This version was not restored — it does not pass the current validation rules. " +
+    // copy-lint: allow rule
+    "This version was not restored. It does not pass the current validation rules. " +
     `Correct these in the editor, then save: ${invalid.join("; ")}`
   );
 }
@@ -794,7 +811,7 @@ function HistoryDrawer({
       )}
       {!versionsQ.isLoading && versions.length === 0 && (
         <div className="px-4 py-3 text-xs text-muted">
-          No versions yet — saved before version history existed. The next save creates v1.
+          No versions yet. This workflow was saved before version history existed. The next save creates v1.
         </div>
       )}
       <ul className="divide-y divide-line/60">

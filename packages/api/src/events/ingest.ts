@@ -7,32 +7,126 @@ import { createEventReceipt, appendReceiptStage } from "./receipts.js";
 import type { ReceiptSubscriptionDecision } from "../wire/types.js";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
+import type { EventCatalogEntry, NormalizedEvent, Principal, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
+import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import {
+  appendWaiterDigests,
+  evaluateWaiterCandidates,
+  recordWaiterMatchFailure,
+  waiterMatchStage,
+  type WaiterCandidate,
+  type WaiterMatchDeps,
+} from "./waiters.js";
+import { followRouteFor, followRouterPassed } from "../channels/follow-router.js";
+import { isPrincipalType, mentionCoveredBy, resolveClaims, withTwinCandidates, type ClaimDecision, type ClaimDeps } from "./claims.js";
+import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
+import { isDeliverableTarget } from "./assistant-delivery.js";
+import { hasTeamCoverage } from "./delivery-policy.js";
+import { isAssistantKind } from "./target-names.js";
+import { placeOfSubject } from "../services/presence-places.js";
+
+/** The target kind a receipt records. A stored old `orchestrator` kind records as `assistant`. */
+function receiptTargetKind(target: unknown): string {
+  if (!isRecord(target) || typeof target.kind !== "string") return "unknown";
+  return isAssistantKind(target.kind) ? "assistant" : target.kind;
+}
 
 export interface IngestDeps {
   db: AppDb;
   plugins: ValetPlugin[];
   /** In-process dispatcher nudge; wired in main.ts. */
   onIngest?: () => void;
+  /** Event waiter matching (spec 2026-10-15: event wakeups, Part E). Absent: no waiter matching and no claims. */
+  waiters?: WaiterMatchDeps;
+  /** Overrides for claim resolution (spec 2026-10-16: delivery threads and claims, Part C). Tests only. */
+  claims?: Partial<ClaimDeps>;
+}
+
+/** The receipt stage for a claim resolution failure (INV-D6). Metadata only. */
+export const CLAIM_FAILURE_STAGE = {
+  stage: "claim_resolution",
+  outcome: "failed",
+  detail: "Claim resolution failed. Each line's work lands by its conversation binding or thread policy, and every matching waiter appends its digest.",
+} as const;
+
+/**
+ * The owner of the follow binding that the follow router delivered this
+ * Slack message event to, or null (spec 2026-10-16: delivery threads and
+ * claims, Part C step 4). The Slack inbox runs the router before ingest, so
+ * the router's cursor (`followRouterPassed`) tells a delivered reply from
+ * one the router dropped before its binding existed or its sender was
+ * admitted. A dropped reply is not routed: its waiters append (INV-D6).
+ */
+export async function followRoutedOwner(
+  db: AppDb,
+  args: { orgId: string; botUserId?: string | undefined; payload: unknown },
+): Promise<Principal | null> {
+  const follow = await followRouteFor(db, { orgId: args.orgId, ...(args.botUserId ? { botUserId: args.botUserId } : {}), payload: args.payload });
+  if (!follow || !followRouterPassed(follow, args.payload) || !isPrincipalType(follow.ownerType)) return null;
+  return { type: follow.ownerType, id: follow.ownerId };
+}
+
+/**
+ * The other half of a Slack mention, from the plugin that owns `service`
+ * (spec 2026-10-16: delivery threads and claims, Part C step 8), or null.
+ */
+export async function conversationalTwinOf(
+  plugins: ValetPlugin[],
+  waiters: Pick<WaiterMatchDeps, "slackBotUserId">,
+  orgId: string,
+  service: string,
+  event: NormalizedEvent,
+): Promise<NormalizedEvent | null> {
+  const plugin = plugins.find((p) => p.conversationalTwin && (p.triggers ?? []).some((t) => t.service === service));
+  if (!plugin?.conversationalTwin) return null;
+  const botUserId = service === "slack" ? await waiters.slackBotUserId(orgId) : undefined;
+  return plugin.conversationalTwin(event, botUserId ? { botUserId } : {});
+}
+
+/**
+ * A plugin's derived event keys (spec 2026-10-15: event wakeups, Part B) for
+ * `service`, as catalog entries marked `derived: true`. A derived key belongs
+ * to the service its plugin has triggers for and its key prefix names. No
+ * event with this key ever reaches ingest, so the entries declare no filters.
+ */
+function derivedCatalogEntries(plugin: ValetPlugin, service: string): EventCatalogEntry[] {
+  if (!(plugin.triggers ?? []).some((t) => t.service === service)) return [];
+  return (plugin.derivedEvents ?? [])
+    .filter((d) => d.key.startsWith(`${service}.`))
+    .map((d) => ({ key: d.key, description: d.description, filters: [], derived: true }));
 }
 
 export function catalogForService(plugins: ValetPlugin[], service: string): EventCatalogEntry[] {
-  return plugins
-    .flatMap((p) => p.triggers ?? [])
-    .filter((t) => t.service === service)
-    .flatMap((t) => t.catalog);
+  return plugins.flatMap((p) => [
+    ...(p.triggers ?? []).filter((t) => t.service === service).flatMap((t) => t.catalog),
+    ...derivedCatalogEntries(p, service),
+  ]).map(withSubjectFilter);
 }
 
-/** The merged catalog across every plugin and service. The one traversal the
- * subscription validator, the mention-scope gate, and the filter-options
- * lookup all share, so a catalog-shape change lands in one place. */
+/** The merged catalog across every plugin and service, derived keys included
+ * (marked `derived: true`). The one traversal the subscription validator,
+ * the mention-scope gate, and the filter-options lookup all share, so a
+ * catalog-shape change lands in one place. Every entry also carries the
+ * implicit `subject` filter field (spec 2026-10-15: event wakeups, Part G),
+ * added here so no individual plugin declares it. */
 export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
-  return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
+  return plugins.flatMap((p) => {
+    const services = [...new Set((p.triggers ?? []).map((t) => t.service))];
+    return [
+      ...(p.triggers ?? []).flatMap((t) => t.catalog),
+      ...services.flatMap((service) => derivedCatalogEntries(p, service)),
+    ];
+  }).map(withSubjectFilter);
+}
+
+/** Catalog entries a subscription may name: every entry except derived keys
+ * (spec 2026-10-15: event wakeups, Part G and Non-goals). */
+export function subscribableEntries(entries: EventCatalogEntry[]): EventCatalogEntry[] {
+  return entries.filter((e) => e.derived !== true);
 }
 
 export interface IngestResult {
@@ -109,7 +203,7 @@ async function logFilterExcludedDrop(
   reason = "filter_excluded",
 ): Promise<void> {
   if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
-  const message = detail ?? `A ${eventKey} event arrived, but every subscription in the organization for it excluded it by filter. Check the filters on the ${eventKey} subscriptions.`;
+  const message = detail ?? `A ${eventKey} event arrived, but the filters on every line for it in the organization excluded it. Check the filters on the ${eventKey} lines.`;
   try {
     await writeDropLog(db, {
       orgId,
@@ -136,7 +230,7 @@ export async function logSlackMessageBotNearMiss(
   payload: unknown,
 ): Promise<void> {
   await logSlackBotDiagnostic(deps.db, orgId, payload, "slack.message", "filter_excluded",
-    "A Slack bot message arrived, but `slack.message` accepts only human messages. Subscribe to `slack.bot_message` to receive bot form deliveries.", catalogForService(deps.plugins, "slack"));
+    "A Slack bot message arrived, but `slack.message` accepts only human messages. To act on bot messages, add a line for `slack.bot_message`.", catalogForService(deps.plugins, "slack"));
 }
 
 /** Keep the fail-closed identity check visible without retaining unsubscribed traffic. */
@@ -167,13 +261,26 @@ async function logSlackBotDiagnostic(
   await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
 }
 
-function failedFilterFields(filters: unknown, key: string, payload: unknown, catalog: EventCatalogEntry[], teamMention: boolean) {
+function failedFilterFields(filters: unknown, key: string, payload: unknown, catalog: EventCatalogEntry[], teamMention: boolean, subjects?: string[]) {
   if (!Array.isArray(filters)) return [];
   const valid = filters.filter((f): f is SubscriptionFilter => isRecord(f) && typeof f.field === "string" &&
     (f.op === "eq" || f.op === "in" || f.op === "prefix" || f.op === "contains" || f.op === "regex") &&
     (typeof f.value === "string" || Array.isArray(f.value) && f.value.every(v => typeof v === "string")));
   return valid.filter(f => !(teamMention && key === "slack.app_mention" && f.field === "user") &&
-    !filtersMatch(payload, key, [f], catalog)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
+    !filtersMatch(payload, key, [f], catalog, subjects)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
+}
+
+/**
+ * The place key a receipt records for an event: its natural subject's place
+ * (`services/presence-places.ts`), so a line's Activity can place a skip
+ * whose event was not stored. A Slack receipt keeps its channel metadata
+ * instead. Null when the plugin names no place.
+ */
+function receiptPlace(plugins: readonly ValetPlugin[], service: string, event: NormalizedEvent): string | null {
+  if (service === "slack") return null;
+  const plugin = plugins.find((p) => (p.triggers ?? []).some((t) => t.service === service));
+  const natural = plugin?.naturalSubject?.(event) ?? null;
+  return natural ? placeOfSubject(natural.subject) : null;
 }
 
 export async function ingestEvent(
@@ -183,8 +290,10 @@ export async function ingestEvent(
   const { orgId, service, event } = args;
   const receiptId = args.receiptId ?? await createEventReceipt(deps.db, { orgId, service, externalId: event.dedupeKey });
   if (!args.receiptId) await appendReceiptStage(deps.db, receiptId, { stage: "receipt", outcome: "received", detail: "An event reached normalized ingestion. Verification is handled by the source adapter." });
-  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` }, { eventKey: event.key });
-  let phase = "subscription lookup";
+  const place = receiptPlace(deps.plugins, service, event);
+  await appendReceiptStage(deps.db, receiptId, { stage: "classification", outcome: "accepted", detail: `Normalized as ${event.key}.` },
+    { eventKey: event.key, ...(place !== null ? { metadata: { place } } : {}) });
+  let phase = "the line lookup";
   try {
     const now = Date.now();
     const eventId = randomUUID();
@@ -219,27 +328,81 @@ export async function ingestEvent(
     const decisions: ReceiptSubscriptionDecision[] = [];
     const matched: typeof subs = [];
     let authorizationDenied = false;
-    phase = "subscription filter and sender authorization checks";
+    phase = "the line filter and sender checks";
     for (const sub of subs) {
-      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog);
+      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
       if (outcome === "matched") matched.push(sub);
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
         id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown",
+        target: receiptTargetKind(sub.target),
         outcome: outcome === "not_matched" ? "filter_excluded" : outcome,
-        ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target)) } : {}),
+        ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target), event.subjects) } : {}),
         ...(isRecord(sub.target) && sub.target.kind === "workflow" && typeof sub.target.workflowId === "string" ? { targetId: sub.target.workflowId } : {}),
       });
     }
     for (const sub of configured.filter(sub => !sub.enabled && subscriptionNamesKey(sub, event.key))) {
       decisions.push({ id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
-        target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown", outcome: "disabled" });
+        target: receiptTargetKind(sub.target), outcome: "disabled" });
     }
     await appendReceiptStage(deps.db, receiptId, { stage: "subscription_match",
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
-      detail: `${subs.length} enabled subscriptions checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 matching-key subscriptions.`,
+      detail: `${subs.length} enabled lines of presence checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 lines that name this key.`,
     }, { subscriptions: decisions });
+    // Event waiters evaluate before the early return for an unmatched event,
+    // and claims resolve before the deliveries are inserted (spec
+    // 2026-10-16: delivery threads and claims, Part C step 1). Each step
+    // has its own error boundary: a failure never changes the subscription
+    // outcome or fails ingestion (INV-E2), and a claim failure stamps
+    // nothing and lets every waiter append (INV-D6).
+    const waiters = deps.waiters;
+    let candidates: WaiterCandidate[] = [];
+    let claims: ClaimDecision | null = null;
+    if (waiters) {
+      let twin: NormalizedEvent | null = null;
+      // A failed evaluation leaves the candidate set partial, so no claim
+      // resolves on it and every accepted waiter appends (INV-D6).
+      let evaluated = false;
+      try {
+        candidates = await evaluateWaiterCandidates(waiters, orgId, service, event);
+        twin = await conversationalTwinOf(deps.plugins, waiters, orgId, service, event);
+        // Both halves of a mention choose over the waiters that accept
+        // either half (Part C step 8).
+        if (twin) {
+          candidates = withTwinCandidates(candidates, await evaluateWaiterCandidates(waiters, orgId, service, twin));
+        }
+        evaluated = true;
+      } catch (error) {
+        recordWaiterMatchFailure(waiters);
+        console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
+      }
+      if (evaluated && candidates.some((c) => c.accepted)) {
+        try {
+          claims = await resolveEventClaims(deps, { orgId, service, event, twin, subs, matched, candidates, catalog });
+          if (claims.failedOwners > 0) {
+            recordWaiterMatchFailure(waiters);
+            await appendReceiptStage(deps.db, receiptId, CLAIM_FAILURE_STAGE);
+          }
+        } catch (error) {
+          claims = null;
+          recordWaiterMatchFailure(waiters);
+          console.error(`[ingest] receipt ${receiptId ?? "unavailable"} claim resolution failed`, error);
+          await appendReceiptStage(deps.db, receiptId, CLAIM_FAILURE_STAGE);
+        }
+      }
+    }
+    // Appends the waiters' digests per the claim decisions, then records
+    // the stage. Without decisions, every accepted waiter appends.
+    const appendDigests = async (decisions: ClaimDecision["waiters"] | undefined): Promise<void> => {
+      if (!waiters || candidates.length === 0) return;
+      try {
+        const appended = await appendWaiterDigests(waiters, service, candidates, decisions);
+        await appendReceiptStage(deps.db, receiptId, waiterMatchStage(appended));
+      } catch (error) {
+        recordWaiterMatchFailure(waiters);
+        console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter append failed`, error);
+      }
+    };
     const namedSubscriptions = subs.filter((sub) => subscriptionNamesKey(sub, event.key));
     const namedSubscription = namedSubscriptions.length > 0;
     // A sender denial is an authorization diagnostic, not a filter miss. Never
@@ -258,12 +421,13 @@ export async function ingestEvent(
       await logFilterExcludedDrop(deps.db, orgId, event.key, diagnosticPayload);
     }
     if (matched.length === 0) {
-      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No delivery was requested. Source payload was not stored. Review the subscription decisions." });
+      await appendDigests(claims?.waiters);
+      await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: "skipped", detail: "No line took this event, so its payload was not stored. Check the match decisions below." });
       return { eventId, duplicate: false, deliveries: 0, skipped: true, namedSubscription, authorizationDenied };
     }
 
-    phase = "event and delivery persistence";
-    const result = await deps.db.transaction(async (tx) => {
+    phase = "event storage";
+    const persist = () => deps.db.transaction(async (tx) => {
       const inserted = await tx
         .insert(events)
         .values({
@@ -278,6 +442,11 @@ export async function ingestEvent(
           payload: event.payload,
           occurredAt,
           receivedAt: now,
+          // Persisted so delivery-time rechecks (team coverage, redeliver)
+          // can match the implicit `subject` filter the same way ingest did
+          // (spec 2026-10-15: event wakeups, Part G) — the stored row, not
+          // the in-memory NormalizedEvent, is all they have.
+          subjects: event.subjects ?? null,
         })
         .onConflictDoNothing({ target: [events.service, events.dedupeKey] })
         .returning({ id: events.id });
@@ -297,24 +466,88 @@ export async function ingestEvent(
             attempts: 0,
             nextAttemptAt: now,
             createdAt: now,
+            // The claim stamp the dispatcher executes (Part C step 6). An
+            // unstamped delivery resolves from the binding and the policy.
+            destination: claims?.deliveries.get(sub.id) ?? null,
           })),
         );
       }
       return { eventId, duplicate: false, deliveries: matched.length, linkedEventId: eventId };
     });
+    let result: Awaited<ReturnType<typeof persist>>;
+    try {
+      result = await persist();
+    } catch (error) {
+      // No delivery was stored, so a suppressed digest would be lost. Every
+      // accepted waiter appends (INV-D6).
+      await appendDigests(undefined);
+      throw error;
+    }
+    await appendDigests(claims?.waiters);
 
     await appendReceiptStage(deps.db, receiptId, { stage: "persistence", outcome: result.duplicate ? "duplicate" : "stored",
-      detail: result.duplicate ? "This provider event was already stored. No duplicate deliveries were created." : `Event stored with ${result.deliveries} pending deliveries. Open its activity entry for delivery attempts and workflow results.`,
+      detail: result.duplicate ? "This provider event was already stored. No line acted on it again." : `Event stored for ${result.deliveries} ${result.deliveries === 1 ? "line" : "lines"}. Open its Activity entry to see what each line did.`,
     }, result.linkedEventId ? { eventId: result.linkedEventId } : undefined);
     if (!result.duplicate && result.deliveries > 0) {
-      phase = "dispatcher wake after storing pending deliveries";
+      phase = "the dispatcher wake after event storage";
       deps.onIngest?.();
-      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "Delivery records are pending. Enqueueing does not mean a workflow has completed." });
+      await appendReceiptStage(deps.db, receiptId, { stage: "dispatch", outcome: "enqueued", detail: "The lines' work is queued. A queued workflow has not completed yet." });
     }
     return { eventId: result.eventId, duplicate: result.duplicate, deliveries: result.deliveries, authorizationDenied };
   } catch (error) {
-    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Check server logs using this receipt reference; no exception payload is retained here.` });
+    await appendReceiptStage(deps.db, receiptId, { stage: "ingestion", outcome: "failed", detail: `Processing failed during ${phase}. Search the server logs for this event's ID; the error itself is not kept here.` });
     console.error(`[ingest] receipt ${receiptId ?? "unavailable"} failed`, error);
     throw error;
   }
+}
+
+/**
+ * Resolves the claims for one ingested event (spec 2026-10-16: delivery
+ * threads and claims, Part C). One conversation binding lookup runs per
+ * owner that has a claim candidate.
+ */
+async function resolveEventClaims(
+  deps: IngestDeps,
+  args: {
+    orgId: string;
+    service: string;
+    event: NormalizedEvent;
+    twin: NormalizedEvent | null;
+    subs: Array<typeof eventSubscriptions.$inferSelect>;
+    matched: Array<typeof eventSubscriptions.$inferSelect>;
+    candidates: WaiterCandidate[];
+    catalog: EventCatalogEntry[];
+  },
+): Promise<ClaimDecision> {
+  const { orgId, service, event } = args;
+  const db = deps.db;
+  // The dispatcher's team coverage check, over the same catalog it uses.
+  const coverageCatalog = allCatalogEntries(deps.plugins);
+  const teamCovered = (sub: typeof eventSubscriptions.$inferSelect, e: NormalizedEvent) =>
+    hasTeamCoverage(db, sub, { eventKey: e.key, payload: e.payload, subjects: e.subjects ?? null }, coverageCatalog);
+  const byId = new Map(args.subs.map((sub) => [sub.id, sub]));
+  const claimDeps: ClaimDeps = {
+    isDeliverable: (owner, target) => isDeliverableTarget({ db }, orgId, owner, target),
+    mentionCovered: (owner, twin) => mentionCoveredBy(db, args.subs, owner, twin, args.catalog, teamCovered),
+    teamCovered: async (subscriptionId, e) => {
+      const sub = byId.get(subscriptionId);
+      return sub ? teamCovered(sub, e) : false;
+    },
+    followRoute: async (e) => {
+      if (service !== "slack" || e.key !== "slack.message") return null;
+      return followRoutedOwner(db, { orgId, botUserId: await deps.waiters?.slackBotUserId(orgId), payload: e.payload });
+    },
+    ...deps.claims,
+  };
+  const origin = deps.waiters?.channelOrigin?.(service, event.key, event.payload) ?? null;
+  const bindingEvent = { key: event.key, payload: event.payload };
+  return resolveClaims(claimDeps, {
+    orgId,
+    event,
+    twin: args.twin,
+    matched: args.matched,
+    candidates: args.candidates,
+    binding: (owner) => conversationBinding(db, orgId, owner, bindingEvent, origin),
+    conversational: (binding) => isConversationalEvent(bindingEvent, origin, binding),
+  });
 }

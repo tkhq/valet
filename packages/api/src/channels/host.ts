@@ -1,4 +1,4 @@
-import { mergePresence, readPresence } from "@valet/shared";
+import { mergeAppearance, readAppearance } from "@valet/shared";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -61,7 +61,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { resolveOrgChannelCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { isOrgAdmin } from "../services/org.js";
 import { answersGate, canResolveSessionGate, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -95,7 +95,7 @@ export interface ChannelHostDeps {
   now?: () => number;
   /**
    * 1Password reference-credential resolver (owner-precedence contract,
-   * Task 6). Threaded into `resolveOrgCredentialRead` so an org-owned bot
+   * Task 6). Threaded into `resolveOrgChannelCredentialRead` so an org-owned bot
    * token row carrying `metadata.onepassword` resolves through the org's
    * shared 1Password token instead of surfacing the raw reference string.
    * Optional — omit for deployments/tests with no 1Password service wired;
@@ -531,7 +531,7 @@ export class ChannelHost {
         // boot — log it and skip this transport, same as "no bot token".
         let credential: StoredCredential | null;
         try {
-          credential = await resolveOrgCredentialRead(
+          credential = await resolveOrgChannelCredentialRead(
             { credentials: this.deps.engineCredentials, onePassword: this.deps.onePassword },
             { orgId, scopes: ["org"] },
             factory.channelType,
@@ -1014,7 +1014,7 @@ export class ChannelHost {
         return "not_live";
       }
       const item = feedback.queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, feedback.queueItemId) : undefined;
-      const presence = readPresence(item?.metadata?.presence);
+      const presence = readAppearance(item?.metadata?.presence);
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -1114,7 +1114,7 @@ export class ChannelHost {
     try {
       const base = await assistantSessionSender(this.deps.db, sessionId);
       const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
-      return mergePresence(base, readPresence(item?.metadata?.presence));
+      return mergeAppearance(base, readAppearance(item?.metadata?.presence));
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);

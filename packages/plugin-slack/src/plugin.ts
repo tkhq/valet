@@ -3,9 +3,11 @@ import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { slackPlugin } from "./actions/actions.js";
 import { slackHttpRoutes } from "./http.js";
+import { slackNaturalSubject, slackSubjects } from "./subjects.js";
 import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
+import { slackConversationalTwin } from "./twins.js";
 
 // Re-exported so the api's Slack app manifest can pin its bot-event
 // subscriptions against the event types these triggers actually match.
@@ -17,8 +19,15 @@ const plugin: ValetPlugin = {
   name: "slack",
   version: "0.1.0",
   description: "Slack integration for messages, channels, and users",
+  // The app identity is the org bot token: `slack.*` actions act as the bot
+  // by design. The person's identity is the separate `slack-user` service.
+  native: true,
+  appCredentialService: "slack",
   actions: [slackPlugin],
   triggers: slackTriggerDefs,
+  eventSubjects: slackSubjects,
+  naturalSubject: slackNaturalSubject,
+  conversationalTwin: slackConversationalTwin,
   httpRoutes: slackHttpRoutes,
   transports: [slackTransportFactory],
   filterOptionResolvers: slackFilterOptionResolvers,

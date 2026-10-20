@@ -1312,7 +1312,7 @@ export async function workflowActionOrigin(
   // Until chained runs carry that audience separately, do not publish its input
   // in an originless child that every team member could read.
   if (principal.type === "team" && typeof eventKey === "string" && eventKey.startsWith("slack.")) {
-    throw new ValidationError("Chaining a Slack-triggered workflow is unavailable until its channel audience can be preserved.");
+    throw new ValidationError("A team cannot chain a workflow that a Slack event starts. Valet cannot keep the channel audience in a chained run yet.");
   }
   if ("origin" in params && params.origin != null) {
     const origin = params.origin;

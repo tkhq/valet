@@ -13,6 +13,7 @@ import { actionPolicies, actionPolicyOverrides, workflowActionGrants, workflowRu
 import { addMember, createTeam } from "../services/teams.js";
 import { loadPolicyRows, resolveActionPolicy } from "../policies/service.js";
 import { isRiskLevel } from "../policies/admin.js";
+import { needsGrant } from "../workflows/permissions.js";
 import type {
   AllowWorkflowPermissionsResponse,
   GetWorkflowPermissionsResponse,
@@ -547,6 +548,11 @@ describe("agent step permissions", () => {
     // The review then reads the agent rows as allowed, as the run does, so nothing asks twice.
     const reviewed = (await (await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse;
     expect(reviewed.nodes.find((n) => n.actionId === "widgets.deploy")).toMatchObject({ mode: "allow", provenance: "workflow_grant", agentStep: true });
+    // A dynamic action has no risk to read before a run, so it stays unknown,
+    // but the review shows the saved grant and no longer counts it as waiting.
+    const dynamic = reviewed.nodes.find((n) => n.actionId === "granola.list_meetings");
+    expect(dynamic).toMatchObject({ mode: "unknown", agentStep: true, granted: true });
+    expect(dynamic && needsGrant(dynamic)).toBe(false);
 
     await api.providers.workflowStore.createRun("agent-run", { workflowId: wfId, definitionVersionId: "v1" }, AGENT_DEFINITION, "v1",
       { ownerType: "user", ownerId: "local-user", actorUserId: "local-user" });
@@ -563,6 +569,22 @@ describe("agent step permissions", () => {
     const edited = { ...AGENT_DEFINITION, nodes: AGENT_DEFINITION.nodes.slice(0, 2) };
     await api.providers.db.update(workflowDefinitions).set({ definition: edited }).where(eq(workflowDefinitions.id, wfId));
     expect((await check(true)).mode).toBe("require_approval");
+  });
+
+  it("does not call a dynamic agent-step action granted while a risk rule could gate it", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api, { definition: AGENT_DEFINITION });
+    await reviewedApproval(`${api.baseUrl}/api/workflows/${wfId}/permissions/allow`, { method: "POST" });
+    // The run learns the action's risk only from discovery, and this rule
+    // would then win over the grant (`resolution.ts`).
+    await api.providers.db.insert(actionPolicies).values({
+      id: "pol_critical", orgId: "local-org", principalType: "org", principalId: "local-org", riskLevel: "critical",
+      mode: "require_approval", appliesIn: "any", paramMatchers: [], origin: "admin", createdAt: 1, updatedAt: 1,
+    });
+    const reviewed = (await (await fetch(`${api.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse;
+    const dynamic = reviewed.nodes.find((n) => n.actionId === "granola.list_meetings");
+    expect(dynamic).toMatchObject({ mode: "unknown", agentStep: true });
+    expect(dynamic?.granted).toBeUndefined();
   });
 
   it("blocks an agent-step grant that an org rule scoped to workflows keeps gated", async () => {

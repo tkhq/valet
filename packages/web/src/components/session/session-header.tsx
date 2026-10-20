@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Check,
@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { ApiError } from "~/api/client";
+import { useWorkspaceChannels } from "~/api/channels";
+import { placeOfSubject } from "~/api/presence";
 import {
   useDeleteSession,
   usePauseSession,
@@ -44,6 +46,7 @@ import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
+import { workspaceKeyForOwner } from "~/lib/workspace-scope";
 import {
   queueBusy,
   useActiveModelForThread,
@@ -52,6 +55,8 @@ import {
   type AgentStatus,
   type ConnectionStatus,
 } from "~/stores/stream";
+import { canAdministerSession } from "./use-can-administer-session";
+import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { ShareThreadDialog } from "./share-thread-dialog";
@@ -74,10 +79,66 @@ export function shortenWorkspace(workspace: string): string {
     : parts[parts.length - 1] ?? workspace;
 }
 
+/** A subject thread's place: the place key the places API lists for the
+ * subject (after `subject:`), and the label the header shows for it. */
+export interface SubjectPlace {
+  subject: string;
+  label: string;
+}
+
+/** Pure: the Slack channel id inside a `slack:<team>/<channel>` place. */
+function placeSlackChannelId(place: string): string | undefined {
+  if (!place.startsWith("slack:")) return undefined;
+  const parts = place.slice("slack:".length).split("/");
+  return parts.length === 2 ? parts[1] : undefined;
+}
+
+/** Pure: the place of a `subject:` thread key, as `placeOfSubject` names it. */
+function subjectKeyPlace(key: string | undefined): string | undefined {
+  if (!key?.startsWith("subject:")) return undefined;
+  return placeOfSubject(key.slice("subject:".length)) ?? undefined;
+}
+
+/**
+ * Pure: a subject thread's place label (spec Part G). The subject is first
+ * normalized to its place the way the server does, so a Slack thread names
+ * its channel and `github:Acme/API@<sha>` names `acme/api`. The label is
+ * `#<channel>` for a Slack channel, using the resolved channel name when
+ * the caller has one and falling back to the raw channel id;
+ * `<owner>/<repo>` or `<owner>/<repo>#<n>` for GitHub; `<ID>` for a Linear
+ * issue; `<KEY>` for a Linear team. Undefined for any other key, including
+ * a non-subject thread.
+ */
+export function subjectPlaceLabel(key: string | undefined, channelName?: string): SubjectPlace | undefined {
+  const subject = subjectKeyPlace(key);
+  if (subject === undefined) return undefined;
+  const channelId = placeSlackChannelId(subject);
+  if (channelId !== undefined) return { subject, label: `#${channelName ?? channelId}` };
+  if (subject.startsWith("github:")) return { subject, label: subject.slice("github:".length) };
+  if (subject.startsWith("linear:")) {
+    const rest = subject.slice("linear:".length);
+    return { subject, label: rest.startsWith("team/") ? rest.slice("team/".length) : rest };
+  }
+  return undefined;
+}
+
 /** Server sends `{ error: "a turn is running" }` / `{ error: "sandbox is not
  * ready to pause" }` for the documented 409s (pause and sandbox-replace);
  * fall back to the mutation's own message for anything else (network
  * failure, capability-off 409, unexpected shape). */
+const STOP_AND_PAUSE: GuardedAction = {
+  title: "Stop background work and pause?",
+  confirmLabel: "Stop background work and pause",
+};
+const STOP_AND_REPLACE: GuardedAction = {
+  title: "Stop background work and replace the sandbox?",
+  confirmLabel: "Stop background work and replace",
+};
+const STOP_AND_RESTART: GuardedAction = {
+  title: "Stop background work and restart the sandbox?",
+  confirmLabel: "Stop background work and restart",
+};
+
 function extractActionError(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
@@ -153,6 +214,10 @@ export function SessionHeader({
   // switch confirm first, and their modal covers this row, so each reports
   // its own failure inside its dialog.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Pause, replace, and the profile switch stop background work. The server
+  // refuses them with a 409 that lists the work; the guard asks, then
+  // resends with `force` (fix wave 3, H3).
+  const guard = useBackgroundWorkGuard();
   // Delete and the Terminal/VS Code switch confirm in a `ConfirmDialog`, not
   // in `window.confirm`: the native prompt shows no pending state, drops the
   // server's refusal, and browser automation accepts it before a person sees
@@ -194,7 +259,7 @@ export function SessionHeader({
   async function pauseSession() {
     setActionError(null);
     try {
-      await pause.mutateAsync();
+      await guard.attempt(STOP_AND_PAUSE, (force) => pause.mutateAsync(force ? { force: true } : undefined));
     } catch (err) {
       setActionError(extractActionError(err, "Failed to pause the sandbox. Try again."));
     }
@@ -203,7 +268,7 @@ export function SessionHeader({
   async function replaceSandbox() {
     setActionError(null);
     try {
-      await replace.mutateAsync();
+      await guard.attempt(STOP_AND_REPLACE, (force) => replace.mutateAsync(force ? { force: true } : undefined));
     } catch (err) {
       setActionError(extractActionError(err, "Failed to replace the sandbox."));
     }
@@ -218,7 +283,11 @@ export function SessionHeader({
   async function applyInteractiveServices() {
     setServicesError(null);
     try {
-      await setProfile.mutateAsync(turningOnServices ? "full" : "headless");
+      const profile = turningOnServices ? "full" : "headless";
+      // On a background-work refusal the guard's dialog takes over, so this one closes.
+      await guard.attempt(STOP_AND_RESTART, (force) =>
+        setProfile.mutateAsync({ profile, ...(force ? { force: true } : {}) }),
+      );
       setConfirmServices(false);
     } catch (err) {
       setServicesError(
@@ -288,8 +357,7 @@ export function SessionHeader({
   // team shares, so they are a team-admin power — the API enforces the
   // same rule; this only hides controls that would 404. Personal sessions
   // are unaffected.
-  const canAdminister =
-    teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
+  const canAdminister = canAdministerSession(owner, teams.data, me.data);
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   const modelScopeHint = threadScoped
     ? "Model for this thread (pinned at creation). New threads use the workspace default."
@@ -310,6 +378,23 @@ export function SessionHeader({
   // Only the owner shares a personal thread. A team thread is already open
   // to its team.
   const canShare = activeThread !== undefined && owner.type === "user" && owner.id === me.data?.id;
+
+  // A subject thread names its place (spec Part G): the channel, repository,
+  // or Linear issue it was opened for. The Slack case resolves the raw
+  // channel id to a readable name from the same channel list ThreadChannelChip
+  // reads, when the list has it.
+  const channelOwner = owner.type === "user" || owner.type === "team" ? { ownerType: owner.type, ownerId: owner.id } : undefined;
+  const channels = useWorkspaceChannels(channelOwner);
+  const threadKey = activeThread?.key;
+  const subjectPlace = subjectKeyPlace(threadKey);
+  const subjectChannelId = subjectPlace !== undefined ? placeSlackChannelId(subjectPlace) : undefined;
+  const subjectChannelName = subjectChannelId !== undefined
+    ? channels.data?.channels.find((c) => c.key === `slack:${subjectChannelId}`)?.name
+    : undefined;
+  const place = subjectPlaceLabel(threadKey, subjectChannelName);
+  // The place page reads in the thread owner's workspace, not the
+  // switcher's: a team thread's place lists the team's listeners.
+  const placeWorkspace = workspaceKeyForOwner(owner) ?? "user";
 
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
@@ -390,6 +475,18 @@ export function SessionHeader({
           )}
         </div>
       </Tooltip>
+      {place && (
+        <div className="basis-full min-w-0 -mt-1">
+          <Link
+            to="/presence/places/$subject"
+            params={{ subject: place.subject }}
+            search={{ workspace: placeWorkspace }}
+            className="text-[11px] text-muted hover:text-ink hover:underline"
+          >
+            {place.label}
+          </Link>
+        </div>
+      )}
       {activeThread?.channel && (
         <ThreadChannelChip
           channel={activeThread.channel}
@@ -548,6 +645,7 @@ export function SessionHeader({
       {canShare && sharing && (
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
+      {guard.dialog}
       {moving && (
         <MoveSessionDialog
           sessionId={session.id}

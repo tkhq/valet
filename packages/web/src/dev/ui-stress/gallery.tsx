@@ -19,7 +19,7 @@ import { WorkflowAgentApprovals } from "~/components/workflows/agent-approvals";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
 import { cn } from "~/lib/cn";
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
-import { EventDetailBody } from "~/routes/events.$eventId";
+import { EventDetailBody } from "~/routes/presence.events.$eventId";
 import { IntegrationsPage } from "~/routes/integrations";
 import { UsagePage } from "~/routes/usage";
 import { RunDetailBody } from "~/routes/workflows.runs.$runId";
@@ -80,7 +80,7 @@ function Frame({ label, className, children }: { label: string; className?: stri
   );
 }
 
-/** The log's filter and search live in its page's URL; here they are local. */
+/** The log's chip and place search live in its page's URL; here they are local. */
 function EventLogSection() {
   const [filter, setFilter] = useState<LogFilter>("all");
   const [query, setQuery] = useState("");

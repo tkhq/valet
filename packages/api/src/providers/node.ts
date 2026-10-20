@@ -30,6 +30,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
@@ -41,6 +42,7 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
@@ -71,13 +73,16 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
-import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
+import { appendClaimedWaiterDigest } from "../events/claim-recovery.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
   buildSandboxProvider,
+  parseSandboxBackend,
   resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
@@ -85,6 +90,10 @@ import {
   resolveIdleMinutes,
   resolveOrgSandboxCeiling,
   resolveSandboxCapacityWaitMs,
+  resolveJobLogMaxBytes,
+  resolveScratchCaps,
+  resolveWakeupLimits,
+  scratchPoolWarning,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -337,6 +346,16 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // so a long-lived dev stack would wedge every new create at the
   // ceiling — and those backends have no bounded pod budget to protect.
   const gateHostRef: { current: EngineHost | null } = { current: null };
+  // Called unconditionally regardless of `VALET_SANDBOX_BACKEND`. The
+  // contradictory-config boot check must fire on every backend, not only
+  // kubernetes.
+  const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
+  // Boot checks: a bad log cap, or one above the scratch cap, stops the api
+  // here instead of failing every session build.
+  const jobLogMaxBytes = resolveJobLogMaxBytes(process.env);
+  const poolWarning = scratchPoolWarning(process.env);
+  if (poolWarning !== undefined) console.warn(`WARNING: ${poolWarning}`);
   const rawSandboxProvider = buildSandboxProvider(process.env);
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
@@ -479,6 +498,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
+    wakeupLimits,
+    jobLogMaxBytes,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.
@@ -545,6 +567,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
+    scratchCaps,
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
@@ -583,6 +606,27 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     engineStore,
     idleMs: resolveIdleMinutes(process.env) * 60_000,
+  });
+
+  // Owns every wakeup and lease: probes due wakeups, delivers their signals,
+  // expires hold leases, and keeps leased pods out of autoscaler eviction
+  // (spec 2026-10-08, B5, C5). `start()`/`stop()` are called from `main.ts`.
+  const wakeWatcher = new WakeWatcher({
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+    deriveEvent: productionEventWaiterDeriver({
+      db,
+      plugins,
+      githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    }),
+    // Kubernetes keeps detached logs on disk in the pod, so exit signals
+    // can name the file. Docker keeps them in api memory (no path).
+    ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes"
+      ? { jobLogDir: "/tmp/valet-jobs" }
+      : {}),
   });
 
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
@@ -765,12 +809,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from
   // main.ts alongside the dispatcher.
-  const deliverToOrchestrator = buildOrchestratorTarget({
+  const deliverToAssistant = buildAssistantTarget({
     db,
     engineHost,
     fetchThreadContext: channelThreadContextFetcher(channelHost),
+    slackAccess: { engineCredentials, onePassword },
   });
-  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToAssistant });
 
   // Coarse per-workflow cap for the public webhook-trigger route — bounds
   // what an unauthenticated caller holding a leaked/guessed URL can force
@@ -778,18 +823,27 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
-  // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
+  // into workflow/assistant/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
   const eventDispatcher = new EventDispatcher({
     db,
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator,
+    deliverToAssistant,
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
     // The catalog a subscription's `{{payload.<field>}}` variable resolves
     // through. It is the same merged catalog the write validator uses.
     plugins,
+    // A claim redirect to a once-mode waiter ends that waiter after the
+    // delivery lands, with one terminal signal.
+    endMatchedWaiter: (args) => wakeWatcher.endDeliveredWaiter(args),
+    // The follow router's predicate and the Slack twin need the bot id.
+    slackBotUserId: (orgId) => waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }).slackBotUserId(orgId),
+    // A claimed waiter gets its digest back when its claim delivery is
+    // skipped after ingest (`events/claim-recovery.ts`).
+    recoverClaimedDigest: (args) => appendClaimedWaiterDigest(
+      waiterMatchDeps({ db, engineStore, engineCredentials, plugins, onePassword, channelHost }, { nudge: (ids) => wakeWatcher.nudge(ids) }), args),
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub
@@ -862,6 +916,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,
@@ -875,5 +930,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
+    scratchCaps,
   };
 }

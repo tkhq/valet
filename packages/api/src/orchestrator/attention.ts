@@ -34,7 +34,7 @@ import { and, eq, isNull, like, sql } from "drizzle-orm";
 import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
-import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, threadVisibility } from "../services/thread-access.js";
+import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
 import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
@@ -226,12 +226,15 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
   // editor thread, or a private Slack channel's) reaches only them: no team
   // channel post, and no other member's inbox or DM (`thread-access.ts`).
   const key = await teamThreadKey(deps.db, event);
-  const restricted = key !== undefined && !(await isSharedTeamThread(deps.db, event.owner.id, key));
+  // The Slack channels the event's thread holds content from gate it too.
+  const channels = key !== undefined && event.sessionId && event.threadId
+    ? await threadSlackChannels(deps.db, event.sessionId, event.threadId) : [];
+  const restricted = key !== undefined && !(await isSharedTeamThread(deps.db, event.owner.id, key, channels));
   let audience = resolveAudience(event.owner, event.kind, membership);
   if (restricted) {
     const orgId = await orgOf(deps.db, event.owner);
     const shown = await Promise.all(audience.map((userId) => deps.access && orgId
-      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId })(key)
+      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
       : Promise.resolve(privateThreadOwner(key) === userId)));
     audience = audience.filter((_, i) => shown[i]);
   }
@@ -287,10 +290,11 @@ async function teamThreadKey(db: AppDb, event: AttentionEvent): Promise<string |
 }
 
 /** Whether every member may see a team thread, from stored channel privacy. */
-async function isSharedTeamThread(db: AppDb, teamId: string, key: string | null): Promise<boolean> {
+async function isSharedTeamThread(db: AppDb, teamId: string, key: string | null, channels: readonly string[]): Promise<boolean> {
   const orgId = await orgOf(db, { type: "team", id: teamId });
   if (!orgId) return false;
-  const result = await db.execute(sql`SELECT ${sharedWithWholeTeamSql(orgId, sql`${key}::text`)} AS shared`) as { rows: Array<{ shared: boolean }> };
+  const result = await db.execute(sql`SELECT ${sharedWithWholeTeamSql(orgId, sql`${key}::text`,
+    channels.length > 0 ? sql`ARRAY[${sql.join(channels.map((channel) => sql`${channel}`), sql`, `)}]::text[]` : sql`'{}'::text[]`)} AS shared`) as { rows: Array<{ shared: boolean }> };
   return result.rows[0]?.shared === true;
 }
 

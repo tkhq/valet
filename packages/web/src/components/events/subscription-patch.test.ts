@@ -21,7 +21,7 @@ function sub(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
     ownerId: "u1",
     eventKeys: ["github.pr.opened"],
     filters: [],
-    target: { kind: "orchestrator" },
+    target: { kind: "assistant" },
     enabled: true,
     createdBy: "u1",
     createdAt: 1,
@@ -164,7 +164,7 @@ describe("buildSubscriptionPatch", () => {
 
   describe("prompt templates", () => {
     const withPrompts = sub({
-      target: { kind: "orchestrator", systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
+      target: { kind: "assistant", systemPrompt: "Triage it.", userPromptTemplate: "{{event.summary}}" },
     });
 
     it("sends nothing when the templates are untouched", () => {
@@ -212,16 +212,45 @@ describe("buildSubscriptionPatch", () => {
 });
 
 
-describe("presence overrides", () => {
-  it.each(["workflow", "orchestrator"] as const)("preserves and clears %s presence without rewriting the match", (kind) => {
-    const presence = { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" };
-    const target = kind === "workflow" ? { kind, workflowId: "wf_1", presence } : { kind, presence };
+describe("appearance overrides", () => {
+  it.each(["workflow", "assistant"] as const)("preserves and clears %s appearance without rewriting the match", (kind) => {
+    const appearance = { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" };
+    const target = kind === "workflow" ? { kind, workflowId: "wf_1", appearance } : { kind, appearance };
     const stored = sub({ target });
-    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence })).toBeNull();
-    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence: {} })).toEqual({ presence: null });
-    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), presence: { displayName: "New bot" } }))
-      .toEqual({ presence: { displayName: "New bot" } });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance })).toBeNull();
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance: {} })).toEqual({ appearance: null });
+    expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), appearance: { displayName: "New bot" } }))
+      .toEqual({ appearance: { displayName: "New bot" } });
     expect(buildSubscriptionPatch(stored, { ...unchangedForm(stored), name: "Renamed" }))
       .toEqual({ name: "Renamed" });
+  });
+});
+
+describe("buildSubscriptionPatch thread policy", () => {
+  const base = { name: "PR alerts", eventKeys: ["github.pr.opened"], filters: [], anyChannel: false };
+
+  it("sends nothing when the policy equals the effective stored one", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "own" } })).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", follow: true } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t" } },
+    )).toBeNull();
+  });
+
+  it("sends a changed policy", () => {
+    expect(buildSubscriptionPatch(sub(), { ...base, thread: { mode: "subject" } })).toEqual({ thread: { mode: "subject" } });
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "assistant", thread: { mode: "existing", sessionId: "s", threadId: "t" } } }),
+      { ...base, thread: { mode: "existing", sessionId: "s", threadId: "t2" } },
+    )).toEqual({ thread: { mode: "existing", sessionId: "s", threadId: "t2" } });
+  });
+
+  it("never sends a policy for a workflow target", () => {
+    expect(buildSubscriptionPatch(
+      sub({ target: { kind: "workflow", workflowId: "wf" } }), { ...base, thread: { mode: "new" } },
+    )).toBeNull();
   });
 });

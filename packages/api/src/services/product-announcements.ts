@@ -6,11 +6,14 @@ import type { ProductAnnouncement } from "../wire/types.js";
 
 type AnnouncementDeps = Pick<Providers, "db" | "engineCredentials" | "onePassword">;
 
+/** The id stays as first released: acknowledgements and the activation seed
+ * (`0000_app.sql`, `lib/drizzle.ts`) key on it, so a new id would show the
+ * notice again to every reader who closed it. */
 export const WORKFLOW_THREADS_ANNOUNCEMENT: ProductAnnouncement = {
   id: "workflow-run-threads-in-automations-v1",
-  title: "Workflow run threads moved to Automations",
-  body: "Open Automations to find workflow runs and their conversations. Your existing run history is still available.",
-  action: { label: "Open Automations", href: "/workflows" },
+  title: "Workflows have their own nav entry",
+  body: "Open Workflows to find workflow runs and their conversations. Your existing run history is still available.",
+  action: { label: "Open Workflows", href: "/workflows" },
 };
 
 async function hasExistingWorkflowThread(deps: AnnouncementDeps, userId: string, orgId: string, activatedAt: number): Promise<boolean> {

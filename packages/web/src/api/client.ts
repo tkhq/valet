@@ -13,7 +13,9 @@ import type {
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,
-  ChannelDetailResponse,
+  ListPresencePlacesResponse,
+  ListThreadFeedersResponse,
+  PresencePlaceDetailResponse,
   ThreadChannelActivity,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
@@ -24,6 +26,7 @@ import type {
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
   DeleteWorkflowWebhookResponse,
+  GetWorkflowWebhookResponse,
   GetWorkflowPermissionsResponse,
   WorkflowWebhookResponse,
   CreateSourceResponse,
@@ -145,6 +148,7 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   ListWorkflowTriggersResponse,
   ListWorkflowVersionsResponse,
@@ -175,6 +179,11 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  BackgroundWorkConflict,
+  BackgroundWorkItem,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   GetSessionRatingsResponse,
   PutRatingRequest,
   PutRatingResponse,
@@ -202,6 +211,8 @@ import type {
   EventLogResponse,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
+  ListSubscriptionDeliveriesResponse,
+  LineActivityResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
@@ -326,6 +337,49 @@ export function memoryCopyConflict(error: unknown): { version: string | null; ch
   const version = payload.destinationVersion;
   if (changed && version === null) return { version, changed };
   return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
+
+const WORK_KINDS: ReadonlySet<string> = new Set(["process", "watch", "timer", "hold"]);
+
+function isWorkKind(kind: string): kind is BackgroundWorkItem["kind"] {
+  return WORK_KINDS.has(kind);
+}
+
+/** One work item of a 409 body, or null when it is malformed. A missing `status` reads as running. */
+function toWorkItem(value: unknown): BackgroundWorkItem | null {
+  if (typeof value !== "object" || value === null) return null;
+  if (!("id" in value) || typeof value.id !== "string") return null;
+  if (!("kind" in value) || typeof value.kind !== "string" || !isWorkKind(value.kind)) return null;
+  if (!("reason" in value) || typeof value.reason !== "string") return null;
+  if (!("createdAt" in value) || typeof value.createdAt !== "number") return null;
+  return {
+    id: value.id,
+    kind: value.kind,
+    status: "status" in value && value.status === "pending" ? "pending" : "running",
+    reason: value.reason,
+    ...("threadId" in value && typeof value.threadId === "string" ? { threadId: value.threadId } : {}),
+    ...("deadlineAt" in value && typeof value.deadlineAt === "number" ? { deadlineAt: value.deadlineAt } : {}),
+    ...("fireAt" in value && typeof value.fireAt === "number" ? { fireAt: value.fireAt } : {}),
+    createdAt: value.createdAt,
+  };
+}
+
+/**
+ * The structured 409 an action returns while background work would stop
+ * (pause, replace, a profile change, a move, a thread archive). Null for
+ * any other error. A caller shows the work and resends with `force`.
+ */
+export function backgroundWorkConflict(error: unknown): BackgroundWorkConflict | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  if (!("code" in payload) || payload.code !== "background_work") return null;
+  if (!("error" in payload) || typeof payload.error !== "string") return null;
+  if (!("work" in payload) || !Array.isArray(payload.work)) return null;
+  const work: unknown[] = payload.work;
+  const hiddenCount = "hiddenCount" in payload && typeof payload.hiddenCount === "number" ? payload.hiddenCount : 0;
+  const forceAllowed = "forceAllowed" in payload && payload.forceAllowed === true;
+  return { error: payload.error, code: "background_work", work: work.flatMap((v) => { const item = toWorkItem(v); return item ? [item] : []; }), hiddenCount, forceAllowed };
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
@@ -580,8 +634,15 @@ export const api = {
     request<WorkspaceIntegrationLimitResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
   clearIntegrationLimit: (owner: OwnerFilter) =>
     request<void>("DELETE", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/integration-limit`),
-  getWorkspaceChannel: (owner: OwnerFilter, key: string) =>
-    request<ChannelDetailResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/channel?key=${encodeURIComponent(key)}`),
+  /** `scope` is the workspace key: `user`, or a team id. */
+  listPresencePlaces: (scope: string) =>
+    request<ListPresencePlacesResponse>("GET", `/presence/places?scope=${encodeURIComponent(scope)}`),
+  getPresencePlace: (scope: string, subject: string) =>
+    request<PresencePlaceDetailResponse>("GET", `/presence/places/${encodeURIComponent(subject)}?scope=${encodeURIComponent(scope)}`),
+  /** The listeners and routines that feed a thread (spec Part G). 404s when
+   * the viewer cannot read the thread. */
+  getThreadFeeders: (sessionId: string, threadId: string) =>
+    request<ListThreadFeedersResponse>("GET", `/presence/feeders?sessionId=${encodeURIComponent(sessionId)}&threadId=${encodeURIComponent(threadId)}`),
   getThreadChannelActivity: (threadId: string) =>
     request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
@@ -715,10 +776,27 @@ export const api = {
     ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
-  pauseSession: (id: string) =>
-    request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
-  replaceSandbox: (id: string) =>
-    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
+  /** `force` stops background work that would block the pause. */
+  pauseSession: (id: string, opts?: { force?: boolean }) =>
+    request<PauseSessionResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/pause`,
+      opts?.force ? { force: true } : undefined,
+    ),
+  /** `force` stops background work that would block the replace. */
+  replaceSandbox: (id: string, opts?: { force?: boolean }) =>
+    request<ReplaceSandboxResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/sandbox/replace`,
+      opts?.force ? { force: true } : undefined,
+    ),
+  listSessionWakeups: (id: string) =>
+    request<ListSessionWakeupsResponse>("GET", `/sessions/${encodeURIComponent(id)}/wakeups`),
+  cancelSessionWakeup: (id: string, wakeupId: string) =>
+    request<CancelSessionWakeupResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/wakeups/${encodeURIComponent(wakeupId)}/cancel`,
+    ),
   // workspace runtime: these entry points take a workspace key, never a raw
   // session id, and only ensure the runtime exists
   ensureWorkspaceConversation: (workspace: string, body?: EnsureWorkspaceConversationRequest) =>
@@ -1048,17 +1126,19 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; cursor?: string }) => {
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; place?: string; cursor?: string }) => {
     const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
     if (params.problems) qs.set("problems", "1");
     if (params.diagnostics) qs.set("diagnostics", "1");
     if (params.q) qs.set("q", params.q);
+    if (params.place) qs.set("place", params.place);
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
   },
-  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number } = {}) => {
+  listEventReceipts: (params: { q?: string; cursor?: string; limit?: number; subscriptionId?: string } = {}) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
+    if (params.subscriptionId) qs.set("subscriptionId", params.subscriptionId);
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     return request<ListEventReceiptsResponse>("GET", `/events/receipts${qs.size ? `?${qs}` : ""}`);
@@ -1068,6 +1148,21 @@ export const api = {
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: (owner?: OwnerFilter) =>
     request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
+  listSubscriptionDeliveries: (id: string, limit?: number) =>
+    request<ListSubscriptionDeliveriesResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/deliveries${limit !== undefined ? `?limit=${limit}` : ""}`,
+    ),
+  /** One line's Activity, newest first, with the health strip's counts. `before` is the previous page's `nextCursor`. */
+  getLineActivity: (id: string, params: { before?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.before !== undefined) qs.set("before", params.before);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    return request<LineActivityResponse>(
+      "GET",
+      `/event-subscriptions/${encodeURIComponent(id)}/activity${qs.size ? `?${qs}` : ""}`,
+    );
+  },
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
@@ -1081,7 +1176,7 @@ export const api = {
   // workflow webhook URL management. Schedules and event triggers are the
   // flat trigger surface below, not this per-workflow one.
   getWorkflowWebhook: (id: string) =>
-    request<WorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
+    request<GetWorkflowWebhookResponse>("GET", `/workflows/${encodeURIComponent(id)}/webhook`),
   mintWorkflowWebhook: (id: string) =>
     request<WorkflowWebhookResponse>("POST", `/workflows/${encodeURIComponent(id)}/webhook`),
   deleteWorkflowWebhook: (id: string) =>
@@ -1099,6 +1194,14 @@ export const api = {
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
   listWorkflowActionRequired: () => request<ListWorkflowActionRequiredResponse>("GET", "/workflows/action-required"),
+  /** Every workflow run in one workspace, newest first. Paged by `nextCursor`. */
+  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (page?.limit) qs.set("limit", String(page.limit));
+    if (page?.cursor) qs.set("cursor", page.cursor);
+    const joined = [qs.toString(), ownerParams(owner)].filter(Boolean).join("&");
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${joined ? `?${joined}` : ""}`);
+  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>

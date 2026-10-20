@@ -5,6 +5,36 @@
  * discovery path.
  */
 
+import { resolveChildRetentionMs } from "../providers/sandbox-backend.js";
+
+const HOUR_MS = 3_600_000;
+
+/** The child timer bound when child sandbox retention is off: 24 hours. */
+export const DEFAULT_CHILD_TIMER_HOURS = 24;
+
+/**
+ * How long a child's pending `wake_at` keeps the child unsettled: the
+ * child sandbox retention window, or 24 hours when retention is off. The
+ * ChildWatcher and the prompt both use this, so the promise the prompt
+ * makes is the bound the ChildWatcher holds (fix wave 4, UX N10).
+ */
+export function childTimerBoundMs(retentionMs: number): number {
+  return retentionMs > 0 ? retentionMs : DEFAULT_CHILD_TIMER_HOURS * HOUR_MS;
+}
+
+/** The child timer bound in hours, from `VALET_CHILD_SANDBOX_RETENTION_HOURS`, the value the ChildWatcher reads. */
+export function resolveChildTimerHours(env: Record<string, string | undefined>): number {
+  return childTimerBoundMs(resolveChildRetentionMs(env)) / HOUR_MS;
+}
+
+/** The child timer bound, resolved once when the api loads this module. */
+export const CHILD_TIMER_HOURS = resolveChildTimerHours(process.env);
+
+function hoursText(hours: number): string {
+  const n = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+  return hours === 1 ? "1 hour" : `${n} hours`;
+}
+
 /** Catalog indirection: integration actions are not on the visible tool list. */
 export const TOOL_USE_RULES =
   "Your visible tool list is not your full capability set. Integration " +
@@ -127,12 +157,60 @@ This sandbox has no secrets command. Do not run one to find out. Never print a c
 export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 
 /**
+ * Background work (spec 2026-10-08: sandbox scratch, wakeups, and leases;
+ * spec 2026-10-15: event waiters). Tells the model to use the
+ * background-work tools instead of blocking a turn on a long command or
+ * polling a running process. A model told only how to check progress loops
+ * on process_read, so the rules say to end the turn after a start (fix wave
+ * 3, UX prompts 1 and 9). The child timer promise holds only inside the
+ * ChildWatcher's bound (UX M6), which is `childTimerHours` (fix wave 4, UX
+ * N10). The final sentence (Part I of the event-wakeups spec, quoted
+ * verbatim) tells the model to arm an event waiter instead of polling an
+ * external service with `watch` or `curl`.
+ */
+export function backgroundWorkRules(childTimerHours: number): string {
+  return `## Background work
+
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. After the start, end your turn with a one-line status. You receive a \`process.exited\` signal when it ends, and that signal starts your next turn; do not poll it. Call \`process_read\` with \`tail: true\` only when someone asks for progress. To follow a log or an external system, use \`watch\`, and print only the lines you will act on: each \`watch.event\` signal starts a turn. \`watch\` runs its own command and cannot attach to a process that \`bash\` already started. If you need a command's output lines as they arrive, start the command with \`watch\`, not with \`bash\`. For a process \`bash\` already started, read its output with \`process_read\`; do not guess a log path to tail. To pause for more than 5 minutes, call \`wake_at\` and end your turn; do not \`sleep\`. To keep the sandbox running while nothing runs in it, for example for a person in the terminal, use \`hold_sandbox\`. To stop work you started, call \`wakeup_cancel\` with its id; \`wakeup_list\` shows the ids. Your own cancel sends no signal, so do not wait for one. In a child session, a pending \`wake_at\` that fires within ${hoursText(childTimerHours)} keeps the child unsettled until that turn ends, so the parent waits for it. A later timer does not hold the parent. When a signal reports a cause other than \`exit\`, tell the person before you run the work again. To wait for something in GitHub, Slack, or Linear, such as CI, a review, a reply, or a new ticket, call \`wait_for_event\` with its URL and end your turn. Do not poll with \`watch\` or \`sleep\`. Arm it before the action that triggers it, for example before \`git push\`.`;
+}
+
+/**
+ * The thread link sentence (Part I of the event-wakeups spec, quoted
+ * verbatim). It is per-thread, not per-session, so it cannot live in
+ * {@link backgroundWorkRules} or {@link codingSystemPrompt}, both of which
+ * build once per session: `host.ts` wires it in through the engine's
+ * `threadSystemContext` hook instead, which runs once per thread. Returns
+ * undefined when the deployment has no public URL (`publicUrlFromEnv`),
+ * so the sentence never names an address nobody outside the sandbox can
+ * reach.
+ */
+export function threadLinkContext(threadId: string, publicUrl: string | undefined): string | undefined {
+  if (!publicUrl) return undefined;
+  return `This thread's link is ${publicUrl}/threads/${threadId}. Post it when you announce work in a channel, so people can follow the thread.`;
+}
+
+/** The background-work rules at the default child timer bound, for callers and tests. */
+export const BACKGROUND_WORK_RULES = backgroundWorkRules(DEFAULT_CHILD_TIMER_HOURS);
+
+/**
+ * The `/scratch` sentence. Only a session whose sandbox has `/scratch`
+ * gets it: a session without one was told a directory exists that does
+ * not (fix wave 3, UX prompt 8).
+ */
+export const SCRATCH_RULE =
+  "`/scratch` is wiped when the sandbox stops; keep anything you need in /workspace or push it.";
+
+/**
  * System prompt for sandbox coding sessions. `secretsCli` says whether this
  * build runs sandbox prep, which installs valet-secrets. An unbound build
  * on a non-isolated provider does not, and telling it about a command it
  * lacks produced a command-not-found with no scripted response.
+ * `scratchEnabled` says whether the session's sandbox has `/scratch`;
+ * absent means no, so the prompt never names a directory that may not
+ * exist. `childTimerHours` is the resolved child timer bound
+ * (`CHILD_TIMER_HOURS`); absent means 24.
  */
-export function codingSystemPrompt(opts: { secretsCli: boolean }): string {
+export function codingSystemPrompt(opts: { secretsCli: boolean; scratchEnabled?: boolean; childTimerHours?: number }): string {
   return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
 ${TOOL_USE_RULES}
@@ -148,6 +226,8 @@ ${MODEL_SWITCH_CORE}
 ${CHILD_MODEL_RULES}
 
 ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
+
+${backgroundWorkRules(opts.childTimerHours ?? DEFAULT_CHILD_TIMER_HOURS)}${opts.scratchEnabled ? ` ${SCRATCH_RULE}` : ""}
 
 ${CODING_PERSISTENCE_RULES}`;
 }

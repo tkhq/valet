@@ -7,7 +7,7 @@
  * BEFORE `workflowsRouter`, whose `GET /:id` would otherwise swallow
  * `/triggers` as a workflow id.
  */
-import { validatePresence } from "@valet/shared";
+import { type Appearance, validateAppearance } from "@valet/shared";
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -45,6 +45,7 @@ import type {
   WorkflowScheduleResponse,
   WorkflowTriggerItem,
 } from "../wire/types.js";
+import { acceptAppearanceWrite, isAssistantKind } from "../events/target-names.js";
 
 export const workflowTriggersRouter = new Hono<AppEnv>();
 
@@ -69,6 +70,9 @@ const CRON_HINT = ' Use 5 fields, for example "0 9 * * 1-5" (09:00 on weekdays).
 function withCronHint(error: string): string {
   return error.includes("cron") ? error + CRON_HINT : error;
 }
+
+/** A routine id that is missing, or that the caller may not reach. */
+const ROUTINE_NOT_FOUND = "This routine was not found. Refresh Presence and try again.";
 
 workflowTriggersRouter.get("/triggers", async (c) => {
   const { db } = c.var.providers;
@@ -102,9 +106,13 @@ workflowTriggersRouter.get("/triggers", async (c) => {
         timezone: s.timezone,
         targetKind: s.targetKind,
         prompt: s.prompt,
+        ...(s.thread !== undefined ? { thread: s.thread } : {}),
         input: s.input,
         nextFireAt: s.nextFireAt,
         lastFiredAt: s.lastFiredAt,
+        ...(s.disabledReason !== undefined ? { disabledReason: s.disabledReason } : {}),
+        ownerType: s.ownerType,
+        ownerId: s.ownerId,
       },
     })),
     ...events.map((t): WorkflowTriggerItem => ({
@@ -122,7 +130,9 @@ workflowTriggersRouter.get("/triggers", async (c) => {
 
 workflowTriggersRouter.get("/trigger-catalog", async (c) => {
   const { db, engineCredentials, plugins } = c.var.providers;
-  const catalog = listEventTypes(plugins);
+  // The trigger editor reads this catalog. Triggers are subscriptions, which
+  // do not accept derived keys (event wakeups spec, Part G).
+  const catalog = listEventTypes(plugins).map(item => ({ ...item, entries: item.entries.filter(e => !e.derived) }));
   const linear = catalog.some(item => item.service === "linear")
     ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetWorkflowTriggerCatalogResponse = {
@@ -156,23 +166,25 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     return c.json({ error: "name is required" }, 400);
   }
   if (body.target && typeof body.target === "object" && "assistantId" in body.target) return c.json({ error: "Choose a workspace instead of an assistant." }, 400);
-  if (!body.target || (body.target.kind !== "workflow" && body.target.kind !== "orchestrator")) {
+  // `orchestrator` is the old value for `assistant`, accepted for one release
+  // (spec 2026-10-16: presence hub, Part H).
+  if (!body.target || (body.target.kind !== "workflow" && !isAssistantKind(body.target.kind))) {
     return c.json(
       {
         error:
-          'target.kind must be "workflow" (start a run) or "orchestrator" (send a prompt)',
+          'target.kind must be "workflow" (start a run) or "assistant" (send a prompt). Set target.kind to one of them.',
       },
       400,
     );
   }
-  // An orchestrator-prompt schedule created in a team workspace fires the
+  // An assistant-prompt schedule created in a team workspace fires the
   // TEAM's assistant, so it is team-owned. `resolveCreateOwner` settles the
   // owner before anything is written: a cookie caller's team id needs live
   // membership (a non-member's id 404s like an unknown one), a personal key
   // cannot name a team, and a team key always schedules as its own team. A
   // workflow-target schedule ignores teamId (its owner follows the workflow).
   let teamId: string | undefined;
-  if (body.target.kind === "orchestrator") {
+  if (body.target.kind !== "workflow") {
     const created = await resolveCreateOwner({
       principal: c.var.principal,
       authVia: c.var.authVia,
@@ -189,9 +201,10 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     cron: body.cron,
     timezone: body.timezone,
     workflowId: body.target.kind === "workflow" ? body.target.workflowId : undefined,
-    prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
+    prompt: body.target.kind !== "workflow" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
+    thread: body.thread,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };
@@ -210,11 +223,11 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const owner = ownerFrom(c);
-  const result = await updateWorkflowSchedule(db, owner, c.req.param("id"), body);
+  const result = await updateWorkflowSchedule(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that you have access to it.`
+        ? ROUTINE_NOT_FOUND
         : withCronHint(result.error);
     return c.json({ error: msg }, result.status);
   }
@@ -226,14 +239,14 @@ workflowTriggersRouter.delete("/schedules/:id", async (c) => {
   const { db } = c.var.providers;
   const owner = ownerFrom(c);
   const result = await deleteWorkflowSchedule(db, owner, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
+  if (result === "not_found") return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   return c.json({ ok: true });
 });
 
 workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
   const result = await c.var.providers.workflowScheduler.fireNow(ownerFrom(c), c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
+    return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   if (result !== "ok") return c.json({ error: result.error }, 400);
   return c.json({ ok: true });
 });
@@ -251,12 +264,17 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  if (body.presence !== undefined) {
-    const error = validatePresence(body.presence);
+  // `presence` is the old name, accepted for one release (spec 2026-10-16:
+  // presence hub, Part H).
+  const appearanceWrite = acceptAppearanceWrite(body);
+  if (!appearanceWrite.ok) return c.json({ error: appearanceWrite.error }, 400);
+  if (appearanceWrite.appearance !== undefined) {
+    const error = validateAppearance(appearanceWrite.appearance);
     if (error) return c.json({ error }, 400);
   }
   const result = await createWorkflowTrigger(armDeps(c), owner, {
-    presence: body.presence,
+    // `validateAppearance` accepted the value above.
+    appearance: appearanceWrite.appearance as Appearance | undefined,
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,
@@ -283,9 +301,7 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
   const result = await updateWorkflowTrigger(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
-      result.status === 404
-        ? `${result.error} Confirm the id and that you have access to it.`
-        : result.error;
+      result.status === 404 ? ROUTINE_NOT_FOUND : result.error;
     return c.json({ error: msg }, result.status);
   }
   const resp: WorkflowEventTriggerResponse = { trigger: result.trigger };
@@ -297,6 +313,6 @@ workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
   const owner = ownerFrom(c);
   const result = await deleteWorkflowTrigger(db, owner, c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
+    return c.json({ error: ROUTINE_NOT_FOUND }, 404);
   return c.json({ ok: true });
 });

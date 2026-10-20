@@ -55,7 +55,7 @@ import {
   purgeWorkflowRows,
   revokeWorkflowGrants,
 } from "../../workflows/service.js";
-import { nextFireAt } from "../../workflows/schedule-service.js";
+import { BAD_CRON_REASON, nextFireAt } from "../../workflows/schedule-service.js";
 import {
   teamArmRefusals,
   teamServiceReadiness,
@@ -737,6 +737,10 @@ async function armTriggers(
           timezone: wanted.timezone,
           updatedAt: now,
           ...(reschedule ? { nextFireAt: wanted.nextFireAt } : {}),
+          // A new schedule from the repo answers the bad-schedule reason, as
+          // an edit of the schedule does (`patchAnswersReason`). The routine
+          // stays off until someone turns it on.
+          ...(reschedule && current.disabledReason === BAD_CRON_REASON ? { disabledReason: null } : {}),
         })
         .where(eq(workflowSchedules.id, current.id));
     }

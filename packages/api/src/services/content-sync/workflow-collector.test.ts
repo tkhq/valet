@@ -10,6 +10,7 @@ import linearEventPlugin from "@valet/plugin-linear/plugin";
  */
 import * as workflowService from "../../workflows/service.js";
 import { shareCredential } from "../credential-shares.js";
+import { BAD_CRON_REASON } from "../../workflows/schedule-service.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -1023,6 +1024,48 @@ describe("workflow collector", () => {
 
       expect(after.name).toBe("Renamed");
       expect(after.nextFireAt).toBe(before.nextFireAt);
+    });
+
+    // Review A8: a routine the scheduler turned off for a bad schedule loses
+    // that reason when the repo brings a new schedule, and keeps it on a
+    // name-only edit.
+    it("clears the bad-schedule reason when the repo changes the schedule", async () => {
+      const file = (cron: string, name: string) =>
+        [
+          "valet: workflow/v1",
+          "name: Nightly",
+          "schedule:",
+          `  cron: "${cron}"`,
+          `  name: ${name}`,
+          "definition:",
+          "  version: dag/v1",
+          "  nodes:",
+          "    - id: trigger",
+          "      type: trigger",
+          "    - id: stop",
+          "      type: stop",
+          "  edges:",
+          "    - from: trigger",
+          "      to: stop",
+          "",
+        ].join("\n");
+      const repo: FakeRepo = { sha: "c1", files: { ".valet/workflows/n.yaml": file("0 3 * * *", "First") } };
+      const f = serve(repo);
+      const id = await teamSource();
+      await serviceFor(f).syncOnce(id);
+      await db.update(workflowSchedules).set({ enabled: false, disabledReason: BAD_CRON_REASON });
+
+      repo.sha = "c2";
+      repo.files[".valet/workflows/n.yaml"] = file("0 3 * * *", "Renamed");
+      await serviceFor(f).syncOnce(id);
+      expect((await db.select().from(workflowSchedules))[0]?.disabledReason).toBe(BAD_CRON_REASON);
+
+      repo.sha = "c3";
+      repo.files[".valet/workflows/n.yaml"] = file("0 4 * * *", "Renamed");
+      await serviceFor(f).syncOnce(id);
+      const [after] = await db.select().from(workflowSchedules);
+      expect(after?.disabledReason).toBeNull();
+      expect(after?.enabled).toBe(false);
     });
 
     /** A scheduled team file with one tool node on `service`. `body` wraps

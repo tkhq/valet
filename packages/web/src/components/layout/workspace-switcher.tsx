@@ -26,14 +26,36 @@ import { cn } from "~/lib/cn";
  * A badge here would be a second, weaker answer to a question the bell
  * already answers completely.
  *
- * Selecting a workspace keeps list pages in place. Workspace-owned channel,
- * workflow, and run details return to Automation so an old resource is not
- * requested under the new owner. Chat opens the selected workspace's thread list.
+ * Selecting a workspace keeps list pages in place, and renames the
+ * workspace in the URL when the URL names one. A Presence detail page
+ * (a place, a line of presence, an event) returns to its Presence list, and a
+ * workflow or a run returns to its Workflows list, so an old resource is not
+ * requested under the new owner. Chat opens the selected workspace's thread
+ * list.
  *
  * A workspace with no assistant is therefore selectable now. It could not be
  * before, because the only thing selecting it did was open an assistant that
  * did not exist. A team with no assistant still owns skills and workflows.
  */
+/**
+ * The Presence or Workflows list to open after a workspace switch, or
+ * `undefined` to stay. A detail page returns to its list. The Workflows
+ * list reloads too, which drops its `run` and `gate` params.
+ */
+export function presenceListAfterSwitch(
+  pathname: string,
+): "/presence" | "/presence/activity" | "/workflows" | "/workflows/runs" | undefined {
+  if (
+    pathname.startsWith("/presence/places/")
+    || pathname.startsWith("/presence/rules/")
+    || pathname.startsWith("/presence/routines/")
+  ) return "/presence";
+  if (pathname.startsWith("/presence/events/")) return "/presence/activity";
+  if (pathname === "/workflows" || (pathname.startsWith("/workflows/") && !pathname.startsWith("/workflows/runs"))) return "/workflows";
+  if (pathname.startsWith("/workflows/runs/")) return "/workflows/runs";
+  return undefined;
+}
+
 export interface WorkspaceOption {
   /** `user` for your own, else the team id. Stable across renders. */
   key: string;
@@ -72,6 +94,8 @@ export function WorkspaceSwitcher({
 }) {
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // A URL that names the workspace outranks the stored key, so a switch must rename it.
+  const urlNamesWorkspace = useRouterState({ select: (state) => "workspace" in state.location.search });
 
   // One workspace is not a choice. A solo user sees the logo alone, exactly
   // as before teams existed.
@@ -105,9 +129,10 @@ export function WorkspaceSwitcher({
             key={o.key}
             onSelect={() => {
               if (o.key === activeKey) return;
-              if (pathname === "/channel" || pathname === "/workflows" || pathname.startsWith("/workflows/")) {
+              const list = presenceListAfterSwitch(pathname);
+              if (list) {
                 // Drop old detail parameters and make the new workspace authoritative.
-                void navigate({ to: "/workflows", search: { workspace: o.key } });
+                void navigate({ to: list, search: { workspace: o.key } });
                 return;
               }
               if (pathname === "/integrations") {
@@ -117,12 +142,23 @@ export function WorkspaceSwitcher({
                 void navigate({ to: "/integrations", search: { workspace: o.key } });
                 return;
               }
+              if (navigateOnSelect) {
+                onSelect(o.key);
+                void navigate({
+                  to: "/chat",
+                  search: { workspace: o.key, thread: undefined, child: undefined },
+                });
+                return;
+              }
+              if (urlNamesWorkspace) {
+                // A list page reached with `?workspace=` (a switch from a
+                // detail page, a link from Settings, a redirect) stays in
+                // place under the new name. Without it the scope reads the
+                // old key back from the URL.
+                void navigate({ to: ".", search: (prev) => ({ ...prev, workspace: o.key }) });
+                return;
+              }
               onSelect(o.key);
-              if (!navigateOnSelect) return;
-              void navigate({
-                to: "/chat",
-                search: { workspace: o.key, thread: undefined, child: undefined },
-              });
             }}
           >
             <span className={cn("flex w-full items-center gap-2", o.key === activeKey && "font-medium")}>

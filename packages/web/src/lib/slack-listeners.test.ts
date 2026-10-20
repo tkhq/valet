@@ -5,7 +5,7 @@ import { listenerFor, slackChannelListeners } from "./slack-listeners";
 function rule(overrides: Partial<EventSubscriptionWire>): EventSubscriptionWire {
   return {
     id: "r", name: "Replies", ownerType: "team", ownerId: "t1", eventKeys: ["slack.app_mention"],
-    filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "orchestrator", orchestrator: "team", teamId: "t1" },
+    filters: [{ field: "channel", op: "eq", value: "C1" }], target: { kind: "assistant", assistant: "team", teamId: "t1" },
     enabled: true, createdBy: "u", createdAt: 1, updatedAt: 1, ...overrides,
   };
 }

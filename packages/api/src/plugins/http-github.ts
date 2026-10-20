@@ -80,6 +80,7 @@ import { refreshCredentialReadiness } from "../services/credential-readiness.js"
 import { deleteSharesFrom } from "../services/credential-shares.js";
 import { setPullRequestState } from "../services/thread-pull-requests.js";
 import { ingestEvent } from "../events/ingest.js";
+import { waiterMatchDeps } from "../events/waiters.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { GetGithubAppResponse, GetGithubOrgStatusResponse } from "../wire/types.js";
 import type { PluginHttpBinding, PluginHttpBindingContext } from "./http-bindings.js";
@@ -533,7 +534,7 @@ function deliveryEffects(
       && installationServesOrg({ db, apiUrl: resolveGithubApiUrl(process.env) }, config, orgId, installationId),
     emit: async (event) => {
       await ingestEvent(
-        { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge },
+        { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge, waiters: waiterMatchDeps(providers, { nudge: (ids) => providers.wakeWatcher.nudge(ids) }) },
         { orgId, service: "github", event },
       );
     },

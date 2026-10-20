@@ -12,10 +12,12 @@ import { readAppPageHint, type AppPageHint } from "@valet/shared";
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { threadRef } from "../services/thread-access.js";
 import { threadPage } from "../services/thread-page.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
+import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -49,6 +51,7 @@ import type {
   MessageReplyReference,
   MessageSkillInvocation,
   PatchThreadRequest,
+  PatchThreadResponse,
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
@@ -63,6 +66,8 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { canReadWorkflowRun } from "../workflows/service.js";
+import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
+import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -109,7 +114,7 @@ export async function loadOwnedSession(
   }
   const thread = decisionAccess?.threadId ? await engineStore.getThread(id, decisionAccess.threadId) : undefined;
   if (decisionAccess?.threadId && !thread) return null;
-  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread.key))) return row;
+  if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread))) return row;
   // Named approval grants decision access only, never private child content.
   if (decisionAccess && c.var.principal.type === "user") {
     const gates = await engineStore.listDecisionGates(id, decisionAccess.threadId, "pending");
@@ -352,6 +357,8 @@ async function loadEngineSession(
   c: Context<AppEnv>,
   id = c.req.param("id"),
   decisionAccess?: { threadId?: string },
+  /** The key of the thread the request targets. A startup warning of this build goes there (fix wave 2, M13). */
+  warningThreadKey?: string,
 ): Promise<
   | {
       session: typeof agentSessions.$inferSelect;
@@ -369,7 +376,8 @@ async function loadEngineSession(
   // carries them. The first call to actually build the session (create or
   // restore) wires `prepareSandbox`; later calls are no-op reads once cached
   // (`sessionFor` returns early without touching `meta`).
-  const meta = await loadSessionMeta(db, session);
+  const loaded = await loadSessionMeta(db, session);
+  const meta = warningThreadKey !== undefined ? { ...loaded, warningThreadKey } : loaded;
   const engineSession = await engineHost.sessionFor(session.id, meta);
   return { session, engineSession, meta };
 }
@@ -422,7 +430,7 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
     const stored = await engineStore.listThreads(row.id);
     const threads = [];
     for (const thread of stored) {
-      if (!await visible(thread.key)) continue;
+      if (!await visible(thread)) continue;
       // Root anchors carry authorization; keep old history when an anchor already held entries.
       if (row.id === session.id && anchors.has(thread.id)) {
         const entries = await db.select({ id: sql<string>`id` }).from(sql`engine_entries`)
@@ -701,6 +709,26 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     if (reasoningErr) return c.json({ error: reasoningErr }, 400);
   }
 
+  // An archive waits for the thread's turn, forced or not (fix wave 4, P4).
+  // A turn that starts background work after the gate below would leave
+  // work running on a hidden thread, and nobody would see the 409 for it.
+  // A turn blocked on an approval does not count: the archive withdraws
+  // its gate below (TKAI-260), and the turn then settles.
+  const threadBusy = async (): Promise<boolean> =>
+    (await c.var.providers.engineStore.listUnsettledSubmissions(sessionId))
+      .some((item) => item.threadId === thread.id && item.status !== "blocked_on_decision_gate");
+  if (body.archived === true && (await threadBusy())) {
+    return c.json({ error: "A turn is running in this thread. Wait for it to finish, then archive." }, 409);
+  }
+
+  // Archiving a thread with background work stops that work, so it needs
+  // `force: true` (fix wave 3, H1). The check runs before any write; the
+  // forced stop runs below, next to the approval withdrawal.
+  const archiveGate = body.archived === true
+    ? await gateBackgroundWork(c, session, "archive", { threadId: thread.id }, body.force === true)
+    : undefined;
+  if (archiveGate?.kind === "refused") return archiveGate.response;
+
   if (body.model !== undefined) {
     try {
       await thread.setModel(
@@ -735,6 +763,43 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
         );
       }
       for (const gate of pending) await engineSession.withdrawDecision(gate.id, "cancel");
+    }
+  }
+
+  // A forced archive stops the thread's wakeups and holds as a human cancel
+  // (fix wave 3, H1). The signal goes to the session's main thread, because
+  // the work's own thread is about to be hidden. It tells the agent that a
+  // person stopped the work, so it does not wait for a signal that never
+  // comes after an unarchive. The main thread can have a wider audience,
+  // so the signal carries the reason but no log tail and no channel origin
+  // (fix wave 4, N3). The archived thread keeps a note of the stop.
+  let cancelledWork: string[] | undefined;
+  if (archiveGate?.kind === "force") {
+    const stopped = await cancelAllWorkAsHuman(
+      c.var.providers.engineStore,
+      engineSession,
+      sessionId,
+      { threadId: thread.id, ids: archiveGate.ids },
+      {
+        actorUserId: c.var.user.id,
+        signal: "deliver",
+        deliverTo: "main",
+        note: "They archived the thread it ran in. Do not start it again unless someone asks.",
+      },
+    );
+    if (stopped.cancelled.length > 0) {
+      cancelledWork = stopped.cancelled.map((w) => w.id);
+      const items = stopped.cancelled.map((w) => `"${w.reason}" (${w.kind})`).join(", ");
+      await thread.appendEntry({
+        id: `e-${randomUUID()}`,
+        sessionId,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "system",
+        content: `A person archived this thread, which stopped its background work: ${items}. The agent got a message about it on the main thread.`,
+        createdAt: Date.now(),
+      });
     }
   }
 
@@ -792,7 +857,12 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     archivedAt,
     thread.reasoning() ?? null,
   );
-  return c.json(rows[0]?.shareMode ? { ...summary, share: rows[0].shareMode } : summary);
+  const response: PatchThreadResponse = {
+    ...summary,
+    ...(rows[0]?.shareMode ? { share: rows[0].shareMode } : {}),
+    ...(cancelledWork ? { cancelledWork } : {}),
+  };
+  return c.json(response);
 }
 
 messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
@@ -911,7 +981,7 @@ async function visibleThread(
   threadId: string | undefined,
 ) {
   const thread = resolveThread(engineSession, threadId);
-  return thread && await threadsVisibleTo(c, session)(thread.key) ? thread : undefined;
+  return thread && await threadsVisibleTo(c, session)(threadRef(thread)) ? thread : undefined;
 }
 
 // ── Messages: list ────────────────────────────────────────────────────────
@@ -1192,10 +1262,28 @@ export async function submitSessionPrompt(
 
 messagesRouter.post("/:id/messages", (c) => sendPrompt(c, c.req.param("id")));
 
+/**
+ * The key of the thread a prompt targets: the route's thread, else the
+ * body's `threadId`. Undefined for the default thread, an unknown thread,
+ * or an unreadable body; `sendPrompt` reports a bad body itself. Hono
+ * caches the parsed body, so the second read in `sendPrompt` is free.
+ */
+async function promptThreadKey(c: Context<AppEnv>, sessionId: string, threadId: string | undefined): Promise<string | undefined> {
+  let id = threadId;
+  if (id === undefined) {
+    const parsed: unknown = await c.req.json().catch(() => undefined);
+    if (typeof parsed === "object" && parsed !== null && "threadId" in parsed && typeof parsed.threadId === "string") {
+      id = parsed.threadId;
+    }
+  }
+  if (!id) return undefined;
+  return (await c.var.providers.engineStore.getThread(sessionId, id))?.key;
+}
+
 export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId?: string) {
   const row = await loadOwnedSession(c, sessionId);
   if (!row) return c.json({ error: "session not found" }, 404);
-  const loadedPrompt = await loadEngineSession(c, sessionId);
+  const loadedPrompt = await loadEngineSession(c, sessionId, undefined, await promptThreadKey(c, sessionId, threadId));
   if ("error" in loadedPrompt) return loadedPrompt.error;
 
   let body: SendPromptRequest;
@@ -1485,7 +1573,7 @@ async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; de
     if (session.decisionApproverOnly) return false;
     const thread = engineSession.threadById(gate.threadId)
       ?? await c.var.providers.engineStore.getThread(engineSession.id, gate.threadId);
-    return !!thread && visible(thread.key);
+    return !!thread && visible(threadRef(thread));
   }));
   return pending.filter((_, i) => shown[i]);
 }

@@ -24,6 +24,7 @@ import type {
   RedeliverEventResponse,
 } from "@valet/api/wire";
 import { api, type OwnerFilter } from "./client";
+import { qkPresence } from "./presence";
 
 /** Key marker for a scoped query whose owner has not resolved. Not a valid
  * `ownerType`, so it can never collide with a real owner pair. */
@@ -51,8 +52,8 @@ export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
   filterOptions: (source: string, q: string, deps: Record<string, string>) =>
     filterOptionsKey(source, q, deps),
-  log: (owner: OwnerFilter | undefined, problems: boolean, q?: string, diagnostics = false) =>
-    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? "", diagnostics] as const,
+  log: (owner: OwnerFilter | undefined, problems: boolean, q?: string, diagnostics = false, place?: string) =>
+    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? "", diagnostics, place ?? ""] as const,
   detail: (id: string) => ["events", "detail", id] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
@@ -102,13 +103,16 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
 
 /** The Log: stored events and recorded problems, newest first, one page at a
  * time. Polls the first page while nothing is searched. */
-export function useEventLog(params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string }) {
+export function useEventLog(params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string; place?: string }) {
   const { owner } = params;
   return useInfiniteQuery({
-    queryKey: qkEvents.log(owner, params.problems, params.q, params.diagnostics),
+    queryKey: qkEvents.log(owner, params.problems, params.q, params.diagnostics, params.place),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) => owner
-      ? api.getEventLog({ owner, problems: params.problems, diagnostics: params.diagnostics, ...(params.q ? { q: params.q } : {}), ...(pageParam ? { cursor: pageParam } : {}) })
+      ? api.getEventLog({
+        owner, problems: params.problems, diagnostics: params.diagnostics,
+        ...(params.q ? { q: params.q } : {}), ...(params.place ? { place: params.place } : {}), ...(pageParam ? { cursor: pageParam } : {}),
+      })
       : Promise.reject(new Error("No workspace selected.")),
     // An owner-less request names no workspace, so the Log waits for the owner.
     enabled: owner !== undefined,
@@ -128,9 +132,14 @@ export function useRedeliverEvent(id: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkEvents.detail(id) });
       qc.invalidateQueries({ queryKey: ["events", "log"] });
+      // A line's Activity lists the redelivered entries too.
+      qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
     },
   });
 }
+
+/** The prefix of every line's Activity query (`qkLineActivity.line` in `api/line-activity.ts`). */
+const LINE_ACTIVITY_PREFIX = ["events", "line-activity"] as const;
 
 /** `owner` scopes the list to one workspace plus every org-owned
  * subscription. Undefined lists every subscription in the org; an undefined
@@ -149,11 +158,16 @@ export function useEventSubscriptions(
 
 /** A workflow-target subscription is the same row the workflow page lists as
  * an event trigger (`["workflows", "triggers", …]`), so every subscription
- * mutation invalidates that key too — else the trigger list serves a stale
- * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`. */
+ * mutation invalidates that key too. Otherwise the trigger list serves a stale
+ * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`.
+ * The Presence reads (places, a place page) list the same rules, so a
+ * listener added from a place page shows there at once. A line's Activity
+ * and health strip read the line too, so an edit refreshes them. */
 function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+  void qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+  void qc.invalidateQueries({ queryKey: qkPresence.all });
 }
 
 export function useCreateEventSubscription() {

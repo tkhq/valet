@@ -23,6 +23,7 @@ import {
   type BusEvent,
   type Credential,
   type CredentialProvider,
+  type CredentialRead,
   DecisionGateExpiredError,
   type DecisionGateRequest,
   type DecisionResolution,
@@ -637,6 +638,97 @@ describe("pluginCatalogTools: list_tools", () => {
     expect(githubWarning?.reason).toMatch(/tools hidden/);
     const gmailWarning = payload.warnings?.find((w) => w.service === "gmail");
     expect(gmailWarning).toBeUndefined();
+  });
+
+  describe("native app credential fallback", () => {
+    const linearAction: PluginAction = {
+      id: "linear.list_issues",
+      name: "List Issues",
+      description: "List Linear issues.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const linearPlugin: ActionPlugin = {
+      service: "linear",
+      actions: [linearAction],
+      requiresCredential: true,
+      appCredentialService: "linear:app",
+    };
+    const ctxAnswering = (answers: Record<string, string>) =>
+      makeCtx({
+        credentials: {
+          get: async (service?: string): Promise<Credential | null> => {
+            const token = service === undefined ? undefined : answers[service];
+            return token ? { accessToken: token } : null;
+          },
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      });
+
+    it("lists linear tools without a warning when only the app service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({ "linear:app": "app-token" }));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools.map((t) => t.tool_id)).toEqual(["linear.list_issues"]);
+      expect(payload.warnings).toBeUndefined();
+    });
+
+    // The host counts an app-token fallback once per action, so only the
+    // action's own reads say they are for an action.
+    it("marks the action's reads forAction, and leaves the list_tools probe and discovery unmarked", async () => {
+      const reads: Array<[string | undefined, CredentialRead | undefined]> = [];
+      const credentials: CredentialProvider = {
+        get: async (service?: string, read?: CredentialRead): Promise<Credential | null> => {
+          reads.push([service, read]);
+          return service === "linear:app" ? { accessToken: "app-token" } : null;
+        },
+        request: async (): Promise<Credential> => {
+          throw new Error("not implemented in test stub");
+        },
+      };
+      const reading: PluginAction = {
+        ...linearAction,
+        execute: async (_args, ctx) => {
+          const cred = (await ctx.credentials.get()) ?? (await ctx.credentials.get("linear:app"));
+          return { success: true, data: { token: cred?.accessToken ?? null } };
+        },
+      };
+      const dynamic: ActionPlugin = {
+        ...linearPlugin,
+        actions: [],
+        resolveActions: async ({ credentials: discovery }) => {
+          await discovery.get();
+          return [reading];
+        },
+      };
+      const [listTool, callTool] = pluginCatalogTools({ plugins: [dynamic] });
+      await listTool.execute({}, makeCtx({ credentials }));
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads.every(([, read]) => read === undefined)).toBe(true);
+
+      reads.length = 0;
+      await callTool.execute({ tool_id: "linear.list_issues", params: {}, summary: "List issues" }, makeCtx({ credentials }));
+      const marked = reads.filter(([, read]) => read?.forAction === true);
+      expect(marked).toEqual([["linear", { forAction: true }], ["linear:app", { forAction: true }]]);
+    });
+
+    it("still hides linear tools with a warning when neither service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({}));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools).toEqual([]);
+      expect(payload.warnings?.[0]?.service).toBe("linear");
+      expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
+    });
   });
 });
 

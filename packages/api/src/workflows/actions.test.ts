@@ -96,6 +96,15 @@ describe("workflowsActionPlugin", () => {
     ]);
   });
 
+  // The assistant repeats these words to the person, so they name the Presence UI.
+  it("sends the person to Presence to review a proposal", () => {
+    const description = (id: string) => workflowsActionPlugin(noDeps).actions.find(a => a.id === id)!.description;
+    expect(description("workflows.propose_trigger")).toContain("Ask the user to review and turn it on in Presence.");
+    expect(description("workflows.propose_schedule")).toContain("Ask the user to review and turn it on under On a schedule in Presence.");
+    expect(description("workflows.propose_trigger")).not.toMatch(/in Events|in Scheduled/);
+    expect(description("workflows.propose_schedule")).not.toMatch(/in Events|in Scheduled/);
+  });
+
   // The "end your turn" advice holds only when the run's signals reach the
   // approving conversation; elsewhere the assistant must read get_run.
   it("says a run reports to this thread only when this thread started it", () => {
@@ -361,7 +370,7 @@ describe("DB-backed actions", () => {
     const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_schedule")!;
     const input = { proposal_key: "morning", name: "Morning", prompt: "Check work", cron: "0 9 * * *" };
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/workflows?tab=scheduled&review=") } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "schedule", enabled: false, reviewUrl: expect.stringContaining("/presence/routines?routine=") } } });
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
     await db.update(workflowSchedules).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Morning" } } } });
@@ -376,11 +385,11 @@ describe("DB-backed actions", () => {
     const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
     expect(await tool.execute(input, ctx({ userId: "other" }))).toMatchObject({ success: false });
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, presence: input.presence } } } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, appearance: input.presence } } } } });
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
     await db.update(eventSubscriptions).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true } } });
-    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
+    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { appearance: input.presence } } } } });
   });
 
   it("keeps one proposal key separate per workflow", async () => {
@@ -576,7 +585,7 @@ describe("DB-backed actions", () => {
     await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v", definition: {},
       params: { input: { data: { key: "slack.message" } }, ...(origin ? { origin } : {}) }, ownerType: "team", ownerId: "team", createdAt: 1, updatedAt: 1 });
     await expect(workflowActionOrigin(deps, { orgId: "org1", userId: "team:team", principal: { type: "team", id: "team" } },
-      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("channel audience can be preserved");
+      "wf:invoke:workflow:parent:tool", "invoke")).rejects.toThrow("cannot keep the channel audience in a chained run");
   });
 
   it("uses the execution owner for org-owned workflow parents", async () => {
@@ -651,7 +660,7 @@ describe("DB-backed actions", () => {
     );
     if (!scheduled.success) throw new Error(scheduled.error);
     expect(await db.select().from(workflowSchedules)).toContainEqual(
-      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "orchestrator" }),
+      expect.objectContaining({ ownerType: "team", ownerId: teamId, targetKind: "assistant" }),
     );
   });
 
@@ -1831,7 +1840,7 @@ describe("update actions", () => {
       orgId: DB_USER.orgId,
       ownerType: "user",
       ownerId: DB_USER.id,
-      targetKind: "orchestrator",
+      targetKind: "assistant",
       workflowId: null,
       prompt: "hello",
       name: "original name",

@@ -93,6 +93,9 @@ export interface VerifiedEvent {
   eventType: string;
   deliveryId: string;
   payload: unknown;
+  /** Envelope-level facts the inner payload may not carry, e.g. Slack's
+   * `team_id` for an inner event with no `team` field (spec Part A3). */
+  context?: Record<string, string>;
 }
 
 /** Why a trigger declined a request. Only `bad_signature` means the request
@@ -112,18 +115,63 @@ export interface NormalizedEvent {
   /** ISO timestamp of when the event happened at the provider. */
   occurredAt: string;
   /** External actor, when the payload carries one (enables identity-link attribution). */
-  actor?: { externalId: string; login?: string };
+  actor?: { externalId: string; login?: string; bot?: boolean };
   /** Flat scope refs for filtering/display: repo, installation_id, team_id, … */
   refs: Record<string, string>;
   /** One-line human summary (used as the SignalContent body for orchestrator delivery). */
   summary: string;
   /** Raw provider payload. */
   payload: unknown;
+  /** Canonical subjects, coarse to fine (spec Part A1). */
+  subjects?: string[];
+  /** One normalized outcome, when the event has one (spec Part A). */
+  status?: string;
+  /** The status before this update, when the provider reports it. */
+  previousStatus?: string;
+}
+
+/** What a `DerivedEventDef.derive` call receives (spec Part B). */
+export interface DeriveContext {
+  orgId: string;
+  /** Org app credential for the plugin's service. Null when not connected. */
+  appToken(): Promise<string | null>;
+  fetch: typeof fetch;
+}
+
+/**
+ * A native plugin's declared derived event (spec Part B). Ingest never
+ * calls `derive` — only the WakeWatcher does, for a match digest that a
+ * clause on a derived key produced.
+ */
+export interface DerivedEventDef {
+  key: string;
+  description: string;
+  /** Source event keys, globs allowed. */
+  sources: string[];
+  derive(ctx: DeriveContext, subject: string, source: NormalizedEvent): Promise<NormalizedEvent | null>;
+}
+
+/** A native plugin's subject helpers (spec Part A5, Part H). */
+export interface EventSubjects {
+  fromUrl(url: string): { subject: string; slackChannel?: string } | null;
+  label(subject: string): string;
+  url(subject: string): string | null;
+}
+
+/** A native plugin's provider-state status mapping (spec Part E, `from_status`). */
+export interface StatusResolver {
+  /** Maps a provider state reference to a normalized status. */
+  resolve(ctx: DeriveContext, ref: { teamKey?: string; stateId: string }): Promise<string | null>;
 }
 
 export interface EventCatalogEntry {
   key: string;
   description: string;
+  /**
+   * True for a key from a plugin's `derivedEvents` (spec Part B). An event
+   * waiter accepts it; a subscription does not.
+   */
+  derived?: boolean;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: {
     field: string;
@@ -619,6 +667,41 @@ export interface ValetPlugin {
    * else rather than build an index from unsanitized text.
    */
   storeIndexes?: PluginStoreIndex[];
+  /**
+   * Marks a native integration: Valet owns an app identity for it, and an
+   * action falls back to that identity when no person's credential applies
+   * (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+   * Today only GitHub, Slack, and Linear set it. Config-declared MCP servers
+   * never do. A native plugin MUST name `appCredentialService`.
+   */
+  native?: boolean;
+  /**
+   * The credential service that answers with this integration's app
+   * identity, as a bare token: `github:installation`, `slack`, `linear:app`.
+   * Valid only with `native: true`.
+   */
+  appCredentialService?: string;
+  /** Subject helpers for this plugin's service (spec Part A5, Part H). */
+  eventSubjects?: EventSubjects;
+  /** Derived event keys this plugin computes from other events and provider state (spec Part B). */
+  derivedEvents?: DerivedEventDef[];
+  /**
+   * Names the natural subject of one normalized event: the narrowest subject
+   * a human would call "what this event is about" (spec Part D). Returns
+   * null when the event names no subject this plugin recognizes. A plugin
+   * without this hook offers no `subject` delivery mode (spec Part A step 4).
+   */
+  naturalSubject?(event: NormalizedEvent): { subject: string; label: string } | null;
+  /**
+   * Predicts the other half of a split delivery: one real-world action a
+   * provider reports as two separate events (spec Part C step 8, Part D).
+   * Returns null when the event implies no twin. `identity` carries
+   * provider-specific context the prediction needs, such as the bot's own
+   * user id, to decide whether the twin applies.
+   */
+  conversationalTwin?(event: NormalizedEvent, identity: { botUserId?: string }): NormalizedEvent | null;
+  /** Provider-state status mapping for `from_status` resolution (spec Part E). */
+  statusResolver?: StatusResolver;
 }
 
 /** One declared `plugin_store` expression index (see `ValetPlugin.storeIndexes`). */
@@ -673,6 +756,17 @@ export function validateValetPlugin(
   }
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });
+  }
+
+  if (v.native !== undefined && typeof v.native !== "boolean") {
+    issues.push({ path: "native", message: "must be a boolean when present" });
+  }
+  if (v.appCredentialService !== undefined && (typeof v.appCredentialService !== "string" || v.appCredentialService.length === 0)) {
+    issues.push({ path: "appCredentialService", message: "must be a non-empty string when present" });
+  } else if (v.native === true && v.appCredentialService === undefined) {
+    issues.push({ path: "appCredentialService", message: "required when native is true" });
+  } else if (v.native !== true && v.appCredentialService !== undefined) {
+    issues.push({ path: "appCredentialService", message: "only valid when native is true" });
   }
 
   issues.push(...validatePluginHttpRoutes(v.httpRoutes));
@@ -973,6 +1067,49 @@ export function validateValetPlugin(
       }
     }
   });
+
+  if (v.eventSubjects !== undefined) {
+    const es = asRecord(v.eventSubjects, "eventSubjects", issues);
+    if (es) {
+      for (const key of ["fromUrl", "label", "url"] as const) {
+        if (typeof es[key] !== "function") {
+          issues.push({ path: `eventSubjects.${key}`, message: "required function" });
+        }
+      }
+    }
+  }
+
+  checkArray(v.derivedEvents, "derivedEvents", issues, (d, path) => {
+    const def = asRecord(d, path, issues);
+    if (!def) return;
+    if (typeof def.key !== "string" || def.key.length === 0) {
+      issues.push({ path: `${path}.key`, message: "required non-empty string" });
+    }
+    if (typeof def.description !== "string" || def.description.length === 0) {
+      issues.push({ path: `${path}.description`, message: "required non-empty string" });
+    }
+    if (!Array.isArray(def.sources) || def.sources.length === 0) {
+      issues.push({ path: `${path}.sources`, message: "required non-empty array" });
+    }
+    if (typeof def.derive !== "function") {
+      issues.push({ path: `${path}.derive`, message: "required function" });
+    }
+  });
+
+  if (v.naturalSubject !== undefined && typeof v.naturalSubject !== "function") {
+    issues.push({ path: "naturalSubject", message: "must be a function when present" });
+  }
+
+  if (v.conversationalTwin !== undefined && typeof v.conversationalTwin !== "function") {
+    issues.push({ path: "conversationalTwin", message: "must be a function when present" });
+  }
+
+  if (v.statusResolver !== undefined) {
+    const resolver = asRecord(v.statusResolver, "statusResolver", issues);
+    if (resolver && typeof resolver.resolve !== "function") {
+      issues.push({ path: "statusResolver.resolve", message: "required function" });
+    }
+  }
 
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plugin: value as ValetPlugin };

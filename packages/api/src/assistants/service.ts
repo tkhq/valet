@@ -175,12 +175,14 @@ export async function ensureDefaultAssistantSession(
   return ensureAssistantSession(deps, assistant, meta);
 }
 
-/** Team conversations use independent execution state with the existing reader boundary. */
+/** Team conversations use independent execution state with the existing reader boundary.
+ * `init.title` titles the governing thread when this call creates it. */
 export async function ensureAssistantExecution(
   deps: { db: AppDb; engineHost: EngineHost },
   principal: Principal,
   meta: { actorUserId: string; orgId: string },
   conversationKey: string,
+  init?: { title?: string; metadata?: Record<string, unknown> },
 ): Promise<{ assistant: AssistantRow; sessionId: string; session: Session }> {
   if (principal.type !== "team") return ensureDefaultAssistantSession(deps, principal, meta);
   const root = await ensureDefaultAssistantSession(deps, principal, meta);
@@ -201,7 +203,7 @@ export async function ensureAssistantExecution(
   }
   const data = await root.session.toData();
   const governing = await deps.engineHost.ensureFreshThread(root.session, conversationKey,
-    { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId);
+    { userId: data.userId, orgId: data.orgId, workspace: data.workspace }, meta.actorUserId, init);
   const execution = await deps.db.transaction(async tx => {
     await lockTeamForOwnership(tx, principal.id);
     if (!await ownerExists(tx, meta.orgId, principal)) throw new ArchivedAssistantError();

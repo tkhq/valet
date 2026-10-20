@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import { NESTED_KUBERNETES_IDENTITY, type SandboxResources } from "@valet/engine";
-import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
+import { isValidSandboxCpu, MIN_SCRATCH_BYTES, sandboxCpuRange } from "@valet/shared";
 import { parse as parseYaml } from "yaml";
 import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
 
@@ -127,8 +127,8 @@ export interface PrebuildOverride {
   baseSetup?: string[];
 }
 
-/** Sandbox CPU and memory requested by a repository prebuild. */
-export type PrebuildResources = Pick<SandboxResources, "cpu" | "memory">;
+/** Sandbox CPU, memory, and scratch requested by a repository prebuild. */
+export type PrebuildResources = Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 
 /**
  * Loads `.valet/prebuild.yaml` if present. Returns `null` when the file
@@ -179,7 +179,7 @@ export async function loadPrebuildOverride(
   if (obj.resources !== undefined) {
     if (typeof obj.resources !== "object" || obj.resources === null || Array.isArray(obj.resources)) {
       throw new Error(
-        '.valet/prebuild.yaml: resources must be a mapping with optional cpu and memory fields — use resources: { cpu: 2, memory: "4Gi" }',
+        '.valet/prebuild.yaml: resources must be a mapping with optional cpu, memory, and scratch fields — use resources: { cpu: 2, memory: "4Gi" }',
       );
     }
     const resourcesObj = obj.resources as Record<string, unknown>;
@@ -206,6 +206,16 @@ export async function loadPrebuildOverride(
         );
       }
       resources.memory = memory;
+    }
+    if (resourcesObj.scratch !== undefined) {
+      const scratch = typeof resourcesObj.scratch === "string" ? resourcesObj.scratch.trim() : "";
+      const bytes = scratch ? parseStorageQuantity(scratch) : null;
+      if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+        throw new Error(
+          '.valet/prebuild.yaml: resources.scratch must be a quantity string of at least 1Gi — use resources: { scratch: "200Gi" }',
+        );
+      }
+      resources.scratch = scratch;
     }
     override.resources = resources;
   }

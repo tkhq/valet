@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
+import { EventDispatcher, type AssistantDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
@@ -58,7 +58,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       id: randomUUID(), orgId: ORG, ownerType, ownerId: ownerType === "team" ? "team-1" : "member-a",
       createdBy: "member-a", name: "Team replies", eventKeys: ["slack.app_mention"],
       filters: legacy || ownerType === "user" || workflow ? [channelFilter, creatorFilter] : [channelFilter],
-      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", follow: true },
+      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "assistant", follow: true },
       audience,
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     }).returning();
@@ -68,14 +68,14 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     return ingestEvent({ db: tdb.appDb, plugins }, { orgId: ORG, service: "slack", event });
   }
   function dispatcher() {
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-landed", threadId: "thr-landed" }));
     const workflowRunHost: RunHost = {
       start: vi.fn(async () => {}), wake: vi.fn(async () => {}), scheduleWake: vi.fn(async () => {}),
       terminate: vi.fn(async () => {}), startHost: vi.fn(), stopHost: vi.fn(async () => {}),
     };
     const host = new EventDispatcher({
       db: tdb.appDb, workflowStore: new PgWorkflowStore(tdb.pgdb), workflowRunHost,
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
       resolveChannelOrigin: (_service, _key, payload) => {
         if (typeof payload !== "object" || payload === null || !("channel" in payload) || !("ts" in payload)) return null;
         const threadTs = "thread_ts" in payload && payload.thread_ts ? payload.thread_ts : payload.ts;
@@ -299,7 +299,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
 
   it("team writes need channel scope but no creator link or user filter", async () => {
     await tdb.appDb.delete(userIdentityLinks).where(eq(userIdentityLinks.userId, "member-a"));
-    const body = { name: "Team", eventKeys: ["slack.app_mention"], filters: [channelFilter, creatorFilter], target: { kind: "orchestrator", orchestrator: "team", teamId: "team-1" } };
+    const body = { name: "Team", eventKeys: ["slack.app_mention"], filters: [channelFilter, creatorFilter], target: { kind: "assistant", assistant: "team", teamId: "team-1" } };
     const scope = { creatorUserId: "member-a", anyChannel: false, matchChanged: true };
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, body, scope)).toEqual({ ok: true, filters: [channelFilter] });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, scope)).toMatchObject({ ok: false });

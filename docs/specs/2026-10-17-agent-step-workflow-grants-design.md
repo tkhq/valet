@@ -25,7 +25,7 @@ An agent step can use a workflow grant only for an exact `service.action` entry 
 
 ### Review
 
-Permission review adds the exact entries of each agent step as rows with `agentStep: true`. The prediction uses `partialParams: true`, because the agent supplies every parameter. A dynamic action outside the static catalog, such as a Granola action, shows as `unknown` and is still grantable, because the step names it exactly.
+Permission review adds the exact entries of each agent step as rows with `agentStep: true`. The prediction uses `partialParams: true`, because the agent supplies every parameter. A dynamic action outside the static catalog, such as a Granola action, shows as `unknown` and is still grantable, because the step names it exactly. Once a saved grant covers such an action, its row stays `unknown` and adds `granted: true`, so the badge, the banner, and `needsApproval` stop counting it (2026-10-20). The preview sets `granted` only when no org or team rule could gate the action at any risk level, because the run learns the risk only from discovery.
 
 The services of every agent-step entry, exact or `service.*`, join the workflow's credential services. A member's approval therefore covers their own shared accounts for those services, as #940 does for tool steps.
 

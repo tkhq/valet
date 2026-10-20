@@ -930,7 +930,7 @@ describe("POST /webhooks/github-app", () => {
       name: "PR opened",
       eventKeys: ["github.pull_request.opened"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "local-user",
       createdAt: now,
@@ -971,7 +971,7 @@ describe("POST /webhooks/github-app", () => {
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
       id: "sub_gh", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Every PR",
-      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true,
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "assistant" }, enabled: true,
       createdBy: "local-user", createdAt: now, updatedAt: now,
     });
     await seedInstallationRow();
@@ -1019,7 +1019,7 @@ describe("POST /webhooks/github-app", () => {
       name: "PR opened",
       eventKeys: ["github.pull_request.opened"],
       filters: [],
-      target: { kind: "orchestrator" },
+      target: { kind: "assistant" },
       enabled: true,
       createdBy: "local-user",
       createdAt: now,

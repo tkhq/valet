@@ -327,7 +327,7 @@ describe("teams service", () => {
       orgId,
       ownerType: "team",
       ownerId: team.id,
-      targetKind: "orchestrator",
+      targetKind: "assistant",
       prompt: "Review work",
       name: "Team schedule",
       cron: "0 9 * * *",

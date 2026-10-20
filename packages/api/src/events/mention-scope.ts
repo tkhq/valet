@@ -86,8 +86,8 @@ export function readMentionAudience(
   return {
     ok: false,
     error:
-      "Only a team assistant mention rule has an invocation audience. " +
-      "Point the rule at a team assistant, or remove the audience.",
+      "Only a mention line for a team assistant has an invocation audience. " +
+      "Point the line at a team assistant, or remove the audience.",
   };
 }
 
@@ -137,8 +137,8 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        `A mention subscription cannot also subscribe ` +
-        `to ${entry.key}. Create a separate subscription for ${entry.key}.`,
+        `A mention line cannot also listen for ${entry.key}. ` +
+        `Add a separate line for ${entry.key}.`,
     };
   }
 
@@ -166,7 +166,7 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        "A mention subscription needs at least one channel filter (equals, or is one of). " +
+        "A mention line needs at least one channel filter (equals, or is one of). " +
         'Select channels, or choose "Any channel" to listen in every channel the app can see.',
     };
   }
@@ -182,7 +182,7 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        "A mention subscription fires only for its creator's own @-mentions, so the creator must link " +
+        "A mention line fires only for its creator's own @-mentions, so the creator must link " +
         "their Slack account in Integrations → Slack first.",
     };
   }
@@ -200,7 +200,7 @@ export async function enforceMentionScope(
   return {
     ok: false,
     error:
-      "A mention subscription fires only for the creator's own @-mentions. " +
+      "A mention line fires only for the creator's own @-mentions. " +
       "Remove the user filter, or set it to the creator's linked Slack user.",
   };
 }

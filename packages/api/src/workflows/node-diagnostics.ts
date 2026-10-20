@@ -18,7 +18,7 @@ export async function readNodeDiagnostics(store: SessionStore, checkpoint: NodeC
   const ids = [...new Set([firstQueueItemId, queueItemId].filter((id): id is string => !!id))];
   const submissions = await Promise.all(ids.map(async id => {
     const phase = repairAttempted && id === queueItemId ? "repair" : "original";
-    if (!sessionId || !threadId) return { phase, queueItemId: id, textState: "unavailable", reason: "No session or thread receipt was recorded." };
+    if (!sessionId || !threadId) return { phase, queueItemId: id, textState: "unavailable", reason: "No session or thread was recorded for this run." };
     const item = await store.getQueueItem(sessionId, id);
     if (item && item.threadId !== threadId) {
       return { phase, queueItemId: id, textState: "unavailable", reason: "The submission does not belong to the checkpoint thread." };

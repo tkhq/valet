@@ -1,4 +1,4 @@
-import type { Presence } from "@valet/shared";
+import type { Appearance } from "@valet/shared";
 import type { ToolScope } from "@valet/shared";
 
 /**
@@ -72,7 +72,7 @@ export interface RunParams {
   definitionVersionId: string;
   triggerId?: string;
   /** Per-run sender identity override, captured when the run starts. */
-  presence?: Presence;
+  presence?: Appearance;
   input?: unknown; // JSON-serializable trigger/manual input
   /** Present only when an assistant conversation explicitly started this run. */
   origin?: WorkflowRunOrigin;

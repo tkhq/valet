@@ -7,9 +7,12 @@
  * surfaces the mutation's error text verbatim on failure (e.g. the 409
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { RouterContextProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { act, render as renderUnrouted, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
 import { useStreamStore } from "~/stores/stream";
@@ -30,7 +33,12 @@ let headerThreads: Array<{
   createdAt: number;
   model?: string;
   reasoning?: string | null;
+  key?: string;
 }> = [];
+/** The workspace channel list `useWorkspaceChannels` reads, for resolving a
+ * Slack subject thread's channel id to its name (spec Part G). Undefined by
+ * default: the place label then falls back to the raw channel id. */
+let channelsData: { channels: Array<{ key: string; name: string }> } | undefined;
 let sessionRating: "positive" | "negative" | null = null;
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
@@ -74,6 +82,10 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
     useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),
+    // The session has background work. The header must not show it: it
+    // lives in the composer status line.
+    useSessionWakeups: () => ({ data: { wakeups: [{ id: "wk_1", threadId: "t1", kind: "timer", status: "pending", reason: "check CI", fireAt: Date.now() + 3_600_000, createdAt: Date.now() }], leases: [] } }),
+    useCancelSessionWakeup: () => ({ isPending: false, mutateAsync: vi.fn() }),
   };
 });
 
@@ -87,11 +99,35 @@ vi.mock("~/api/settings", () => ({
   useOrgReasoning: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
-vi.mock("@tanstack/react-router", () => ({
+// The real router module, so each Link builds its href as the app does
+// (params encoded). Only navigation is stubbed. Every render sits under a
+// memory router (`RouterWrapper` below).
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => vi.fn(),
 }));
 
+vi.mock("~/api/channels", () => ({
+  useWorkspaceChannels: () => ({ data: channelsData }),
+}));
+
 import { SandboxChip, SessionHeader } from "./session-header";
+
+/** A memory router with the place page's route, for the header's links. */
+function testRouter() {
+  const root = createRootRoute();
+  const place = createRoute({ getParentRoute: () => root, path: "/presence/places/$subject" });
+  return createRouter({ routeTree: root.addChildren([place]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+}
+
+function RouterWrapper({ children }: { children: ReactNode }) {
+  return <RouterContextProvider router={testRouter()}>{children}</RouterContextProvider>;
+}
+
+/** Every render here sits under a real memory router; a rerender keeps it. */
+function render(ui: ReactNode) {
+  return renderUnrouted(<>{ui}</>, { wrapper: RouterWrapper });
+}
 
 function baseSession(): SessionDetail {
   return {
@@ -179,6 +215,15 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   isWorkspaceRuntime = false;
+  channelsData = undefined;
+});
+
+describe("SessionHeader: background work", () => {
+  it("does not show background work in the header", () => {
+    renderHeader(undefined, "t1");
+    expect(screen.queryByRole("button", { name: /background work/i })).toBeNull();
+    expect(screen.queryByText(/next wakeup/)).toBeNull();
+  });
 });
 
 describe("SandboxChip — suspended state", () => {
@@ -409,6 +454,66 @@ describe("SessionHeader — pause control", () => {
   });
 });
 
+describe("SessionHeader: background work refusal (fix wave 3, H3)", () => {
+  const HOUR = 3_600_000;
+  function conflict(forceAllowed = true, hiddenCount = 0): BackgroundWorkConflict {
+    return {
+      error: 'This session has background work running: "full proof build" (process). Cancel it first, or retry with force=true to stop it and pause the session.',
+      code: "background_work",
+      work: [{ id: "wk_1", kind: "process", status: "running", reason: "full proof build", createdAt: Date.now() - 3 * HOUR - 60_000, deadlineAt: Date.now() + 49 * HOUR }],
+      hiddenCount,
+      forceAllowed,
+    };
+  }
+
+  it("pause: the 409 opens a confirm naming the work, and confirm resends with force", async () => {
+    pauseMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "POST /pause → 409", conflict()))
+      .mockResolvedValue({ status: "hibernated", cancelledWork: ["wk_1"] });
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("full proof build")).toBeTruthy();
+    expect(within(dialog).getByText("Process · running 3h · deadline in 2d")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and pause" }));
+    expect(pauseMutateAsync).toHaveBeenLastCalledWith({ force: true });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("replace: the 409 opens a confirm, and confirm resends with force", async () => {
+    replaceMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "POST /sandbox/replace → 409", conflict()))
+      .mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /replace sandbox/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and replace" }));
+    expect(replaceMutateAsync).toHaveBeenLastCalledWith({ force: true });
+  });
+
+  it("shows the server text and offers no force when hidden work blocks it", async () => {
+    pauseMutateAsync = vi.fn().mockRejectedValue(
+      new ApiError(409, "POST /pause → 409", { ...conflict(false, 2), error: "Ask the people in those threads to cancel it, then pause the session." }),
+    );
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Ask the people in those threads/)).toBeTruthy();
+    expect(within(dialog).getByText("2 more items run on threads you cannot see.")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: /stop background work/i })).toBeNull();
+    expect(pauseMutateAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("SessionHeader — overflow menu", () => {
   it("does not offer session ratings in the header or overflow menu", async () => {
     renderHeader({ state: "ready", epoch: 1 });
@@ -595,7 +700,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
 
     await user.click(within(dialog).getByRole("button", { name: "Turn on" }));
-    expect(setProfileMutateAsync).toHaveBeenCalledWith("full");
+    expect(setProfileMutateAsync).toHaveBeenCalledWith({ profile: "full" });
     confirmSpy.mockRestore();
   });
 
@@ -611,7 +716,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     expect(setProfileMutateAsync).not.toHaveBeenCalled();
 
     await user.click(within(dialog).getByRole("button", { name: "Turn off" }));
-    expect(setProfileMutateAsync).toHaveBeenCalledWith("headless");
+    expect(setProfileMutateAsync).toHaveBeenCalledWith({ profile: "headless" });
   });
 
   it("names the cost before restarting the sandbox", async () => {
@@ -646,6 +751,29 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     await waitFor(() =>
       expect(within(screen.getByRole("dialog")).getByText(/a turn is running/i)).toBeTruthy(),
     );
+  });
+
+  it("a profile change blocked by background work asks, then resends with force", async () => {
+    setProfileMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "PATCH → 409", {
+        error: "This session has background work running.",
+        code: "background_work",
+        work: [{ id: "wk_1", kind: "watch", reason: "tail the build", createdAt: Date.now() }],
+        hiddenCount: 0,
+        forceAllowed: true,
+      }))
+      .mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderWithProfile("headless");
+
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Turn on" }));
+
+    const guard = await screen.findByRole("dialog", { name: "Stop background work and restart the sandbox?" });
+    expect(within(guard).getByText("tail the build")).toBeTruthy();
+    await user.click(within(guard).getByRole("button", { name: "Stop background work and restart" }));
+    expect(setProfileMutateAsync).toHaveBeenLastCalledWith({ profile: "full", force: true });
   });
 
   it("hides the switch from a plain team member", async () => {
@@ -922,5 +1050,93 @@ describe("SessionHeader — team assistant", () => {
     renderTeamHeader();
     expect(screen.getByText("New thread")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Rename session/ })).toBeNull();
+  });
+});
+
+/**
+ * A subject thread names its place (spec 2026-10-16-presence-hub-design.md
+ * Part G): the header reads the engine thread key and, for a `subject:`
+ * key, shows the place label under the title with a link to the place page.
+ * The hrefs are the router's own, so the key's `:`, `/`, and `#` arrive
+ * encoded, and a `#` never cuts the key into a fragment.
+ */
+describe("SessionHeader: subject thread place", () => {
+  it("names a GitHub pull request subject and links to its place", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo#12" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/repo#12" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Frepo%2312?workspace=user");
+  });
+
+  it("names a GitHub repository subject with no issue number", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/repo" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "acme/repo" })).toBeTruthy();
+  });
+
+  it("names a Linear issue subject by its id", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:linear:ENG-123" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "ENG-123" })).toBeTruthy();
+  });
+
+  it("names a Linear team subject by its key, not the raw team path", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:linear:team/ENG" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "ENG" })).toBeTruthy();
+    expect(screen.queryByText("team/ENG")).toBeNull();
+  });
+
+  it("names a Slack channel subject with the resolved channel name", () => {
+    channelsData = { channels: [{ key: "slack:C123", name: "incidents" }] };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "#incidents" });
+    expect(link.getAttribute("href")).toBe("/presence/places/slack%3AT1%2FC123?workspace=user");
+  });
+
+  it("falls back to the raw channel id when the channel name is not resolved", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C999" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "#C999" })).toBeTruthy();
+  });
+
+  it("links the place the server names: a lowercase repository and its pull request", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API#12" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/api#12" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi%2312?workspace=user");
+  });
+
+  it("links a commit subject to its repository", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:Acme/API@0a1b2c3d" }];
+    renderHeader(undefined, "th-1");
+    const link = screen.getByRole("link", { name: "acme/api" });
+    expect(link.getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi?workspace=user");
+  });
+
+  it("links a Slack thread subject to its channel", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:slack:T1/C123/1790000000.000100" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("link", { name: "#C123" }).getAttribute("href")).toBe("/presence/places/slack%3AT1%2FC123?workspace=user");
+  });
+
+  it("reads a team thread's place in the team's workspace, not the switcher's", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "subject:github:acme/api#12" }];
+    renderHeader(undefined, "th-1", { ...baseSession(), owner: { type: "team", id: "team_1" } });
+    expect(screen.getByRole("link", { name: "acme/api#12" }).getAttribute("href")).toBe("/presence/places/github%3Aacme%2Fapi%2312?workspace=team_1");
+  });
+
+  it("shows no place label for a non-subject thread", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, key: "web:abc123" }];
+    renderHeader(undefined, "th-1");
+    expect(screen.queryByText(/^#/)).toBeNull();
+    expect(screen.queryByRole("link", { name: /acme|ENG|incidents/ })).toBeNull();
+  });
+
+  it("shows no place label when the thread carries no key", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1 }];
+    renderHeader(undefined, "th-1");
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

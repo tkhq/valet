@@ -30,7 +30,7 @@ export function slackChannelListeners(
 ): Map<string, ChannelListener> {
   const listeners = new Map<string, ChannelListener>();
   for (const rule of subscriptions) {
-    if (!rule.enabled || !selectsSlackMention(rule.eventKeys) || rule.target.kind !== "orchestrator") continue;
+    if (!rule.enabled || !selectsSlackMention(rule.eventKeys) || rule.target.kind !== "assistant") continue;
     const ownTeam = rule.ownerType === "team" && rule.ownerId === teamId;
     const listener: ChannelListener = ownTeam ? { kind: "this-team" }
       : { kind: "other", owner: rule.ownerType === "team" ? `${teamName(rule.ownerId) ?? "Another team"}'s Valet` : "A personal Valet" };
@@ -66,7 +66,7 @@ export function teamListening(subscriptions: readonly EventSubscriptionWire[], t
   everywhere: boolean;
 } {
   const own = subscriptions.filter((rule) => rule.enabled && selectsSlackMention(rule.eventKeys)
-    && rule.target.kind === "orchestrator" && rule.ownerType === "team" && rule.ownerId === teamId);
+    && rule.target.kind === "assistant" && rule.ownerType === "team" && rule.ownerId === teamId);
   const channelsOf = (rule: EventSubscriptionWire): ListeningChannel[] => rule.filters
     .filter(isChannelIdFilter)
     .flatMap((filter) => {

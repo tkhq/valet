@@ -108,7 +108,7 @@ it("leaves a private Slack channel's events out of a non-member's Log", async ()
     { teamId: "team-log", userId: "local-user", role: "member" },
     { teamId: "team-log", userId: "test-member", role: "member" },
   ]);
-  await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
+  await db.insert(eventSubscriptions).values({ id: "sub-log", orgId: "local-org", ownerType: "team", ownerId: "team-log", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
   const now = Date.now();
   // The private channel's events are the newest, so a short page holds only them.
   for (const [id, channel, at] of [["log-private", "CPRIV", now + 2], ["log-private-2", "CPRIV", now + 1], ["log-public", "CPUB", now]] as const) {
@@ -156,4 +156,24 @@ it("keeps a private Slack event's run gates with the channel's members", async (
   expect((await fetch(decisions)).status).toBe(200);
   expect((await fetch(decisions, { headers: asOther })).status).toBe(404);
   expect((await fetch(`${decisions}/gate-ev/resolve`, { method: "POST", headers: { ...asOther, "Content-Type": "application/json" }, body: JSON.stringify({ actionId: "approve" }) })).status).toBe(404);
+});
+
+it("leaves a private Slack channel's events out of a non-member's listener deliveries", async () => {
+  api = await bootTestApi();
+  await connectSlack(api, { CPRIV: ["UMEMBER"] });
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "UMEMBER", userId: "local-user" });
+  const db = api.providers.db;
+  await db.insert(eventSubscriptions).values({ id: "sub-deliv", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Slack", eventKeys: ["slack.*"], filters: [], target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1 });
+  const now = Date.now();
+  for (const [id, channel, at] of [["deliv-private", "CPRIV", now + 1], ["deliv-public", "CPUB", now]] as const) {
+    await db.insert(events).values({ id, orgId: "local-org", service: "slack", eventKey: "slack.message", dedupeKey: id, refs: { channel }, summary: `message in ${channel}`, payload: { channel, text: "secret plan" }, occurredAt: at, receivedAt: at });
+    await db.insert(eventDeliveries).values({ id: `d-${id}`, eventId: id, subscriptionId: "sub-deliv", status: "delivered", attempts: 1, nextAttemptAt: at, createdAt: at });
+  }
+  const deliveries = async (user?: string) => ((await (await fetch(`${api!.baseUrl}/api/event-subscriptions/sub-deliv/deliveries`,
+    user ? { headers: { "x-valet-test-user-id": user } } : {})).json()) as { deliveries: Array<{ event: { id: string } }> }).deliveries.map((d) => d.event.id);
+  expect(await deliveries()).toEqual(["deliv-private", "deliv-public"]);
+  expect(await deliveries("test-member")).toEqual(["deliv-public"]);
+  const missing = await fetch(`${api.baseUrl}/api/event-subscriptions/no-such-rule/deliveries`);
+  expect(missing.status).toBe(404);
+  expect(await missing.json()).toEqual({ error: "This line of presence does not exist. Open Presence and pick one from the list." });
 });

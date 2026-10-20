@@ -476,7 +476,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
     if (status.state === "failed" && REGISTRY_RATE_LIMIT.test(status.logTail ?? "")) {
       ctx.skip("the base image registry rate-limited this runner (429)");
     }
-    expect(status.state, JSON.stringify(status)).toBe("pushed");
+    expect(status.state, `build ended ${status.state}: ${JSON.stringify(status)}`).toBe("pushed");
 
     const inspect = spawnSync("docker", ["image", "inspect", imageRef], { stdio: "pipe" });
     expect(inspect.status).toBe(0);

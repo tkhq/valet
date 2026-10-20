@@ -44,7 +44,7 @@ it("lists a workspace's Slack channel with its listener, thread, and messages, a
   await api.providers.db.insert(eventSubscriptions).values({
     id: "listen-eng", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Listen in eng",
     eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "in", value: ["CENG"], labels: ["eng"] }],
-    target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   await recordChannelMessage(api.providers.db, {
     orgId: "local-org", sessionId, threadId: thread.id, channelKey: "slack:CENG", conversationKey: "slack:CENG:1700.1",
@@ -95,7 +95,7 @@ it("records one message for each workspace it reached, and reads a pattern filte
   await api.providers.db.insert(eventSubscriptions).values({
     id: "listen-prefix", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Prefix",
     eventKeys: ["slack.app_mention"], filters: [{ field: "channel", op: "prefix", value: "C" }],
-    target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    target: { kind: "assistant" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   const list = await (await fetch(`${api.baseUrl}/api/workspaces/user/channels`)).json() as ListChannelsResponse;
   expect(list.channels.map((channel) => channel.key)).toEqual(["slack:CENG"]);

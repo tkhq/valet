@@ -1,4 +1,4 @@
-import { readPresence } from "@valet/shared";
+import { readAppearance } from "@valet/shared";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -275,7 +275,7 @@ describe("overheard digest: queue coalescing", () => {
       await thread.submitPrompt(overheardSignal({ body: "different avatar" }), { metadata: { presence: { displayName: "Automation", avatarUrl: "https://example.com/avatar.png" } } });
       const pending = await store.listUnsettledSubmissions(session.id);
       expect(pending).toHaveLength(4);
-      expect(pending.filter(item => readPresence(item.metadata?.presence)?.displayName === "Automation")).toHaveLength(2);
+      expect(pending.filter(item => readAppearance(item.metadata?.presence)?.displayName === "Automation")).toHaveLength(2);
       const content = (await store.getQueueItem(session.id, digest.queueItemId))?.content;
       if (!content || typeof content !== "object" || !("kind" in content)) throw new Error("Expected a digest signal");
       expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, "plain", "plain again"].sort());

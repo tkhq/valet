@@ -25,7 +25,6 @@ vi.mock("~/api/queries", () => ({
   useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
-vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: vi.fn() }));
 vi.mock("~/components/session/session-view", () => ({ SessionView: ({ sessionId, activeThreadId, scopeNotice }: { sessionId: string; activeThreadId?: string; scopeNotice?: string }) => <div data-testid="conversation" data-scope-notice={scopeNotice}>{sessionId}:{activeThreadId}</div> }));
 vi.mock("~/components/session/child-panel", () => ({ ChildPanel: () => null }));
 beforeEach(() => { data = { sessionId: "team-session" }; error = null; empty = false; teamMetadata = true; vi.clearAllMocks(); createThread.mockResolvedValue({ id: "created" }); });

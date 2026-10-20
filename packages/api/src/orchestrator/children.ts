@@ -20,11 +20,14 @@ import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { and, count, eq, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
-import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql } from "../services/thread-access.js";
+import { governingThreadKeySql, isOutsideReader, outsideReaderMayReach, sharedWithWholeTeamSql, threadSlackChannelsSql } from "../services/thread-access.js";
 import {
   namespaceInternalDispatchId,
   PendingCapError,
+  recordChildSettleOverDeadline,
   recordSandboxDestroyed,
+  recordScratchRefused,
+  recordScratchRequested,
   ValidationError as EngineValidationError,
   type ChannelOrigin,
   type ChildReader,
@@ -40,7 +43,9 @@ import {
   type SpawnChildResult,
   type SubmissionResult,
   walkTranscriptDag,
+  type AttachmentState,
 } from "@valet/engine";
+import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -53,6 +58,8 @@ import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
+import { WAKE_WATCHER_INTERVAL_MS } from "../engine/wake-watcher.js";
+import { childTimerBoundMs } from "../engine/prompt-rules.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
@@ -61,6 +68,20 @@ const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
 const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 /** Cadence of the parked-sandbox retention sweep. Coarse on purpose — retention windows are hours. */
 const DEFAULT_RETENTION_SWEEP_INTERVAL_MS = 15 * 60_000;
+/**
+ * What `parkChildSandbox` does with a settled child's sandbox in each
+ * attachment state. A `provisioning` sandbox is skipped: a forced replace
+ * or profile change is building it, and a destroy here would tear it down
+ * mid-replace (fix wave 4, concurrency N1).
+ */
+export type ChildParkAction = "skip" | "record_suspended" | "suspend" | "destroy";
+
+export function childParkAction(state: AttachmentState, retainable: boolean): ChildParkAction {
+  if (state === "provisioning") return "skip";
+  if (retainable && state === "suspended") return "record_suspended";
+  if (retainable && state === "ready") return "suspend";
+  return "destroy";
+}
 
 export interface ChildrenDeps {
   db: AppDb;
@@ -99,6 +120,31 @@ export interface ChildrenDeps {
   retentionMs?: number;
   /** Override for the retention sweep cadence. Tests only. */
   retentionSweepIntervalMs?: number;
+  /** Poll interval for `ChildWatcher`'s active-lease wait. Tests only. */
+  leasePollMs?: number;
+  /**
+   * The WakeWatcher tick (ms). The lease wait allows two ticks past a
+   * deadline, the time the watcher takes to end a row there (fix wave 3,
+   * concurrency L7). Defaults to `WAKE_WATCHER_INTERVAL_MS`.
+   */
+  wakeWatcherIntervalMs?: number;
+  /** Records a refused `task` scratch request. Tests inject a spy. */
+  recordScratchRefused?: (source: string, reason: string) => void;
+  /**
+   * How long `ChildWatcher` waits for an ended wakeup's terminal signal
+   * to be admitted, counted from when the wakeup ended. The WakeWatcher
+   * ends the row and then delivers the signal, so a read in between sees
+   * no queue item yet. Default 90s.
+   */
+  leaseSettleGraceMs?: number;
+  /**
+   * Deploy and agent caps for a `task`-requested `/scratch` volume
+   * (`resolveScratchCaps(process.env)` at real boot). `buildChildSpawner`
+   * validates `req.resources.scratch` against these before the child's
+   * `agent_sessions` row is ever inserted. The `task` tool renders a
+   * refusal as `[task_resources] <message>`, never a partial spawn.
+   */
+  scratchCaps: ScratchCaps;
 }
 
 /** Thrown when a spawn would exceed a decision-21 limit. Message is what the `task` tool surfaces verbatim as error text. */
@@ -453,6 +499,24 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       );
     }
 
+    // Same "validate before anything is created" rule as `req.repo` above.
+    // A `ScratchRequestError` here (refused, never clamped) must throw
+    // BEFORE the `agent_sessions` insert, so a bad request never leaves a
+    // partial child behind. The `task` tool renders the thrown message
+    // verbatim as `[task_resources] <message>`.
+    if (req.resources?.scratch !== undefined) {
+      let scratch: string;
+      try {
+        scratch = validateScratchRequest(req.resources.scratch, "task", deps.scratchCaps);
+      } catch (err) {
+        // Counted like the prebuild source (fix wave 3, data L5).
+        if (isScratchRequestError(err)) (deps.recordScratchRefused ?? recordScratchRefused)("task", err.reason);
+        throw err;
+      }
+      req = { ...req, resources: { ...req.resources, scratch } };
+      recordScratchRequested("task", parseResourceQuantity(scratch) ?? 0);
+    }
+
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
     const warnings: string[] = [];
     if (deps.sandboxBacked ?? deps.prebuildService.builderBackend === "kubernetes") {
@@ -699,6 +763,8 @@ export class ChildWatcher {
   private readonly retryDelayMs: number;
   private readonly maxAttempts: number;
   private retentionTimer: SweepTimer | undefined;
+  /** Children the retention sweep already logged as kept by background work. */
+  private readonly keptForWork = new Set<string>();
 
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
@@ -854,6 +920,9 @@ export class ChildWatcher {
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(watch.queueItemId);
+    // The settle body reports the child's latest awaited turn: after a
+    // background wait, the turn that handled the last signal.
+    const settleResult = await this.awaitBackgroundWork(watch, childSession.thread(), result);
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
     // new submission and arms a fresh watcher on it. A watcher that wakes
@@ -938,7 +1007,7 @@ export class ChildWatcher {
       .limit(1);
     const title = appRows[0]?.title ?? undefined;
     const continuationCheckpoint =
-      result.outcome === "failed" || result.outcome === "aborted"
+      settleResult.outcome === "failed" || settleResult.outcome === "aborted"
         ? await this.latestContinuationCheckpoint(
             watch.childSessionId,
             childSession.thread().id,
@@ -966,10 +1035,10 @@ export class ChildWatcher {
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: resultBody(result, watch.childSessionId, continuationCheckpoint),
+        body: resultBody(settleResult, watch.childSessionId, continuationCheckpoint),
         attributes: {
           child_session_id: watch.childSessionId,
-          outcome: result.outcome,
+          outcome: settleResult.outcome,
           ...(title !== undefined ? { title } : {}),
           ...(continuationCheckpoint !== undefined
             ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }
@@ -1033,6 +1102,160 @@ export class ChildWatcher {
         await tx.delete(eventDropLog).where(and(eq(eventDropLog.id, `child-reply:${replyId}`), eq(eventDropLog.orgId, watch.orgId)));
       }
     });
+  }
+
+  /**
+   * Waits until the child's background work owes no more turns (wakeups
+   * spec C4, fix wave 2 B2, H6, H9). Each pass checks facts in order:
+   *
+   * 1. An active lease: a process or watch still runs, or a hold is open.
+   *    The wait is bounded at the latest lease deadline plus two WakeWatcher
+   *    ticks plus one poll (fix wave 3, concurrency L7). The WakeWatcher
+   *    releases every lease by then, so a lease past the bound is a bug:
+   *    log it, count it, and settle anyway.
+   * 2. A pending timer: its turn is still owed. A timer that fires beyond
+   *    the retention window does not hold the settle; it is logged. A
+   *    running event waiter whose deadline falls inside the same bound
+   *    follows the same rule (spec 2026-10-15, F2): it holds no lease
+   *    (INV-E3), so it does not show in rule 1.
+   * 3. A wakeup that ended after the watched submission was admitted, or
+   *    was created after it: its terminal signal turn (dispatch id
+   *    `wakeup:<id>:terminal`) is owed. Await it once admitted. Until
+   *    admission, wait at most `leaseSettleGraceMs`, counted from when this
+   *    loop first saw the row ended, not from its `endedAt` (fix wave 3,
+   *    concurrency M1). A cancelled row is awaited too: a human cancel
+   *    sends a signal (fix wave 3, concurrency L3). An agent cancel sends
+   *    none, so it costs one grace wait.
+   *
+   * 4. A hold this loop saw active that is now released: its
+   *    `lease.expired` (deadline) or `lease.released` (human cancel) signal
+   *    turn is owed (PR review 2, item 3). A hold is a lease, not a wakeup,
+   *    so rule 3 never sees it. The same admission grace applies; an agent
+   *    release sends no signal and costs one grace wait.
+   *
+   * A turn this loop awaits can start new work, so the loop checks again.
+   * The result is the last awaited turn that was not superseded.
+   */
+  private async awaitBackgroundWork(
+    watch: ArmArgs,
+    thread: { awaitResult(queueItemId: string): Promise<SubmissionResult> },
+    first: SubmissionResult,
+  ): Promise<SubmissionResult> {
+    const store = this.deps.engineStore;
+    const child = watch.childSessionId;
+    const pollMs = this.deps.leasePollMs ?? 30_000;
+    const graceMs = this.deps.leaseSettleGraceMs ?? 90_000;
+    // The same bound the coding prompt promises (fix wave 4, UX N10).
+    const timerBoundMs = childTimerBoundMs(this.deps.retentionMs ?? 0);
+    const watcherMs = this.deps.wakeWatcherIntervalMs ?? WAKE_WATCHER_INTERVAL_MS;
+    const pause = () => new Promise((resolve) => setTimeout(resolve, pollMs).unref());
+    const firstSeenEnded = new Map<string, number>();
+    const admittedAt = (await store.getQueueItem(child, watch.queueItemId))?.createdAt ?? 0;
+    const awaited = new Set<string>([watch.queueItemId]);
+    // Holds seen active, so their release signal turn is awaited (rule 4).
+    const seenHolds = new Set<string>();
+    let settleResult = first;
+
+    for (;;) {
+      const now = Date.now();
+      // A forced replace or profile change cancels the work with deferred
+      // signals and sends them only after the new sandbox is up. While the
+      // child's sandbox is provisioning, those signals are still owed, so
+      // the grace below must not lapse (fix wave 4, concurrency N1).
+      if (this.deps.engineHost.liveSession(child)?.attachment.state === "provisioning") {
+        await pause();
+        continue;
+      }
+      const leases = await store.listActiveLeases(child);
+      for (const l of leases) if (l.ownerKind === "hold") seenHolds.add(l.id);
+      if (leases.length > 0) {
+        const bound = Math.max(...leases.map((l) => l.deadlineAt)) + 2 * watcherMs + pollMs;
+        if (now <= bound) {
+          await pause();
+          continue;
+        }
+        recordChildSettleOverDeadline();
+        console.error(
+          `ChildWatcher: ${child} still holds ${leases.length} lease(s) past their deadline (${leases.map((l) => l.id).join(", ")}); settling it anyway. The WakeWatcher should have released them.`,
+        );
+        break;
+      }
+
+      const wakeups = await store.listWakeups(child, []);
+      const timers = wakeups.filter((w) => w.kind === "timer" && w.status === "pending");
+      // An event waiter holds no lease (INV-E3), so it is not in `leases`
+      // above; it follows the timer bound instead (spec 2026-10-15, F2).
+      const eventWaiters = wakeups.filter((w) => w.kind === "event" && w.status === "running");
+      if (
+        timers.some((t) => t.fireAt === undefined || t.fireAt <= now + timerBoundMs) ||
+        eventWaiters.some((e) => e.deadlineAt === undefined || e.deadlineAt <= now + timerBoundMs)
+      ) {
+        await pause();
+        continue;
+      }
+
+      const ended = wakeups
+        .filter(
+          (w) =>
+            w.status !== "pending" &&
+            w.status !== "running" &&
+            ((w.endedAt !== undefined && w.endedAt >= admittedAt) || w.createdAt >= admittedAt),
+        )
+        .sort((a, b) => (a.endedAt ?? a.updatedAt) - (b.endedAt ?? b.updatedAt));
+      let owed = false;
+      let unadmitted = false;
+      for (const w of ended) {
+        const item = await store.getQueueItemByDispatchId(child, `wakeup:${w.id}:terminal`);
+        if (!item) {
+          const seen = firstSeenEnded.get(w.id) ?? now;
+          firstSeenEnded.set(w.id, seen);
+          if (now - seen < graceMs) unadmitted = true;
+          continue;
+        }
+        if (awaited.has(item.id)) continue;
+        awaited.add(item.id);
+        owed = true;
+        const r = await thread.awaitResult(item.id);
+        // A superseded turn is not a result; keep the last real one.
+        if (r.outcome !== "superseded") settleResult = r;
+      }
+      // Rule 4: every hold seen active is released by now (no active lease
+      // remains), so its expiry or release turn is owed.
+      for (const holdId of seenHolds) {
+        const item =
+          (await store.getQueueItemByDispatchId(child, `lease:${holdId}:expired`)) ??
+          (await store.getQueueItemByDispatchId(child, `lease:${holdId}:released`));
+        if (!item) {
+          const key = `lease:${holdId}`;
+          const seen = firstSeenEnded.get(key) ?? now;
+          firstSeenEnded.set(key, seen);
+          if (now - seen < graceMs) unadmitted = true;
+          continue;
+        }
+        if (awaited.has(item.id)) continue;
+        awaited.add(item.id);
+        owed = true;
+        const r = await thread.awaitResult(item.id);
+        if (r.outcome !== "superseded") settleResult = r;
+      }
+      if (owed) continue;
+      if (unadmitted) {
+        await pause();
+        continue;
+      }
+      if (timers.length > 0) {
+        console.warn(
+          `ChildWatcher: ${child} settles with ${timers.length} timer(s) set to fire after the ${Math.round(timerBoundMs / 3_600_000)}h wait bound; the parent will not hear their turns.`,
+        );
+      }
+      if (eventWaiters.length > 0) {
+        console.warn(
+          `ChildWatcher: ${child} settles with ${eventWaiters.length} event waiter(s) set to end after the ${Math.round(timerBoundMs / 3_600_000)}h wait bound; the parent will not hear their turns.`,
+        );
+      }
+      break;
+    }
+    return settleResult;
   }
 
   private async latestContinuationCheckpoint(
@@ -1100,7 +1323,9 @@ export class ChildWatcher {
 
       const retentionMs = this.deps.retentionMs ?? 0;
       const retainable = retentionMs > 0 && this.deps.engineHost.sandboxHibernationCapable();
-      if (retainable && live.attachment.state === "suspended") {
+      const action = childParkAction(live.attachment.state, retainable);
+      if (action === "skip") return;
+      if (action === "record_suspended") {
         // Already suspended (the idle sweep got there first): the sandbox
         // is parked as-is. Record the handle — suspend keeps it live on
         // the attachment — and leave the reclaim to `sweepRetention`.
@@ -1114,7 +1339,7 @@ export class ChildWatcher {
         await writeHibernated(this.deps.db, childSessionId);
         return;
       }
-      if (retainable && live.attachment.state === "ready") {
+      if (action === "suspend") {
         // Record the provider handle BEFORE suspending: the retention
         // sweep needs it once an api restart evicts the cached session,
         // and nothing else durably tracks a provisioned sandbox's id.
@@ -1187,6 +1412,7 @@ export class ChildWatcher {
         if (unsettled.length > 0) continue;
         const activityAt = await this.deps.engineStore.latestActivityAt(row.childSessionId);
         if (activityAt != null && activityAt > cutoff) continue;
+        if (await this.holdsBackgroundWork(row.childSessionId)) continue;
         const live = this.deps.engineHost.liveSession(row.childSessionId);
         if (live) {
           // Race rule (mirrors `maybeSuspendIdleSession`): re-check
@@ -1194,6 +1420,7 @@ export class ChildWatcher {
           // the check above wins and the reclaim waits for the next pass.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
+          if (await this.holdsBackgroundWork(row.childSessionId)) continue;
           await live.attachment.destroy("child_retention");
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (row.parkedSandboxId) {
@@ -1215,6 +1442,33 @@ export class ChildWatcher {
         console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
       }
     }
+  }
+
+  /**
+   * True while the child holds a lease, a pending timer, or a running event
+   * waiter. A person can prompt a settled child to start long work, and
+   * that work must keep its sandbox past the retention window (fix wave 3,
+   * concurrency M2; spec INV-8). Logged once per child.
+   */
+  private async holdsBackgroundWork(childSessionId: string): Promise<boolean> {
+    const store = this.deps.engineStore;
+    const leases = await store.countActiveLeases(childSessionId);
+    // An event waiter holds no lease (INV-E3) and is always "running", never
+    // "pending" (spec 2026-10-15, F2), so it needs its own count.
+    const open = leases > 0 ? [] : await store.listWakeups(childSessionId, ["pending", "running"]);
+    const timers = open.filter((w) => w.kind === "timer" && w.status === "pending").length;
+    const events = open.filter((w) => w.kind === "event" && w.status === "running").length;
+    if (leases === 0 && timers === 0 && events === 0) {
+      this.keptForWork.delete(childSessionId);
+      return false;
+    }
+    if (!this.keptForWork.has(childSessionId)) {
+      this.keptForWork.add(childSessionId);
+      console.warn(
+        `ChildWatcher: retention keeps ${childSessionId} past its window: it holds ${leases} lease(s), ${timers} pending timer(s), and ${events} event waiter(s).`,
+      );
+    }
+    return true;
   }
 
   /** Start the retention interval (no-op when retention is off). */
@@ -1293,16 +1547,26 @@ async function childReachableFrom(
 ): Promise<boolean> {
   if (readerThreadId === undefined || readerThreadId === watch.parentThreadId) return true;
   const governing = governingThreadKeySql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`, "parent link");
-  const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing)} AS shared,
-    (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key
-    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{ owner_type: string; key: string | null; shared: boolean; reader_key: string | null }> };
+  const channels = threadSlackChannelsSql(sql`${parentSessionId}`, sql`${watch.parentThreadId}`);
+  const result = await db.execute(sql`SELECT s.owner_type, ${governing} AS key, ${sharedWithWholeTeamSql(watch.orgId, governing, channels)} AS shared,
+    ${channels} AS channels,
+    (SELECT t.key FROM engine_threads t WHERE t.session_id = s.id AND t.id = ${readerThreadId}) AS reader_key,
+    ${threadSlackChannelsSql(sql`${parentSessionId}`, sql`${readerThreadId}`)} AS reader_channels
+    FROM engine_sessions s WHERE s.id = ${parentSessionId}`) as { rows: Array<{
+      owner_type: string; key: string | null; shared: boolean; channels: string[] | null; reader_key: string | null; reader_channels: string[] | null;
+    }> };
   const parent = result.rows[0];
   // A parent that is gone leaves nobody to say who may read its child.
   if (!parent) return false;
   if (parent.owner_type !== "team") return true;
-  // A Slack, Telegram, or GitHub conversation reaches only what it may read
-  // with `thread_read` (`services/thread-access.ts#threadReadAccess`).
-  if (isOutsideThreadKey(parent.reader_key)) return outsideReaderMayReach(parent.reader_key!, parent.key, parent.shared === true);
+  // A Slack, Telegram, or GitHub conversation, or a thread holding Slack
+  // content, reaches only what it may read with `thread_read`
+  // (`services/thread-access.ts#threadReadAccess`).
+  const readerChannels = parent.reader_channels ?? [];
+  if (isOutsideReader(parent.reader_key, readerChannels)) {
+    return outsideReaderMayReach({ key: parent.reader_key, channels: readerChannels },
+      { key: parent.key, channels: parent.channels ?? [] }, parent.shared === true);
+  }
   return parent.shared === true;
 }
 

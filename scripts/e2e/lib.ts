@@ -105,12 +105,23 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
+  "src/integration/native-credential-acceptance.test.ts",
   "src/integration/usage-summary.test.ts",
   "src/integration/plugin-entitlements.test.ts",
   "src/integration/org-mcp-servers.test.ts",
   "src/integration/profile-pictures.test.ts",
   "src/integration/workflow-avatar.test.ts",
   "src/integration/openai-images.test.ts",
+  // Wakeups acceptance runs keyless: a faux model and a scripted virtual sandbox.
+  "src/integration/wakeups-acceptance.test.ts",
+  // Event wakeups, claims, and delivery threads acceptance run keyless: a faux model,
+  // the GitHub fixture, and a fetch stub for Slack and Linear.
+  "src/integration/event-wakeups.test.ts",
+  "src/integration/event-claims.test.ts",
+  "src/integration/delivery-threads.test.ts",
+  // The Presence hub acceptance's data half runs keyless: event ingest, the
+  // dispatcher, and the scheduler over PGlite, with a fetch stub for Slack.
+  "src/integration/presence-hub.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",

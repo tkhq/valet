@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
-import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type DecisionResolution, type ToolDef } from "../src/index.js";
+import { builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, pluginCatalogTools, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type DecisionResolution, type PolicyResolver, type ToolDef } from "../src/index.js";
 import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
@@ -165,7 +165,7 @@ describe("unattended workflow tasks", () => {
     expect(outcome, label).toBe("completed");
     expect(seen.unattended, label).toBe(true);
     expect(seen.resolution, label).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
-    expect(seen.askText, label).toContain("this is an unattended workflow run");
+    expect(seen.askText, label).toContain("this is an unattended run");
     expect(seen.askText, label).toContain("Say in the result what was missing");
     // The refused approval is on record for the workflow; nothing is pending.
     expect(gates.map((gate) => ({ status: gate.status, resolvedBy: gate.resolution?.resolvedBy, type: gate.type })), label)
@@ -189,6 +189,44 @@ describe("unattended workflow tasks", () => {
       await session.thread().awaitResult(receipt.queueItemId);
       expect(refusal).toMatchObject({ actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION });
       expect(await store.listDecisionGates(session.id)).toEqual([]);
+    } finally { faux.unregister(); }
+  });
+
+  // Asking the lender would park the shared delivery thread again. The lender
+  // grants lasting consent from an attended approval, or the team connects its
+  // own account.
+  it("refuses a teammate's shared account on an automated delivery and names the team account", async () => {
+    const faux = registerFauxProvider({ provider: "unattended-delivery-borrow" });
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      let executed = false;
+      let callText: string | undefined;
+      const [, callTool] = pluginCatalogTools({ plugins: [{ service: "linear", actions: [{ id: "linear.create_issue", name: "Create Issue", description: "Create an issue.",
+        riskLevel: "low", parameters: Type.Object({}), execute: async () => { executed = true; return { success: true }; } }] }] });
+      if (!callTool) throw new Error("call_tool missing");
+      const policyResolver: PolicyResolver = { resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "bea", shareGeneration: "generation", allowTeamConsent: true },
+        extraGateActions: [{ id: "always_allow_account", label: "Always allow for this team", approves: true }] }) };
+      const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "team", id: "team" }, workspace: "/", sandbox: {}, purpose: "orchestrator",
+        model: faux.getModel(), builtinTools: [], policyResolver, automatedThread: ({ key }) => key === "events",
+        tools: [{ ...callTool, execute: async (args, ctx) => {
+          const result = await callTool.execute(args, ctx);
+          callText = result.text;
+          return result;
+        } }] });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall(callTool.name, { tool_id: "linear.create_issue", params: {}, summary: "File the bug" })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("done"),
+      ]);
+      const thread = await session.createThread("events");
+      const receipt = await thread.submitPrompt({ kind: "signal", signalType: "linear.issue", body: "A bug came in" }, {});
+      expect((await thread.awaitResult(receipt.queueItemId)).outcome).toBe("completed");
+      expect(executed).toBe(false);
+      expect(callText).toContain("Valet sent no approval request");
+      expect(callText).toContain("connect a team account on the team's Integrations page");
+      // No gate waits for the lender.
+      expect((await store.listDecisionGates(session.id)).map((gate) => gate.status)).toEqual(["resolved"]);
     } finally { faux.unregister(); }
   });
 

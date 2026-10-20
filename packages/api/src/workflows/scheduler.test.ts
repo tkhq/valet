@@ -14,11 +14,17 @@
  * scheduler must still bill correctly for the ones that already exist.
  */
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type RunParams } from "@valet/workflow";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { WorkflowScheduler } from "./scheduler.js";
+import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveryDestination } from "../events/assistant-delivery.js";
+import { eq } from "drizzle-orm";
+import type { DestinationRecorder } from "../observability/delivery-metrics.js";
+
+/** The thread a recording delivery fake reports it landed in. */
+const LANDED = { sessionId: "sess-landed", threadId: "thr-landed" };
 
 class RecordingRunHost implements RunHost {
   started: Array<{ runId: string; params: RunParams; owner?: { ownerType: string; ownerId: string } }> = [];
@@ -93,7 +99,7 @@ describe("WorkflowScheduler fire ownership", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: runHost,
-      deliverToOrchestrator: async () => {
+      deliverToAssistant: async () => {
         throw new Error("not exercised by a workflow-target fire");
       },
       now: () => 1_000,
@@ -110,15 +116,138 @@ describe("WorkflowScheduler fire ownership", () => {
  it("delivers a team prompt schedule without its creator's identity", async () => {
     await db.insert(workflowSchedules).values({
       id: "team-prompt", orgId: "org-1", ownerType: "team", ownerId: "team-1",
-      targetKind: "orchestrator", prompt: "A teammate changed this prompt", name: "Team prompt",
+      targetKind: "assistant", prompt: "A teammate changed this prompt", name: "Team prompt",
       cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
       createdBy: "original-creator", createdAt: 100, updatedAt: 200,
     });
     const actors: string[] = [];
+    const unattended: Array<boolean | undefined> = [];
     const scheduler = new WorkflowScheduler({
       db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
-      deliverToOrchestrator: async (args) => { actors.push(args.actorUserId); }, now: () => 1000,
+      deliverToAssistant: async (args) => { actors.push(args.actorUserId); unattended.push(args.unattended); return LANDED; },
+      now: () => 1000,
     });
     await scheduler.tick();
     expect(actors).toEqual(["team:team-1"]);
+    // No person waits on a scheduled prompt, so it must not park on a question.
+    expect(unattended).toEqual([true]);
   });
+
+describe("WorkflowScheduler thread policy", () => {
+  async function seedPromptSchedule(id: string, threadPolicy: unknown) {
+    await db.insert(workflowSchedules).values({
+      id, orgId: "org-1", ownerType: "user", ownerId: "user-1",
+      targetKind: "assistant", prompt: "Summarize the night", name: "Morning summary",
+      cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
+      createdBy: "user-1", createdAt: 100, updatedAt: 100, threadPolicy,
+    });
+  }
+
+  it("lands two firings of an own-policy schedule in schedule:<id> titled by its name", async () => {
+    await seedPromptSchedule("sched-own", null);
+    const destinations: DeliveryDestination[] = [];
+    let clock = 1_000;
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); return LANDED; }, now: () => clock,
+    });
+    await scheduler.tick();
+    // Move the clock past the next slot so the schedule fires again.
+    clock = 10_000_000;
+    await scheduler.tick();
+    expect(destinations).toEqual([
+      { kind: "key", key: "schedule:sched-own", title: "Morning summary", reason: "policy_own" },
+      { kind: "key", key: "schedule:sched-own", title: "Morning summary", reason: "policy_own" },
+    ]);
+  });
+
+  it("keys a new-policy firing on its slot", async () => {
+    await seedPromptSchedule("sched-new", { mode: "new" });
+    const destinations: DeliveryDestination[] = [];
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); return LANDED; }, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(destinations).toEqual([
+      { kind: "key", key: "schedule:sched-new:500", title: "Morning summary · 1970-01-01", reason: "policy_new" },
+    ]);
+  });
+
+  it("disables a schedule whose pinned thread cannot receive deliveries", async () => {
+    await seedPromptSchedule("sched-pin", { mode: "existing", sessionId: "sess-1", threadId: "thr-1" });
+    const destinations: DeliveryDestination[] = [];
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); throw new PinUnavailableError(); }, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(destinations).toEqual([{ kind: "target", sessionId: "sess-1", threadId: "thr-1", reason: "policy_existing" }]);
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-pin"));
+    expect(row?.enabled).toBe(false);
+    expect(row?.disabledReason).toBe(PIN_UNAVAILABLE_MESSAGE);
+    expect(PIN_UNAVAILABLE_MESSAGE).toBe("Pick another thread in Presence.");
+  });
+
+  it("counts a dead pin once, when it disables the schedule", async () => {
+    await seedPromptSchedule("sched-pin-count", { mode: "existing", sessionId: "sess-1", threadId: "thr-1" });
+    const recordDestination = vi.fn<DestinationRecorder>();
+    // Two replicas fire the same slot: each delivery waits until both started.
+    let started = 0;
+    let bothStarted = () => {};
+    const barrier = new Promise<void>((resolve) => { bothStarted = resolve; });
+    const deliverToAssistant = async () => {
+      if (++started === 2) bothStarted();
+      await barrier;
+      throw new PinUnavailableError();
+    };
+    const replica = () => new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(), deliverToAssistant, now: () => 1_000, recordDestination,
+    });
+    const scheduler = replica();
+    await Promise.all([scheduler.tick(), replica().tick()]);
+    expect(started).toBe(2);
+    expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
+
+    // A manual fire of the disabled schedule answers with the fix text and
+    // does not page again.
+    expect(await scheduler.fireNow({ userId: "user-1", orgId: "org-1" }, "sched-pin-count")).toEqual({ error: PIN_UNAVAILABLE_MESSAGE });
+    expect(recordDestination.mock.calls).toEqual([["pin_unavailable"]]);
+  });
+});
+
+describe("WorkflowScheduler disable reasons", () => {
+  const scheduler = () => new WorkflowScheduler({
+    db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+    deliverToAssistant: async () => LANDED, now: () => 1_000,
+  });
+  const base = {
+    orgId: "org-1", ownerType: "user", ownerId: "user-1", name: "Broken routine",
+    timezone: "UTC", enabled: true, nextFireAt: 500, createdBy: "user-1", createdAt: 100, updatedAt: 100,
+  } as const;
+  async function reasonFor(id: string): Promise<{ enabled: boolean | undefined; disabledReason: string | null | undefined }> {
+    await scheduler().tick();
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, id));
+    return { enabled: row?.enabled, disabledReason: row?.disabledReason };
+  }
+
+  it("names the fix when a prompt routine has no prompt", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "no-prompt", targetKind: "assistant", prompt: "  ", cron: "0 * * * *" });
+    expect(await reasonFor("no-prompt")).toEqual({ enabled: false, disabledReason: "Its prompt is empty. Edit the routine and add a prompt." });
+  });
+
+  it("names the fix when a routine's workflow was deleted", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "wf-gone", targetKind: "workflow", workflowId: "wf_deleted", cron: "0 * * * *" });
+    expect(await reasonFor("wf-gone")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
+  });
+
+  it("names the fix when a workflow routine has no workflow", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "wf-null", targetKind: "workflow", workflowId: null, cron: "0 * * * *" });
+    expect(await reasonFor("wf-null")).toEqual({ enabled: false, disabledReason: "Its workflow was deleted. Delete this routine and make a new one with another workflow." });
+  });
+
+  it("names the fix when a routine's schedule does not parse", async () => {
+    await db.insert(workflowSchedules).values({ ...base, id: "bad-cron", targetKind: "assistant", prompt: "p", cron: "not a cron" });
+    expect(await reasonFor("bad-cron")).toEqual({ enabled: false, disabledReason: "Its schedule does not parse. Edit the routine and fix the schedule." });
+  });
+});

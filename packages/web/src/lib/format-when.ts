@@ -8,6 +8,12 @@ export function formatWhen(ts: number): string {
   });
 }
 
+/** A date and a time without seconds: "Oct 19, 2026, 4:00 PM". `locale` and
+ * `timeZone` default to the reader's; tests pin them. */
+export function formatDateTime(ts: number, { locale, timeZone }: { locale?: string; timeZone?: string } = {}): string {
+  return new Date(ts).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short", ...(timeZone !== undefined ? { timeZone } : {}) });
+}
+
 /** Date-only variant for created-at rows: "Aug 11, 2026". */
 export function formatDate(ts: number | Date): string {
   return new Date(ts).toLocaleDateString(undefined, {

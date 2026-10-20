@@ -205,7 +205,7 @@ describe("bash tool: job-mode poll loop", () => {
         cancelJob: vi.fn(async () => {}),
       };
       const ctx = makeCtx(sandbox);
-      const resultPromise = execute({ command: "sleep 999", timeout: 61 }, ctx);
+      const resultPromise = execute({ command: "long-running-task", timeout: 61 }, ctx);
       await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
       const result = await resultPromise;
       expect(sandbox.cancelJob).toHaveBeenCalledWith("job-3");
@@ -229,7 +229,7 @@ describe("bash tool: job-mode poll loop", () => {
       cancelJob: vi.fn(async () => {}),
     };
     const ctx = makeCtx(sandbox, controller.signal);
-    await expect(execute({ command: "sleep 999", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
+    await expect(execute({ command: "long-running-task", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
     expect(sandbox.cancelJob).toHaveBeenCalledWith("job-4");
     expect(sandbox.pollJob).toHaveBeenCalledTimes(1);
   });
@@ -266,7 +266,7 @@ describe("bash tool: job-mode poll loop", () => {
       }),
     };
     const ctx = makeCtx(sandbox, controller.signal);
-    await expect(execute({ command: "sleep 999", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
+    await expect(execute({ command: "long-running-task", timeout: 61 }, ctx)).rejects.toThrow("cancelled by user");
     expect(sandbox.cancelJob).toHaveBeenCalledWith("job-6");
   });
 
@@ -282,7 +282,7 @@ describe("bash tool: job-mode poll loop", () => {
         }),
       };
       const ctx = makeCtx(sandbox);
-      const resultPromise = execute({ command: "sleep 999", timeout: 61 }, ctx);
+      const resultPromise = execute({ command: "long-running-task", timeout: 61 }, ctx);
       await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
       const result = await resultPromise;
       expect(sandbox.cancelJob).toHaveBeenCalledWith("job-7");

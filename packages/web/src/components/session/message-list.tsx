@@ -5,7 +5,7 @@ import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
-import { SignalCard } from "./signal-card";
+import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
 
@@ -171,8 +171,12 @@ export function MessageList({
           </div>
         ) : (
           <div className="shrink-0 space-y-2 py-4">
-            {visible.map((m, i) =>
-              m.compaction ? (
+            {groupWatchEvents(visible).map((item, i, items) => {
+              if (item.kind === "watch") {
+                return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
+              }
+              const m = item.message;
+              return m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
                 <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
@@ -182,14 +186,14 @@ export function MessageList({
                 <MessageItem
                   key={m.id}
                   message={m}
-                  continuation={isContinuation(m, visible[i - 1])}
-                  suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+                  continuation={isContinuation(m, previousMessage(items[i - 1]))}
+                  suppressEmptyPlaceholder={agentBusy && i === items.length - 1}
                   viewerId={viewerId}
                   onReply={onReply}
                   ratings={ratings}
                 />
-              ),
-            )}
+              );
+            })}
           </div>
         )}
       </div>
@@ -208,6 +212,12 @@ export function MessageList({
       )}
     </div>
   );
+}
+
+/** The message of the transcript row before this one, if that row is a
+ * message. A grouped watch card is not a message, so it ends a turn. */
+function previousMessage(item: TranscriptItem | undefined): StreamMessage | undefined {
+  return item?.kind === "message" ? item.message : undefined;
 }
 
 /** Consecutive assistant messages from one turn share the first one's

@@ -25,6 +25,7 @@ export interface DockerInventoryRecord {
   image: string;
   imageId?: string;
   credsHostDir?: string;
+  scratchHostDir?: string;
   docker: boolean;
   browser?: { enabled: boolean; viewer?: boolean };
   browserCompanion?: DockerBrowserCompanion;
@@ -68,7 +69,7 @@ function parse(value: unknown): DockerInventoryRecord {
     value.state !== "released"
   )
     return invalid();
-  for (const key of ["containerId", "imageId", "credsHostDir", "workloadStateDir"])
+  for (const key of ["containerId", "imageId", "credsHostDir", "scratchHostDir", "workloadStateDir"])
     if (value[key] !== undefined && typeof value[key] !== "string")
       return invalid();
   let browser: DockerInventoryRecord["browser"];
@@ -122,6 +123,9 @@ function parse(value: unknown): DockerInventoryRecord {
     ...(typeof value.imageId === "string" ? { imageId: value.imageId } : {}),
     ...(typeof value.credsHostDir === "string"
       ? { credsHostDir: value.credsHostDir }
+      : {}),
+    ...(typeof value.scratchHostDir === "string"
+      ? { scratchHostDir: value.scratchHostDir }
       : {}),
     ...(browser ? { browser } : {}),
     ...(browserCompanion ? { browserCompanion } : {}),
@@ -242,6 +246,7 @@ export function validateDockerOwner(
     ["/workspace", expected.workspace],
     ...(!expected.browserCompanion ? [["/var/lib/valet", expected.runtimeStateDir]] : []),
     ...(expected.credsHostDir ? [["/etc/valet/creds", expected.credsHostDir]] : []),
+    ...(expected.scratchHostDir ? [["/scratch", expected.scratchHostDir]] : []),
   ])
     if (
       !actual.mounts.some(

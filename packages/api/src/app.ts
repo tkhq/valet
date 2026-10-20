@@ -32,6 +32,7 @@ import { VALET_VERSION, valetBuildSha } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
+import { wakeupsRouter } from "./routes/wakeups.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamDeletionRequestsRouter } from "./routes/team-deletion-requests.js";
@@ -40,6 +41,7 @@ import { teamApiKeysRouter } from "./routes/team-api-keys.js";
 import { memoryRouter } from "./routes/memory.js";
 import { securityRouter } from "./routes/security.js";
 import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
+import { presenceRouter } from "./routes/presence.js";
 import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
 import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
 import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
@@ -345,6 +347,7 @@ export function createApp(
   app.route("/api/sessions", browserRouter);
   app.route("/api/sessions", securityRouter);
   app.route("/api/sessions", ratingsRouter);
+  app.route("/api/sessions", wakeupsRouter);
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   // Before the teams router, so the legacy team runtime path is not read as a team route.
@@ -361,6 +364,7 @@ export function createApp(
   app.route("/api/workspaces", workspaceOutcomesRouter);
   app.route("/api/workspaces", workspaceActiveWorkRouter);
   app.route("/api/workspaces", workspaceChannelsRouter);
+  app.route("/api/presence", presenceRouter);
 
   app.route("/api", profilePicturesRouter);
   app.route("/api/notifications", notificationsRouter);

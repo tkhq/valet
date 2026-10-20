@@ -5,7 +5,7 @@ import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession, findDefaultAssistant, resolveDefaultAssistant, workspaceSessionIds } from "../assistants/service.js";
 import { canViewAssistantOwner } from "../assistants/access.js";
-import { assistantConversationKey, isAssistantConversationOf, threadVisibility } from "../services/thread-access.js";
+import { assistantConversationKey, isAssistantConversationOf, storedThreadRef, threadVisibility } from "../services/thread-access.js";
 import { viewerOf } from "./_thread-access.js";
 import { agentSessions, assistantExecutions, assistants, childWatches, sessionThreads } from "../schema/index.js";
 import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
@@ -216,7 +216,8 @@ workspaceRuntimeRouter.get("/:workspace/history", async c => {
       .where(and(scope, before ? sql`t.id < ${before}` : undefined)).orderBy(desc(sql`t.id`)).limit(101);
     const visible = [];
     for (const row of rows.slice(0, 100)) {
-      if (await threadVisibility(c.var.providers, { id: row.sessionId, ownerType: owner.type }, viewerOf(c))(row.key)) visible.push(row);
+      const ref = await storedThreadRef(db, row.sessionId, row.threadId, row.key);
+      if (await threadVisibility(c.var.providers, { id: row.sessionId, ownerType: owner.type }, viewerOf(c))(ref)) visible.push(row);
     }
     return c.json({ threads: visible, nextCursor: rows.length > 100 ? sealCursor(rows[99].threadId) : null });
   }
@@ -226,7 +227,8 @@ workspaceRuntimeRouter.get("/:workspace/history", async c => {
   const [source] = await db.select({ key: sql<string>`t.key` }).from(assistants)
     .innerJoin(sql`engine_threads t`, sql`t.session_id = ${assistants.sessionId}`)
     .where(and(scope, eq(assistants.sessionId, sessionId), sql`t.id = ${threadId}`)).limit(1);
-  if (!source || !await threadVisibility(c.var.providers, { id: sessionId, ownerType: owner.type }, viewerOf(c))(source.key)) {
+  if (!source || !await threadVisibility(c.var.providers, { id: sessionId, ownerType: owner.type }, viewerOf(c))(
+    await storedThreadRef(db, sessionId, threadId, source.key))) {
     return c.json({ error: "Thread not found." }, 404);
   }
   const rows = await db.select({ entry: sql<Record<string, unknown>>`row_to_json(e)`, cursor: sql<string>`e.seq::text` })

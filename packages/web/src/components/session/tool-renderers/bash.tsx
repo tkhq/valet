@@ -5,12 +5,36 @@ import { isActiveStatus, resultText, type ToolRenderer } from "./types";
 
 interface BashArgs {
   command?: unknown;
+  background?: unknown;
+  deadline_hours?: unknown;
+  reason?: unknown;
 }
 
 function getCommand(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const c = (args as BashArgs).command;
   return typeof c === "string" ? c : "";
+}
+
+/** The background fields of a `bash` call (spec 2026-10-08, B3), or null for a foreground call. */
+export function backgroundArgs(args: unknown): { deadlineHours?: number; reason?: string } | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as BashArgs;
+  if (a.background !== true) return null;
+  return {
+    ...(typeof a.deadline_hours === "number" ? { deadlineHours: a.deadline_hours } : {}),
+    ...(typeof a.reason === "string" && a.reason ? { reason: a.reason } : {}),
+  };
+}
+
+/**
+ * The background fields of a `bash` call that started a sandbox process,
+ * or null. A refused or failed start returns other text, so it renders as a
+ * plain result (fix wave 4, N6).
+ */
+export function startedBackground(args: unknown, result: unknown): { deadlineHours?: number; reason?: string } | null {
+  const bg = backgroundArgs(args);
+  return bg && resultText(result).startsWith("started sandbox process") ? bg : null;
 }
 
 /**
@@ -38,7 +62,10 @@ export const bashRenderer: ToolRenderer = {
   // The command text fills in live while the model writes it.
   streamsArgs: true,
   formatTarget: (args) => commandExcerpt(getCommand(args)) || undefined,
-  formatSummary: (_args, result, status) => {
+  formatSummary: (args, result, status) => {
+    // A background call returns at once; its exit arrives later as a signal.
+    const bg = startedBackground(args, result);
+    if (bg) return bg.deadlineHours !== undefined ? `background · ${bg.deadlineHours}h deadline` : "background";
     if (status !== "completed" && status !== "error") return undefined;
     const text = resultText(result);
     if (!text) return undefined;
@@ -50,9 +77,21 @@ export const bashRenderer: ToolRenderer = {
     const command = getCommand(args);
     const raw = error ?? resultText(result);
     const { body, exit } = parseExit(raw);
+    const bg = startedBackground(args, result);
 
     return (
       <ToolBody className="bg-neutral-950 dark:bg-black text-emerald-300/95 px-0 py-0">
+        {bg && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-emerald-500/15 px-3 py-1.5 text-[11px] text-neutral-300">
+            <span className="rounded-sm bg-emerald-500/15 px-1.5 py-0.5 font-medium uppercase tracking-wider text-emerald-300">
+              background
+            </span>
+            {bg.reason && <span className="min-w-0 break-words">{bg.reason}</span>}
+            {bg.deadlineHours !== undefined && (
+              <span className="text-neutral-400">deadline {bg.deadlineHours}h</span>
+            )}
+          </div>
+        )}
         {/* Command line, terminal-prompt style. */}
         {command && (
           <div className="px-3 py-2 border-b border-emerald-500/15 flex gap-2 items-start">

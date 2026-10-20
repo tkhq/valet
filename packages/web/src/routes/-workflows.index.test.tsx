@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * `/workflows` definitions list (plan decision 11): each row's name links
- * to `/workflows/$workflowId` (the editor), Run starts a run and navigates
+ * The `/workflows` list page (spec Part G step 1): the definitions list.
+ * Each row's name links to `/workflows/$workflowId` (the editor), Run starts a run and navigates
  * to the run detail page, and "New workflow" opens `NewWorkflowDialog`
  * (review fix 1), which POSTs the entered name + a minimal trigger→stop
  * definition then navigates to its editor page. `<Link>`/`useNavigate` need
@@ -166,10 +166,9 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
   useNavigate: () => navigate,
-  // One `useSearch` serves both readers: the hub reads `?tab=`, and the
-  // workspace scope reads `?assistant=` so an open assistant can override the
-  // stored workspace. This page is never rendered with an assistant, so
-  // `searchState` only ever carries the tab.
+  // The workspace scope reads `?assistant=` so an open assistant can
+  // override the stored workspace. This page is never rendered with an
+  // assistant, so `searchState` stays empty.
   useSearch: () => searchState,
   createFileRoute: () => (config: unknown) => config,
 }));
@@ -241,7 +240,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
-import { WorkflowsIndexPage } from "./workflows.index";
+import { WorkflowsTab } from "./workflows.index";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 
 /** `workspace` selects the workspace the page is being read in — what the
@@ -259,7 +258,7 @@ function renderPage(workspace = PERSONAL) {
     <TooltipProvider>
       <WorkspaceScopeProvider>
         <SwitchWorkspace />
-        <WorkflowsIndexPage />
+        <WorkflowsTab />
       </WorkspaceScopeProvider>
     </TooltipProvider>
     </QueryClientProvider>,
@@ -283,7 +282,7 @@ beforeEach(() => {
   resolveMutate.mockClear();
 });
 
-describe("WorkflowsIndexPage", () => {
+describe("WorkflowsTab", () => {
   it("renders each workflow definition's name as a link to its editor page", () => {
     renderPage();
     const link = screen.getByText("Deploy pipeline").closest("a");
@@ -380,13 +379,13 @@ describe("WorkflowsIndexPage", () => {
     await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("wf_1"));
   });
 
-  it("shows the Workflows tab by default with per-workflow trigger badges", () => {
+  it("badges each workflow with its routine count", () => {
     renderPage();
     expect(screen.getByText("Deploy pipeline")).toBeTruthy();
-    expect(screen.getByLabelText(/1 schedule/)).toBeTruthy();
+    expect(screen.getByLabelText("1 routine")).toBeTruthy();
   });
 
-  it("turns a workflow off from its row by disabling all of its triggers", () => {
+  it("turns a workflow off from its row by disabling all of its listeners and routines", () => {
     renderPage();
     const toggle = screen.getByRole("switch", { name: "Deploy pipeline on" });
     expect(screen.getByText("On")).toBeTruthy();
@@ -394,7 +393,7 @@ describe("WorkflowsIndexPage", () => {
     expect(setEnabledMutate).toHaveBeenCalledWith({ triggers: triggersData.triggers, enabled: false });
   });
 
-  it("offers New workflow in the page header", () => {
+  it("offers New workflow above the list", () => {
     renderPage();
     expect(screen.getByRole("button", { name: "New workflow" })).toBeTruthy();
   });
@@ -441,21 +440,17 @@ describe("WorkflowsIndexPage", () => {
     expect(screen.queryByLabelText("Delete Nightly digest")).toBeNull();
   });
 
-  it("renders the Scheduled tab", () => {
-    searchState = { tab: "scheduled" };
+  it("renders no tabs of its own, because Presence holds the tabs", () => {
     renderPage();
-    expect(screen.getByText("Nightly build")).toBeTruthy();
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(screen.queryByText("Scheduled")).toBeNull();
   });
 
-  it("tab buttons navigate via search params", () => {
-    renderPage();
-    fireEvent.click(screen.getByRole("tab", { name: /Scheduled/ }));
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ search: { tab: "scheduled" } }));
-  });
-
-  it("shows only Workflows and Scheduled tabs", () => {
-    renderPage();
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent?.trim())).toEqual(["Workflows", "Scheduled"]);
+  it("never uses the retired words", () => {
+    const { container } = renderPage();
+    // Case-sensitive "Automation": the fixture repository is `tkhq/automation`.
+    expect(container.textContent ?? "").not.toMatch(/trigger|subscription/i);
+    expect(container.textContent ?? "").not.toMatch(/Automation/);
   });
 
   it("offers the workflow composer without templates when the list is empty", async () => {
@@ -475,7 +470,7 @@ describe("WorkflowsIndexPage", () => {
 
 });
 
-describe("WorkflowsIndexPage — team ownership", () => {
+describe("WorkflowsTab: team ownership", () => {
   // The badge opens the assistant that runs the workflow, not a chat with
   // the team. A team row running on the team's unnamed default still reads
   // as the team, which is the name this list showed before.

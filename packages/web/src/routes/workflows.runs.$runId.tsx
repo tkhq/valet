@@ -27,10 +27,12 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 import { formatUsdPrecise } from "~/lib/format-usage";
 import { useNow } from "~/lib/use-now";
+import { errorText } from "~/lib/error-text";
+import { isNotFound, retryUnlessNotFound } from "~/lib/not-found";
 
 /**
- * `/workflows/runs/$runId` — the settled run's result first, then
- * pending gates and expandable steps. The diagram is optional.
+ * `/workflows/runs/$runId` (spec Part G step 1): the settled run's result
+ * first, then pending gates and expandable steps. The diagram is optional.
  * Polls every 5s via `useRunDetail` (stops once
  * `run.status === 'settled'`).
  */
@@ -42,10 +44,11 @@ export const Route = createFileRoute("/workflows/runs/$runId")({
   }),
 });
 
-function RunDetailPage() {
+export function RunDetailPage() {
   const { runId } = Route.useParams();
   const search = Route.useSearch();
-  const { data, isLoading, error } = useRunDetail(runId);
+  // A missing run stays missing: a 404 shows its text at once, with no retries.
+  const { data, isLoading, error } = useRunDetail(runId, { retry: retryUnlessNotFound });
   // The header names the workflow. A viewer who can see the run but not
   // the workflow keeps the generic back link.
   const workflow = useWorkflow(data?.run.workflowId ?? "", { retry: false });
@@ -73,11 +76,7 @@ function RunDetailPage() {
     );
   }
   if (error || !data) {
-    return (
-      <div className="flex-1 p-6 text-sm text-danger-500">
-        This run could not be loaded. Reload the page, or open it from its workflow&apos;s Runs list.
-      </div>
-    );
+    return <RunLoadError error={error} />;
   }
 
   // With conversations, the tab bar holds the back link: the details
@@ -133,6 +132,22 @@ function runInputData(params: unknown): Record<string, unknown> {
   const input = params && typeof params === "object" ? (params as { input?: unknown }).input : undefined;
   const data = input && typeof input === "object" ? (input as { data?: unknown }).data : undefined;
   return data && typeof data === "object" && !Array.isArray(data) ? { ...(data as Record<string, unknown>) } : {};
+}
+
+/** Why the run page has no run: gone (404), or a load that failed. Each names what to do. */
+export function RunLoadError({ error }: { error: unknown }) {
+  return (
+    <div className="flex-1 space-y-2 p-6 text-sm">
+      <p role="alert" className="text-danger-500">
+        {isNotFound(error)
+          ? "This run was not found. It may have been deleted."
+          : errorText(error, "Could not load this run. Reload the page to try again.")}
+      </p>
+      <Link to="/workflows/runs" className="inline-flex min-h-11 items-center text-accent-600 hover:underline sm:min-h-0">
+        Back to Runs
+      </Link>
+    </div>
+  );
 }
 
 export interface RunDetailBodyProps {

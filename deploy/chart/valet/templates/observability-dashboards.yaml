@@ -28,4 +28,6 @@ data:
 {{ .Files.Get "dashboards/valet.json" | indent 4 }}
   valet-prebuild-alerts.yaml: |-
 {{ .Files.Get "alerts/prebuild.yaml" | indent 4 }}
+  valet-events-alerts.yaml: |-
+{{ .Files.Get "alerts/events.yaml" | indent 4 }}
 {{- end }}

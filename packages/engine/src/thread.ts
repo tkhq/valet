@@ -1,7 +1,7 @@
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
-import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
-import { mergePresence, readPresence, type Presence } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readToolScope, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ToolScope } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -612,6 +612,8 @@ export class Thread {
   /** Creation-time user timezone from persisted thread state (TKAI-584). */
   private readonly threadUserTimezone: string | undefined;
   private threadMetadata: Record<string, unknown> | undefined;
+  /** Tail of the metadata write queue. See `patchThreadMetadata`. */
+  private metadataWrites: Promise<void> = Promise.resolve();
   /** Durable leaf used to link each new entry into the active transcript path. */
   private activeLeafEntryId: string | undefined;
 
@@ -718,7 +720,7 @@ export class Thread {
     }
     const requestedMode = opts.queueMode ?? this.mode;
     // A sender override belongs to one submission, never a collect digest.
-    const effectiveMode: QueueMode = requestedMode === "collect" && readPresence(opts.metadata?.presence)
+    const effectiveMode: QueueMode = requestedMode === "collect" && readAppearance(opts.metadata?.presence)
       ? "followup" : requestedMode;
 
     // Validate a per-item model pin at admission, the same way setModel
@@ -789,7 +791,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author, readPresence(admitted.metadata?.presence)),
+          this.coalesceQueuedOverheard(coalesceKey, item.author, readAppearance(admitted.metadata?.presence)),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -820,7 +822,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Presence): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Appearance): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -829,8 +831,8 @@ export class Thread {
           i.threadId === this.id &&
           i.status === "queued" &&
           // Only combine messages that use the same sender identity.
-          readPresence(i.metadata?.presence)?.displayName === presence?.displayName &&
-          readPresence(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
+          readAppearance(i.metadata?.presence)?.displayName === presence?.displayName &&
+          readAppearance(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
           i.author?.id === author?.id &&
@@ -4499,7 +4501,7 @@ export class Thread {
   }
 
   private async continueAfterCompaction(): Promise<void> {
-    const prompt = this.isUnattendedWorkflowTask() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
+    const prompt = this.isUnattendedTurn() ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
     const item = this.runningItem;
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
@@ -5363,10 +5365,18 @@ export class Thread {
 
   /** A workflow step's own session, a workflow task handed to an assistant thread,
    * or any turn on a run's own thread that a person did not type. Nobody answers
-   * its decisions, so `requestDecision` refuses them before a gate opens. */
+   * its decisions, and a task it delegates inherits that. */
   private isUnattendedWorkflowTask(): boolean {
     return this.session.options.purpose === "workflow" || this.runningItem?.metadata?.[UNATTENDED_WORKFLOW_KEY] === true
       || (!this.isUserPrompt() && this.session.options.unattendedThread?.({ id: this.id, key: this.key }) === true);
+  }
+
+  /** An unattended workflow task, or an automated event or schedule delivery.
+   * Nobody answers its decisions, so `requestDecision` refuses them before a
+   * gate opens. A task that a delivery delegates can still ask in the inbox. */
+  private isUnattendedTurn(): boolean {
+    return this.isUnattendedWorkflowTask() || this.runningItem?.metadata?.[UNATTENDED_DELIVERY_KEY] === true
+      || (!this.isUserPrompt() && this.session.options.automatedThread?.({ id: this.id, key: this.key, metadata: this.threadMetadata }) === true);
   }
 
   private buildTools(includeRestricted = false): AgentTool[] {
@@ -5383,9 +5393,49 @@ export class Thread {
   private async persistContinuationToolScope(): Promise<void> {
     const scope = this.toolScopeCeiling();
     if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
-    const metadata = { ...this.threadMetadata, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} };
-    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
-    this.threadMetadata = metadata;
+    await this.patchThreadMetadata((current) => ({ ...current, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
+  }
+
+  /**
+   * The one read-modify-write path for thread metadata. Every writer goes
+   * through it, and the writes run one at a time.
+   *
+   * `patch` always runs against the current `threadMetadata`, never a copy
+   * taken before an await. Thus a write cannot erase a value that another
+   * writer added while it waited. This matters for security: a lost
+   * `slackChannels` entry reopens the private-channel read gate.
+   *
+   * - "before-save" publishes the patch in memory at once, then persists it.
+   *   Use it for values that only narrow access. If the save fails, the value
+   *   stays in memory, and the next save persists it.
+   * - "after-save" persists first and publishes only after the save succeeds.
+   *   Use it for values that can widen access. A failed save cannot change
+   *   live access.
+   */
+  private patchThreadMetadata(
+    patch: (current: Record<string, unknown> | undefined) => Record<string, unknown> | undefined,
+    publish: "before-save" | "after-save",
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    if (publish === "before-save") {
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return Promise.resolve();
+      this.threadMetadata = next;
+    }
+    const write = this.metadataWrites.then(async () => {
+      if (publish === "before-save") {
+        await store.saveThread(this.session.id, this.toThreadData());
+        return;
+      }
+      const next = patch(this.threadMetadata);
+      if (next === undefined) return;
+      await store.saveThread(this.session.id, { ...this.toThreadData(), metadata: next });
+      // Apply the patch again to the value as it is now. A "before-save"
+      // writer may have changed memory while the save above waited.
+      this.threadMetadata = patch(this.threadMetadata) ?? this.threadMetadata;
+    });
+    this.metadataWrites = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   toolScopeCeiling(): ToolScope | undefined {
@@ -5398,11 +5448,37 @@ export class Thread {
       readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY]));
   }
 
+  /**
+   * Add `value` to the string list at `metadata[key]` and persist it. A
+   * value already in the list is a no-op. Hosts use it to record facts about
+   * a thread's content, such as where its messages came from.
+   *
+   * The in-memory metadata takes the value before the write, so a save that
+   * runs while this one waits carries it too. Such a fact narrows who may
+   * read the thread, so if the write fails the value stays in memory, and the
+   * next save persists it. Other metadata writers patch the current value
+   * (see `patchThreadMetadata`), so they cannot erase it.
+   */
+  async addToMetadataList(key: string, value: string): Promise<void> {
+    await this.patchThreadMetadata((current) => {
+      const listed = current?.[key];
+      const items = Array.isArray(listed) ? listed.filter((item): item is string => typeof item === "string") : [];
+      return items.includes(value) ? undefined : { ...current, [key]: [...items, value] };
+    }, "before-save");
+  }
+
+  /**
+   * Set `metadata[key]` to `true` and persist it. A flag already set is a
+   * no-op. Hosts use it to record a lasting fact about a thread, such as
+   * that a person now takes part in it.
+   */
+  async setMetadataFlag(key: string): Promise<void> {
+    await this.patchThreadMetadata((current) => current?.[key] === true ? undefined : { ...current, [key]: true }, "before-save");
+  }
+
   async setToolFocus(scope: ToolScope | undefined): Promise<void> {
     // Write before publishing the change. A failed save cannot expand live access.
-    const metadata = { ...this.threadMetadata, [TOOL_SCOPE_KEY]: scope ?? {} };
-    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
-    this.threadMetadata = metadata;
+    await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
     this.nativeImages.invalidatePermission();
     this.agent.state.tools = this.buildTools();
   }
@@ -5416,7 +5492,7 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
-    const presence = mergePresence(readPresence(this.runningItem?.metadata?.presence));
+    const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
     const resolveDefaultSender = session.options.resolveOutboundSender;
     const actorId = this.runningItem?.author?.id
       ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
@@ -5460,6 +5536,7 @@ export class Thread {
         record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
       },
       config: session.options.toolConfig,
+      wakeups: session.options.wakeups,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
@@ -5471,7 +5548,7 @@ export class Thread {
       origin,
       sharedTranscript: session.options.sharedTranscript,
       resolveOutboundSender: presence
-        ? async () => mergePresence(await resolveDefaultSender?.(), presence)
+        ? async () => mergeAppearance(await resolveDefaultSender?.(), presence)
         : resolveDefaultSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
@@ -5513,7 +5590,7 @@ export class Thread {
         // until it expires. Refuse it here, after replay, so a gate opened
         // before this rule still resolves. The author grants approvals when
         // the workflow is saved.
-        if (this.isUnattendedWorkflowTask()) {
+        if (this.isUnattendedTurn()) {
           const refusal: DecisionResolution = { actionId: "deny", resolvedBy: UNATTENDED_WORKFLOW_DECISION, resolvedAt: Date.now() };
           // A refused approval means an action did not run. Record it as an
           // already-resolved gate, never pending, so the workflow can fail the

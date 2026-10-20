@@ -5,9 +5,11 @@ import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
+import { isAutomatedDeliveryThread } from "../events/automated-threads.js";
 import { resolveWorkflowStepGrant, type WorkflowStepGrant } from "../workflows/step-grants.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -34,14 +36,20 @@ import {
   type SessionStore,
   type ServiceAvailability,
   type Thread,
-  type StoredCredential,
+  type ResolvedCredential,
   type ResolvedModel,
   type PolicyResolver,
   type PluginStore,
+  type WakeupLimits,
+  type WakeupsSeam,
+  DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
+import { armDeps, checkArm, type ArmProviders } from "../events/waiter-arm.js";
+import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
-import { membersSharing } from "../services/credential-shares.js";
+import { membersSharing, withSharerName } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { createBrowserPolicy, browserSessionHooks, prepareBrowserSandboxStop } from "../services/browser-host.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
@@ -87,16 +95,23 @@ import {
   resolveRepoResources,
   type ResolvedRepoPrebuildFlags,
 } from "./resolve-repo-resources.js";
+import { applyScratchCaps } from "./apply-scratch-caps.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
+  isAppCredentialRowService,
+  noteAppCredentialFallback,
+  resolveOrgNativeAppRead,
+  rowBackedAppServiceFor,
   orgFallbackPolicy,
+  resolveAppCredentialRead,
   resolveOrgCredentialRead,
-  resolveTeamCredentialRead,
-  resolveUserCredentialRead,
+  readTeamCredential,
+  readUserCredential,
   onePasswordScopesFor,
+  teamFallbackReason,
 } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
@@ -134,7 +149,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { codingSystemPrompt } from "./prompt-rules.js";
+import { CHILD_TIMER_HOURS, codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -266,6 +281,25 @@ export interface EngineHostOpts {
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   blobs?: BlobStore;
+  /**
+   * Deploy scratch caps (`resolveScratchCaps(process.env)` at boot), applied
+   * to a repository's `.valet/prebuild.yaml` scratch declaration by
+   * `applyScratchCaps` inside `resolveRepoPrebuildFlags`. A declared value
+   * over the cap is dropped, never clamped.
+   */
+  scratchCaps?: ScratchCaps;
+  /**
+   * Wakeup/lease limits (`resolveWakeupLimits(process.env)` at boot),
+   * passed to every session's `wakeups` seam as `WakeupsSeam.limits`
+   * (spec 2026-10-08).
+   */
+  wakeupLimits?: WakeupLimits;
+  /**
+   * Cap on one detached job's log, in bytes (`resolveJobLogMaxBytes` at
+   * boot). Passed to every session's `wakeups` seam. Optional so test
+   * harnesses can omit it; `node.ts` always sets it.
+   */
+  jobLogMaxBytes?: number;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
   /** pi-ai model id or tier token; defaults to tier "s" when unset. */
@@ -462,6 +496,50 @@ export interface EngineHostOpts {
 /** `agent_sessions.credential_owner_mode`; see {@link SessionMeta.credentialOwnerMode}. */
 export type CredentialOwnerMode = "owner" | "actor";
 
+/** The `wakeups` seam deps every session builder passes. */
+export function wakeupsSeamDeps(
+  opts: Pick<EngineHostOpts, "engineStore" | "wakeupLimits" | "sandboxProvider" | "jobLogMaxBytes">,
+): WakeupsSeamDeps {
+  return {
+    engineStore: opts.engineStore,
+    limits: opts.wakeupLimits ?? DEFAULT_WAKEUP_LIMITS,
+    provider: opts.sandboxProvider,
+    ...(opts.jobLogMaxBytes !== undefined ? { jobLogMaxBytes: opts.jobLogMaxBytes } : {}),
+  };
+}
+
+/**
+ * The session's live `/scratch` size in bytes, from the attachment's last
+ * observation, or undefined when the session has no scratch or nothing has
+ * been observed yet. The wakeups seam caps a detached job log at a quarter
+ * of it (fix wave 3, k8s M-B). Lazy: a job starts after the run-start
+ * reconcile, so the observation exists by then.
+ */
+export function sessionScratchBytes(
+  getSession: () => Pick<WakeupsSeamSession, "attachment"> | undefined,
+): number | undefined {
+  const scratch = getSession()?.attachment.observedResources?.()?.scratch;
+  if (scratch === undefined) return undefined;
+  const bytes = parseResourceQuantity(scratch);
+  return bytes === null || bytes <= 0 ? undefined : bytes;
+}
+
+/** The coding prompt's options. `scratchEnabled` is true when the session's
+ * resources include scratch, so the prompt names `/scratch` only then. */
+export function codingPromptOptions(
+  secretsCli: boolean,
+  flags: { resources?: { scratch?: string }; initialResources?: { scratch?: string } },
+): { secretsCli: boolean; scratchEnabled: boolean } {
+  const scratch = flags.resources?.scratch ?? flags.initialResources?.scratch;
+  return { secretsCli, scratchEnabled: scratch !== undefined };
+}
+
+/** A system-prompt paragraph that tells the model a dropped scratch
+ * request left the session without `/scratch`. Empty when nothing dropped. */
+export function scratchWarningPrompt(warning: string | undefined): string {
+  return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
+}
+
 export interface SessionMeta {
   userId: string;
   orgId: string;
@@ -479,6 +557,9 @@ export interface SessionMeta {
   kubernetes?: boolean;
   /** Per-child CPU and memory overrides persisted on the app session row. */
   sandboxResourceOverrides?: PrebuildResources;
+  /** Thread key of the request that triggered this build. A REST session's
+   * startup warning goes on this thread. Absent means `web:default`. */
+  warningThreadKey?: string;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -748,6 +829,8 @@ export class EngineHost {
   private buildEpoch = new Map<string, number>();
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
+  /** Repo keys whose dropped-scratch warning is active. */
+  private scratchCapWarnings = new Set<string>();
 
   /**
    * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
@@ -845,6 +928,9 @@ export class EngineHost {
     const unsettled = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
 
+    // A lease (wakeups spec C3) keeps the sandbox out of idle suspension.
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
+
     let sinceMs = await this.opts.engineStore.latestActivityAt(sessionId);
     if (sinceMs == null) {
       const data = await this.opts.engineStore.getSession(sessionId);
@@ -864,6 +950,9 @@ export class EngineHost {
     if ((await this.opts.engineStore.listDecisionGates(sessionId, undefined, "pending")).length > 0) return;
     const recheck = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0 || session.hasOtherActiveRuns("") || session.pendingJobCount() > 0) return;
+    // A turn that started, set a hold or a process, and finished inside this
+    // window leaves a lease the first check never saw (PR review 2, item 1).
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.cache.get(sessionId)?.session !== session) return;
     if (session.attachment.state !== "ready") {
       if (execution && ["detached", "suspended"].includes(session.attachment.state)) this.evictCache(sessionId);
@@ -1035,6 +1124,13 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
+    // Event-wakeups Part I: the thread link sentence is per-thread, not
+    // per-session, so it rides the engine's `threadSystemContext` hook
+    // (resolved once per thread, unlike `systemPrompt`) rather than
+    // `codingSystemPrompt`. `publicUrl` is undefined on a deployment with
+    // no public URL, which omits the sentence entirely.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const threadLink = (thread: { id: string }) => threadLinkContext(thread.id, publicUrl);
     const extras = await this.sessionExtras(
       principal,
       meta.orgId,
@@ -1236,7 +1332,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1250,6 +1346,9 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            threadSystemContext: threadLink,
+            ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
+            ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1268,7 +1367,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1282,6 +1381,9 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          threadSystemContext: threadLink,
+          ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
+          ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1291,6 +1393,12 @@ export class EngineHost {
     if (pendingStartRef) {
       await onStartRef(pendingStartRef);
       pendingStartRef = undefined;
+    }
+    // A child reports this warning to its parent (`startupWarnings`). A
+    // REST session has no parent, so the warning goes on the thread that
+    // triggered the build. The system prompt carries it for the model.
+    if (repoFlags.scratchWarning) {
+      await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
     }
 
     extras.bindSession(session);
@@ -1732,6 +1840,13 @@ export class EngineHost {
    *    result, hint text intact.
    *    Synthesizes a `StoredCredential` the engine's `credentialProvider`
    *    maps to `{ accessToken }`.
+   *  - `linear:app` (an app credential service an org row answers,
+   *    `isAppCredentialRowService`) → `resolveAppCredentialRead` for every
+   *    owner: the org `linear` app row as a bare `{ accessToken }`, or `null`
+   *    when no native plugin names the service. This is the app step of the
+   *    native credential policy's Part B order
+   *    (docs/specs/2026-10-15-native-integration-credential-policy-design.md);
+   *    `linear` itself keeps the personal and delegated order below.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves, or when `db`/
@@ -1893,7 +2008,7 @@ export class EngineHost {
     actingMember: boolean,
     /** The member a turn with no author acts for: a workflow run's actor. */
     runActor?: string,
-  ): ((owner: CredentialOwner, service: string, use: CredentialUse) => Promise<StoredCredential | null>) | undefined {
+  ): ((owner: CredentialOwner, service: string, use: CredentialUse) => Promise<ResolvedCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
@@ -1921,6 +2036,17 @@ export class EngineHost {
       }
       const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
       const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
+      if (isAppCredentialRowService(service)) {
+        // A native integration's app identity (`linear:app`), the last step
+        // of the Part B order for every owner. The org owns it, so the
+        // answer does not depend on who reads. `null` unless a native plugin
+        // names the service (INV-P2); a bare token, never the row (INV-P1).
+        // The app tier is for members only: a channel sender with no Valet
+        // account never acts as the app (native credential policy, Part B).
+        if (use.externalSender) return null;
+        const app = await resolveAppCredentialRead({ credentials, onePassword }, { orgId }, service, this.opts.plugins);
+        return app ? { ...app, source: { kind: "app" } } : null;
+      }
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -2020,16 +2146,38 @@ export class EngineHost {
       // is the identity link, which the private-channel check needs — and
       // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      // An external sender never reaches the app tier, so its reads neither
+      // fall through to the app token nor count as a fallback.
+      const appService = use.externalSender ? undefined : rowBackedAppServiceFor(this.opts.plugins, service);
+      // An action whose read ends at the app token is counted
+      // (`valet_credentials_app_fallback_total`), so a broken delegated
+      // credential stays visible while the app keeps the action working.
+      // Only the action's own read counts: discovery and the `list_tools`
+      // probe read the same credential, and would count one action thrice.
+      const countsFallback = appService !== undefined && use.forAction === true;
+      const readDeps = { credentials, onePassword };
       if (owner.type === "team") {
+        let deadDelegated = false;
         // The acting member's own share first. Another member's share is
         // used once that member approved, including authenticated tool discovery
         // (`services/credential-borrow.ts`).
         const actor = use.externalSender ? undefined : use.actorId ?? runActor;
-        return resolveTeamCredentialRead(
+        const { credential: fromTeam, source, approvalFrom } = await readTeamCredential(
           { credentials, onePassword, ...(db ? { shares: (teamId: string, svc: string) => membersSharing(db, teamId, svc) } : {}) },
           {
             orgId, teamId: owner.id, ...(actor ? { userId: actor } : {}), scopes,
-            mayBorrow: async (memberId) => !!db && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service, memberId }),
+            // A sender with no Valet account never rides a teammate's approval.
+            mayBorrow: async (memberId) => !use.externalSender && !!db && this.mayBorrowAccount(db, { orgId, teamId: owner.id, sessionId, actor, use, service, memberId }),
+            // A native integration's app token is the last tier (Part B), so
+            // a dead team connection or broken share gives way to it.
+            ...(appService
+              ? {
+                  laterTier: async () => {
+                    deadDelegated = (await resolveAppCredentialRead(readDeps, { orgId }, appService, this.opts.plugins)) !== null;
+                    return deadDelegated;
+                  },
+                }
+              : {}),
           },
           service,
           // The raw policy, not a clamp: "reference-only" lets the read
@@ -2037,22 +2185,34 @@ export class EngineHost {
           // refusing the org credential row (decision 5).
           fallback,
         );
+        if (fromTeam === null && countsFallback) {
+          await noteAppCredentialFallback(readDeps, { orgId }, service, teamFallbackReason(approvalFrom, deadDelegated), this.opts.plugins);
+        }
+        // The source names who must repair a rejected token: the team, or
+        // the member whose shared account it is.
+        return fromTeam ? { ...fromTeam, source: db ? await withSharerName(db, source) : source } : null;
       }
       if (owner.type === "org") {
-        return resolveOrgCredentialRead(
+        const app = use.externalSender ? null : await resolveOrgNativeAppRead(readDeps, { orgId }, service, this.opts.plugins, use.forAction === true);
+        if (app) return { ...app, source: { kind: "app" } };
+        const fromOrg = await resolveOrgCredentialRead(
           { credentials, onePassword },
           { orgId, userId, scopes },
           service,
         );
+        return fromOrg ? { ...fromOrg, source: { kind: "org" } } : null;
       }
-      const stored = await resolveUserCredentialRead(
+      const { credential: stored, source } = await readUserCredential(
         { credentials, onePassword },
         { orgId, userId: owner.id, scopes },
         service,
         fallback,
       );
-      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, owner.id, stored);
-      return stored;
+      if (stored === null && countsFallback) await noteAppCredentialFallback(readDeps, { orgId }, service, "no_personal", this.opts.plugins);
+      if (!stored) return null;
+      const resolved: ResolvedCredential = { ...stored, ...(source ? { source } : {}) };
+      if (service === "slack" && db) return withSlackOwnerMetadata(db, owner.id, resolved);
+      return resolved;
     };
   }
 
@@ -2128,7 +2288,14 @@ export class EngineHost {
     const effective = resolved.outcome === "error"
       ? { ...resolved, kubernetes: meta.kubernetes === true }
       : resolved;
-    const result = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    const overridden = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    // `applyScratchCaps` records the refusal metric itself (it has the
+    // `ScratchRequestError.reason`); this call site logs a warning,
+    // deduplicated per repo below (mirroring `resourcesWithheld`), and
+    // surfaces the warning text to callers (REST sessions log it; children
+    // push it onto `startupWarnings` in `childSessionFor`).
+    const capped = applyScratchCaps(overridden, this.opts.scratchCaps ?? {});
+    const result = { ...capped.flags, ...(capped.warning ? { scratchWarning: capped.warning } : {}) };
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -2142,6 +2309,18 @@ export class EngineHost {
       } else {
         this.resourceWithholdingWarnings.delete(warningKey);
       }
+      if (capped.warning) {
+        if (!this.scratchCapWarnings.has(warningKey)) {
+          console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
+          this.scratchCapWarnings.add(warningKey);
+        }
+      } else {
+        this.scratchCapWarnings.delete(warningKey);
+      }
+    } else if (capped.warning) {
+      // No repo key to dedup against with no primary binding, so log every
+      // call, same as before this change.
+      console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
     }
     return result;
   }
@@ -2390,6 +2569,108 @@ export class EngineHost {
       if (!session || session.attachment.state !== "ready") return undefined;
       return session.sandbox as Sandbox;
     }, repos[0].targetDir);
+  }
+
+  /**
+   * Builds the `{ wakeups }` session option every builder spreads in
+   * alongside `extractDocument` (spec 2026-10-08, Task 15). `getSession`
+   * is the same lazy `() => builtSession` accessor each builder already
+   * threads to `buildCommandOptions`/`buildRepoInstructionsProvider`.
+   * It resolves only once the engine has built the session.
+   */
+  private wakeupsOptions(
+    sessionId: string,
+    getSession: () => WakeupsSeamSession | undefined,
+    /**
+     * The session's org and owner, for the `wait_for_event` arm checks
+     * (spec 2026-10-15, Part D). A workflow run passes none, so its seam
+     * has no `armEvent` (R9).
+     */
+    armFor?: { orgId: string; owner: Principal },
+  ): { wakeups: WakeupsSeam } {
+    const checkArm = armFor ? this.armChecks(sessionId, armFor.orgId, armFor.owner) : undefined;
+    return {
+      wakeups: buildWakeupsSeam(
+        {
+          ...wakeupsSeamDeps(this.opts),
+          scratchBytes: () => sessionScratchBytes(getSession),
+          ...(checkArm ? { checkArm } : {}),
+        },
+        sessionId,
+        getSession,
+      ),
+    };
+  }
+
+  /**
+   * The arm checks for one session. The checks read the subject with the
+   * calling turn's credential provider, which the tool passes in. That is
+   * the resolver this builder already gave the engine, bound to the turn's
+   * actor, so the resolver stays private to the host. Undefined without a
+   * database: the checks need the app tables.
+   */
+  private armChecks(
+    sessionId: string,
+    orgId: string,
+    owner: Principal,
+  ): WakeupsSeamDeps["checkArm"] {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    const providers: ArmProviders = {
+      db,
+      engineStore: this.opts.engineStore,
+      engineCredentials: this.opts.engineCredentials,
+      plugins: this.opts.plugins ?? [],
+      ...(this.opts.onePassword ? { onePassword: this.opts.onePassword } : {}),
+    };
+    const session = { sessionId, orgId, ownerType: owner.type, ownerId: owner.id };
+    const apiUrl = this.opts.githubTokenDeps?.apiUrl;
+    return (threadId, req, credentials) =>
+      checkArm(
+        armDeps(providers, session, credentials, apiUrl ? { githubApiUrl: apiUrl } : {}),
+        { sessionId, threadId, orgId },
+        req,
+      );
+  }
+
+  /**
+   * Shows a startup warning as a `system` entry on `threadKey`, where the
+   * session page renders it. The model does not see `system` entries
+   * (`entriesToAgentMessages` skips them); `scratchWarningPrompt` gives it
+   * the same text. A rebuild after a restart finds the entry and does not
+   * write it again. Best-effort: a failed write is logged and never blocks
+   * the session.
+   */
+  private async noteSessionWarning(session: Session, text: string, threadKey: string): Promise<void> {
+    try {
+      const thread = await session.createThread(threadKey);
+      const snapshot = await this.opts.engineStore.getThreadSnapshot(session.id, thread.id);
+      if (snapshot?.entries.some((e) => e.type === "message" && e.role === "system" && e.content === text)) return;
+      await thread.appendEntry({
+        id: `e-${randomUUID()}`,
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "system",
+        content: text,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      console.error(`EngineHost: session ${session.id}: showing a startup warning failed:`, err);
+    }
+  }
+
+  /**
+   * Builds the `{ isLeased }` session option every builder spreads in
+   * alongside `wakeups` (spec INV-8, Task 19). The attachment calls this
+   * before a pod-replacing image or resource change at run-start reconcile
+   * and defers the change while a lease is active.
+   */
+  private leaseOptions(sessionId: string): { isLeased: () => Promise<boolean> } {
+    return {
+      isLeased: () => this.opts.engineStore.countActiveLeases(sessionId).then((n) => n > 0),
+    };
   }
 
   /**
@@ -2659,6 +2940,17 @@ export class EngineHost {
     }
     const db = this.opts.db;
     const apiBaseUrl = this.opts.apiBaseUrl;
+    // Event-wakeups Part I: the thread link sentence, composed with the
+    // existing workflow editor/run context (both are per-thread, so they
+    // share the one `threadSystemContext` hook). `publicUrl` undefined
+    // omits the sentence.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const assistantThreadContext = (thread: { id: string; key: string }): string | undefined => {
+      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread)].filter(
+        (part): part is string => part !== undefined,
+      );
+      return parts.length > 0 ? parts.join("\n\n") : undefined;
+    };
 
     const assistant = await loadAssistant(db, assistantId);
     if (!assistant) {
@@ -2801,6 +3093,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -2829,8 +3123,9 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
-      threadSystemContext: workflowThreadContext,
+      threadSystemContext: assistantThreadContext,
       unattendedThread: isWorkflowRunThread,
+      automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -3623,8 +3918,16 @@ export class EngineHost {
    * Reuse an existing thread or persist current defaults for a new one.
    * Channel ingress and event delivery share this guard because they can
    * reach the same thread while its first creation awaits persistence.
+   * `init.title` titles a thread this call creates. An existing thread keeps
+   * its title.
    */
-  async ensureFreshThread(session: Session, key: string, meta: SessionMeta, actorUserId = meta.userId): Promise<Thread> {
+  async ensureFreshThread(
+    session: Session,
+    key: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+    init?: { title?: string; metadata?: Record<string, unknown> },
+  ): Promise<Thread> {
     const existing = await session.threadByKey(key);
     if (existing) return existing;
     let pending = this.threadCreations.get(session);
@@ -3636,7 +3939,7 @@ export class EngineHost {
     if (inflight) return inflight;
     const creation = (async () => {
       const settings = await this.resolveFreshThreadSettings(session.id, meta, actorUserId);
-      return session.createThread(key, settings);
+      return session.createThread(key, { ...settings, ...init });
     })();
     pending.set(key, creation);
     try {
@@ -3925,6 +4228,9 @@ export class EngineHost {
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
       );
     }
+    if (repoFlags.scratchWarning) {
+      opts.startupWarnings?.push(repoFlags.scratchWarning);
+    }
     const dockerFlag = opts.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;
     const initialResources = repoFlags.initialResources;
@@ -3951,6 +4257,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
+      ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -3991,7 +4299,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4138,6 +4446,11 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
+    // `builtSession` is assigned below, after the engine builds the
+    // session. The wakeups seam resolves it lazily, same as every other
+    // builder's `wakeupsOptions` accessor. It passes no arm info: a
+    // workflow run cannot wait for events (spec 2026-10-15, R9).
+    let builtSession: Session | undefined;
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -4151,6 +4464,8 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4177,7 +4492,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}), childTimerHours: CHILD_TIMER_HOURS }),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name
@@ -4205,6 +4520,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);
+    builtSession = session;
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);

@@ -85,6 +85,53 @@ function asString(v: unknown): string | undefined {
 }
 
 /**
+ * The implicit filter field every catalog entry carries (spec 2026-10-15:
+ * event wakeups, Part G). It reads the event's normalized `subjects` array,
+ * not a payload path, so it is handled as a special case in `filtersMatch`
+ * and is never looked up through a catalog entry's declared `path`. The
+ * catalog builders in `ingest.ts` (`withSubjectFilter`) still add it to every
+ * entry's declared filters, so the subscription write validator and the
+ * collision checker — which read catalog declarations directly, not through
+ * `filtersMatch` — see it as a field every key supports.
+ */
+export const SUBJECT_FILTER_FIELD = "subject";
+
+const SUBJECT_FILTER_DESCRIPTOR = {
+  field: SUBJECT_FILTER_FIELD,
+  path: "",
+  description:
+    "The key of the event's place or thread (for example github:acme/lean-proofs#42). " +
+    "Matches with eq (a key equals the value) or prefix (a key starts with the value).",
+};
+
+/**
+ * Adds the implicit `subject` filter field to one catalog entry's declared
+ * filters, when not already present. Pure; the catalog builders in
+ * `ingest.ts` apply it to every entry they assemble.
+ */
+export function withSubjectFilter(entry: EventCatalogEntry): EventCatalogEntry {
+  if (entry.filters.some((f) => f.field === SUBJECT_FILTER_FIELD)) return entry;
+  return { ...entry, filters: [...entry.filters, SUBJECT_FILTER_DESCRIPTOR] };
+}
+
+/**
+ * Whether a `subject` filter passes, against the event's normalized subjects
+ * (coarse to fine, spec Part A1). `eq` matches when any subject equals the
+ * value; `prefix` matches when any subject starts with it. The binding spec
+ * (Part G) defines only these two ops for `subject`; the write validator
+ * (`subscription-write.ts`) refuses any other op at write time, so `in` /
+ * `contains` / `regex` reaching here is defensive fail-closed, never a throw.
+ */
+function subjectFilterMatches(subjects: string[] | undefined, filter: SubscriptionFilter): boolean {
+  if (!subjects || subjects.length === 0) return false;
+  const value = filter.value;
+  if (typeof value !== "string") return false;
+  if (filter.op === "eq") return subjects.includes(value);
+  if (filter.op === "prefix") return subjects.some((s) => s.startsWith(value));
+  return false;
+}
+
+/**
  * Whether one subscription matches an event: its key patterns match AND its
  * filters pass. The single predicate the ingest gate, the delivery match, and
  * the redeliver route all share, so a change to match semantics cannot make
@@ -93,6 +140,13 @@ function asString(v: unknown): string | undefined {
  * The two casts narrow the `unknown` jsonb columns; their shapes are owned by
  * the subscriptions CRUD validator (`routes/events.ts`), the only writer of
  * these columns, which writes exactly these types.
+ *
+ * `subjects` is the event's normalized subjects array (spec Part A1), used
+ * only by the implicit `subject` filter field. Redelivery and the team
+ * coverage recheck pass the stored event row's `subjects` column (Part G).
+ * A row stored before that column existed holds null, which callers pass
+ * as undefined; a subscription with a `subject` filter then fails closed,
+ * same as any other field it cannot evaluate.
  */
 export function subscriptionMatchesEvent(
   sub: { eventKeys: unknown; filters: unknown },
@@ -100,13 +154,14 @@ export function subscriptionMatchesEvent(
   payload: unknown,
   catalog: EventCatalogEntry[],
   teamMentionScope = false,
+  subjects?: string[],
 ): boolean {
   if (!eventKeyMatches(eventKey, sub.eventKeys as string[])) return false;
   // The async team gate replaces legacy creator filters with live membership.
   // Callers must authorize the team before persisting or delivering the event.
   if (eventKey === "slack.app_mention" && teamMentionScope) {
     return filtersMatch(payload, eventKey,
-      (sub.filters as SubscriptionFilter[]).filter((f) => f.field !== "user"), catalog);
+      (sub.filters as SubscriptionFilter[]).filter((f) => f.field !== "user"), catalog, subjects);
   }
   // The match-time arm of the mention-scope rule (events/mention-scope.ts,
   // TKAI-299). A `slack.app_mention` subscription with no user filter
@@ -121,7 +176,7 @@ export function subscriptionMatchesEvent(
   ) {
     return false;
   }
-  return filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog);
+  return filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog, subjects);
 }
 
 /**
@@ -139,11 +194,15 @@ export function filtersMatch(
   eventKey: string,
   filters: SubscriptionFilter[],
   catalog: EventCatalogEntry[],
+  subjects?: string[],
 ): boolean {
   if (filters.length === 0) return true;
   // No catalog entry for this key → all field filters are undeclared → no match.
   const entry = catalog.find((e) => e.key === eventKey);
   return filters.every((filter) => {
+    // `subject` reads the event's normalized subjects array, not a payload
+    // path, so it is matched before (and independent of) catalog lookup.
+    if (filter.field === SUBJECT_FILTER_FIELD) return subjectFilterMatches(subjects, filter);
     const declared = entry?.filters.find((f) => f.field === filter.field);
     if (!declared) return false;
     const actual = asString(resolvePath(payload, declared.path));

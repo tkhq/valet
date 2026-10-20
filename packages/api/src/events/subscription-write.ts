@@ -8,23 +8,26 @@
  * workflow trigger service (`workflows/trigger-service.ts`), and the template
  * installer (`workflows/templates.ts`).
  */
-import { validatePresence } from "@valet/shared";
+import { readThreadPolicy, validateAppearance, validateThreadPolicy } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { allCatalogEntries } from "./ingest.js";
-import { eventKeyMatches, validateRegexPattern, type SubscriptionFilter } from "./match.js";
+import { allCatalogEntries, subscribableEntries } from "./ingest.js";
+import { eventKeyMatches, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
+import { acceptTargetWrite } from "./target-names.js";
+import { NO_SUBJECT_ERROR, subjectModeAllowed } from "./thread-policy-write.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
-/** The optional prompt templates an orchestrator target may carry. */
+/** The optional prompt templates an assistant target may carry. */
 const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
 // silently never fire. Re-add once a waitForEvent node exists.
-const TARGET_KINDS = ["workflow", "orchestrator"] as const;
+// The old `orchestrator` kind is renamed before this check (`target-names.ts`).
+const TARGET_KINDS = ["workflow", "assistant"] as const;
 
 /**
  * Validates a subscription body against the merged plugin catalog. Returns a
@@ -58,11 +61,20 @@ export function validateSubscription(
   // e.g. a GitHub-only `repo` filter on a `linear.issue.*` subscription,
   // which then silently never matches anything.
   const selectedEntries: EventCatalogEntry[] = [];
+  const patterns: string[] = [];
   for (const pattern of body.eventKeys) {
     if (typeof pattern !== "string" || pattern.length === 0) {
       return "eventKeys entries must be non-empty strings";
     }
-    const matches = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
+    patterns.push(pattern);
+    const covered = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
+    // Derived keys stay unavailable to subscriptions (spec 2026-10-15: event
+    // wakeups, Part G and Non-goals): the dispatcher has no derive step. A
+    // glob that also covers a derived key keeps only its plain entries.
+    const matches = subscribableEntries(covered);
+    if (matches.length === 0 && covered.length > 0) {
+      return `${pattern} is a derived event key, and Presence does not listen for derived keys. Use wait_for_event in a session to wait for it.`;
+    }
     if (matches.length === 0) return `unknown event key: ${pattern}`;
     selectedEntries.push(...matches);
   }
@@ -98,7 +110,14 @@ export function validateSubscription(
         if (regexError) return regexError;
       }
     }
-    if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
+    // `subject` is implicit on every key (spec 2026-10-15: event wakeups,
+    // Part G) — it is not one of a plugin's declared fields, so it skips the
+    // declared-field check below. The spec defines only eq and prefix for it.
+    if (f.field === SUBJECT_FILTER_FIELD) {
+      if (f.op !== "eq" && f.op !== "prefix") {
+        return `A place condition matches only with "is" or "starts with", not "${f.op}". Change how the condition matches.`;
+      }
+    } else if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
       return `filter field ${f.field} is not declared by any event selected by eventKeys`;
     }
   }
@@ -106,42 +125,59 @@ export function validateSubscription(
   if (typeof body.target !== "object" || body.target === null) {
     return "target must be an object";
   }
-  const target = body.target as Record<string, unknown>;
+  // The old names validate as the new ones for one release (spec
+  // 2026-10-16: presence hub, Part H). The writer stores the renamed target.
+  const renamed = acceptTargetWrite(body.target);
+  if (!renamed.ok) return renamed.error;
+  const target = renamed.target as Record<string, unknown>;
   if (typeof target.kind !== "string" || !(TARGET_KINDS as readonly string[]).includes(target.kind)) {
     return `unknown target kind: ${String(target.kind)}`;
   }
-  if (target.presence !== undefined) {
-    const error = validatePresence(target.presence);
+  if (target.appearance !== undefined) {
+    const error = validateAppearance(target.appearance);
     if (error) return error;
   }
+  // The thread policy (spec 2026-10-16: delivery threads, Part A). Shape and
+  // subject checks only; `existing` needs the owner, so the writer checks
+  // it with `validateExistingThread` once the owner is known.
+  if (target.thread !== undefined) {
+    if (target.kind !== "assistant") {
+      return "A thread choice applies only when the assistant does the work. Remove the thread from this workflow line.";
+    }
+    const error = validateThreadPolicy(target.thread);
+    if (error) return error;
+    if (readThreadPolicy(target.thread).mode === "subject" && !subjectModeAllowed(patterns, plugins)) {
+      return NO_SUBJECT_ERROR;
+    }
+  }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
-    return "workflow target requires workflowId";
+    return "A workflow line needs workflowId. Choose the workflow that runs.";
   }
   if (target.deliveryPolicy !== undefined || target.pauseOnOverlap !== undefined) {
-    if (target.kind !== "orchestrator" || (target.orchestrator !== undefined && target.orchestrator !== "user")) return "Delivery preferences apply only to personal assistant subscriptions.";
-    if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown delivery policy.";
-    if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be a boolean.";
+    if (target.kind !== "assistant" || (target.assistant !== undefined && target.assistant !== "user")) return "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant.";
+    if (target.deliveryPolicy !== undefined && (typeof target.deliveryPolicy !== "string" || !["always", "ignoreIfMyTeamSubscribed", "ignoreIfAnyTeamSubscribed"].includes(target.deliveryPolicy))) return "Unknown choice for when a team also listens. Pick one of the listed choices.";
+    if (target.pauseOnOverlap !== undefined && typeof target.pauseOnOverlap !== "boolean") return "pauseOnOverlap must be true or false. Send true to pause this line when a team also listens.";
   }
-  if (target.kind === "orchestrator") {
-    const who = target.orchestrator;
+  if (target.kind === "assistant") {
+    const who = target.assistant;
     if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
-      return `unknown target orchestrator: ${String(who)}`;
+      return `Unknown target assistant: ${String(who)}. Use user, team, or org.`;
     }
-    // `orchestrator` and `teamId` are one choice expressed in two fields, so
+    // `assistant` and `teamId` are one choice expressed in two fields, so
     // each is refused without the other. A team target with no id names no
     // team; a teamId on a user or org target names a team the delivery would
     // never reach, and would read as if it did.
     if (who === "team" && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
-      return "team orchestrator target requires teamId";
+      return "A team assistant target requires teamId. Choose the team.";
     }
     if (who !== "team" && target.teamId !== undefined) {
-      return "teamId is only valid when orchestrator is team";
+      return "teamId is only valid when assistant is team. Remove teamId.";
     }
     if (target.assistantId !== undefined) {
       return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
     if (target.replaces !== undefined && (typeof target.replaces !== "string" || target.replaces.length === 0)) {
-      return "replaces must be the ID of the subscription this rule updates";
+      return "replaces must name the line this proposal updates. Pick the line again.";
     }
     // Both prompt templates are validated against the SELECTED catalog
     // entries, the same set a filter field is held to: a template addresses
@@ -160,7 +196,7 @@ export function validateSubscription(
     // A workflow keeps its own prompt configuration on its llm and session
     // nodes. A prompt field here would name a prompt nothing renders.
     for (const field of PROMPT_FIELDS) {
-      if (target[field] !== undefined) return `${field} is only valid on an orchestrator target`;
+      if (target[field] !== undefined) return `${field} is only valid on an assistant target. Remove ${field}, or point the line at an assistant.`;
     }
   }
   return null;
@@ -206,7 +242,7 @@ export async function validateSubscriptionWrite(
   const error = validateSubscription(plugins, body);
   if (error) return { ok: false, error };
   if (scope.ownerType && scope.ownerType !== "user" && typeof body.target === "object" && body.target !== null &&
-      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Delivery preferences apply only to personal assistant subscriptions." };
+      ("deliveryPolicy" in body.target || "pauseOnOverlap" in body.target)) return { ok: false, error: "Only a line for your personal assistant can choose what happens when a team also listens. Remove that choice, or point the line at your personal assistant." };
   const filters = body.filters as SubscriptionFilter[];
   // The audience is read on every write, including one that changes nothing
   // about the match: a patch may set it alone.

@@ -9,6 +9,7 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import { resolvePath, subscriptionMatchesEvent } from "./match.js";
 import { isOrgMember } from "../services/org.js";
 import { isTeamMember } from "../services/teams.js";
+import { assistantScopeOf, isAssistantKind } from "./target-names.js";
 
 /**
  * Who a Slack message shows as written by, when that is not the Valet user it
@@ -98,16 +99,17 @@ export async function followedThreadAudience(
  *
  * `ownerType` is the stored owner where there is one. On a create there is
  * not: the route derives the owner FROM the target, so an undefined owner
- * falls back to the target's own `orchestrator: "team"`. A stored row needs
+ * falls back to the target's own `assistant: "team"`. A stored row needs
  * no such field — the route only ever stamps team ownership on a team
  * orchestrator target, and rows written before that field existed carry the
  * team owner alone.
  */
 export function isTeamAssistantRule(ownerType: string | undefined, target: unknown): boolean {
   if (typeof target !== "object" || target === null) return false;
-  if (!("kind" in target) || target.kind !== "orchestrator") return false;
+  // Stored rows may still carry the old names (`target-names.ts`).
+  if (!("kind" in target) || !isAssistantKind(target.kind)) return false;
   if (ownerType !== undefined) return ownerType === "team";
-  return "orchestrator" in target && target.orchestrator === "team";
+  return assistantScopeOf(target) === "team";
 }
 
 export function isTeamAssistantMention(
@@ -115,6 +117,26 @@ export function isTeamAssistantMention(
   eventKey: string,
 ): boolean {
   return eventKey === "slack.app_mention" && isTeamAssistantRule(sub.ownerType, sub.target);
+}
+
+/**
+ * The dispatcher's sender gate for an orchestrator delivery: the user id the
+ * delivery acts as, or null when the gate refuses the sender. A team
+ * assistant mention acts as its verified sender (`teamMentionActor`). Any
+ * other rule acts as its owner and refuses nobody. Claim resolution reuses
+ * this gate for the Slack twin check, so a mention that the dispatcher
+ * refuses stays an ordinary channel message for the waiter (spec
+ * 2026-10-16: delivery threads and claims, Part C step 8).
+ */
+export async function mentionSenderActor(
+  db: AppDb,
+  sub: { orgId: string; ownerType: string; ownerId: string; target: unknown; audience?: string | null; createdBy: string },
+  eventKey: string,
+  payload: unknown,
+  logDenied = true,
+): Promise<string | null> {
+  if (isTeamAssistantMention(sub, eventKey)) return teamMentionActor(db, sub, payload, logDenied);
+  return sub.ownerType === "user" ? sub.createdBy : `${sub.ownerType}:${sub.ownerId}`;
 }
 
 /** No identity or membership cache: removal applies to the next match. */
@@ -180,9 +202,13 @@ export async function subscriptionMatchOutcome(
   // Off for a re-check, such as a personal rule's team-coverage test, so
   // a denial ingest already logged is not logged again on every delivery.
   logDenied = true,
+  // The event's normalized subjects (spec Part A1), for the implicit
+  // `subject` filter field. Omitted by callers with no subjects to hand
+  // (e.g. redelivery over a stored event row).
+  subjects?: string[],
 ): Promise<SubscriptionMatchOutcome> {
   const teamMention = isTeamAssistantMention(sub, eventKey);
-  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention)) return "not_matched";
+  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention, subjects)) return "not_matched";
   if (!teamMention || await teamMentionActor(db, sub, payload, logDenied) !== null) return "matched";
   return "authorization_denied";
 }
@@ -197,8 +223,12 @@ export async function authorizedSubscriptionMatchesEvent(
   eventKey: string,
   payload: unknown,
   catalog: EventCatalogEntry[],
+  // The event's normalized subjects (spec Part A1), from the stored event
+  // row (spec 2026-10-15: event wakeups, Part G). Omitted callers get the
+  // pre-existing fail-closed behavior for a `subject` filter.
+  subjects?: string[],
 ): Promise<boolean> {
-  return (await subscriptionMatchOutcome(db, sub, eventKey, payload, catalog)) === "matched";
+  return (await subscriptionMatchOutcome(db, sub, eventKey, payload, catalog, true, subjects)) === "matched";
 }
 
 /** Validate the saved actor against the team's current org and membership.

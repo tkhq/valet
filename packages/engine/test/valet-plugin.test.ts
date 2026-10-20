@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
-import { validateValetPlugin, type ValetPlugin, type NormalizedEvent, type EventCatalogEntry } from "../src/index.js";
+import {
+  validateValetPlugin,
+  subjectService,
+  type ValetPlugin,
+  type NormalizedEvent,
+  type EventCatalogEntry,
+  type DeriveContext,
+} from "../src/index.js";
 
 function minimalPlugin(): ValetPlugin {
   return { name: "demo", version: "1.0.0" };
@@ -650,6 +657,157 @@ describe("validateValetPlugin identityLink", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.issues.some((i) => i.path === "identityLink.oauthService")).toBe(true);
+    }
+  });
+});
+
+// Native integration credential policy, Part A
+// (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+describe("validateValetPlugin native classification", () => {
+  it("accepts a native plugin that names its app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "demo:app" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts native: false with no app credential service", () => {
+    expect(validateValetPlugin({ ...minimalPlugin(), native: false }).ok).toBe(true);
+  });
+
+  it("rejects a non-boolean native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: "yes" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("native");
+  });
+
+  it("rejects a native plugin with no app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an app credential service on a plugin that is not native", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), appCredentialService: "demo:app" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+
+  it("rejects an empty app credential service", () => {
+    const res = validateValetPlugin({ ...minimalPlugin(), native: true, appCredentialService: "" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.issues.map((i) => i.path)).toContain("appCredentialService");
+  });
+});
+
+describe("subjectService", () => {
+  it("returns the prefix before the first colon", () => {
+    expect(subjectService("github:acme/x#1")).toBe("github");
+    expect(subjectService("slack:T001/C001/1712345678.000100")).toBe("slack");
+    expect(subjectService("linear:team/ENG")).toBe("linear");
+  });
+});
+
+describe("validateValetPlugin event contracts", () => {
+  function derivedEventDef(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    return {
+      key: "github.pull_request.checks_completed",
+      description: "All checks finished",
+      sources: ["github.check_run.completed"],
+      derive: async (
+        _ctx: DeriveContext,
+        _subject: string,
+        _source: NormalizedEvent,
+      ): Promise<NormalizedEvent | null> => null,
+      ...overrides,
+    };
+  }
+
+  it("accepts a plugin with eventSubjects, derivedEvents, and statusResolver", () => {
+    const plugin: Record<string, unknown> = {
+      name: "demo",
+      version: "1.0.0",
+      eventSubjects: {
+        fromUrl: () => null,
+        label: (subject: string) => subject,
+        url: () => null,
+      },
+      derivedEvents: [derivedEventDef()],
+      statusResolver: {
+        resolve: async () => null,
+      },
+    };
+    const res = validateValetPlugin(plugin);
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts a plugin without eventSubjects, derivedEvents, or statusResolver (unchanged behavior)", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0" });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a derived event with an empty key, naming derivedEvents[0].key", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      derivedEvents: [derivedEventDef({ key: "" })],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].key")).toBe(true);
+    }
+  });
+
+  it("rejects a derived event with an empty sources array", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      derivedEvents: [derivedEventDef({ sources: [] })],
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].sources")).toBe(true);
+    }
+  });
+
+  it("rejects a derived event missing derive", () => {
+    const { derive: _omit, ...rest } = derivedEventDef();
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", derivedEvents: [rest] });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "derivedEvents[0].derive")).toBe(true);
+    }
+  });
+
+  it("accepts a plugin with a naturalSubject function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      naturalSubject: (_event: NormalizedEvent) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a naturalSubject that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", naturalSubject: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "naturalSubject")).toBe(true);
+    }
+  });
+
+  it("accepts a plugin with a conversationalTwin function", () => {
+    const res = validateValetPlugin({
+      name: "demo",
+      version: "1.0.0",
+      conversationalTwin: (_event: NormalizedEvent, _identity: { botUserId?: string }) => null,
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects a conversationalTwin that is not a function", () => {
+    const res = validateValetPlugin({ name: "demo", version: "1.0.0", conversationalTwin: "nope" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.issues.some((i) => i.path === "conversationalTwin")).toBe(true);
     }
   });
 });

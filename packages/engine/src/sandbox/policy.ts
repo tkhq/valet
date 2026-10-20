@@ -4,6 +4,7 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCommandChannel,
   SandboxCommandChannelOptions,
@@ -19,6 +20,8 @@ export const SANDBOX_READY_TIMEOUT_MS = 60_000;
 
 /** Default `exec`/`execJob` output cap when the caller passes none (decision 3). */
 const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
+/** A detached job's log cap when the caller sets none: 2 GiB (`VALET_JOB_LOG_MAX_BYTES` default). */
+const DEFAULT_DETACHED_MAX_OUTPUT_BYTES = 2 * 1024 ** 3;
 
 /**
  * Transport-level failure signatures (decision 3). A rejection whose message
@@ -295,7 +298,12 @@ export class PolicySandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
-    const effectiveOpts: ExecOpts = { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
+    const effectiveOpts: ExecOpts = opts?.detached
+      // A detached sandbox process (wakeups spec B4): a large cap, so a
+      // chatty job cannot fill the node disk or the api heap (fix wave 2,
+      // M6, H2), and no pending-job entry because a lease owns its lifetime.
+      ? { ...opts, maxOutputBytes: opts.maxOutputBytes ?? DEFAULT_DETACHED_MAX_OUTPUT_BYTES }
+      : { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
     // Job-mode kickoff only — the job's own runtime is polled, not awaited,
     // so this span measures dispatch latency, not the command's duration.
     return withSpan(
@@ -313,18 +321,20 @@ export class PolicySandbox implements Sandbox {
         }, { signal: opts?.signal });
         recordSandboxExec(Date.now() - startedAt, true);
         // Track as pending until a terminal poll or cancelJob clears it.
-        this.pendingJobs.add(handle.execId);
+        // A detached process is not tracked: its lifetime belongs to a
+        // lease, not the run-start reconcile window.
+        if (!opts?.detached) this.pendingJobs.add(handle.execId);
         return handle;
       },
     );
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     let poll: JobPoll;
     try {
       poll = await this.dispatch((sb) => {
         if (!sb.pollJob) throw jobUnsupportedError();
-        return sb.pollJob(execId, offset);
+        return opts === undefined ? sb.pollJob(execId, offset) : sb.pollJob(execId, offset, opts);
       });
     } catch (err) {
       // A transport failure (SandboxUnavailableError) or epoch bump

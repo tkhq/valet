@@ -391,8 +391,8 @@ export const agentSessions = pgTable(
     docker: boolean("docker").notNull().default(false),
     // Persisted repository capability. Failed YAML reads preserve this value.
     kubernetes: boolean("kubernetes").notNull().default(false),
-    // Per-child CPU and memory overrides from the task tool. Null means the
-    // session uses repository or deployment defaults.
+    // Per-child CPU, memory, and scratch overrides from the task tool. Null
+    // means the session uses repository or deployment defaults.
     sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),
     // Which authoring surface the session drives ('code' default,
     // 'security' = engagement runner). Distinct from the engine's
@@ -714,7 +714,7 @@ export const eventReceipts = pgTable("event_receipts", {
   subscriptions: jsonb("subscriptions").notNull().default([]),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id)]);
+}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id), index("event_receipts_event").on(t.orgId, t.eventId)]);
 
 export const eventDropLog = pgTable(
   "event_drop_log",
@@ -1948,6 +1948,11 @@ export const events = pgTable(
     payload: jsonb("payload").notNull(),
     occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
     receivedAt: bigint("received_at", { mode: "number" }).notNull(),
+    /** Normalized subjects (spec 2026-10-15: event wakeups, Part A1), coarse
+     * to fine. Null on a row stored before this column existed; delivery-time
+     * matching treats that as no subjects, so a `subject` filter fails closed
+     * for it rather than matching. */
+    subjects: text("subjects").array(),
   },
   (t) => [
     uniqueIndex("events_service_dedupe").on(t.service, t.dedupeKey),
@@ -1968,7 +1973,10 @@ export const eventSubscriptions = pgTable(
     eventKeys: jsonb("event_keys").notNull(),
     /** `{ field, op: "eq"|"in"|"prefix"|"contains", value }[]` over catalog-declared fields. */
     filters: jsonb("filters").notNull().default([]),
-    /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
+    /** `{ kind: "workflow", workflowId } | { kind: "assistant" } | { kind: "signal" }`.
+     * Rows written before the rename may say `orchestrator`, `presence`,
+     * and an `orchestrator` scope field; read them through
+     * `events/target-names.ts#readStoredTarget`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
     /** Who may invoke a team assistant by mention. Null reads as `team` —
@@ -2015,6 +2023,12 @@ export const followedThreads = pgTable(
      * must narrow every thread it opened. Null on a follow bound before the
      * column, and on one no mention rule bound; both read as team-only. */
     subscriptionId: text("subscription_id"),
+    /** The assistant thread the binding delivery landed in (spec
+     * 2026-10-16: delivery threads, Part B step 5). Later messages in the
+     * Slack thread go there. Null on a follow bound before the columns; the
+     * router then keeps the Slack thread key (`slack:{channel}:{threadTs}`). */
+    sessionId: text("session_id"),
+    threadId: text("thread_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
@@ -2033,26 +2047,32 @@ export const workflowSchedules = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull().default("user"),
     ownerId: text("owner_id").notNull(),
-    /** Fire target: start a workflow run, or prompt the orchestrator
-     * (V1's `schedule_target=orchestrator`). `workflow_id`/`prompt` are
-     * each required only for their own kind. */
-    targetKind: text("target_kind", { enum: ["workflow", "orchestrator"] })
+    /** Fire target: start a workflow run, or prompt the assistant.
+     * `workflow_id`/`prompt` are each required only for their own kind.
+     * New rows store `assistant`. Rows written before the rename store
+     * `orchestrator`, which reads as `assistant` through
+     * `readScheduleTargetKind` (spec 2026-10-16: presence hub, Part H). */
+    targetKind: text("target_kind", { enum: ["workflow", "assistant", "orchestrator"] })
       .notNull()
       .default("workflow"),
     workflowId: text("workflow_id"),
-    /** Prompt submitted to the orchestrator's "schedules" thread when
-     * `target_kind = 'orchestrator'`. */
+    /** Prompt submitted to the assistant when `target_kind` is `assistant`
+     * (or the old `orchestrator`). */
     prompt: text("prompt"),
-    /** Which of the owner's assistants the prompt goes to, when
-     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
-     * on any schedule that named none — both read as "the owner's default".
-     * Ignored for a `workflow` target, which has no assistant. */
+    /** Where an assistant-prompt schedule's prompts land: an
+     * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).
+     * Null reads as `{ mode: "own" }`. Always null for a `workflow` target. */
+    threadPolicy: jsonb("thread_policy"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** Why the scheduler disabled this schedule: the pin text when its
+     * `existing` thread cannot receive deliveries (spec 2026-10-16: presence
+     * hub, Part D). Enabling the schedule or changing its pin clears it. */
+    disabledReason: text("disabled_reason"),
     /** `repo` rows are armed from a mirrored workflow file. The sync updates
      * and deletes only these, so a schedule a person armed on the same
      * workflow is never touched. */
@@ -2100,10 +2120,15 @@ export const eventDeliveries = pgTable(
     lastError: text("last_error"),
     deliveredAt: bigint("delivered_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** The Destination resolved at ingest (spec 2026-10-16: delivery threads
+     * and claims, Part C step 6). NULL means resolve at dispatch from the
+     * binding and the policy only (no waiter consult, Part C step 7). */
+    destination: jsonb("destination"),
   },
   (t) => [
     index("event_deliveries_due").on(t.status, t.nextAttemptAt),
     index("event_deliveries_event").on(t.eventId),
+    index("event_deliveries_subscription").on(t.subscriptionId, t.createdAt),
   ],
 );
 

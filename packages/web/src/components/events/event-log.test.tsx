@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * The Log merges this workspace's events and the organization's problems.
- * These cases pin the owner it asks for (it waits for the owner), the two
- * chips, and how each kind of row reads.
+ * These cases pin the owner it asks for (it waits for the owner), the
+ * chips (All, Problems, one per service), the receipts disclosure, and how
+ * each kind of row reads.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -14,6 +15,7 @@ let lastParams: { owner: OwnerFilter | undefined; problems: boolean; diagnostics
 let items: EventLogItem[] = [];
 let owner: OwnerFilter | undefined = { ownerType: "user", ownerId: "u1" };
 let role = "member";
+let hasNext = false;
 
 vi.mock("~/api/events", () => ({
   useEventLog: (params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string }) => {
@@ -21,15 +23,20 @@ vi.mock("~/api/events", () => ({
     const held = params.owner === undefined;
     return {
       data: held ? undefined : { pages: [{ items, nextCursor: null, lastEventAt: null, windowDays: 30 }] },
-      isPending: held, error: null, hasNextPage: false, isFetchingNextPage: false, fetchNextPage: vi.fn(),
+      isPending: held, error: null, hasNextPage: hasNext, isFetchingNextPage: false, fetchNextPage: vi.fn(),
     };
   },
+  useEventSubscriptions: () => ({ data: { subscriptions: [] } }),
+  useEventReceipts: () => ({ data: undefined, isPending: true, error: null, refetch: vi.fn() }),
 }));
+vi.mock("~/api/workflows", () => ({ useWorkflows: () => ({ data: { workflows: [] } }) }));
 vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "u1", orgRole: role }, error: null, isError: false }) }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
-vi.mock("./receipts-panel", () => ({ ReceiptsPanel: () => <p>Receipts list</p> }));
+vi.mock("./receipts-panel", () => ({ ReceiptsPanel: () => <p>Receipts list</p>, EventReceiptStages: () => null }));
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
+  Link: ({ children, to, params }: { children: ReactNode; to: string; params?: Record<string, string> }) => (
+    <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a>
+  ),
 }));
 
 import { EventLog, type LogFilter } from "./event-log";
@@ -39,6 +46,7 @@ afterEach(() => {
   items = [];
   owner = { ownerType: "user", ownerId: "u1" };
   role = "member";
+  hasNext = false;
 });
 
 function renderLog(filter: LogFilter = "all") {
@@ -49,7 +57,8 @@ function renderLog(filter: LogFilter = "all") {
 
 const event: EventLogItem = {
   kind: "event", id: "ev_1", at: Date.now(), status: "failed", service: "github", eventKey: "github.pr.opened",
-  summary: "PR #7 opened", actor: "octocat", reason: null, detail: null, deliveryCount: 2,
+  summary: "PR #7 opened", actor: "octocat", reason: null, detail: null, deliveryCount: 2, place: "acme/app#7",
+  deliveries: [{ id: "d1", subscriptionId: "sub_1", status: "dead", attempts: 4, lastError: "boom", deliveredAt: null }],
 };
 const problem: EventLogItem = {
   kind: "problem", id: "drop_1", at: Date.now() - 1000, status: "filtered", service: "slack", eventKey: "slack.message",
@@ -78,34 +87,102 @@ describe("EventLog", () => {
     expect(onFilterChange).toHaveBeenCalledWith("all");
   });
 
-  it("lists events and problems in one list, each with its status", () => {
+  it("lists events as activity sentences and problems in one list, each with its status", () => {
     items = [event, problem];
     renderLog();
-    expect(screen.getByRole("link", { name: "PR #7 opened" }).getAttribute("href")).toBe("/events/$eventId");
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" }).getAttribute("href")).toBe("/presence/events/ev_1");
+    expect(screen.getByText(/gave up after 4 attempts/)).toBeTruthy();
+    expect(screen.getByText(/PR #7 opened · octocat/)).toBeTruthy();
     expect(screen.getByText(/The text did not match\./)).toBeTruthy();
     expect(screen.getByText("Failed")).toBeTruthy();
-    expect(screen.getByText(/2 deliveries/)).toBeTruthy();
   });
 
-  it("offers raw receipts to admins only, in place of the list", () => {
-    renderLog();
-    expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
+  it("keeps only a service's rows on its chip, and still asks for the whole Log", () => {
+    items = [event, problem];
+    renderLog("slack");
+    expect(lastParams?.problems).toBe(false);
+    expect(screen.getByRole("button", { name: "Slack" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("link", { name: "Pr opened in acme/app#7" })).toBeNull();
+    expect(screen.getByText(/The text did not match\./)).toBeTruthy();
+  });
+
+  it("points to Load more when a service chip hides every loaded row and more rows wait", () => {
+    items = [event];
+    hasNext = true;
+    renderLog("slack");
+    expect(screen.getByText("No Slack events in the loaded rows. Load more to look further.")).toBeTruthy();
+    expect(screen.queryByText("Nothing matches. Choose All.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+    cleanup();
+    hasNext = false;
+    renderLog("slack");
+    expect(screen.getByText("Nothing matches. Choose All.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  });
+
+  it("offers receipts to admins only, inside the open Diagnostics disclosure", () => {
+    render(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={vi.fn()} />);
+    expect(screen.getByText("Diagnostics").closest("details")?.open).toBe(true);
+    expect(screen.queryByText("Receipts list")).toBeNull();
     cleanup();
     role = "admin";
-    renderLog("receipts");
+    items = [event];
+    render(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={vi.fn()} />);
     expect(screen.getByText("Receipts list")).toBeTruthy();
-    expect(lastParams?.owner).toBeUndefined();
+    // The list stays, scoped to the workspace.
+    expect(screen.getByRole("link", { name: "Pr opened in acme/app#7" })).toBeTruthy();
+    expect(lastParams?.owner).toEqual({ ownerType: "user", ownerId: "u1" });
   });
 });
 
-it("opts into diagnostics and stops requesting them when switched off", () => {
+it("asks for diagnostics only while the caller's disclosure is open, and has no checkbox", () => {
+  role = "admin";
+  const onDiagnosticsChange = vi.fn();
+  const { rerender } = render(
+    <EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics={false} onDiagnosticsChange={onDiagnosticsChange} />,
+  );
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(lastParams?.diagnostics).toBe(false);
+  const details = screen.getByText("Diagnostics").closest("details")!;
+  details.open = true;
+  fireEvent(details, new Event("toggle"));
+  expect(onDiagnosticsChange).toHaveBeenCalledWith(true);
+  rerender(<EventLog filter="all" onFilterChange={vi.fn()} query="" onQueryChange={vi.fn()} diagnostics onDiagnosticsChange={onDiagnosticsChange} />);
+  expect(lastParams?.diagnostics).toBe(true);
+});
+
+it("has no disclosure when the caller does not keep its state", () => {
   role = "admin";
   renderLog();
+  expect(screen.queryByText("Diagnostics")).toBeNull();
   expect(lastParams?.diagnostics).toBe(false);
-  expect(screen.queryByRole("button", { name: "Raw receipts" })).toBeNull();
-  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
-  expect(lastParams?.diagnostics).toBe(true);
-  expect(screen.getByRole("button", { name: "Raw receipts" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("checkbox", { name: "Show diagnostics" }));
-  expect(lastParams?.diagnostics).toBe(false);
+});
+
+describe("EventLog empty state", () => {
+  function renderEmpty(props: { filter?: LogFilter; query?: string; place?: { key: string; name: string } }) {
+    render(
+      <EventLog
+        filter={props.filter ?? "all"} onFilterChange={vi.fn()} query={props.query ?? ""} onQueryChange={vi.fn()}
+        {...(props.place !== undefined ? { place: props.place.key, placeName: props.place.name } : {})}
+      />,
+    );
+  }
+
+  it("says nothing happened in the place when only the place filters", () => {
+    renderEmpty({ place: { key: "github:acme/api", name: "acme/api" } });
+    expect(screen.getByText("Nothing happened in acme/api in the last 30 days.")).toBeTruthy();
+  });
+
+  it("names the fix when a place and another filter match nothing", () => {
+    renderEmpty({ filter: "problems", place: { key: "github:acme/api", name: "acme/api" } });
+    expect(screen.getByText("Nothing matches. Choose All or remove the place.")).toBeTruthy();
+    cleanup();
+    renderEmpty({ query: "deploy" });
+    expect(screen.getByText("Nothing matches. Choose All or clear Search.")).toBeTruthy();
+  });
+
+  it("says no activity yet only when nothing filters", () => {
+    renderEmpty({});
+    expect(screen.getByText(/^No activity yet\./)).toBeTruthy();
+  });
 });

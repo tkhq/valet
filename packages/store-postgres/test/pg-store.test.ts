@@ -19,6 +19,8 @@ const DATA_TABLES = [
   "engine_events",
   "engine_threads",
   "engine_sessions",
+  "engine_wakeups",
+  "engine_leases",
 ];
 
 async function truncateAll(db: PgDb): Promise<void> {
@@ -48,6 +50,13 @@ function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
   };
 }
 
+/** Gives the wakeup an unknown cause, which no row mapper accepts. */
+function corrupter(db: PgDb): (_store: unknown, id: string) => Promise<void> {
+  return async (_store, id) => {
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = $1`, [id]);
+  };
+}
+
 describe("PgSessionStore (PGlite)", () => {
   const pglite = new PGlite();
   const db = pgDbFromPglite(pglite);
@@ -57,8 +66,109 @@ describe("PgSessionStore (PGlite)", () => {
     await db.close();
   });
 
-  runSessionStoreContract("PgSessionStore (PGlite)", { factory });
+  runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
+
+  it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", status: "running" as const, reason: "r", command: "c", execId: "job-1",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_bad", kind: "process", createdAt: 0 });
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = 'wk_bad'`);
+    await store.createLease({ id: "ls_good", sessionId: "s", ownerKind: "hold", reason: "r", createdAt: 1, deadlineAt: 9 });
+    await store.createLease({ id: "ls_bad", sessionId: "s", ownerKind: "hold", reason: "r", createdAt: 0, deadlineAt: 9 });
+    await db.query(`UPDATE engine_leases SET owner_kind = 'bogus' WHERE id = 'ls_bad'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.listDueWakeups(10, 10)).rows.map((w) => w.id)).toEqual(["wk_good"]);
+      expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_good"]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_bad"), expect.anything());
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("getWakeup and the count read skip and count an unreadable row (fix wave 3, data L4)", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", status: "running" as const, reason: "r", command: "c", execId: "job-1",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_bad", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_badstatus", kind: "process" });
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = 'wk_bad'`);
+    await db.query(`UPDATE engine_wakeups SET status = 'paused' WHERE id = 'wk_badstatus'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await store.getWakeup("wk_bad")).toBeNull();
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_bad"), expect.anything());
+      errors.mockClear();
+      expect(await store.countWakeupsByKindAndStatus(["pending", "running"])).toEqual([
+        { kind: "process", status: "running", count: 2 },
+      ]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("paused"));
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("skips and counts an event waiter whose match_json or event_buffer is unreadable", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", kind: "event" as const, status: "running" as const, reason: "r",
+      subjects: ["github:acme/lean-proofs#42"], deadlineAt: 5,
+      eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+      eventBuffer: [], logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good" });
+    await store.createWakeup({ ...base, id: "wk_badmatch" });
+    await store.createWakeup({ ...base, id: "wk_badbuf" });
+    await db.query(`UPDATE engine_wakeups SET match_json = '{"clauses":"nope","once":true,"self":[]}' WHERE id = 'wk_badmatch'`);
+    await db.query(`UPDATE engine_wakeups SET event_buffer = 'not json' WHERE id = 'wk_badbuf'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.findEventWaiters(["github:acme/lean-proofs#42"])).map((w) => w.id)).toEqual(["wk_good"]);
+      expect((await store.listDueWakeups(10, 10)).rows.map((w) => w.id)).toEqual(["wk_good"]);
+      expect(await store.getWakeup("wk_badbuf")).toBeNull();
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_badmatch"), expect.anything());
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_badbuf"), expect.anything());
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("appendEventMatch tells a refusal at the buffer cap from a duplicate", async () => {
+    const store = await factory();
+    const digest = (dedupeKey: string) => ({ key: "k", subjects: ["s"], summary: "x", occurredAt: "t", dedupeKey });
+    await store.createWakeup({
+      id: "wk_full", sessionId: "s", threadId: "t", kind: "event", status: "running", reason: "r",
+      subjects: ["s"], eventMatch: { clauses: [{ key: "k" }], once: false, self: [] },
+      eventBuffer: Array.from({ length: 200 }, (_, i) => digest(`f-${i}`)), eventSeen: ["seen-1"],
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    });
+    const query = vi.spyOn(db, "query");
+    try {
+      expect(await store.appendEventMatch("wk_full", digest("new"), 2)).toBe(false);
+      expect(await store.appendEventMatch("wk_full", digest("f-3"), 3)).toBe(false);
+      expect(await store.appendEventMatch("wk_full", digest("seen-1"), 4)).toBe(false);
+      const rows = await Promise.all(query.mock.results.map(async (r) => (await r.value).rows[0]));
+      expect(rows.map((row) => row.full)).toEqual([true, false, false]);
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("creates the event subjects index as a partial GIN index", async () => {
+    await factory();
+    const r = await db.query(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_wakeups' AND indexname = 'engine_wakeups_event_subjects'`,
+    );
+    expect(String(r.rows[0]?.indexdef)).toMatch(/USING gin \(subjects\) WHERE \(\(kind = 'event'::text\) AND \(status = 'running'::text\)\)/);
+  });
 
   it("bounds recent history in the database after excluding compactions", async () => {
     const store = await factory();
@@ -96,6 +206,6 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PgSessionStore (docker-pg)", ()
     await db.close();
   });
 
-  runSessionStoreContract("PgSessionStore (docker-pg)", { factory });
+  runSessionStoreContract("PgSessionStore (docker-pg)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (docker-pg)", { factory });
 });

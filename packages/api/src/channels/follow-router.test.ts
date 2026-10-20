@@ -10,10 +10,10 @@ import { ensureAssistantExecution } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { linkIdentity } from "./identity-links.js";
-import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
+import { followRouteFor, handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
 import { eq, sql } from "drizzle-orm";
-import { eventSubscriptions, teams, teamMembers, orgMembers } from "../schema/index.js";
+import { eventSubscriptions, sessionThreads, teams, teamMembers, orgMembers } from "../schema/index.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { followedMessageActor } from "../events/team-slack-gate.js";
 
@@ -68,6 +68,8 @@ describe("handleFollowedMessage", () => {
     await appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
     await linkIdentity(appDb, { provider: "slack", externalId: "U9", userId: USER });
     engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),
@@ -88,7 +90,7 @@ describe("handleFollowedMessage", () => {
     faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")));
     const first = { displayName: "Release helper", avatarUrl: "https://example.com/first.webp" };
     const edited = { displayName: "Incident helper" };
-    const target = { kind: "orchestrator", orchestrator: "user" };
+    const target = { kind: "assistant", assistant: "user" };
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "presence-follow", orgId: ORG, ownerType: "user", ownerId: USER, createdBy: USER,
       name: "Replies", eventKeys: ["slack.app_mention"], filters: [], target: { ...target, presence: first },
@@ -193,7 +195,7 @@ describe("handleFollowedMessage", () => {
     expect(await followedMessageActor(testDb.appDb, teamOnly, "OTHER")).toBeNull();
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "org-wide-rule", orgId: ORG, ownerType: "team", ownerId: "team-follow", createdBy: USER, name: "Org wide",
-      eventKeys: ["slack.app_mention"], filters: [], target: { kind: "orchestrator", follow: true }, audience: "organization",
+      eventKeys: ["slack.app_mention"], filters: [], target: { kind: "assistant", follow: true }, audience: "organization",
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     });
     const follow = { ...teamOnly, subscriptionId: "org-wide-rule" };
@@ -245,7 +247,7 @@ describe("handleFollowedMessage", () => {
     await testDb.appDb.insert(eventSubscriptions).values({
       id: "sub-follow", orgId: ORG, ownerType: "team", ownerId: "team-follow",
       name: "Team replies", eventKeys: ["slack.app_mention"], filters: [],
-      target: { kind: "orchestrator", orchestrator: "team", teamId: "team-follow" },
+      target: { kind: "assistant", assistant: "team", teamId: "team-follow" },
       audience, enabled: true, createdBy: USER, createdAt: now, updatedAt: now,
     });
   }
@@ -411,7 +413,7 @@ describe("handleFollowedMessage", () => {
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "<@UBOT> help",
     }, "EvMessage") });
     const mention = () => deliverToAssistantThread(deps, {
-      orgId: ORG, owner: { type: "user", id: USER }, actorUserId: USER, threadKey: "slack:C1:1.2",
+      orgId: ORG, owner: { type: "user", id: USER }, actorUserId: USER, destination: { kind: "key", key: "slack:C1:1.2" },
       signal: { kind: "signal", signalType: "slack.app_mention", body: "help", origin: { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.7", reply: "auto" } },
       dispatchId: "event:mention-delivery", mismatchReason: "test",
     });
@@ -426,6 +428,36 @@ describe("handleFollowedMessage", () => {
       expect(prompts).toHaveLength(1);
       expect(prompts[0]).toMatchObject({ signal: { origin: { reply: "auto" } } });
     });
+  });
+
+  it("followRouteFor reads the Slack event payload the way the router reads its envelope", async () => {
+    // Claim resolution and the dispatcher call `followRouteFor` with the
+    // stored event payload (the envelope's `event`). The router reads the
+    // whole envelope. Both must agree on every message.
+    faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")));
+    const deps = { db: testDb.appDb, engineHost, botUserId: "UBOT" };
+    const cases: Array<{ name: string; routed: boolean; follow: boolean; event: Record<string, unknown> }> = [
+      { name: "plain reply", routed: true, follow: true, event: { user: "U9", text: "on it" } },
+      { name: "addressed post", routed: false, follow: true, event: { user: "U9", text: "<@UBOT> on it" } },
+      { name: "bot post", routed: false, follow: true, event: { user: "U9", bot_id: "B1", text: "on it" } },
+      { name: "edit", routed: false, follow: true, event: { user: "U9", subtype: "message_changed", text: "on it" } },
+      { name: "unlinked sender", routed: false, follow: true, event: { user: "OTHER", text: "on it" } },
+      { name: "unfollowed thread", routed: false, follow: false, event: { user: "U9", text: "on it" } },
+    ];
+    for (const [i, c] of cases.entries()) {
+      const threadTs = `2.00000${i}`;
+      if (c.follow) {
+        await upsertFollowedThread(testDb.appDb, {
+          orgId: ORG, channelType: "slack", channelId: "C1", threadTs, ownerType: "user", ownerId: USER, createdBy: USER,
+        });
+      }
+      const event = { type: "message", channel: "C1", thread_ts: threadTs, ts: `3.00000${i}`, ...c.event };
+      const predicted = (await followRouteFor(testDb.appDb, { orgId: ORG, botUserId: "UBOT", payload: event })) !== null;
+      await handleFollowedMessage(deps, { orgId: ORG, raw: envelope(event, `EvEq${i}`) });
+      // The router advances the cursor only after it delivers.
+      const after = await findFollowedThread(testDb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs });
+      expect({ name: c.name, predicted, delivered: after?.lastSeenTs === event.ts }).toEqual({ name: c.name, predicted: c.routed, delivered: c.routed });
+    }
   });
 
   it("routes a followed threaded message to the bound assistant thread as an overheard signal", async () => {
@@ -464,6 +496,53 @@ describe("handleFollowedMessage", () => {
       reply: "manual",
       messageTs: "1.7",
     });
+  });
+
+  it("routes a followed message to the thread the binding mention landed in", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, { type: "org", id: ORG }, { actorUserId: USER, orgId: ORG });
+    const landed = await session.createThread("sub:mention-rule:delivery-1");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "org", ownerId: ORG, createdBy: USER, target: { sessionId: session.id, threadId: landed.id },
+    });
+
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "any update?" }) });
+
+    let userEntry: MessageEntry | undefined;
+    for (let i = 0; i < 100; i++) {
+      const entries = await session.providers.store.getEntries(session.id, landed.id);
+      userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry | undefined;
+      if (userEntry) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(userEntry?.content).toBe("any update?");
+    expect(await session.threadByKey("slack:C1:1.2")).toBeNull();
+  });
+
+  it.each([
+    ["archived", "archived or deleted"],
+    ["deleted", "original thread is unavailable"],
+  ] as const)("refuses a followed message whose bound thread was %s, and delivers nothing", async (state, error) => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, { type: "org", id: ORG }, { actorUserId: USER, orgId: ORG });
+    const landed = await session.createThread("sub:mention-rule:delivery-gone");
+    const threadId = state === "deleted" ? "th-deleted" : landed.id;
+    if (state === "archived") {
+      await testDb.appDb.insert(sessionThreads).values({ id: landed.id, sessionId: session.id, createdAt: 1, archivedAt: Date.now() });
+    }
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "org", ownerId: ORG, createdBy: USER, target: { sessionId: session.id, threadId },
+    });
+
+    await expect(handleFollowedMessage(deps, {
+      orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "still there?" }, "EvGone"),
+    })).rejects.toThrow(error);
+    const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'slack:follow:EvGone'`) as { rows: unknown[] };
+    expect(admitted.rows).toHaveLength(0);
+    // The router never falls back to the Slack thread key.
+    expect(await session.threadByKey("slack:C1:1.2")).toBeNull();
   });
 
   it("prepends the missed window and advances last_seen_ts", async () => {

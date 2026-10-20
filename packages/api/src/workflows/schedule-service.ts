@@ -5,10 +5,13 @@ import { isDeepStrictEqual } from "node:util";
  * runs; this module owns validation and the cron math so both the loop and
  * the agent tools share one implementation.
  */
+import type { Principal } from "@valet/engine";
+import { readThreadPolicy, validateThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { CronExpressionParser } from "cron-parser";
 import { and, eq } from "drizzle-orm";
 import { proposalId } from "../events/proposals.js";
+import { existingThreadError, NO_SUBJECT_ERROR } from "../events/thread-policy-write.js";
 import { randomUUID } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
@@ -24,12 +27,15 @@ import {
   type WorkflowOwnerRef,
 } from "./service.js";
 import { teamArmBlock, type TeamServiceReadinessDeps } from "./team-service-readiness.js";
+import { readScheduleTargetKind } from "../events/target-names.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
-  targetKind: "workflow" | "orchestrator";
+  targetKind: "workflow" | "assistant";
   workflowId?: string;
   prompt?: string;
+  /** Absent reads as `{ mode: "own" }`. */
+  thread?: AssistantThreadPolicy;
   name: string;
   cron: string;
   timezone: string;
@@ -37,6 +43,12 @@ export interface WorkflowScheduleSummary {
   input?: unknown;
   lastFiredAt: number | null;
   nextFireAt: number;
+  /** Why the scheduler disabled this schedule. Absent when it recorded none. */
+  disabledReason?: string;
+  /** The workspace the schedule belongs to: for an assistant-prompt
+   * schedule, the workspace whose assistant receives the prompts. */
+  ownerType: "user" | "team" | "org";
+  ownerId: string;
 }
 
 /**
@@ -60,7 +72,7 @@ export function nextFireAt(
     // invalid tz strings; Intl throws, which is the behavior we want.
     new Intl.DateTimeFormat("en-US", { timeZone: timezone });
   } catch {
-    return { ok: false, error: `unknown timezone ${JSON.stringify(timezone)} — use an IANA name like "America/Denver"` };
+    return { ok: false, error: `Unknown timezone ${JSON.stringify(timezone)}. Use an IANA name like "America/Denver".` };
   }
   try {
     const interval = CronExpressionParser.parse(cron, { currentDate: new Date(from), tz: timezone });
@@ -73,9 +85,11 @@ export function nextFireAt(
 function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowScheduleSummary {
   return {
     scheduleId: row.id,
-    targetKind: row.targetKind,
+    // A stored `orchestrator` row reads as `assistant` (spec 2026-10-16: presence hub, Part H).
+    targetKind: readScheduleTargetKind(row.targetKind),
     workflowId: row.workflowId ?? undefined,
     prompt: row.prompt ?? undefined,
+    ...(row.threadPolicy !== null ? { thread: readThreadPolicy(row.threadPolicy) } : {}),
     name: row.name,
     cron: row.cron,
     timezone: row.timezone,
@@ -83,8 +97,39 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     input: row.input ?? undefined,
     lastFiredAt: row.lastFiredAt,
     nextFireAt: row.nextFireAt,
+    ...(row.disabledReason !== null ? { disabledReason: row.disabledReason } : {}),
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
   };
 }
+
+/**
+ * Validate a schedule's thread policy (spec 2026-10-16: delivery threads,
+ * Part A). Only an assistant-prompt schedule takes one, and never
+ * `subject`: a schedule firing has no subject. An `existing` thread must be
+ * an open assistant thread of the schedule's owner that `writer` can read.
+ */
+async function scheduleThreadError(
+  deps: ScheduleThreadDeps,
+  writer: WorkflowOwner,
+  owner: Principal,
+  targetKind: "workflow" | "assistant",
+  thread: unknown,
+): Promise<string | null> {
+  if (targetKind !== "assistant") {
+    return "A thread policy applies only to an assistant-prompt schedule. Remove thread from this workflow schedule.";
+  }
+  const shapeError = validateThreadPolicy(thread);
+  if (shapeError) return shapeError;
+  if (readThreadPolicy(thread).mode === "subject") return NO_SUBJECT_ERROR;
+  // A team key is no person: it reads only what the whole team shares.
+  const viewer = { orgId: writer.orgId, userId: writer.principal?.type === "team" ? undefined : writer.userId };
+  return existingThreadError({ db: deps.db, engineCredentials: deps.credentials, onePassword: deps.onePassword }, viewer, owner, thread);
+}
+
+/** What a schedule write reads beyond its own rows: the Slack credential the
+ * thread read gate uses when a schedule pins an existing thread. */
+export type ScheduleThreadDeps = Pick<TeamServiceReadinessDeps, "db" | "credentials" | "onePassword">;
 
 /**
  * A schedule arms unattended work, so creating one needs the credential
@@ -106,12 +151,14 @@ export async function createWorkflowSchedule(
     timezone?: string;
     input?: unknown;
     /**
-     * The team that owns an orchestrator-prompt schedule, so a scheduled prompt
+     * The team that owns an assistant-prompt schedule, so a scheduled prompt
      * created in a team workspace fires the TEAM's assistant, not the caller's.
      * This service validates the team under its ownership lock. Ignored for a
      * workflow target (owner follows the workflow).
      */
     teamId?: string;
+    /** An `AssistantThreadPolicy` for a prompt schedule; validated here. */
+    thread?: unknown;
     proposalKey?: string;
   },
   now = Date.now(),
@@ -124,17 +171,14 @@ export async function createWorkflowSchedule(
   const hasWorkflow = typeof input.workflowId === "string" && input.workflowId.length > 0;
   const hasPrompt = typeof input.prompt === "string" && input.prompt.trim().length > 0;
   if (hasWorkflow === hasPrompt) {
-    return {
-      ok: false,
-      error: "provide exactly one of workflow_id (start a workflow run) or prompt (prompt the workspace assistant)",
-    };
+    return { ok: false, error: "Give the routine a prompt, or pick a workflow for it to run." };
   }
 
   // The schedule row's own `ownerType`/`ownerId` (below) is unrelated to run
   // billing for a workflow target — `scheduler.ts`'s `fire()` bills
   // `def.ownerType`/`ownerId` (the workflow's real owner) directly, by
-  // design, never these fields. They matter only for an orchestrator-prompt
-  // target, which `deliverToOrchestrator` reads.
+  // design, never these fields. They matter only for an assistant-prompt
+  // target, which `deliverToAssistant` reads.
   let scheduleOwner: { ownerType: "user" | "team" | "org"; ownerId: string } = {
     ownerType: "user",
     ownerId: owner.userId,
@@ -192,14 +236,21 @@ export async function createWorkflowSchedule(
     return { ok: false, error: "Assistant selection is not supported. Choose the schedule workspace instead." };
   }
 
+  if (input.thread !== undefined) {
+    const threadError = await scheduleThreadError(deps, owner,
+      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, hasWorkflow ? "workflow" : "assistant", input.thread);
+    if (threadError) return { ok: false, error: threadError };
+  }
+
   const values = {
     id: input.proposalKey ? proposalId("schedule", owner.orgId, scheduleOwner.ownerType, scheduleOwner.ownerId, input.proposalKey, hasWorkflow ? input.workflowId : undefined) : randomUUID(),
     orgId: owner.orgId,
     ownerType: scheduleOwner.ownerType,
     ownerId: scheduleOwner.ownerId,
-    targetKind: hasWorkflow ? "workflow" as const : "orchestrator" as const,
+    targetKind: hasWorkflow ? "workflow" as const : "assistant" as const,
     workflowId: hasWorkflow ? input.workflowId! : null,
     prompt: hasPrompt ? input.prompt! : null,
+    threadPolicy: input.thread !== undefined ? readThreadPolicy(input.thread) : null,
     name: input.name,
     cron: input.cron,
     timezone,
@@ -213,8 +264,8 @@ export async function createWorkflowSchedule(
 
   const result = (row: typeof workflowSchedules.$inferSelect): Awaited<ReturnType<typeof createWorkflowSchedule>> => {
     if (input.proposalKey && !isDeepStrictEqual(
-      [row.targetKind, row.workflowId, row.prompt, row.name, row.cron, row.timezone, row.input, row.createdBy],
-      [values.targetKind, values.workflowId, values.prompt, values.name, values.cron, values.timezone, values.input, values.createdBy],
+      [readScheduleTargetKind(row.targetKind), row.workflowId, row.prompt, row.threadPolicy, row.name, row.cron, row.timezone, row.input, row.createdBy],
+      [values.targetKind, values.workflowId, values.prompt, values.threadPolicy, values.name, values.cron, values.timezone, values.input, values.createdBy],
     )) return { ok: false, error: "This proposal key already names a different schedule. Use a new proposal_key." };
     return { ok: true, schedule: rowToSummary(row) };
   };
@@ -303,6 +354,35 @@ export async function accessibleScheduleRow(
   return canAccessTriggerRow(owner, await triggerAccessSets(db, owner), row) ? row : null;
 }
 
+/** The reasons the scheduler records when it turns a routine off. Each
+ * names the fix: the field whose edit answers it, or, for a deleted
+ * workflow, a new routine (a PATCH cannot change a routine's workflow). */
+export const EMPTY_PROMPT_REASON = "Its prompt is empty. Edit the routine and add a prompt.";
+export const WORKFLOW_DELETED_REASON = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
+export const BAD_CRON_REASON = "Its schedule does not parse. Edit the routine and fix the schedule.";
+
+/**
+ * Whether a PATCH answers the routine's recorded reason, so the reason
+ * clears: enabling the routine answers any reason; an edit of the field a
+ * reason names answers that reason (the schedule or its timezone for
+ * `BAD_CRON_REASON`, the prompt for `EMPTY_PROMPT_REASON`); a thread change
+ * answers the pin reason and any reason this list does not name. A PATCH
+ * cannot change a routine's workflow, so `WORKFLOW_DELETED_REASON` clears
+ * only on enable.
+ */
+export function patchAnswersReason(
+  reason: string | null,
+  patch: WorkflowSchedulePatch,
+  changed: { schedule: boolean; prompt: boolean },
+): boolean {
+  if (reason === null) return false;
+  if (patch.enabled === true) return true;
+  if (reason === BAD_CRON_REASON) return changed.schedule;
+  if (reason === EMPTY_PROMPT_REASON) return changed.prompt;
+  if (reason === WORKFLOW_DELETED_REASON) return false;
+  return patch.thread !== undefined;
+}
+
 export interface WorkflowSchedulePatch {
   name?: string;
   cron?: string;
@@ -310,6 +390,8 @@ export interface WorkflowSchedulePatch {
   enabled?: boolean;
   prompt?: string;
   input?: unknown;
+  /** `null` clears the policy; absent leaves it alone. Validated here. */
+  thread?: unknown;
 }
 
 /**
@@ -318,7 +400,7 @@ export interface WorkflowSchedulePatch {
  * transitions disabled → enabled (so a stale slot does not fire at once).
  */
 export async function updateWorkflowSchedule(
-  db: AppDb,
+  deps: ScheduleThreadDeps,
   owner: WorkflowOwner,
   scheduleId: string,
   patch: WorkflowSchedulePatch,
@@ -327,10 +409,11 @@ export async function updateWorkflowSchedule(
   | { ok: true; schedule: WorkflowScheduleSummary }
   | { ok: false; status: 400 | 404; error: string }
 > {
+  const db = deps.db;
   const row = await accessibleScheduleRow(db, owner, scheduleId);
   if (!row) return { ok: false, status: 404, error: "schedule not found" };
 
-  if (patch.prompt !== undefined && row.targetKind !== "orchestrator") {
+  if (patch.prompt !== undefined && readScheduleTargetKind(row.targetKind) !== "assistant") {
     return {
       ok: false,
       status: 400,
@@ -346,6 +429,12 @@ export async function updateWorkflowSchedule(
   }
   if (patch.prompt !== undefined && patch.prompt.trim() === "") {
     return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the workspace assistant." };
+  }
+
+  if (patch.thread !== undefined && patch.thread !== null) {
+    const threadError = await scheduleThreadError(deps, owner,
+      { type: row.ownerType, id: row.ownerId }, readScheduleTargetKind(row.targetKind), patch.thread);
+    if (threadError) return { ok: false, status: 400, error: threadError };
   }
 
   const cron = patch.cron ?? row.cron;
@@ -369,6 +458,13 @@ export async function updateWorkflowSchedule(
       enabled: patch.enabled ?? row.enabled,
       prompt: patch.prompt ?? row.prompt,
       input: patch.input !== undefined ? patch.input : row.input,
+      threadPolicy: patch.thread === undefined ? row.threadPolicy
+        : patch.thread === null ? null : readThreadPolicy(patch.thread),
+      // An edit that answers the recorded reason clears it (`patchAnswersReason`).
+      disabledReason: patchAnswersReason(row.disabledReason, patch, {
+        schedule: cronOrTzChanged,
+        prompt: patch.prompt !== undefined && patch.prompt !== row.prompt,
+      }) ? null : row.disabledReason,
       nextFireAt: nextAt,
       updatedAt: now,
     })

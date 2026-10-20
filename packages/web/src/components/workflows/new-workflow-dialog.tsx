@@ -1,5 +1,5 @@
-import { type Presence, validatePresence } from "@valet/shared";
-import { PresenceSettings } from "~/components/presence-settings";
+import { type Appearance, validateAppearance } from "@valet/shared";
+import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { useCreateWorkflow } from "~/api/workflows";
@@ -43,13 +43,13 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
     generation.current += 1;
     return () => { generation.current += 1; };
   }, [open]);
-  const [presence, setPresence] = useState<Presence>({});
+  const [presence, setPresence] = useState<Appearance>({});
   const [name, setName] = useState(DEFAULT_NAME);
   const [start, setStart] = useState<StartKind>("manual");
 
   async function submit() {
     const trimmed = name.trim();
-    if (!open || create.isPending || !trimmed || validatePresence(presence) !== null) return;
+    if (!open || create.isPending || !trimmed || validateAppearance(presence) !== null) return;
     const requestGeneration = generation.current;
     try {
       const created = await create.mutateAsync({
@@ -117,7 +117,7 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
           ))}
         </fieldset>
 
-        <PresenceSettings value={presence} onChange={setPresence} disabled={create.isPending} />
+        <AppearanceSettings value={presence} onChange={setPresence} disabled={create.isPending} />
 
         {create.error && (
           <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
@@ -129,7 +129,7 @@ function WorkflowCreationForm({ open, onOpenChange, teamId }: {
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={create.isPending}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={create.isPending || !name.trim() || validatePresence(presence) !== null}>
+          <Button onClick={() => void submit()} disabled={create.isPending || !name.trim() || validateAppearance(presence) !== null}>
             {create.isPending ? "Creating…" : "Create"}
           </Button>
         </DialogFooter>

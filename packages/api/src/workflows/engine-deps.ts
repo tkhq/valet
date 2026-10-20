@@ -1,6 +1,6 @@
 import { workflowStepToolScope } from "./tool-scope.js";
 import { actionInScope, scopeRefusal, MODEL_CALL_LIMIT_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
-import { mergePresence, readPresence, type Presence } from "@valet/shared";
+import { mergeAppearance, readAppearance, type Appearance } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
  * `EngineHost`. Node executors and the interpreter only see this narrow
@@ -186,7 +186,7 @@ export function workflowRunThreadKey(runId: string, slackChannel?: string): stri
 }
 
 interface RunContext {
-  presence?: Presence;
+  presence?: Appearance;
   legacyRuntimeId?: string;
   orgId: string;
   actorUserId: string;
@@ -243,8 +243,8 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     throw new Error("The Slack workflow event has no channel audience.");
   }
   const definitionPresence = run.definition && typeof run.definition === "object" && "presence" in run.definition
-    ? readPresence(run.definition.presence) : undefined;
-  const presence = mergePresence(definitionPresence, readPresence(run.params.presence));
+    ? readAppearance(run.definition.presence) : undefined;
+  const presence = mergeAppearance(definitionPresence, readAppearance(run.params.presence));
   return { presence, legacyRuntimeId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     origin: run.params.origin, ...(slackChannel ? { slackChannel } : {}) };
 }

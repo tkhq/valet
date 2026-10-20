@@ -1073,7 +1073,8 @@ CREATE TABLE "events" (
 	"summary" text NOT NULL,
 	"payload" jsonb NOT NULL,
 	"occurred_at" bigint NOT NULL,
-	"received_at" bigint NOT NULL
+	"received_at" bigint NOT NULL,
+	"subjects" text[]
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "events_service_dedupe" ON "events" ("service","dedupe_key");
@@ -1124,7 +1125,12 @@ CREATE TABLE "followed_threads" (
 	-- rule's CURRENT invocation audience, so a rule narrowed back to the team
 	-- narrows the threads it opened, and a disabled or deleted rule narrows
 	-- them too. NULL, like a rule that is gone, reads as team-only.
-	"subscription_id" text
+	"subscription_id" text,
+	-- The assistant thread the binding mention landed in. Later messages in
+	-- the Slack thread go to this thread. NULL on a follow bound before the
+	-- columns: the router keeps the Slack thread key for those.
+	"session_id" text,
+	"thread_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -1137,11 +1143,16 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
+	-- An AssistantThreadPolicy for an assistant-prompt schedule. NULL reads as own.
+	"thread_policy" jsonb,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- Why the scheduler disabled this schedule: the pin text when its
+	-- `existing` thread cannot receive deliveries. NULL otherwise.
+	"disabled_reason" text,
 	-- `repo` rows are armed from a mirrored workflow file. The sync updates
 	-- and deletes only these, so a schedule a person armed on the same
 	-- workflow is never touched.
@@ -1176,12 +1187,19 @@ CREATE TABLE "event_deliveries" (
 	"next_attempt_at" bigint NOT NULL,
 	"last_error" text,
 	"delivered_at" bigint,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- The Destination resolved at ingest (spec 2026-10-16: delivery threads
+	-- and claims, Part C step 6). NULL means resolve at dispatch from the
+	-- binding and the policy only (no waiter consult, Part C step 7).
+	"destination" jsonb
 );
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_due" ON "event_deliveries" ("status","next_attempt_at");
 --> statement-breakpoint
 CREATE INDEX "event_deliveries_event" ON "event_deliveries" ("event_id");
+--> statement-breakpoint
+-- The rule list reads each rule's latest delivery for its problem state.
+CREATE INDEX "event_deliveries_subscription" ON "event_deliveries" ("subscription_id","created_at");
 --> statement-breakpoint
 CREATE TABLE "linear_installations" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -2578,6 +2596,8 @@ CREATE TABLE IF NOT EXISTS "event_receipts" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "event_receipts_event" ON "event_receipts" ("org_id", "event_id");
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (

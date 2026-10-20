@@ -1,7 +1,7 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { uid } from "./ids.js";
-import { builtinTools } from "./builtin-tools/index.js";
+import { builtinTools, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
 import { dispatchCommand } from "./commands/dispatch.js";
@@ -61,7 +61,8 @@ import type {
   SessionEntry,
   SessionStartRef,
   SkillSource,
-  StoredCredential,
+  ResolvedCredential,
+  CredentialRead,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -150,7 +151,7 @@ export function formatPluginOutcome(
     case "denied-unattended":
       return {
         ok: false,
-        output: "This action needs approval, and an unattended workflow run cannot ask for it. Valet sent no approval request. To approve it on each run, move the action to a Tool step, which asks for approval on each run. To let it run without asking, use Review permissions on the workflow page, or ask a team admin to allow it by policy.",
+        output: "This action needs approval, and an unattended run (a workflow, an automated event, or a schedule) cannot ask for it. Valet sent no approval request. In a workflow, to approve it on each run, move the action to a Tool step, which asks for approval on each run; to let it run without asking, use Review permissions on the workflow page. For any run, allow it by policy in Settings: its owner for a personal run, a team admin for a team run, an org admin for an org run.",
       };
     case "denied-approval":
       return {
@@ -218,6 +219,12 @@ export interface EmitOptions {
 export interface ThreadInitialSettings {
   model?: string;
   reasoning?: ReasoningLevel;
+  /** A display title for the new thread, stored as `metadata.title`. */
+  title?: string;
+  /** Host facts the new thread starts with, merged into its metadata in the
+   * same write that creates it. A host uses it for a fact that must hold
+   * before anyone can list the thread, such as where its content came from. */
+  metadata?: Record<string, unknown>;
 }
 
 export class Session {
@@ -328,7 +335,11 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
-    this.builtinTools = options.builtinTools ?? builtinTools;
+    // A session with no wakeup seam (a bare engine, a test) gets no wakeup
+    // tools: each one would only refuse, and six tool schemas widen every
+    // prompt. The api gives every session a seam (`host.ts`).
+    this.builtinTools = options.builtinTools
+      ?? (options.wakeups ? builtinTools : builtinTools.filter((tool) => !WAKEUP_TOOL_NAMES.has(tool.name)));
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;
@@ -838,8 +849,9 @@ export class Session {
       reasoning: initial?.reasoning,
       // Stamped with `createdAt` and never rewritten: a later timezone change
       // must not alter this thread's prompt (TKAI-584).
-      metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
-        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}) },
+      metadata: { ...initial?.metadata, [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
+        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}),
+        ...(initial?.title ? { title: initial.title } : {}) },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1800,13 +1812,13 @@ export class Session {
     // or raw store read — is one `credentials.get` span, nesting under the
     // running tool/turn span via the active context. Values never land on
     // the span; only the service name and hit/miss.
-    const read = (service: string): Promise<StoredCredential | null> =>
+    const read = (service: string, readUse: CredentialUse = use): Promise<ResolvedCredential | null> =>
       withSpan(
         "credentials.get",
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service, use)
+            ? await resolver(owner, service, readUse)
             : credStore
               ? await credStore.get(owner, service)
               : null;
@@ -1816,10 +1828,10 @@ export class Session {
         },
       );
     return {
-      async get(service?: string) {
+      async get(service?: string, purpose?: CredentialRead) {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service);
+        const stored = await read(service, purpose?.forAction ? { ...use, forAction: true } : use);
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",
@@ -1827,6 +1839,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
       async request(service: string, reason: string) {
@@ -1842,6 +1855,7 @@ export class Session {
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
           metadata: stored.metadata,
+          ...(stored.source ? { source: stored.source } : {}),
         };
       },
     };
