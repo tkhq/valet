@@ -69,6 +69,9 @@ interface OAuthConnectState {
   /** Step-up: the scopes the authorize request asked for, stored when the
    * token response names none. */
   scopes?: string[];
+  /** Step-up: the scopes the link added. The callback keeps the caller's
+   * connection unless the new grant holds them and every scope it held. */
+  added?: string[];
   nonce: string;
   exp: number;
 }
@@ -81,7 +84,7 @@ async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string):
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes } = payload;
+    const { userId, service, codeVerifier, clientId, returnTo, nonce, exp, teamId, orgId, reconnect, scopes, added } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
@@ -90,6 +93,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
     if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (scopes !== undefined && (!Array.isArray(scopes) || !scopes.every((s) => typeof s === "string"))) return null;
+    if (added !== undefined && (!Array.isArray(added) || !added.every((s) => typeof s === "string"))) return null;
     if (exp < nowMs) return null;
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
@@ -97,6 +101,7 @@ export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: numbe
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
       ...(reconnect === true ? { reconnect } : {}),
       ...(Array.isArray(scopes) ? { scopes: scopes.filter((s): s is string => typeof s === "string") } : {}),
+      ...(Array.isArray(added) ? { added: added.filter((s): s is string => typeof s === "string") } : {}),
     };
   });
 }
@@ -228,7 +233,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     const scopes = addScopes ? [...new Set([...clientRow.scopes, ...addScopes])].sort() : clientRow.scopes;
     const state = signState<OAuthConnectState>(
       "integration-connect",
-      { ...base, codeVerifier, clientId: clientRow.clientId, ...(addScopes ? { scopes } : {}) },
+      { ...base, codeVerifier, clientId: clientRow.clientId, ...(addScopes ? { scopes, added: addScopes } : {}) },
       key,
     );
     const url = buildAuthorizationUrl({
@@ -461,15 +466,37 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
       return c.redirect(`${landing}error=oauth_failed`, 302);
     }
   }
+  const owner = { type: "user" as const, id: user.id };
+  const next: StoredCredential = {
+    type: "oauth2",
+    accessToken: saved.accessToken,
+    refreshToken: saved.refreshToken,
+    expiresAt: saved.expiresAt,
+    scopes: saved.scopes,
+    metadata: saved.metadata,
+  };
   try {
-    await engineCredentials.save({ type: "user", id: user.id }, verified.service, {
-      type: "oauth2",
-      accessToken: saved.accessToken,
-      refreshToken: saved.refreshToken,
-      expiresAt: saved.expiresAt,
-      scopes: saved.scopes,
-      metadata: saved.metadata,
-    });
+    if (verified.added) {
+      // A step-up keeps the connection unless the new grant holds every scope
+      // it holds plus every added one. The swap fails if another sign-in or a
+      // refresh changed the connection since this read, so a narrower or
+      // older grant never replaces a wider one.
+      const current = await engineCredentials.get(owner, verified.service);
+      const granted = new Set(saved.scopes ?? []);
+      const keeps = [...(current?.scopes ?? []), ...verified.added].every((scope) => granted.has(scope));
+      let stored = false;
+      if (keeps && current) stored = await engineCredentials.compareAndSwap(owner, verified.service, current, next);
+      else if (keeps) {
+        await engineCredentials.save(owner, verified.service, next);
+        stored = true;
+      }
+      if (!stored) {
+        if (restoreLink) await restoreLink().catch(() => undefined);
+        return c.redirect(`${landing}error=step_up_not_granted`, 302);
+      }
+    } else {
+      await engineCredentials.save(owner, verified.service, next);
+    }
   } catch (err) {
     console.error(`oauth callback: credential save failed for ${verified.service}:`, err);
     if (restoreLink) await restoreLink().catch(() => undefined); // best-effort compensation

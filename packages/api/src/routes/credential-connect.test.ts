@@ -181,6 +181,37 @@ describe("GET /api/credentials/:service/connect", () => {
     });
   });
 
+  async function startStepUpConnect(baseUrl: string, addScopes: string) {
+    const started = await fetch(`${baseUrl}/api/credentials/linear/connect?addScopes=${encodeURIComponent(addScopes)}`, { redirect: "manual" });
+    return new URL(started.headers.get("location") ?? "").searchParams.get("state") ?? "";
+  }
+
+  async function finishWith(baseUrl: string, state: string, scope: string, token: string) {
+    fake.tokenResponse = { access_token: token, expires_in: 3600, scope };
+    const res = await fetch(`${baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    return res.headers.get("location") ?? "";
+  }
+
+  it("step-up: keeps a working connection when the provider grants less than it holds", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "working", scopes: ["read", "write"] });
+    const state = await startStepUpConnect(api.baseUrl, "read write extra");
+    expect(await finishWith(api.baseUrl, state, "read", "narrow")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "working", scopes: ["read", "write"] });
+  });
+
+  it("step-up: an older sign-in does not roll back a newer, wider grant", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["read"])] });
+    const owner = { type: "user" as const, id: "local-user" };
+    await api.providers.engineCredentials.save(owner, "linear", { type: "oauth2", accessToken: "start", scopes: ["read"] });
+    const older = await startStepUpConnect(api.baseUrl, "read extra");
+    const newer = await startStepUpConnect(api.baseUrl, "read extra write");
+    expect(await finishWith(api.baseUrl, newer, "read extra write", "newer")).toContain("connected=linear");
+    expect(await finishWith(api.baseUrl, older, "read extra", "older")).toContain("error=step_up_not_granted");
+    expect(await api.providers.engineCredentials.get(owner, "linear")).toMatchObject({ accessToken: "newer", scopes: ["read", "extra", "write"] });
+  });
+
   it("authorization_code mode: 503s with the missing env var names when unconfigured", async () => {
     api = await bootTestApi({ plugins: [authCodePlugin(fake.url)] });
     const res = await fetch(`${api.baseUrl}/api/credentials/gmail/connect`, { redirect: "manual" });
