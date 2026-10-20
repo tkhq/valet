@@ -1,3 +1,5 @@
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
@@ -29,12 +31,12 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { pendingChannelDeliveries, agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import type { AttentionEvent } from "../orchestrator/attention.js";
+import { routeAttention, type AttentionEvent } from "../orchestrator/attention.js";
 import { savedGatePrompts } from "./gate-prompts.js";
 import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
@@ -2814,6 +2816,35 @@ describe("ChannelHost.attentionDeliverer", () => {
       ...overrides,
     };
   }
+
+  it("rechecks notifyAttention after the web grace period", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    webPresence(testDb.appDb).report(USER_ID, "tab", true);
+    await routeAttention({ db: testDb.appDb, channels: host.attentionDeliverers() }, event({ dedupeKey: "grace" }));
+    expect(fakeTransport.sent).toHaveLength(0);
+    await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    if (!job) throw new Error("Expected a durable delivery");
+    await drainAttentionDeliveries({ db: testDb.appDb, channels: host.attentionDeliverers() }, job.deliverAfter);
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("keeps a provider failure recoverable and stores its confirmed ref", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const send = vi.spyOn(fakeTransport, "send").mockRejectedValueOnce(new Error("provider unavailable"));
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ dedupeKey: "retry" }));
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    if (!job) throw new Error("Expected a durable delivery");
+    expect(job.status).toBe("sending");
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, job.deliverAfter);
+    expect(send).toHaveBeenCalledTimes(2);
+    const [sent] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(sent).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", conversationKey: "fake:dm:77", messageId: "1" }] });
+    expect(fakeTransport.sent[0]?.message.attentionDeliveryId).toBe(job.id);
+  });
 
   it("sends one DM to a linked user with notifyAttention enabled", async () => {
     host = await buildHost();

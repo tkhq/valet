@@ -1,3 +1,5 @@
+import { webPresence } from "../services/web-presence.js";
+import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
 /**
  * Notifications — web delivery surface for the attention router (Phase 4
  * decision 19).
@@ -36,6 +38,16 @@ import type {
 } from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
+
+notificationsRouter.post("/presence", async c => {
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("tabId" in body) || !("active" in body)
+    || typeof body.tabId !== "string" || body.tabId.length < 1 || body.tabId.length > 128 || typeof body.active !== "boolean") {
+    return c.json({ error: "Invalid presence report. Send a tabId and an active boolean." }, 400);
+  }
+  webPresence(c.var.providers.db).report(c.var.user.id, body.tabId, body.active);
+  return c.json({ ok: true });
+});
 
 /** Read durable gates without waking their sessions or relying on notification read state. */
 notificationsRouter.get("/decisions", async (c) => {
@@ -206,6 +218,7 @@ notificationsRouter.get("/preferences", async (c) => {
     kind,
     web: byKind.get(kind)?.web ?? true,
     teamDm: byKind.get(kind)?.teamDm ?? false,
+    channelGraceSeconds: byKind.get(kind)?.channelGraceSeconds ?? defaultChannelGraceSeconds(kind),
   }));
 
   const body: ListNotificationPreferencesResponse = { preferences };
@@ -234,12 +247,17 @@ notificationsRouter.put("/preferences", async (c) => {
     return c.json({ error: "teamDm must be a boolean. Choose whether to receive team direct messages." }, 400);
   }
 
+  if (body.channelGraceSeconds !== undefined && (!Number.isInteger(body.channelGraceSeconds)
+    || body.channelGraceSeconds < 0 || body.channelGraceSeconds > 86_400)) {
+    return c.json({ error: "channelGraceSeconds must be an integer from 0 to 86400. Choose a delay of at most one day." }, 400);
+  }
+
   await db
     .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false })
+    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false, channelGraceSeconds: body.channelGraceSeconds })
     .onConflictDoUpdate({
       target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web, ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
+      set: { web: body.web, ...(body.channelGraceSeconds === undefined ? {} : { channelGraceSeconds: body.channelGraceSeconds }), ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
     });
 
   return c.json({ ok: true });

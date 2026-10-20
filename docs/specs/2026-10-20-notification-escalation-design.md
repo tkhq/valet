@@ -1,0 +1,134 @@
+# Web-first attention delivery
+
+Date: 2026-10-20. Issue: TKAI-649.
+
+## Routing
+
+The attention router inserts the web notification immediately.
+It stores personal delivery jobs in the same Postgres transaction.
+Team home-channel posts remain immediate.
+Existing audience rules and team DM opt-in remain in force.
+
+Web notifications are tier zero.
+Each personal deliverer declares a stable `id`, an `order`, and a `grace` policy.
+Deliverers with the same order share a tier and must use the same grace policy.
+The router sorts deliverers by order.
+A `when-web-active` tier adds the user's per-kind grace to the previous tier's deadline.
+An `immediate` tier adds no delay.
+The host registers one durable deliverer per messaging transport.
+These deliverers share one order and one grace period.
+Adding a push tier requires another deliverer, not a router branch.
+
+If the user is inactive, every personal tier is due immediately.
+If web delivery is disabled for the kind, every personal tier is due immediately.
+Presence is sampled once when the router creates the jobs.
+Later heartbeats do not extend a job's deadline.
+
+## Presence
+
+The signed-in web shell reports a separate random identifier for each tab.
+Visible tabs report active after input and every 20 seconds while input remains recent.
+Input remains recent for two minutes.
+A visibility change reports the tab's current state immediately.
+An idle tab reports inactive and stops active heartbeats.
+
+`POST /api/notifications/presence` requires authentication.
+The server uses the authenticated user's identifier, never a client-supplied user identifier.
+Any active tab counts toward that user's presence.
+A heartbeat expires after 45 seconds.
+A hidden report clears only its own tab.
+
+The API currently runs one replica.
+Presence uses an in-memory map scoped to the API database handle.
+Multiple replicas will require shared presence storage.
+A restart clears presence but does not clear delivery jobs.
+
+## Durable scheduling
+
+`pending_channel_deliveries` stores the user, tier, optional web row, event, and deadline.
+It also stores sending time, status, attempt count, provider refs, and last error.
+The job identifier combines the existing notification dedupe key with the stable tier identifier.
+Repeated producers cannot create another job for the same recipient and tier.
+Events without a dedupe key remain one-shot events.
+
+The existing event dispatcher drains due jobs every second.
+The router also drains immediately due jobs after their transaction commits.
+No in-process timeout owns a notification deadline.
+A restart picks up pending jobs and stale sending jobs from Postgres.
+An index over pending and sending deadlines bounds the due scan.
+The app migration and schema repairs both create the outbox and preference column.
+
+Before sending a deferred job, the drain checks:
+
+1. The web row still exists and is unread, when the job references one.
+2. The engine decision gate is pending, when the event carries one.
+3. The workflow checkpoint still holds the same unanswered approval, when the event references one.
+4. The recipient still belongs to the event's authorized audience.
+5. The recipient still allows team DM copies, for team events.
+
+The channel deliverer checks the current identity link's `notifyAttention` setting before sending.
+Gate buttons and their authorization checks use the existing channel path.
+Approver-only events keep their explicit recipient.
+Org-admin audiences follow the same per-recipient presence policy as personal and team audiences.
+One recipient's read state does not suppress another recipient's job.
+
+The immediate producer can run before a workflow finishes parking.
+Its immediate drain therefore trusts the current gate event.
+A later dispatcher pass always checks durable gate state.
+
+## Delivery boundary
+
+A conditional update moves each due job to `sending` and records `sending_at`.
+The same statement moves its next deadline forward by two minutes.
+The update repeats the due predicate to fence concurrent workers.
+Only the winning worker sends.
+Each completion also checks the attempt number, so a stale worker cannot overwrite recovery.
+
+After the provider confirms, the worker records `sent` and the provider message refs.
+Slack refs include the channel identifier and message timestamp.
+Handled jobs record `dropped`.
+Confirmed jobs are never selected again.
+
+A crash can leave a job in `sending` after the provider accepted its message.
+After two minutes, the dispatcher claims that job for recovery.
+It calls the deliverer's optional `reconcile` hook before resending.
+If reconciliation finds the message, the worker records its ref without sending again.
+A miss, unsupported hook, or lookup failure causes a resend.
+An uncertain send may produce a duplicate.
+This is intentional: a lost approval notification is worse than a duplicate.
+
+Slack sends plain attention DMs and approval cards with message metadata:
+`event_type: valet_attention` and `event_payload.delivery_id` equal to the durable job identifier.
+Its reconciliation hook reads recent DM history with metadata included.
+The lookup checks at most five pages of 100 messages.
+Missing history permissions cause a resend, not a lost notification.
+Recovered approval refs restore the existing gate callback mapping.
+Transports without history reconciliation still recover by resending.
+
+A provider failure retains `sending` and its error for the next recovery attempt.
+There is no retry limit for an unhandled notification.
+Every retry repeats the read, gate, audience, and preference checks.
+
+Completed job keys remain stored to prevent producer replay.
+This change adds no retention sweep.
+
+## Preferences
+
+`user_notification_preferences.channel_grace_seconds` stores an optional per-kind delay.
+A null value uses 120 seconds for approval, question, escalation, and review.
+General notifications use 300 seconds.
+Zero disables the grace.
+
+The existing preferences GET route returns the effective delay.
+The PUT route accepts an integer from zero through 86400 seconds.
+Omitting the field preserves its value.
+The notification settings page offers immediate delivery and several short delays.
+Preference edits affect new jobs only.
+Already queued jobs retain their original deadline.
+
+## Validation
+
+Tests cover tab expiry, multiple tabs, heartbeat timing, hidden reports, and authenticated user scope.
+Routing tests cover active users, inactive users, disabled web delivery, custom grace, and ordered tiers.
+Outbox tests cover handled rows, terminal gates, pending gates, deduplication, concurrent claims, and restart recovery.
+Existing channel suites cover gate controls and current identity-link preferences.

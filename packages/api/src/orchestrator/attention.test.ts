@@ -123,7 +123,7 @@ describe("routeAttention (DB-backed)", () => {
     await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
       VALUES ('thr-helper', 'sess-team', 'app-assistant:test-member', 'idle', 'steer', 1, 1)`);
     const deliverTeam = vi.fn(async () => {});
-    await routeAttention({ db, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+    await routeAttention({ db, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async () => {}, deliverTeam }] }, {
       kind: "notification", owner: { type: "team", id: "team-p" }, title: "approve?", sessionId: "sess-team", threadId: "thr-helper",
     });
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
@@ -131,7 +131,7 @@ describe("routeAttention (DB-backed)", () => {
     expect(deliverTeam).not.toHaveBeenCalled();
     await db.execute(sql`DELETE FROM engine_threads WHERE id='thr-helper' AND session_id='sess-team'`);
     const deliver = vi.fn(async () => {});
-    await routeAttention({ db, channels: [{ deliver, deliverTeam }] }, {
+    await routeAttention({ db, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver, deliverTeam }] }, {
       kind: "notification", owner: { type: "team", id: "team-p" }, title: "Deleted private context",
       sessionId: "sess-team", threadId: "thr-helper",
     });
@@ -162,7 +162,7 @@ describe("routeAttention (DB-backed)", () => {
       return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
     });
     const deliverTeam = vi.fn(async () => {});
-    await routeAttention({ db, access: api.providers, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+    await routeAttention({ db, access: api.providers, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async () => {}, deliverTeam }] }, {
       kind: "notification", owner: { type: "team", id: "team-s" }, title: "approve?", sessionId: "sess-team-s", threadId: "thr-slack",
     });
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "notification"));
@@ -172,7 +172,7 @@ describe("routeAttention (DB-backed)", () => {
     // A workflow run this channel's event started has no thread of the
     // channel's, so its alert names the channel's audience directly.
     await db.delete(notifications);
-    await routeAttention({ db, access: api.providers, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+    await routeAttention({ db, access: api.providers, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async () => {}, deliverTeam }] }, {
       kind: "notification", owner: { type: "team", id: "team-s" }, title: "run failed", audienceKey: "slack-events:CATTN",
     });
     expect((await db.select().from(notifications)).map((r) => r.userId)).toEqual(["test-member"]);
@@ -195,7 +195,7 @@ describe("routeAttention (DB-backed)", () => {
     await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at)
       VALUES ('sess-child', 'team', 'team-c', 'test-member', 'local-org', '/', 'child', 'running', 'sess-team-c', 'thr-parent', 1, 1)`);
     const deliverTeam = vi.fn(async () => {});
-    await routeAttention({ db, channels: [{ deliver: async () => {}, deliverTeam }] }, {
+    await routeAttention({ db, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async () => {}, deliverTeam }] }, {
       kind: "approval", owner: { type: "team", id: "team-c" }, title: "approve?", sessionId: "sess-child", threadId: "thr-child",
     });
     const recipients = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
@@ -292,6 +292,7 @@ describe("routeAttention (DB-backed)", () => {
     const teamCalls: AttentionEvent[] = [];
     const calls: Array<{ userId: string; event: AttentionEvent }> = [];
     const stub: AttentionChannelDeliverer = {
+      id: "test", order: 1, grace: "when-web-active",
       deliverTeam: async (event) => { teamCalls.push(event); },
       deliver: async (userId, event) => {
         calls.push({ userId, event });
@@ -320,12 +321,14 @@ describe("routeAttention (DB-backed)", () => {
     const { db } = api.providers;
 
     const rejecting: AttentionChannelDeliverer = {
+      id: "rejecting", order: 1, grace: "when-web-active",
       deliver: async () => {
         throw new Error("boom");
       },
     };
     const calls: string[] = [];
     const ok: AttentionChannelDeliverer = {
+      id: "ok", order: 2, grace: "when-web-active",
       deliver: async (userId) => {
         calls.push(userId);
       },

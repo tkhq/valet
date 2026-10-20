@@ -283,6 +283,8 @@ export interface InboundChannelMedia {
 
 /** Where a sent message landed; also the correlation handle for gate edits. */
 export interface SendRef {
+  /** Provider channel identifier, when separate from the conversation key. */
+  channelId?: string;
   conversationKey: string;
   messageId: string;
 }
@@ -345,6 +347,8 @@ export interface ChannelSenderIdentity {
 }
 
 export interface OutboundChannelMessage {
+  /** Durable attention outbox key for provider-side reconciliation. */
+  attentionDeliveryId?: string;
   markdown: string;
   /** Assistant identity override. Absent = the bot's own identity. */
   sender?: ChannelSenderIdentity;
@@ -355,6 +359,7 @@ export type OutboundChannelAttachment =
   | { type: "file"; data: Uint8Array; mimeType: string; name: string; caption?: string };
 
 export interface ChannelGatePrompt {
+  attentionDeliveryId?: string;
   gateId: string;
   title: string;
   body?: string;
@@ -440,6 +445,8 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Find a prior attention send after an uncertain provider response. */
+  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number): Promise<SendRef | null>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Send a notice visible only to one channel member. Failures must reject. */

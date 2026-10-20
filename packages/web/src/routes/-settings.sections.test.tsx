@@ -427,6 +427,8 @@ describe("NotificationsPage", () => {
     const toggle = screen.getByRole("switch", { name: "Notifications web notifications" });
     fireEvent.click(toggle);
     expect(setPrefMutate).toHaveBeenCalledWith({ kind: "notification", web: false });
+    fireEvent.change(screen.getByRole("combobox", { name: "Approvals DM delay" }), { target: { value: "300" } });
+    expect(setPrefMutate).toHaveBeenCalledWith({ kind: "approval", web: true, channelGraceSeconds: 300 });
   });
 });
 

@@ -1151,7 +1151,8 @@ describe("gate prompts", () => {
       user: { id: "U1" },
       team: { id: TEAM },
     });
-    expect(inbound?.gateCallback?.ref).toEqual(ref);
+    expect(ref.channelId).toBe("D-U1");
+    expect(inbound?.gateCallback?.ref).toEqual({ conversationKey: ref.conversationKey, messageId: ref.messageId });
     expect(inbound?.gateCallback?.gateId).toBe("gate-88");
   });
 
@@ -1469,5 +1470,19 @@ describe("lookupUserByEmail", () => {
       name: "ChannelLookupError",
       kind: "transport",
     });
+  });
+});
+
+
+describe("attention delivery metadata", () => {
+  it("tags plain DMs and approval cards with the durable delivery id", async () => {
+    const transport = makeTransport();
+    const key = await transport.openDirectConversation("U1");
+    const plain = await transport.send(key, { markdown: "Needs you", attentionDeliveryId: "plain-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "plain-job" } });
+    expect(plain.channelId).toBe("D-U1");
+    const gate = await transport.sendGatePrompt(key, { gateId: "g", title: "Approve", actions: [], attentionDeliveryId: "gate-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "gate-job" } });
+    expect(gate.channelId).toBe("D-U1");
   });
 });

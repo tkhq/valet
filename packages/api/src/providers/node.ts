@@ -1,3 +1,4 @@
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -693,7 +694,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   });
 
   const onApprovalPending = buildRunApprovalAttention({
-    db, store: workflowStore, channels: [channelHost.attentionDeliverer()],
+    db, store: workflowStore, channels: channelHost.attentionDeliverers(),
     access: { engineCredentials, onePassword },
   });
 
@@ -760,7 +761,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     store: workflowStore,
   });
-  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } });
   const runThreadArchive = buildRunThreadArchive({ db, store: workflowStore, engineStore, engineHost });
   const runOriginReport = buildRunOriginReport({ db, engineHost, store: workflowStore });
 
@@ -827,6 +828,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
   const eventDispatcher = new EventDispatcher({
     db,
+    drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
     deliverToAssistant,

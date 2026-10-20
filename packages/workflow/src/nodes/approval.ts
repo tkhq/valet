@@ -100,6 +100,7 @@ export async function executeApproval(args: NodeExecutorArgs<ApprovalNode>): Pro
     await onApprovalPending?.({
       runId: run.runId,
       nodeId: node.id,
+      ...(iteration > 0 ? { iteration } : {}),
       prompt: renderText(node.prompt, templateContext),
       summary: node.summary !== undefined ? renderText(node.summary, templateContext) : undefined,
       details: node.details !== undefined ? renderJsonTemplates(node.details, templateContext) : undefined,

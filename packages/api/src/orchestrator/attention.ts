@@ -29,13 +29,15 @@
  * dedupe key (ad hoc `routeAttention` calls) get a random id — those calls
  * are inherently one-shot, so there's nothing to dedupe against.
  */
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull, like, sql } from "drizzle-orm";
-import type { DecisionAction, Principal } from "@valet/engine";
+import type { DecisionAction, Principal, SendRef } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
 import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
-import { notifications, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
+import { notifications, pendingChannelDeliveries, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
 export type AttentionUrgency = "low" | "normal" | "high";
@@ -62,6 +64,8 @@ export interface AttentionEvent {
    * Omit for one-shot events with no natural replay key.
    */
   dedupeKey?: string;
+  /** Workflow approval checkpoints are separate from engine decision gates. */
+  workflowGate?: { runId: string; nodeId: string; iteration: number; gateId?: string };
   /**
    * Set when the event announces a pending decision gate (`kind:
    * "approval"`). A channel deliverer that can render interactive prompts
@@ -95,9 +99,25 @@ export function principalFromOwner(
   return undefined;
 }
 
-/** Best-effort per-recipient channel delivery (e.g. Telegram DM). Must never throw. */
+export interface AttentionDeliveryRef extends SendRef {
+  channelType: string;
+}
+
+export interface AttentionDeliveryAttempt {
+  deliveryId: string;
+  sendingAt: number;
+}
+
+/** A personal delivery tier. Web rows are tier zero. */
 export interface AttentionChannelDeliverer {
-  deliver(userId: string, event: AttentionEvent): Promise<void>;
+  /** Stable across restarts. Used in the durable delivery key. */
+  id: string;
+  order: number;
+  /** Each waiting tier adds the recipient's per-kind grace to the ladder. */
+  grace: "when-web-active" | "immediate";
+  deliver(userId: string, event: AttentionEvent, attempt?: AttentionDeliveryAttempt): Promise<AttentionDeliveryRef[] | void>;
+  /** A stale send may have reached the provider. Undefined means resend. */
+  reconcile?(userId: string, event: AttentionEvent, attempt: AttentionDeliveryAttempt): Promise<AttentionDeliveryRef[] | undefined>;
   /** One shared destination per event, separate from personal DM copies. */
   deliverTeam?(event: AttentionEvent): Promise<void>;
 }
@@ -158,16 +178,9 @@ async function fetchMembership(db: AppDb, owner: Principal): Promise<Membership>
   return {};
 }
 
-/** Web-delivery preference for `userId`/`kind`. Default enabled when no row exists. */
-async function isWebEnabled(db: AppDb, userId: string, kind: AttentionKind): Promise<boolean> {
-  const rows = await db
-    .select({ web: userNotificationPreferences.web })
-    .from(userNotificationPreferences)
-    .where(and(eq(userNotificationPreferences.userId, userId), eq(userNotificationPreferences.kind, kind)))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return true;
-  return row.web;
+/** Default delay while web delivery is actionable. General updates wait longer. */
+export function defaultChannelGraceSeconds(kind: AttentionKind): number {
+  return kind === "notification" ? 300 : 120;
 }
 
 function notificationId(event: AttentionEvent, userId: string): string {
@@ -213,14 +226,8 @@ export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionK
     );
 }
 
-/**
- * Resolves the audience for `event.owner`, gates each recipient by their
- * web preference for `event.kind`, and inserts one `notifications` row per
- * surviving recipient. Channel deliverers (`deps.channels`) additionally
- * fire per recipient, independent of the web preference — that pref governs
- * web notifications only.
- */
-export async function routeAttention(deps: AttentionDeps, event: AttentionEvent): Promise<void> {
+/** Reused at delivery time so a queued event cannot retain revoked access. */
+export async function attentionAudience(deps: AttentionDeps, event: AttentionEvent): Promise<{ audience: string[]; restricted: boolean }> {
   const membership = await fetchMembership(deps.db, event.owner);
   // A team thread only some members may see (a person's helper or workflow
   // editor thread, or a private Slack channel's) reaches only them: no team
@@ -238,6 +245,12 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
       : Promise.resolve(privateThreadOwner(key) === userId)));
     audience = audience.filter((_, i) => shown[i]);
   }
+  return { audience, restricted };
+}
+
+/** Insert web rows and personal delivery jobs atomically. Shared posts stay immediate. */
+export async function routeAttention(deps: AttentionDeps, event: AttentionEvent): Promise<void> {
+  const { audience, restricted } = await attentionAudience(deps, event);
   if (audience.length === 0) return;
 
   for (const ch of deps.channels ?? []) {
@@ -246,37 +259,39 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
     }
   }
   const now = Date.now();
+  const tiers = [...(deps.channels ?? [])].sort((a, b) => a.order - b.order);
+  const immediate: string[] = [];
   for (const userId of audience) {
-    if (await isWebEnabled(deps.db, userId, event.kind)) {
-      await deps.db
-        .insert(notifications)
-        .values({
-          id: notificationId(event, userId),
-          userId,
-          kind: event.kind,
-          urgency: event.urgency ?? "normal",
-          title: event.title,
-          body: event.body ?? null,
-          href: event.href ?? null,
-          sessionId: event.sessionId ?? null,
-          createdAt: now,
-          readAt: null,
-        })
-        .onConflictDoNothing();
-    }
-
-    if (event.owner.type === "team") {
-      const [preference] = await deps.db.select({ teamDm: userNotificationPreferences.teamDm })
-        .from(userNotificationPreferences)
-        .where(and(eq(userNotificationPreferences.userId, userId), eq(userNotificationPreferences.kind, event.kind))).limit(1);
-      if (preference?.teamDm !== true) continue;
-    }
-    for (const ch of deps.channels ?? []) {
-      void ch.deliver(userId, event).catch((err) => {
-        console.error("attention router: channel deliverer failed:", err);
-      });
-    }
+    const [preference] = await deps.db.select().from(userNotificationPreferences)
+      .where(and(eq(userNotificationPreferences.userId, userId), eq(userNotificationPreferences.kind, event.kind))).limit(1);
+    const web = preference?.web ?? true;
+    const id = notificationId(event, userId);
+    const active = web && webPresence(deps.db).isActive(userId, now);
+    const graceMs = (preference?.channelGraceSeconds ?? defaultChannelGraceSeconds(event.kind)) * 1_000;
+    await deps.db.transaction(async tx => {
+      if (web) {
+        await tx.insert(notifications).values({
+          id, userId, kind: event.kind, urgency: event.urgency ?? "normal",
+          title: event.title, body: event.body ?? null, href: event.href ?? null,
+          sessionId: event.sessionId ?? null, createdAt: now, readAt: null,
+        }).onConflictDoNothing();
+      }
+      if (event.owner.type === "team" && preference?.teamDm !== true) return;
+      let deliverAfter = now;
+      let previousOrder: number | undefined;
+      for (const tier of tiers) {
+        if (active && tier.grace === "when-web-active" && tier.order !== previousOrder) deliverAfter += graceMs;
+        previousOrder = tier.order;
+        const jobId = JSON.stringify([id, tier.id]);
+        const inserted = await tx.insert(pendingChannelDeliveries).values({
+          id: jobId, userId, tierId: tier.id, notificationId: web ? id : null, event, deliverAfter,
+        }).onConflictDoNothing().returning({ id: pendingChannelDeliveries.id });
+        if (inserted.length > 0 && deliverAfter <= now) immediate.push(jobId);
+      }
+    });
   }
+  // Immediate delivery uses the same durable claim as a later dispatcher pass.
+  if (immediate.length > 0) await drainAttentionDeliveries(deps, now, immediate);
 }
 
 /** The key that decides who may see a team event's thread, or undefined for

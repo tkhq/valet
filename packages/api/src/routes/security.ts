@@ -909,7 +909,7 @@ function sessionOwner(row: SessionRow): Principal {
  */
 function attentionDepsFrom(c: Context<AppEnv>): AttentionDeps {
   const { db, channelHost } = c.var.providers;
-  return { db, channels: [channelHost.attentionDeliverer()] };
+  return { db, channels: channelHost.attentionDeliverers() };
 }
 
 /** A short severity roll-up for the completion body, e.g. "12 findings — 2

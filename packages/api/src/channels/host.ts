@@ -43,7 +43,7 @@ import {
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   ArchivedAssistantError,
   ensureDefaultAssistantSession,
@@ -55,7 +55,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
-import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import type { AttentionChannelDeliverer, AttentionDeliveryRef, AttentionEvent } from "../orchestrator/attention.js";
 import { activeChildWatch } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
@@ -1236,12 +1236,13 @@ export class ChannelHost {
     prompt: {
       gateId: string;
       title: string;
+      attentionDeliveryId?: string;
       body?: string;
       fields?: Array<{ label: string; value: string }>;
       actions: DecisionAction[];
     },
     sessionId: string,
-  ): Promise<void> {
+  ): Promise<GatePromptRef> {
     // The card carries the asking assistant's identity. In a channel with
     // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
@@ -1278,6 +1279,7 @@ export class ChannelHost {
     } else if (ended) {
       await this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs });
     }
+    return ref;
   }
 
   /** An expiry or a withdrawal: remembered first, like a decision, so a
@@ -1913,15 +1915,21 @@ export class ChannelHost {
   }
 
   /**
-   * Attention-router deliverer (Task 10): for every running transport,
-   * resolves the recipient's linked identity and DMs them a summary of the
-   * event. Best-effort per channelType — a lookup/send failure on one
-   * transport is logged and does not prevent delivery on the others.
+   * One durable deliverer per configured transport. Stable ids exist before
+   * startup, so boot events can wait for their transport. Each transport
+   * reconciles and retries independently.
    */
-  attentionDeliverer(): AttentionChannelDeliverer {
+  attentionDeliverers(): AttentionChannelDeliverer[] {
+    const types = new Set(this.deps.plugins.flatMap(plugin => (plugin.transports ?? []).map(factory => factory.channelType)));
+    return [...types].map(type => this.attentionDeliverer(type));
+  }
+
+  attentionDeliverer(channelTypeFilter?: string): AttentionChannelDeliverer {
+    const transports = () => [...this.transports].filter(([type]) => !channelTypeFilter || type === channelTypeFilter);
     return {
+      id: channelTypeFilter ? `personal-${channelTypeFilter}` : "personal-dm", order: 1, grace: "when-web-active",
       deliverTeam: async (event): Promise<void> => {
-        if (event.owner.type !== "team") return;
+        if (event.owner.type !== "team" || (channelTypeFilter && channelTypeFilter !== "slack")) return;
         const transport = this.transports.get("slack");
         if (!transport?.sendToChannel) return;
         const orgId = this.orgId ?? await this.deps.resolveOrgId();
@@ -1940,13 +1948,41 @@ export class ChannelHost {
           markdown: ["A team notification is ready in Valet.", this.openInValetLink(href)].filter(Boolean).join("\n\n"),
         });
       },
-      deliver: async (userId: string, event: AttentionEvent): Promise<void> => {
-        for (const channelType of this.transports.keys()) {
+      reconcile: async (userId, event, attempt) => {
+        if (transports().length === 0) return undefined;
+        const refs: AttentionDeliveryRef[] = [];
+        for (const [channelType, transport] of transports()) {
+          const link = await identityForUser(this.deps.db, channelType, userId);
+          if (!link || link.notifyAttention === false) continue;
+          if (!transport.reconcileAttention) return undefined;
+          const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId) : `${channelType}:dm:${link.externalId}`;
+          const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt);
+          if (!ref) return undefined;
+          if (event.gate && event.sessionId) {
+            this.gateActions.set(event.gate.id, event.gate.actions);
+            this.recordGatePrompt(event.gate.id, ref, event.sessionId);
+            const gate = await this.deps.engineStore.getDecisionGate(event.sessionId, event.gate.id);
+            if (gate) await this.deps.engineStore.saveDecisionGateRef(event.sessionId, gate.threadId, gate.id, {
+              channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+            });
+          }
+          refs.push({ ...ref, channelType });
+        }
+        return refs;
+      },
+      deliver: async (userId, event, attempt): Promise<AttentionDeliveryRef[]> => {
+        if (attempt && transports().length === 0) {
+          const link = channelTypeFilter ? await identityForUser(this.deps.db, channelTypeFilter, userId) : undefined;
+          if (channelTypeFilter && (!link || link.notifyAttention === false)) return [];
+          throw new Error("No attention transport is running. Retry after channel startup.");
+        }
+        const attentionDeliveryId = attempt?.deliveryId ?? event.dedupeKey ?? randomUUID();
+        const refs: AttentionDeliveryRef[] = [];
+        const failures: unknown[] = [];
+        for (const [channelType, transport] of transports()) {
           try {
             const link = await identityForUser(this.deps.db, channelType, userId);
             if (!link || link.notifyAttention === false) continue;
-            const transport = this.transports.get(channelType);
-            if (!transport) continue;
             // `${channelType}:dm:${externalId}` assumes the sender's id is also
             // the address to answer on, which holds for Telegram and not for
             // Slack: `U…` names a person, `D…` names the DM with them. Ask the
@@ -1962,11 +1998,12 @@ export class ChannelHost {
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
             if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id))) {
-              await this.sendAndRecordGatePrompt(
+              const ref = await this.sendAndRecordGatePrompt(
                 transport,
                 conversationKey,
                 {
                   gateId: event.gate.id,
+                  attentionDeliveryId,
                   title: event.title,
                   body: this.attentionBody(event),
                   fields: event.gate.fields,
@@ -1974,6 +2011,7 @@ export class ChannelHost {
                 },
                 event.sessionId,
               );
+              refs.push({ ...ref, channelType });
               continue;
             }
             // No gate, a recipient who cannot resolve it, or a lookup that
@@ -1981,14 +2019,19 @@ export class ChannelHost {
             const sender = event.sessionId
               ? await this.workspaceSenderForSession(event.sessionId)
               : undefined;
-            await transport.send(conversationKey, {
+            const ref = await transport.send(conversationKey, {
+              attentionDeliveryId,
               markdown: this.attentionMarkdown(event),
               ...(sender !== undefined ? { sender } : {}),
             });
+            refs.push({ ...ref, channelType });
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);
+            failures.push(err);
           }
         }
+        if (attempt && failures.length > 0) throw new AggregateError(failures, "Attention delivery failed. Retry with provider reconciliation.");
+        return refs;
       },
     };
   }

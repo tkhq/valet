@@ -131,6 +131,7 @@ export class SlackApi {
   async postMessage(opts: {
     channel: string;
     text: string;
+    attentionDeliveryId?: string;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
     /** Per-assistant display name override (`chat:write.customize` scope).
@@ -146,6 +147,9 @@ export class SlackApi {
       mrkdwn: true,
       unfurl_links: false,
     };
+    if (opts.attentionDeliveryId !== undefined) body.metadata = {
+      event_type: "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId },
+    };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
@@ -154,6 +158,28 @@ export class SlackApi {
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };
+  }
+
+  /** Bounded recent DM history. A miss or a lookup failure permits a resend. */
+  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<string | null> {
+    let cursor: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const res = await this.get("conversations.history", {
+        channel, oldest: String(Math.max(0, sendingAt - 60_000) / 1_000),
+        limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}),
+      });
+      for (const raw of Array.isArray(res.messages) ? res.messages : []) {
+        const message = rec(raw);
+        const metadata = rec(message?.metadata);
+        if (metadata?.event_type === "valet_attention" && rec(metadata.event_payload)?.delivery_id === deliveryId) {
+          const ts = str(message?.ts);
+          if (ts) return ts;
+        }
+      }
+      cursor = str(rec(res.response_metadata)?.next_cursor);
+      if (!cursor) break;
+    }
+    return null;
   }
 
   async updateMessage(opts: {

@@ -389,8 +389,25 @@ CREATE TABLE "user_notification_preferences" (
 	"kind" text NOT NULL,
 	"web" boolean DEFAULT true NOT NULL,
 	"team_dm" boolean DEFAULT false NOT NULL,
+	"channel_grace_seconds" integer,
 	PRIMARY KEY("user_id", "kind")
 );
+--> statement-breakpoint
+CREATE TABLE "pending_channel_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "user_id" text NOT NULL,
+  "tier_id" text NOT NULL,
+  "notification_id" text,
+  "event" jsonb NOT NULL,
+  "deliver_after" bigint NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending',
+  "sending_at" bigint,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "message_refs" jsonb,
+  "last_error" text
+);
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_due" ON "pending_channel_deliveries" ("deliver_after") WHERE "status" IN ('pending', 'sending');
 --> statement-breakpoint
 CREATE TABLE "event_drop_log" (
 	"id" text PRIMARY KEY NOT NULL,

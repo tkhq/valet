@@ -863,9 +863,16 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: message.attentionDeliveryId,
       ...slackIdentityOverride(message.sender),
     }, fallbackBlocks);
-    return { conversationKey, messageId: res.ts };
+    return { conversationKey, channelId: target.channelId, messageId: res.ts };
+  }
+
+  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number): Promise<SendRef | null> {
+    const target = this.mustParse(conversationKey);
+    const ts = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt);
+    return ts ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, ts), channelId: target.channelId, messageId: ts } : null;
   }
 
   async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef> {
@@ -949,6 +956,7 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: gate.attentionDeliveryId,
       ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
@@ -959,7 +967,7 @@ export class SlackTransport implements ChannelTransport {
     // thread we posted into, or the message's own ts for a root post.
     const refKey = conversationKeyFor(target.teamId, target.channelId, threadTs ?? res.ts);
     this.remember(this.gateRetainedTexts, `${refKey}#${res.ts}`, gate.fields?.length ? titleMrkdwn : text);
-    return { conversationKey: refKey, messageId: res.ts };
+    return { conversationKey: refKey, channelId: target.channelId, messageId: res.ts };
   }
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {

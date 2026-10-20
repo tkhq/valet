@@ -80,3 +80,30 @@ describe("SlackApi.joinChannel", () => {
     expect(url).toBe("http://127.0.0.1:9999/conversations.join");
   });
 });
+
+
+describe("attention reconciliation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("finds the delivery metadata on a later history page", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "1", metadata: { event_type: "other" } }], response_metadata: { next_cursor: "next" } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "2", metadata: { event_type: "valet_attention", event_payload: { delivery_id: "job" } } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 120_000)).toBe("2");
+    const url = new URL(String(fetchMock.mock.calls[1]?.[0]));
+    expect(url.searchParams.get("channel")).toBe("D123");
+    expect(url.searchParams.get("cursor")).toBe("next");
+    expect(url.searchParams.get("include_all_metadata")).toBe("true");
+    expect(url.searchParams.get("oldest")).toBe("60");
+  });
+
+  it("returns a miss and throws lookup errors so the outbox can resend", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: "missing_scope" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new SlackApi("test");
+    expect(await api.findAttentionMessage("D123", "job", 0)).toBeNull();
+    await expect(api.findAttentionMessage("D123", "job", 0)).rejects.toThrow("missing_scope");
+  });
+});

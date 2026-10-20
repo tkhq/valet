@@ -13,6 +13,19 @@ describe("workspace singleton repair on an already migrated database", () => {
   beforeAll(async () => { await applyEngineMigrations(db); await applyAppMigrations(db); });
   afterAll(async () => { await db.close(); });
 
+  it("repairs attention scheduling on an existing database and is repeatable", async () => {
+    await db.query("DROP TABLE pending_channel_deliveries");
+    await db.query("ALTER TABLE user_notification_preferences DROP COLUMN channel_grace_seconds");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query(`INSERT INTO pending_channel_deliveries (id, user_id, tier_id, event, deliver_after)
+      VALUES ('repair-job', 'u', 'dm', '{}', 100)`);
+    expect((await db.query("SELECT status, sending_at, attempts, message_refs FROM pending_channel_deliveries WHERE id = 'repair-job'")).rows)
+      .toEqual([{ status: "pending", sending_at: null, attempts: 0, message_refs: null }]);
+    await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

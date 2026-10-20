@@ -2115,7 +2115,13 @@ export interface ListNotificationDecisionsResponse {
   items: Array<{ sessionId: string; title: string; gate: DecisionGate; canOpenThread?: boolean }>;
 }
 
+export interface WebPresenceRequest {
+  tabId: string;
+  active: boolean;
+}
+
 export interface NotificationPreferenceSummary {
+  channelGraceSeconds?: number;
   /** Personal copies of team attention in linked direct messages. Default off. */
   teamDm?: boolean;
   kind: NotificationKind;
@@ -2127,6 +2133,8 @@ export interface ListNotificationPreferencesResponse {
 }
 
 export interface SetNotificationPreferenceRequest {
+  /** Zero sends immediately. Omit to preserve the current grace. */
+  channelGraceSeconds?: number;
   teamDm?: boolean;
   kind: NotificationKind;
   web: boolean;
