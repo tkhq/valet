@@ -18,7 +18,7 @@ import { blockSubjectFor, faultLeadParts, placeLeadParts, type OverviewService }
 import { isPinProblem, pinProblemText } from "./problem-badge";
 import { isRoutine, type Routine } from "./routine-helpers";
 import {
-  activitySentence, activitySentenceParts, partsText, text, type ActivitySentenceParts, type SentencePart, type ThreadTitles,
+  activitySentence, activitySentenceParts, partsText, replies, text, type ActivitySentenceParts, type SentencePart, type ThreadTitles,
 } from "./sentences";
 
 /** How far back a dead delivery counts. */
@@ -82,6 +82,7 @@ export function faultsOf(input: {
   const listed = new Set(broken.map((rule) => rule.id));
   const editedAt = new Map(input.rules.map((rule) => [rule.id, rule.updatedAt]));
   const byId = new Map(input.rules.map((rule) => [rule.id, rule]));
+  const repliesByListener = Object.fromEntries(input.rules.map((rule) => [rule.id, replies(rule)]));
   // The lines whose fault marks their place row, so a collapsed group with a fault stays open.
   const faultedLines: EventSubscriptionWire[] = [...broken];
   const faults: Fault[] = [
@@ -111,6 +112,7 @@ export function faultsOf(input: {
       const placeNames = {
         ...(item.place !== undefined ? { place: item.place } : {}),
         ...(item.placeKey !== undefined ? { placeKey: item.placeKey } : {}),
+        repliesByListener,
       };
       faults.push({
         kind: "delivery",

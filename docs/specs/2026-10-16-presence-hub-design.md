@@ -524,6 +524,11 @@ Pass criterion: all steps, in one run, from a clean start.
    with outcomes `replied in <thread>`, `delivered to <thread>`, `claimed
    by <thread>`, `started <workflow> run`, `skipped: <reason>`, `no one
    listening`, or the delivery's status line when pending, failed, or dead.
+   A delivered row follows its line's stored action, as the line page does
+   (Part D): it reads `replied in` only for a Reply line (`follow: true`).
+   The Log reads the workspace's lines (`repliesByListener`). Only a row
+   whose line is gone falls back to the event key: a conversational key
+   reads `replied in`.
 2. `/presence/activity` has a breadcrumb `Presence › Activity`. Chips
    filter the list: `All`, `Problems`, and one per service, each service
    chip led by its `ServiceMark size="sm"` (Part K). A text box labeled
@@ -1235,10 +1240,6 @@ Review-fix deviations (2026-10-19):
 - **The delivered body heading reads `Instructions for this line:`.** The
   copy lint reads every api string with a space, so the heading the model
   receives uses Presence words too.
-- **The Log's rows still choose `replied in` by event key (Part F step
-  1).** The line page's Activity follows the line's stored action; the
-  workspace Log has no line in hand for every row and keeps the key-level
-  rule. This replaces the retired `Conversational keys` deviation.
 
 Deviations that revision 4 retires: the wizard's Review step and its
 preview (the side pane replaces both), the team Slack setup's three steps
