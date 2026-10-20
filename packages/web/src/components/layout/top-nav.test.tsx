@@ -384,6 +384,21 @@ describe("TopNav — sidebar toggle", () => {
     expect(screen.getByRole("button", { name: "Open threads" })).toBeTruthy();
   });
 
+  // The phone layout (drawer toggle and menu button) runs until `md`, so its
+  // controls keep 44px targets through `md`, not only below `sm`. jsdom has no
+  // media queries, so this guards the classes.
+  it("keeps 44px targets on the phone layout's controls until md", async () => {
+    renderNav({ withSidebar: true });
+    await screen.findByText("Valet");
+    for (const control of [
+      screen.getByRole("button", { name: "Open threads" }),
+      screen.getByRole("button", { name: "Open navigation" }),
+      screen.getByRole("link", { name: "Valet — dashboard" }),
+    ]) {
+      expect(control.className).toContain("max-md:min-h-11");
+    }
+  });
+
   it("puts the toggle ahead of the logo, at the row's left edge", async () => {
     renderNav({ withSidebar: true });
     const logo = await screen.findByText("Valet");

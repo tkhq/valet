@@ -19,6 +19,7 @@ const RAW_ALLOWED: Record<string, string> = {
 const OVERRIDE_ALLOWED: Record<string, string> = {
   "components/session/browser/browser-overlay.tsx": "The floating preview keeps 44px touch targets in its fixed 48px header.",
   "components/session/composer.tsx": "The composer's round buttons match its 44px input.",
+  "components/layout/top-nav.tsx": "The phone layout's menu button keeps a 44px target until md, where the desktop bar replaces it.",
 };
 
 const TEXT_INPUT_TYPES = new Set(["", "text", "search", "email", "url", "number", "date", "month", "password", "tel", "time", "datetime-local"]);

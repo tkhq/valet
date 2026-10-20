@@ -124,7 +124,7 @@ function SidebarToggle() {
   if (controls === null || !controls.present) return null;
 
   const buttonClass =
-    "shrink-0 min-h-8 min-w-8 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
+    "shrink-0 min-h-8 min-w-8 max-md:min-h-11 max-md:min-w-11 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
 
   return (
     <>
@@ -216,7 +216,7 @@ export function TopNav() {
 
       <Link
         to="/"
-        className="inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash max-sm:min-h-11 max-sm:min-w-11"
+        className="inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash max-md:min-h-11 max-md:min-w-11"
         aria-label="Valet — dashboard"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
@@ -257,7 +257,7 @@ export function TopNav() {
       <div className="ml-auto shrink-0 md:hidden">
         <DropdownMenu open={mobileNav.open} onOpenChange={mobileNav.setOpen}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label="Open navigation" className="w-8 px-0 max-sm:w-11">
+            <Button variant="ghost" size="sm" aria-label="Open navigation" className="w-8 px-0 max-md:min-h-11 max-md:w-11">
               <Menu className="h-5 w-5" aria-hidden />
             </Button>
           </DropdownMenuTrigger>
