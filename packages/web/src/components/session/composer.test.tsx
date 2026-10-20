@@ -754,6 +754,25 @@ describe("Composer — mid-turn submit affordance", () => {
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
   });
 
+  it("disarms Steer when a canceled item was listed before the send resolved", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("steer");
+    const { rerenderComposer } = renderComposer("streaming");
+
+    // The queue update that lists q-1 arrives before POST /messages resolves.
+    queueStateRef.current = { ...queueState("steer"), pendingIds: ["q-1"] };
+    await type("follow after this turn");
+    await userEvent.click(screen.getByRole("button", { name: /^queue$/i }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
+
+    // Cancel removes q-1 from the queue.
+    queueStateRef.current = { ...queueState("steer"), pendingIds: [] };
+    rerenderComposer();
+    expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
+    expect(screen.queryByText(/queued\. press enter again/i)).toBeNull();
+  });
+
   it("shows the API error when promote fails", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
     sendMutateAsync

@@ -374,7 +374,11 @@ export function Composer({
       if (claimed || leftQueue) return drop();
       return prev;
     });
-  }, [working, queueState, threadId]);
+    // The followup id is a dependency: the queue update that lists the item
+    // usually arrives before `POST /messages` resolves, so the item must be
+    // checked against the current pending ids when the followup is armed.
+    // Otherwise a Cancel leaves Steer armed on an item that is gone.
+  }, [working, queueState, threadId, queuedFollowup?.itemId]);
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
   const action: SubmitAction = !working
