@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { sessionThreads } from "../schema/index.js";
+import { addMember, createTeam } from "./teams.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
   isSharedThreadKey, lastAgentAsk, listWaitingThreads, sharedThreadKey,
@@ -158,4 +159,47 @@ it("keeps private helper and editor threads out of shared workspace lists", asyn
     expect(await shared(key, viewer), `${key} for ${viewer}`).toBe(expected);
     expect(isSharedThreadKey(key, viewer), `${key} for ${viewer}`).toBe(expected);
   }
+});
+
+it("tells only the team members who wrote in a thread about its replies", async () => {
+  api = await bootTestApi();
+  const team = await createTeam(api.providers.db, { orgId: "local-org", name: "Release", creatorUserId: "local-user" });
+  await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+  const as = (user: string) => ({ "x-valet-test-user-id": user, "content-type": "application/json" });
+  const created = await (await fetch(`${api.baseUrl}/api/threads?workspace=${team.id}`, { method: "POST", headers: as("local-user") })).json() as { id: string; sessionId: string };
+  const sent = await fetch(`${api.baseUrl}/api/threads/${created.id}/messages`, {
+    method: "POST", headers: as("local-user"), body: JSON.stringify({ text: "Which release is next?" }),
+  });
+  expect(sent.status).toBe(202);
+  await agentMessage(api, created, Date.now() + 60_000);
+
+  const listFor = async (user: string) => ((await (await fetch(`${api!.baseUrl}/api/threads?workspace=${team.id}`, { headers: as(user) })).json()) as ListThreadsResponse)
+    .threads.find(t => t.id === created.id);
+  // The person who asked takes part; another member sees the thread without being told about its reply.
+  expect((await listFor("local-user"))?.participant).toBe(true);
+  expect((await listFor("test-member"))?.participant).toBe(false);
+
+  const waitingFor = (user: string) => listWaitingThreads(api!.providers.db, "local-org", { type: "team", id: team.id }, user, Date.now() + 120_000);
+  expect((await waitingFor("local-user")).map(t => t.threadId)).toContain(created.id);
+  expect((await waitingFor("test-member")).map(t => t.threadId)).not.toContain(created.id);
+
+  // Slack and event deliveries store their sender the same way, so a stored message counts whichever path sent it.
+  const userMessage = (id: string, thread: { id: string; sessionId: string }, author: object) => api!.providers.db.execute(sql`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,role,content,author,created_at)
+    VALUES (${id},${thread.sessionId},${thread.id},'message','user','Any news?',${JSON.stringify(author)},${Date.now()})`);
+  await userMessage("from-slack", created, { id: "test-member", name: "Member in Slack" });
+  expect((await listFor("test-member"))?.participant).toBe(true);
+
+  // A thread only a team API key or an unknown channel sender wrote in notifies every member, as before.
+  const automated = await (await fetch(`${api.baseUrl}/api/threads?workspace=${team.id}`, { method: "POST", headers: as("local-user") })).json() as { id: string; sessionId: string };
+  await userMessage("from-key", automated, { id: `team:${team.id}`, name: "Team API key" });
+  await userMessage("from-guest", automated, { id: "local-user", name: "Guest", externalSender: true });
+  await agentMessage(api, automated, Date.now() + 60_000);
+  const automatedFor = async (user: string) => ((await (await fetch(`${api!.baseUrl}/api/threads?workspace=${team.id}`, { headers: as(user) })).json()) as ListThreadsResponse)
+    .threads.find(t => t.id === automated.id);
+  const forOwner = await automatedFor("local-user");
+  const forMember = await automatedFor("test-member");
+  expect(forOwner?.id).toBe(automated.id);
+  expect(forMember?.id).toBe(automated.id);
+  expect(forOwner?.participant).toBeUndefined();
+  expect(forMember?.participant).toBeUndefined();
 });

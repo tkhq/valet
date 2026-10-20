@@ -30,7 +30,8 @@ The channel selector dropdown was a workaround — channels route *to* threads, 
 - **Reactivate dismissed thread:** Click in dismissed section → PATCH status to `active` → moves back to active list → becomes selected thread.
 - **Auto-reactivate:** When a channel message arrives for an archived thread, the backend flips status to `active`. Sidebar re-fetches and shows it in the active list.
 - **New thread:** "+" button creates a new thread (existing `useCreateThread`), selects it.
-- **Unread tracking:** Track "last viewed" per thread in localStorage (threadId → timestamp). Threads with messages newer than last-viewed show a badge.
+- **Unread tracking:** The server records when each person last read each thread (`thread_reads`). A thread with an agent message newer than that time, and newer than the last user activity, shows as unread.
+- **Team threads:** A reply in a team thread notifies only the people who wrote in it, through any path (web, Slack, an event delivery). The thread list derives this from the stored messages and their authors. For other members the thread stays in the list without an unread mark or a waiting question, and "Waiting on you" leaves it out. A thread that no person wrote in, such as one only a team API key prompts, notifies every member.
 
 ### Component Structure
 
