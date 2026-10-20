@@ -17,7 +17,7 @@ import { teamMembers, teams } from "../schema/index.js";
 import { shareCredential } from "../services/credential-shares.js";
 import * as credentialMetrics from "../observability/credential-metrics.js";
 import { PgCredentialStore } from "./credential-store.js";
-import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+import { buildActionInvoker, userPinnedPersonalRefusalMessage, type ActionInvocationContext } from "./action-invoker.js";
 
 const orgId = "wf-native-org";
 const userId = "u-001";
@@ -136,7 +136,7 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
     const { appDb, credentials } = await harness();
     const invoke = invokerFor(appDb, credentials);
 
-    expect(await invoke(node("linear", "user"), userCtx)).toEqual({ ok: true, result: { token: null, metadata: null } });
+    expect(await invoke(node("linear", "user"), userCtx)).toEqual({ ok: false, error: userPinnedPersonalRefusalMessage("linear") });
     await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "personal-linear" });
     expect(await invoke(node("linear", "user"), userCtx)).toEqual({ ok: true, result: { token: "personal-linear", metadata: null } });
   });
@@ -237,6 +237,43 @@ describe("workflow tool nodes and native app identities (Part E)", () => {
 
     await credentials.save({ type: "team", id: teamId }, "slack", { type: "bot_token", accessToken: "xoxb-team" });
     expect(await invoke(node("slack", "user"), teamCtx)).toMatchObject({ ok: true, result: { token: "xoxb-team" } });
+  });
+
+  it("a personal Slack node pinned to user refuses before it runs when only the org bot row answers", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "org", id: orgId }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const invoke = invokerFor(appDb, credentials);
+
+    expect(await invoke(node("slack", "user"), userCtx)).toEqual({
+      ok: false,
+      error:
+        "This node uses your own slack account, and none is connected. " +
+        "Connect slack on the Integrations page, or change the node's credential setting.",
+    });
+
+    await credentials.save({ type: "user", id: userId }, "slack", { type: "bot_token", accessToken: "xoxb-personal" });
+    expect(await invoke(node("slack", "user"), userCtx)).toMatchObject({ ok: true, result: { token: "xoxb-personal" } });
+  });
+
+  it("a personal node pinned to user refuses before a dynamic plugin's discovery", async () => {
+    const { appDb, credentials } = await harness();
+    const resolveActions = vi.fn(async () => [probeAction("acme-chat")]);
+    const actionPlugin: ActionPlugin = { service: "acme-chat", actions: [], resolveActions };
+    const plugin: ValetPlugin = {
+      name: "acme-chat",
+      version: "0.0.1",
+      native: true,
+      appCredentialService: "acme-chat",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    await credentials.save({ type: "org", id: orgId }, "acme-chat", { type: "bot_token", accessToken: "bot-org" });
+    const actionPluginByService = new Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>(
+      [["acme-chat", { plugin, actionPlugin }]]);
+    const invoke = buildActionInvoker({ db: appDb, credentials, actionPluginByService, plugins: [plugin] });
+
+    expect(await invoke(node("acme-chat", "user"), userCtx)).toEqual({ ok: false, error: userPinnedPersonalRefusalMessage("acme-chat") });
+    expect(resolveActions).not.toHaveBeenCalled();
   });
 
   it("INV-P2: a non-native service still refuses an explicit selection", async () => {

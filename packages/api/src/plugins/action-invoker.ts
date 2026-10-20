@@ -471,7 +471,8 @@ async function computeResult(
   // Team refusal (team credentials design, decision 3): a team run with no
   // resolvable credential refuses here, before any action code runs. A
   // personal run keeps executing on a null credential because the action's
-  // own guards answer for one person; a team run must fail the same way
+  // own guards answer for one person (except a `"user"` pin on a native
+  // service, below); a team run must fail the same way
   // for every member, so the refusal is made once, up front, and names the
   // corrective action. Only a declared service is gated (an undeclared one
   // never needed a credential), and only when the org does not provide it
@@ -492,10 +493,16 @@ async function computeResult(
   // A native service pinned `"user"` is gated even when the org provides
   // it: the org row is the app identity, which the pin never reads
   // (`buildCredentialProvider`), so without a person's credential the
-  // action would run on a null one.
+  // action would run on a null one. That holds for a personal run too: its
+  // owner is the only person the pin can act as, so the run refuses with
+  // the connect fix instead of failing inside the action.
   const userPinnedNative = selection === "user" && appService !== undefined;
-  const teamGated = ctx.owner.type === "team" && declared !== null && (mode !== "org" || userPinnedNative);
-  const teamRefusal = userPinnedNative ? userPinnedTeamRefusalMessage(credentialService) : teamRefusalMessage(credentialService);
+  const gated = declared !== null && (
+    (ctx.owner.type === "team" && (mode !== "org" || userPinnedNative))
+    || (ctx.owner.type === "user" && userPinnedNative));
+  const refusalText = ctx.owner.type === "user"
+    ? userPinnedPersonalRefusalMessage(credentialService)
+    : userPinnedNative ? userPinnedTeamRefusalMessage(credentialService) : teamRefusalMessage(credentialService);
   // An `auto` team read of a native service ends at the app token (Part B),
   // so a team with no person's credential is not refused when it answers.
   const teamAppTier = selection === "auto" && appService && isAppCredentialRowService(appService) ? appService : undefined;
@@ -507,8 +514,8 @@ async function computeResult(
   }
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
-    if (teamGated) {
-      const refusal = await refuseTeamRunWithoutCredential(credentials, teamRefusal, teamAppTier);
+    if (gated) {
+      const refusal = await refuseRunWithoutCredential(credentials, refusalText, teamAppTier);
       if (refusal) return refusal;
     }
     // A credential read can throw a typed refusal (a broken share, a
@@ -526,8 +533,8 @@ async function computeResult(
   }
   if (!action) return unknownAction(req);
 
-  if (teamGated) {
-    const refusal = await refuseTeamRunWithoutCredential(credentials, teamRefusal, teamAppTier);
+  if (gated) {
+    const refusal = await refuseRunWithoutCredential(credentials, refusalText, teamAppTier);
     if (refusal) return refusal;
   }
 
@@ -633,7 +640,7 @@ function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionRe
  * delegated reference, a scope refusal) is mapped the way `execute`'s own
  * try/catch maps it, so the typed message reaches the run unchanged.
  */
-async function refuseTeamRunWithoutCredential(
+async function refuseRunWithoutCredential(
   credentials: CredentialProvider,
   refusal: string,
   appTier?: string,
@@ -645,6 +652,16 @@ async function refuseTeamRunWithoutCredential(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   return { ok: false, error: refusal };
+}
+
+/** The refusal for a native service pinned `"user"` in a personal run whose
+ * owner has no credential for it. The template gallery and install gate
+ * report the same block (`workflows/templates.ts#templateRequirements`). */
+export function userPinnedPersonalRefusalMessage(service: string): string {
+  return (
+    `This node uses your own ${service} account, and none is connected. ` +
+    `Connect ${service} on the Integrations page, or change the node's credential setting.`
+  );
 }
 
 /** The refusal for a native service pinned `"user"` in a team run that only

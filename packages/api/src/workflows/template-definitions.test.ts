@@ -417,6 +417,34 @@ describe("template requirements", () => {
   });
 
   /**
+   * A node of a native service pinned `"user"` never reads the org row, so
+   * an org-provided Slack bot does not connect it. The run refuses the same
+   * node with the connect fix (`userPinnedPersonalRefusalMessage`).
+   */
+  it("counts only the caller's own credential for a native node pinned to user", () => {
+    const assign = ownedById("github.assign-reviewers");
+    const definition = {
+      ...assign.definition,
+      nodes: assign.definition.nodes.map((node) => {
+        if (node.type === "tool" && node.service === "slack") return { ...node, credential: "user" as const };
+        if (node.type === "foreach" && node.body.type === "tool" && node.body.service === "slack") {
+          return { ...node, body: { ...node.body, credential: "user" as const } };
+        }
+        return node;
+      }),
+    };
+    expect(toolNodesOf(definition).filter((node) => node.service === "slack").map((node) => node.credential)).toContain("user");
+    const connected = new Set(["github", "google_calendar", "slack"]);
+    const blocked = templateRequirements(definition, actionPluginByService, connected, new Set(), new Set(["github", "google_calendar"]));
+    expect(blocked.filter((r) => !r.connected).map((r) => r.service)).toEqual(["slack"]);
+    const own = templateRequirements(definition, actionPluginByService, connected, new Set(), connected);
+    expect(own.filter((r) => !r.connected)).toEqual([]);
+    // An unpinned definition still rides the org-provided Slack bot.
+    const unpinned = templateRequirements(assign.definition, actionPluginByService, connected, new Set(), new Set(["github", "google_calendar"]));
+    expect(unpinned.filter((r) => !r.connected)).toEqual([]);
+  });
+
+  /**
    * A service the organization has not configured is not a service the
    * reader can connect: the integrations page hides it. The requirement
    * must therefore carry the two states apart, so the card can offer a

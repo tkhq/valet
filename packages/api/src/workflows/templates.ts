@@ -57,6 +57,7 @@ import {
 import { builtinWorkflowTemplates } from "./template-definitions.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
+import { nativeAppCredentialServiceFor } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import {
   teamArmRefusals,
@@ -385,13 +386,23 @@ function credentialServiceFor(
  * say who configures it rather than offer a connect path. An absent set
  * means the caller knows of no unconfigured service, which is the right
  * answer for a caller with no organization in hand.
+ *
+ * `personalServices` is the caller's own credential set without the
+ * org-provided services. A node of a native service pinned `"user"` never
+ * reads the org row, which is the app identity, so that service counts as
+ * connected only when the caller has their own credential. The run refuses
+ * the same node (`plugins/action-invoker.ts`,
+ * `userPinnedPersonalRefusalMessage`). An absent set reads every pin as
+ * `connectedServices` does.
  */
 export function templateRequirements(
   definition: WorkflowDefinition,
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
   unavailableServices: ReadonlySet<string> = new Set(),
+  personalServices?: ReadonlySet<string>,
 ): WorkflowTemplateRequirement[] {
+  const plugins = [...new Set([...actionPluginByService.values()].map((entry) => entry.plugin))];
   const byService = new Map<string, WorkflowTemplateRequirement>();
   for (const node of toolNodesOf(definition)) {
     const entry = actionPluginByService.get(node.service);
@@ -400,10 +411,13 @@ export function templateRequirements(
     // validation before this runs.
     if (!entry) continue;
     const { service, required, dynamic } = credentialServiceFor(entry);
-    if (byService.has(service)) continue;
+    const userPinned = personalServices !== undefined && node.credential === "user"
+      && nativeAppCredentialServiceFor(plugins, service) !== undefined;
+    const prior = byService.get(service);
+    if (prior && !(userPinned && prior.connected)) continue;
     byService.set(service, {
       service,
-      connected: required ? connectedServices.has(service) : true,
+      connected: required ? (userPinned ? personalServices.has(service) : connectedServices.has(service)) : true,
       ...(dynamic ? { dynamic: true } : {}),
       ...(unavailableServices.has(service) ? { unconfigured: true } : {}),
     });
@@ -555,6 +569,7 @@ export function summarizeTemplate(
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>,
   connectedServices: ReadonlySet<string>,
   unavailableServices: ReadonlySet<string> = new Set(),
+  personalServices?: ReadonlySet<string>,
 ): { ok: true; value: SummarizeResult } | { ok: false; errors: string[] } {
   const validation = validateDefinitionInput(
     owned.template.definition,
@@ -581,6 +596,7 @@ export function summarizeTemplate(
           actionPluginByService,
           connectedServices,
           unavailableServices,
+          personalServices,
         ),
         inputs: templateInputs(triggerDataSchema(definition)),
         // The author's own caveats come first: they carry knowledge the
@@ -702,7 +718,8 @@ export async function listWorkflowTemplateSummaries(
   // every card for an org-provided-but-not-personally-connectable service
   // reads "Connect Slack" forever, for every member, including the one who
   // set it up.
-  const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
+  const own = new Set(personal.map((cred) => cred.service));
+  const connected = new Set([...own, ...orgProvided]);
 
   // The org's model policy, read once for the whole listing. It decides the
   // `installable` flag on each card: the install gate refuses a template
@@ -725,7 +742,7 @@ export async function listWorkflowTemplateSummaries(
 
   const listed: SummarizeResult[] = [];
   for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
-    const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
+    const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable, own);
     if (!result.ok) {
       console.error(
         `workflow templates: hiding "${owned.template.id}" from "${owned.pluginName}" — ` +
@@ -1031,8 +1048,9 @@ export async function installWorkflowTemplate(
     orgProvidedServiceSet(availability),
     unavailableServiceSet(availability),
   ]);
-  const connected = new Set([...personal.map((c) => c.service), ...orgProvided]);
-  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
+  const own = new Set(personal.map((c) => c.service));
+  const connected = new Set([...own, ...orgProvided]);
+  const summarized = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable, own);
   if (!summarized.ok) {
     return {
       ok: false,
