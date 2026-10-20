@@ -3,23 +3,27 @@
  * Rendered for each `WorkflowPendingGate` with `kind === "policy_gate"`.
  *
  * Split-button: "Approve once" (primary) + chevron trigger opening a
- * DropdownMenu with "Approve for rest of run". Durable permission applies
- * only to this workflow. Deny is a separate danger button. Note field rides whichever action
+ * DropdownMenu with "Approve for rest of run". "Approve and stop asking"
+ * (secondary, confirmed) saves a permission for later runs of this workflow
+ * only. Deny is a separate danger button. Note field rides whichever action
  * fires. On 409 the query key is invalidated so the stale card disappears.
  */
 import { type ReactElement } from "react";
 import { ChevronDown, ShieldAlert } from "lucide-react";
 import type { WorkflowPendingGate } from "@valet/api/wire";
+import { actionParamsLabel } from "@valet/shared";
 import { useMe } from "~/api/settings";
 import { useApprovalResponse } from "./use-approval-response";
 import { ApiError } from "~/api/client";
 import { apiErrorMessage } from "~/api/policies";
 import {
   Button,
+  Callout,
   cardClass,
   ConfirmDialog,
   Input,
   Spinner,
+  Time,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
@@ -44,6 +48,10 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const serviceAction = service && action ? `${service}.${action}` : gate.nodeId;
 
   const busy = resolve.isPending;
+  const paramsLabel = actionParamsLabel(gate.gateParams);
+  // Only the action permission stops later runs from asking. A lender's
+  // workflow consent covers their account and keeps its own copy.
+  const confirmingStopAsking = confirmation?.approved === true && confirmation.scope === "workflow" && !gate.approver;
   const borrowScopeCopy = `Approving this step also lets Valet use your ${gate.serviceDisplayName || service || "shared"} account for later actions in this workflow run, including actions requested by other teammates. Only you can approve use of your account.`;
 
   function fireApprove(scope: "once" | "run" | "workflow" | "team_account") {
@@ -82,7 +90,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   }
 
   return (
-    <div className="rounded-md border border-amber-300 bg-amber-50/70 dark:border-amber-700/60 dark:bg-amber-950/40 p-4 space-y-3">
+    <Callout tone="warning" className="space-y-3 p-4">
       {/* Header */}
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-200 dark:bg-amber-900/60">
@@ -108,6 +116,12 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       )}
 
       {/* Params */}
+      {paramsLabel && (
+        <p className="text-sm [overflow-wrap:anywhere]">
+          <span className="text-muted">{paramsLabel.key}: </span>
+          <span className="font-medium text-ink">{paramsLabel.value}</span>
+        </p>
+      )}
       {gate.gateParams != null && (
         <details className="text-xs text-muted">
           <summary className="min-h-11 cursor-pointer select-none py-3 font-medium sm:min-h-0 sm:py-0 text-ink">
@@ -146,7 +160,6 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           {gate.approver.allowTeamConsent && <Button size="sm" variant="secondary" onClick={() => fireApprove("team_account")} disabled={busy}>Always allow for this team</Button>}
           </>
         ) : <>
-        <Button size="sm" onClick={() => fireApprove("workflow")} disabled={busy}>Allow for this workflow</Button>
         {/* Split-button: Approve once + dropdown */}
         <div className="flex items-center">
           <Button
@@ -186,7 +199,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-
+        <Button size="sm" variant="secondary" onClick={() => fireApprove("workflow")} disabled={busy}>Approve and stop asking</Button>
         </>}
 
         {/* Deny */}
@@ -202,21 +215,21 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       <ConfirmDialog
         open={confirmation !== null}
         onOpenChange={onConfirmationOpenChange}
-        title={confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
+        title={confirmingStopAsking ? "Stop asking on later runs?" : confirmation?.approved === false ? "Deny this tool action?" : "Allow this tool action?"}
         description={
           confirmation?.approved && gate.approver
             ? confirmation.scope === "workflow"
               ? `Valet can use your ${gate.serviceDisplayName || service || "shared"} account in later runs of this workflow until someone changes its steps or you stop sharing. Action approvals still apply.`
               : borrowScopeCopy
-            : confirmation?.scope === "workflow"
-            ? `Allow ${serviceAction} for future runs of this workflow only, until its saved permissions are reset. Existing policy restrictions remain in effect.`
+            : confirmingStopAsking
+            ? `Valet runs ${serviceAction} now. Later runs of this workflow run ${serviceAction} without asking anyone, until someone changes its steps or resets its saved permissions. Policy rules that require approval still apply.`
             : confirmation?.scope === "run"
             ? `Valet runs ${serviceAction} now and allows later calls in this run.`
             : confirmation?.approved === false
               ? denyMicrocopy
               : `Valet runs ${serviceAction} once with the shown parameters.`
         }
-        confirmLabel={confirmation?.approved === false ? "Deny action" : "Allow action"}
+        confirmLabel={confirmingStopAsking ? "Stop asking" : confirmation?.approved === false ? "Deny action" : "Allow action"}
         onConfirm={confirm}
       />
 
@@ -225,7 +238,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
         <div className="space-y-1">
           {gate.timeoutAt != null && (
             <div className="text-[11px] text-muted">
-              Gate times out {new Date(gate.timeoutAt).toLocaleString()}.
+              Gate times out <Time ts={gate.timeoutAt} format="absolute" />.
             </div>
           )}
           {is409AlreadyResolved && (
@@ -240,6 +253,6 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           )}
         </div>
       )}
-    </div>
+    </Callout>
   );
 }

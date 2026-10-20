@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { Label, Spinner } from "~/components/primitives";
+import { Label, Select, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useOrgReasoning, usePatchOrgReasoning } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
 import { VALET_DEFAULT_REASONING } from "@valet/api/wire";
 import { levelsUpTo, REASONING_LABELS, REASONING_LEVELS, reasoningLabelFor } from "~/lib/reasoning";
-
-const SELECT_CLASS = "mt-1 h-12 w-full rounded border border-[--border] bg-[--bg] px-2 text-base text-[--fg] sm:h-9 sm:text-sm";
 
 /**
  * Organization · Models — default and max reasoning levels
@@ -62,11 +60,11 @@ export function ReasoningSection() {
           <div className="grid max-w-md grid-cols-2 gap-4">
             <div>
               <Label htmlFor="reasoning-default">Default</Label>
-              <select
+              <Select
                 id="reasoning-default"
                 value={defaultLevel}
                 onChange={(e) => setDefault(e.target.value)}
-                className={SELECT_CLASS}
+                className="mt-1 w-full"
               >
                 <option value="">Valet default ({reasoningLabelFor(builtInDefault)})</option>
                 {REASONING_LEVELS.map((level) => (
@@ -74,15 +72,15 @@ export function ReasoningSection() {
                     {REASONING_LABELS[level]}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div>
               <Label htmlFor="reasoning-max">Max</Label>
-              <select
+              <Select
                 id="reasoning-max"
                 value={maxLevel}
                 onChange={(e) => setMax(e.target.value)}
-                className={SELECT_CLASS}
+                className="mt-1 w-full"
               >
                 <option value="">No cap</option>
                 {REASONING_LEVELS.map((level) => (
@@ -90,7 +88,7 @@ export function ReasoningSection() {
                     {REASONING_LABELS[level]}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           </div>
 

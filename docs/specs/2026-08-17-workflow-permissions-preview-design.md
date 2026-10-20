@@ -135,8 +135,18 @@ rows only, so the preview reads no secret, no vault, and refreshes no token.
 - The prediction reads the STORED definition. An unsaved draft edit badges
   after the save (the detail invalidation refetches it).
 - `unknown` actions are excluded from both the badge and the bulk allow; a
-  run that reaches one can still gate on its resolved risk level.
+  run that reaches one can still gate on its resolved risk level. That run's
+  approval card can allow it for later runs (see "Run approval card for a Tool
+  step").
 
+
+## Run approval card for a Tool step (2026-10-20)
+
+A Tool step that policy holds parks the run and shows an approval card on the run page. The card puts **Approve once** first, as the primary button, with **Approve for rest of run** in its menu. **Approve and stop asking** is a secondary button after it. Its confirmation says that Valet runs the action now and that later runs of this workflow run it without asking, until someone changes the steps or resets saved permissions. When the rendered parameters have a `name`, `title`, `subject` or `summary` text field, the card shows it above the raw parameters (`actionParamsLabel` in `@valet/shared`). The approval notification title adds it: `Approval needed: linear.save_project for "<name>"`. Slack renders the title as markdown, so the title puts a space after `]` to keep `[text](url)` in a parameter from becoming a link.
+
+Approve and stop asking sends scope `workflow`. `resolveWorkflowApproval` saves a workflow grant through `prepareWorkflowPermissions`, which grants only actions the review reports as gating. The review reports a Tool step's dynamic action, which includes every MCP action, as `unknown`, so before this change the card always returned 403. The run already resolved that action, and the gate's checkpoint records the policy source in `effects.provenance`. When that source is `risk_default` or `plugin_default`, the card's workflow scope now grants exactly the parked step's action, also in a foreach body. Before it saves, the server reads the current rules again with the risk the gate recorded. An org or team rule or an override added since the run parked refuses the grant, including a rule on any parameter. The owner or team admin rule, the step check, and the definition lock still apply. For any other source (org policy, team policy, override, resolver error), the card still returns 403 and writes nothing. At run time an org or team rule and a personal override still win over a workflow grant (`resolvePolicyDecision`).
+
+The review keeps showing such a step as "Checked at runtime". Reset saved permissions removes the grant, and any step change revokes it.
 
 ## Explicit build-time approval (2026-10-18)
 

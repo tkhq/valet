@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError } from "~/api/client";
 import { NotYou } from "~/components/auth/not-you";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Callout, Spinner } from "~/components/primitives";
 
 /**
  * `/oauth/consent` — approve or deny an app that asks for MCP access to Valet
@@ -91,10 +91,10 @@ export function ConsentPage({ code }: { code: string | undefined }) {
             </p>
 
             {!info.data.redirect_is_local && (
-              <div className="rounded border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-ink dark:border-amber-700/60 dark:bg-amber-950/40">
+              <Callout tone="warning" className="text-xs leading-relaxed">
                 Access goes to <strong>{info.data.redirect_origin}</strong>, not to this computer. Allow it only if you
                 started this connection in that app.
-              </div>
+              </Callout>
             )}
 
             <div className="space-y-2">

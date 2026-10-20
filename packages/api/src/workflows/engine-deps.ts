@@ -86,6 +86,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { isTeamMember } from "../services/teams.js";
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { definitionVersionId } from "./definition-version.js";
+import { submissionWorkflowStep } from "./step-grants.js";
 import { recordLlmStepUsage } from "./step-usage.js";
 
 export interface WorkflowEngineDepsOpts {
@@ -439,7 +440,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const refused = (await opts.engineStore.listDecisionGatesForQueueItem(sessionId, threadId, queueItemId))
         .filter((gate) => gate.resolution !== undefined && isUnattendedWorkflowRefusal(gate.resolution));
       if (refused.length === 0) return result;
-      return { queueItemId, outcome: "failed" as const, error: unattendedRefusalError(refused) };
+      // A run an agent started never uses saved permissions in agent steps
+      // (`step-grants.ts`), so the review fix would not help there.
+      const step = await submissionWorkflowStep(opts.engineStore, sessionId, queueItemId);
+      const run = step ? await opts.store.getRun(step.runId) : null;
+      return { queueItemId, outcome: "failed" as const,
+        error: unattendedRefusalError(refused, { agentStarted: run?.params.startedBy === "agent" }) };
     },
 
     async abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void> {
@@ -722,9 +728,13 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
  * Review permissions can allow it in the agent step instead (only there for
  * an MCP action, which the review cannot resolve in a Tool step). An
  * ask_approval request can never be answered in a run, so it gets the
- * Approval step fix.
+ * Approval step fix. A run an agent started never uses saved permissions in
+ * agent steps, so for it the error says that instead of the review fix.
  */
-export function unattendedRefusalError(gates: Array<Pick<DecisionGate, "title" | "context">>): string {
+export function unattendedRefusalError(
+  gates: Array<Pick<DecisionGate, "title" | "context">>,
+  opts: { agentStarted?: boolean } = {},
+): string {
   const toolId = (gate: Pick<DecisionGate, "context">) => {
     const id = gate.context?.tool_id;
     return typeof id === "string" ? id : undefined;
@@ -732,10 +742,18 @@ export function unattendedRefusalError(gates: Array<Pick<DecisionGate, "title" |
   const actions = [...new Set(gates.flatMap((gate) => toolId(gate) ?? []))];
   const requests = gates.filter((gate) => toolId(gate) === undefined).map((gate) => `"${gate.title}"`);
   const parts = ["A workflow run cannot ask a person for approval, so Valet sent no approval request."];
+  if (opts.agentStarted && actions.length > 0) {
+    // The marker comes from the source run or from an agent's retry
+    // (`startWorkflowRun`), so only a new run is sure to clear it.
+    parts.push("An agent started or retried this run, so its agent steps do not use the workflow's saved permissions. " +
+      "Start a new run from the workflow page, or wait for the workflow to start one on its own.");
+  }
   for (const action of actions) {
     parts.push(
-      `${action} did not run. To approve it on each run, move ${action} to a Tool step, which asks for approval on each run. ` +
-        `To let it run without asking, list ${action} in this step's actions, then use Review permissions on the workflow page.`,
+      `${action} did not run. To approve it on each run, move ${action} to a Tool step, which asks for approval on each run.` +
+        (opts.agentStarted
+          ? ` A new run uses saved permissions for ${action} only if this step lists it in its actions and Review permissions allows it.`
+          : ` To let it run without asking, list ${action} in this step's actions, then use Review permissions on the workflow page.`),
     );
   }
   if (requests.length > 0) {

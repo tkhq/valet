@@ -3,7 +3,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SandboxProfile } from "@valet/api/wire";
 import { useSandboxJwt } from "~/api/queries";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, Spinner, TabBar, type TabDef } from "~/components/primitives";
 import { SandboxChip } from "~/components/session/session-header";
 import { BrowserPane } from "~/components/session/browser/browser-pane";
 import { cn } from "~/lib/cn";
@@ -11,7 +11,7 @@ import { cn } from "~/lib/cn";
 export type SandboxTabId = "chat" | "browser" | "terminal" | "vscode";
 type GatewayTabId = "terminal" | "vscode";
 
-const TABS: { id: SandboxTabId; label: string }[] = [
+const TABS: TabDef<SandboxTabId>[] = [
   { id: "chat", label: "Chat" },
   { id: "browser", label: "Browser" },
   { id: "terminal", label: "Terminal" },
@@ -54,25 +54,7 @@ export function SandboxTabs({
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
       <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
-        <div role="tablist" aria-label="Thread view" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === t.id}
-              onClick={() => onTabChange(t.id)}
-              className={cn(
-                "shrink-0 min-h-11 sm:min-h-0 px-2.5 py-2 text-xs font-medium border-b-2 -mb-px transition-colors",
-                activeTab === t.id
-                  ? "border-moss text-ink"
-                  : "border-transparent text-muted hover:text-ink",
-              )}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <TabBar label="Thread view" size="sm" className="flex-1 shadow-none" tabs={tabs} active={activeTab} onSelect={onTabChange} />
         {notice && <>
           <span role="status" title={notice} className="hidden lg:block max-w-[50%] truncate pl-3 text-xs text-muted">{notice}</span>
           <Popover>

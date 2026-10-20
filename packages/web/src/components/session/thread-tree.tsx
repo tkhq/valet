@@ -774,7 +774,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               )}
               {(archivedQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)).map((t) => (
                 <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
-                  <span className="flex-1 truncate">{t.title ?? t.id}</span>
+                  <span className="flex-1 truncate" title={t.title ?? t.id}>{t.title ?? t.id}</span>
                   {gatedThreadIds.has(t.id) && (
                     <span role="img" aria-label="Response required" title="Response required">
                       <Bell className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-300" aria-hidden />
@@ -935,8 +935,8 @@ function ThreadNode({
         )}
       >
         {isEditing ? (
-          <div className={cn("flex-1 min-w-0 py-1", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
-            <input
+          <div className={cn("flex-1 min-w-0", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
+            <Input
               ref={inputRef}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -953,10 +953,6 @@ function ThreadNode({
               maxLength={200}
               aria-label={`Rename thread: ${label}`}
               placeholder="Thread name"
-              className={cn(
-                "w-full rounded border border-line bg-surface px-1.5 py-0.5 text-sm text-ink",
-                "outline-none focus:ring-1 focus:ring-moss",
-              )}
             />
           </div>
         ) : (
@@ -1074,7 +1070,7 @@ function ThreadNode({
                 )}
               >
                 <MessageSquare className="h-3 w-3 shrink-0" />
-                <span className="flex-1 truncate">{c.title || c.sessionId}</span>
+                <span className="flex-1 truncate" title={c.title || c.sessionId}>{c.title || c.sessionId}</span>
                 {c.status === "settled" ? (
                   <span role="img" aria-label="settled" className="shrink-0 text-muted">
                     ✓

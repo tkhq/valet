@@ -99,7 +99,7 @@ describe("team Policies settings parity", () => {
     fireEvent.click(screen.getByText("Advanced rules (1)"));
     expect(await screen.findByText(/"path": "to"/)).toBeTruthy();
     expect(screen.getByText("Workflows", { selector: "span" })).toBeTruthy();
-    expect(screen.getByText(/^Expires /)).toBeTruthy();
+    expect(screen.getByText(/^Expires/).querySelector("time")?.getAttribute("dateTime")).toBe(new Date(2000000000000).toISOString());
     fireEvent.change(screen.getByLabelText("Mode for policy advanced"), { target: { value: "deny" } });
     await waitFor(() => expect(api.patchTeamPolicy).toHaveBeenCalledWith("a", "advanced", { mode: "deny" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete policy service: simple" }));

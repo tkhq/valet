@@ -3,10 +3,11 @@ import { cn } from "~/lib/cn";
 
 /**
  * A single radio option rendered as a quiet card: title + one-line
- * description, moss ring when selected (split-settings design, "Visual
- * direction" — used for Appearance's System/Light/Dark choice). Callers
- * compose a `role="radiogroup"` wrapper around a row of these; each card
- * is itself `role="radio"`.
+ * description, moss ring when selected. Use it for every selectable card,
+ * such as a theme, a member role, or a review method. Callers compose a
+ * `role="radiogroup"` wrapper around a row of these; each card is itself
+ * `role="radio"`. `children` shows below the description, such as the
+ * passes of a review method.
  */
 export function RadioCard({
   title,
@@ -17,6 +18,7 @@ export function RadioCard({
   className,
   ariaLabel,
   disabled,
+  children,
 }: {
   title: string;
   description: string;
@@ -28,6 +30,7 @@ export function RadioCard({
    * text (title + description). */
   ariaLabel?: string;
   disabled?: boolean;
+  children?: ReactNode;
 }) {
   return (
     <button
@@ -58,6 +61,7 @@ export function RadioCard({
         </span>
       </div>
       <span className="text-xs text-muted">{description}</span>
+      {children}
     </button>
   );
 }

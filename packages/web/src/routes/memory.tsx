@@ -1,6 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 import { Link, Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import { MemoryImportExport } from "~/components/memory/import-export";
+import { PageHeader } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { MemorySearchPane } from "~/components/memory/memory-search";
 import { cn } from "~/lib/cn";
@@ -45,12 +46,10 @@ function MemoryLayout() {
         "flex min-h-0 min-w-0 flex-col border-b border-line md:h-auto md:w-72 md:shrink-0 md:border-b-0 md:border-r",
         activePath || isGraph ? "shrink-0" : "flex-1 md:flex-none",
       )}>
+        <PageHeader title="Memory" clause={<WorkspaceClause />} className="px-4 pt-4" />
         <div className="flex min-w-0 items-center gap-1 px-2 pt-2">
           <ViewTab to="/memory" label="Files" active={!isGraph} back={Boolean(activePath) || isGraph} />
           <ViewTab to="/memory/graph" label="Graph" active={isGraph} />
-          <span className="ml-auto flex min-w-0 justify-end pr-1">
-            <WorkspaceClause />
-          </span>
         </div>
         <div className={cn("flex-1 min-h-0 overflow-y-auto", (activePath || isGraph) && "hidden md:block")}>
           <MemorySearchPane activePath={activePath} onSelect={onSelect} />

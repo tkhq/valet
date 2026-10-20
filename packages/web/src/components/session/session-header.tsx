@@ -414,7 +414,7 @@ export function SessionHeader({
           <Input
             autoFocus
             aria-label="Session title"
-            className="w-full sm:h-7 sm:w-64 sm:max-w-full font-semibold"
+            className="w-full sm:w-64 sm:max-w-full font-semibold"
             value={titleDraft}
             onChange={(e) => setTitleDraft(e.target.value)}
             onBlur={() => void commitRename()}

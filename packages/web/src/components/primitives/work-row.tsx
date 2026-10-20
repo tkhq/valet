@@ -1,6 +1,6 @@
 import { cardClass } from "./card";
 import type { ReactNode } from "react";
-import { relativeTime } from "~/lib/relative-time";
+import { Time } from "./time";
 import { cn } from "~/lib/cn";
 
 /**
@@ -22,7 +22,7 @@ export function WorkRow({ title, badge, time, detail, actions }: {
         {badge}
       </div>
       {(time !== undefined || detail) && <div className="mt-1 [overflow-wrap:anywhere] text-sm text-muted">
-        {time !== undefined && <span className="tabular-nums">{relativeTime(time)}</span>}
+        {time !== undefined && <Time ts={time} className="tabular-nums" />}
         {time !== undefined && detail ? " · " : null}
         {detail}
       </div>}

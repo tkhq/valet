@@ -76,6 +76,13 @@ describe("PolicyGateCard", () => {
     expect(screen.getByText(/Parameters/i)).toBeTruthy();
   });
 
+  it("summarizes the rendered params above the raw JSON", () => {
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ gateParams: { team: "t-1", name: "Onboarding: Valet Test Hire" } })} />);
+    const summary = screen.getByText("Onboarding: Valet Test Hire");
+    expect(summary.closest("details")).toBeNull();
+    expect(summary.parentElement?.textContent).toBe("name: Onboarding: Valet Test Hire");
+  });
+
   it("shows truncation notice when gateParamsTruncated is true", () => {
     const gate = makeGate({ gateParams: { x: 1 }, gateParamsTruncated: true });
     render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
@@ -129,14 +136,25 @@ describe("PolicyGateCard", () => {
     });
   });
 
-  it("confirms a persistent permission confined to this workflow", async () => {
+  it("makes Approve once the primary action and the lasting choice a later secondary one", () => {
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
+    const once = screen.getByRole("button", { name: "Approve once" });
+    const lasting = screen.getByRole("button", { name: "Approve and stop asking" });
+    expect(screen.getAllByRole("button")[0]).toBe(once);
+    expect(once.compareDocumentPosition(lasting) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(once.className).toContain("bg-moss");
+    expect(lasting.className).not.toContain("bg-moss");
+    expect(screen.queryByRole("button", { name: "Allow for this workflow" })).toBeNull();
+  });
+
+  it("confirms that later runs of this workflow stop asking", async () => {
     const user = userEvent.setup();
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
-    await user.click(screen.getByRole("button", { name: "Allow for this workflow" }));
-    expect(screen.getByText(/future runs of this workflow only/i)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Allow action" }));
+    await user.click(screen.getByRole("button", { name: "Approve and stop asking" }));
+    expect(mutate).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog").textContent).toMatch(/Later runs of this workflow run linear\.save_issue without asking anyone/);
+    await user.click(screen.getByRole("button", { name: "Stop asking" }));
     expect(mutate).toHaveBeenCalledWith({ nodeId: "node_1", body: { approved: true, scope: "workflow", note: undefined, iteration: undefined } });
-    expect(screen.queryByText("Always allow")).toBeNull();
   });
 
   // ── Case 5: Deny microcopy ────────────────────────────────────────────────
@@ -222,7 +240,7 @@ describe("PolicyGateCard", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Optional note" }), {
       target: { value: "  needs changes  " },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Allow for this workflow" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve and stop asking" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(mutate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
@@ -257,7 +275,7 @@ describe("PolicyGateCard", () => {
     rerender(<PolicyGateCard runId="wfrun_1" gate={{ ...gate, approver: { userId: "me" } }} />);
     expect(screen.getByRole("button", { name: "Allow for this run" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Allow for this workflow" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and stop asking" })).toBeNull();
     expect(screen.queryByRole("button", { name: "More approval options" })).toBeNull();
     expect(screen.getByText(/also lets Valet use your linear account for later actions in this workflow run/)).toBeTruthy();
     expect(screen.getByText(/including actions requested by other teammates/)).toBeTruthy();

@@ -210,7 +210,8 @@ export function ConfigForm({
                   setInvariants(invariants.map((v, i) => (i === index ? e.target.value : v)))
                 }
                 placeholder="e.g. every admin route sits behind requireAdmin"
-                className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
+                size="sm"
+                className="min-w-0 flex-1"
                 aria-label={`Invariant ${index + 1}`}
               />
               <Button
@@ -289,7 +290,8 @@ export function ConfigForm({
                 value={host}
                 onChange={(e) => updateHost(i, e.target.value)}
                 placeholder="e.g. api.example.com or api.example.com:8443"
-                className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
+                size="sm"
+                className="min-w-0 flex-1"
                 aria-label={`Authorized host ${i + 1}`}
               />
               <Button
@@ -325,7 +327,8 @@ export function ConfigForm({
                   value={cidr}
                   onChange={(e) => updateCidr(i, e.target.value)}
                   placeholder="e.g. 10.0.0.0/8"
-                  className="min-h-11 sm:min-h-0 sm:h-8 min-w-0 flex-1 text-base sm:text-xs"
+                  size="sm"
+                  className="min-w-0 flex-1"
                   aria-label={`Authorized CIDR ${i + 1}`}
                 />
                 <Button
@@ -355,7 +358,7 @@ export function ConfigForm({
             value={scope.loginUrl}
             onChange={(e) => setLoginUrl(e.target.value)}
             placeholder="https://api.example.com/auth/login"
-            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
+            size="sm"
           />
           <p className="text-[11px] text-muted">
             The pivot-coordinator POSTs to this endpoint with the credentials
@@ -372,7 +375,7 @@ export function ConfigForm({
             value={scope.signupUrl}
             onChange={(e) => setSignupUrl(e.target.value)}
             placeholder="https://api.example.com/signup"
-            className="min-h-11 sm:min-h-0 sm:h-8 text-base sm:text-xs"
+            size="sm"
           />
           <p className="text-[11px] text-muted">
             Only used by the L4 <span className="font-mono">create-test-account</span> pattern; leave blank to skip.
@@ -387,7 +390,8 @@ export function ConfigForm({
             value={scope.rateLimitRps}
             onChange={(e) => setRateLimit(e.target.value)}
             placeholder="e.g. 5"
-            className="min-h-11 sm:min-h-0 sm:h-8 w-24 text-base sm:text-xs"
+            size="sm"
+            className="w-24"
           />
           <p className="text-[11px] text-muted">
             Integer 1..1000. Absent means each live persona picks a conservative default.

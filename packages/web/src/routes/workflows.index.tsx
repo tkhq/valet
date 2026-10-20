@@ -188,6 +188,7 @@ function DefinitionRow({
         <Link
           to="/workflows/$workflowId"
           params={{ workflowId: workflow.id }}
+          title={workflow.name}
           className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
         >
           {workflow.name}

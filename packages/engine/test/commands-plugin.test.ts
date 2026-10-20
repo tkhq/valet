@@ -517,6 +517,7 @@ describe("formatPluginOutcome", () => {
     expect(ok).toBe(false);
     expect(output).toContain("Valet sent no approval request");
     expect(output).toContain("move the action to a Tool step, which asks for approval on each run");
+    expect(output).toContain("Saved permissions do not apply to a run that an agent started or retried.");
     // Since build-time approval, saving a workflow allows nothing.
     expect(output).not.toContain("saving the workflow approves");
   });
