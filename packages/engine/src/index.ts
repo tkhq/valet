@@ -154,6 +154,7 @@ export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
 export {
   builtinTools,
+  DEFAULT_WAKEUP_LIMITS,
   readTool,
   writeTool,
   editTool,

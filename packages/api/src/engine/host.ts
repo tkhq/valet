@@ -42,6 +42,7 @@ import {
   type PluginStore,
   type WakeupLimits,
   type WakeupsSeam,
+  DEFAULT_WAKEUP_LIMITS,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
@@ -285,13 +286,13 @@ export interface EngineHostOpts {
    * `applyScratchCaps` inside `resolveRepoPrebuildFlags`. A declared value
    * over the cap is dropped, never clamped.
    */
-  scratchCaps: ScratchCaps;
+  scratchCaps?: ScratchCaps;
   /**
    * Wakeup/lease limits (`resolveWakeupLimits(process.env)` at boot),
    * passed to every session's `wakeups` seam as `WakeupsSeam.limits`
    * (spec 2026-10-08).
    */
-  wakeupLimits: WakeupLimits;
+  wakeupLimits?: WakeupLimits;
   /**
    * Cap on one detached job's log, in bytes (`resolveJobLogMaxBytes` at
    * boot). Passed to every session's `wakeups` seam. Optional so test
@@ -500,7 +501,7 @@ export function wakeupsSeamDeps(
 ): WakeupsSeamDeps {
   return {
     engineStore: opts.engineStore,
-    limits: opts.wakeupLimits,
+    limits: opts.wakeupLimits ?? DEFAULT_WAKEUP_LIMITS,
     provider: opts.sandboxProvider,
     ...(opts.jobLogMaxBytes !== undefined ? { jobLogMaxBytes: opts.jobLogMaxBytes } : {}),
   };
@@ -2283,7 +2284,7 @@ export class EngineHost {
     // deduplicated per repo below (mirroring `resourcesWithheld`), and
     // surfaces the warning text to callers (REST sessions log it; children
     // push it onto `startupWarnings` in `childSessionFor`).
-    const capped = applyScratchCaps(overridden, this.opts.scratchCaps);
+    const capped = applyScratchCaps(overridden, this.opts.scratchCaps ?? {});
     const result = { ...capped.flags, ...(capped.warning ? { scratchWarning: capped.warning } : {}) };
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
