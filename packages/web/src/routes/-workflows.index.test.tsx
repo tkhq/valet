@@ -241,6 +241,7 @@ vi.mock("~/api/workflows", () => ({
 
 import { PERSONAL, WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
 import { WorkflowsTab } from "./workflows.index";
+import { WorkflowsHeaderActions } from "~/components/workflows/workflows-header-actions";
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 
 /** `workspace` selects the workspace the page is being read in — what the
@@ -261,6 +262,16 @@ function renderPage(workspace = PERSONAL) {
         <WorkflowsTab />
       </WorkspaceScopeProvider>
     </TooltipProvider>
+    </QueryClientProvider>,
+  );
+}
+
+/** The page header's actions, which the layout renders above the tabs. */
+function renderHeaderActions(workspace = PERSONAL) {
+  window.sessionStorage.setItem("valet:workspace", workspace);
+  return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <TooltipProvider><WorkspaceScopeProvider><SwitchWorkspace /><WorkflowsHeaderActions /></WorkspaceScopeProvider></TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -338,7 +349,7 @@ describe("WorkflowsTab", () => {
   });
 
   it("opens the New workflow dialog, defaults the name field, and posts the entered name on Create", async () => {
-    renderPage();
+    renderHeaderActions();
     await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
 
@@ -393,9 +404,18 @@ describe("WorkflowsTab", () => {
     expect(setEnabledMutate).toHaveBeenCalledWith({ triggers: triggersData.triggers, enabled: false });
   });
 
-  it("offers New workflow above the list", () => {
+  it("offers New workflow in the page header and opens the composer through the URL", async () => {
+    renderHeaderActions();
+    await userEvent.click(screen.getByRole("button", { name: "New workflow" }));
+    const call = navigate.mock.calls[0]![0] as { to: string; search: (prev: Record<string, unknown>) => Record<string, unknown> };
+    expect(call.to).toBe("/workflows");
+    expect(call.search({ workspace: "team-1" })).toEqual({ workspace: "team-1", create: true });
+  });
+
+  it("shows the composer when the URL asks for it", () => {
+    searchState = { create: true };
     renderPage();
-    expect(screen.getByRole("button", { name: "New workflow" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: workflowsData.workflows[0]!.name })).toBeNull();
   });
 
   it("shows both gate classes and highlights the focused approval", () => {
@@ -487,7 +507,7 @@ describe("WorkflowsTab: team ownership", () => {
     // The dialog had an Owner select. It repeated the nav's workspace
     // switcher and could contradict it, so the list could show one
     // workspace while Create filed the new workflow under another.
-    renderPage("team_1");
+    renderHeaderActions("team_1");
     await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
 
@@ -504,7 +524,7 @@ describe("WorkflowsTab: team ownership", () => {
   });
 
   it("sends no teamId in your own workspace", async () => {
-    renderPage();
+    renderHeaderActions();
     await userEvent.click(screen.getByRole("button", { name: "Workflow options" }));
     await userEvent.click(screen.getByRole("menuitem", { name: "Manual setup" }));
     fireEvent.click(screen.getByRole("button", { name: "Create" }));

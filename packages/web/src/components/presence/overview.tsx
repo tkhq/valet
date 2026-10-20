@@ -20,7 +20,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
-import type { EventSubscriptionWire, PresencePlaceWire, WorkflowTriggerItem } from "@valet/api/wire";
 import { useEventSubscriptions } from "~/api/events";
 import { usePresencePlaces } from "~/api/presence";
 import { useWorkflowTriggers } from "~/api/workflows";
@@ -98,11 +97,11 @@ export function OverviewActions() {
   return (
     <div className="flex items-center gap-2">
       {!empty && (
-        <Button asChild variant="secondary">
+        <Button asChild variant="secondary" size="sm">
           <Link to="/presence/activity">Activity</Link>
         </Button>
       )}
-      <Button onClick={() => setAdding(true)}>
+      <Button size="sm" onClick={() => setAdding(true)}>
         <Plus aria-hidden className="h-3.5 w-3.5" />
         Add
       </Button>

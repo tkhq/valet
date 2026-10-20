@@ -1,6 +1,6 @@
 import { Link, Outlet, createFileRoute, useMatch } from "@tanstack/react-router";
 import { OverviewActions } from "~/components/presence/overview";
-import { pageClass } from "~/components/primitives";
+import { PageHeader, pageClass } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 
 /**
@@ -35,16 +35,13 @@ export function PresenceLayout() {
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className={pageClass}>
         {onOverview && (
-          <div className="mb-6 flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <h1 className="font-display text-2xl text-ink">Presence</h1>
-                <WorkspaceClause />
-              </div>
-              <p className="mt-1 text-sm text-muted">Where Valet is, and what it does there.</p>
-            </div>
-            <OverviewActions />
-          </div>
+          <PageHeader
+            className="mb-6"
+            title="Presence"
+            clause={<WorkspaceClause />}
+            description="Where Valet is, and what it does there."
+            actions={<OverviewActions />}
+          />
         )}
         <div className="min-w-0">
           <Outlet />

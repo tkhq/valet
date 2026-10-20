@@ -33,6 +33,13 @@ export function stripMarkdown(source: string): string {
   // Horizontal rules on their own line.
   text = text.replace(/^\s{0,3}([-*_])\s*(?:\1\s*){2,}$/gm, "");
 
+  // Tables: drop the delimiter row (`|---|:---:|`), then read each row as
+  // its cells joined with " · ", one paragraph per row, so a preview shows
+  // the words, not pipes, and rows stay apart.
+  text = text.replace(/^(?=[^\n]*\|)(?=[^\n]*-{3})[ \t|:-]+$/gm, "");
+  text = text.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (_row, cells: string) =>
+    `${cells.split("|").map((cell) => cell.trim()).filter(Boolean).join(" · ")}\n`);
+
   // Emphasis/strong/strikethrough — strip paired markers, keep content.
   // Longest first so `***bold italic***` unwraps cleanly.
   text = text.replace(/(\*{1,3}|_{1,3}|~~)(?=\S)([\s\S]*?\S)\1/g, "$2");

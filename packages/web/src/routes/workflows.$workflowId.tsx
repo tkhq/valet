@@ -35,7 +35,10 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  ErrorRow,
+  LoadingRow,
   Spinner,
+  pageClass,
 } from "~/components/primitives";
 import { DeleteWorkflowDialog } from "~/components/workflows/delete-workflow-dialog";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
@@ -116,14 +119,10 @@ export function WorkflowEditorPage({ workflowId, newTrigger, explain }: { workfl
   }, [data]);
 
   if (isLoading) {
-    return (
-      <div className="flex-1 flex items-center gap-2 p-6 text-sm text-muted">
-        <Spinner size={14} /> Loading workflow…
-      </div>
-    );
+    return <div className={pageClass}><LoadingRow label="Loading workflow…" /></div>;
   }
   if (error || !data || !definition) {
-    return <div className="flex-1 p-6 text-sm text-danger-500">Failed to load workflow.</div>;
+    return <div className={pageClass}><ErrorRow>Could not load this workflow. Reload the page to try again.</ErrorRow></div>;
   }
 
   return (

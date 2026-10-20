@@ -393,6 +393,36 @@ export function UsagePage() {
           description={scope === "team"
             ? "Spend across all Valet use cases for this team."
             : "Spend across all Valet use cases for your account."}
+          actions={scopeKnown ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <label>
+                <span className="sr-only">CSV granularity</span>
+                <Select
+                  size="sm"
+                  aria-label="CSV granularity"
+                  value={exportGranularity}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "day" || value === "hour" || value === "turn") setExportGranularity(value);
+                  }}
+                >
+                  <option value="day">Daily</option>
+                  <option value="hour">Hourly</option>
+                  <option value="turn">Itemized (per turn)</option>
+                </Select>
+              </label>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={exporting}
+                onClick={handleCsvDownload}
+                aria-label={`Download CSV (${periodLabel}, ${scope})`}
+              >
+                {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
+              </Button>
+              <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
+            </div>
+          ) : undefined}
         />
 
         <TabBar label="Usage views" tabs={VIEWS} active={view} onSelect={setView} />
@@ -411,7 +441,7 @@ export function UsagePage() {
           </div>
         )}
 
-        {/* Window selector + scope toggle + CSV export */}
+        {/* Window selector + scope toggle. The CSV export is a page action in the header. */}
         <div className="flex items-center gap-2 flex-wrap">
           <FilterChips<string>
             label="Period"
@@ -474,42 +504,11 @@ export function UsagePage() {
           {personalWorkspace && isOrgAdmin && (
             <FilterChips
               label="Whose usage"
-              className="sm:ml-4"
+              className="sm:ml-auto"
               value={personalScope}
               onChange={setPersonalScope}
               options={[{ value: "me", label: "My usage" }, { value: "org", label: "Organization" }]}
             />
-          )}
-          {scopeKnown && (
-            <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
-              <label>
-                <span className="sr-only">CSV granularity</span>
-                <Select
-                  size="sm"
-                  aria-label="CSV granularity"
-                  value={exportGranularity}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    if (value === "day" || value === "hour" || value === "turn") setExportGranularity(value);
-                  }}
-                >
-                  <option value="day">Daily</option>
-                  <option value="hour">Hourly</option>
-                  <option value="turn">Itemized (per turn)</option>
-                </Select>
-              </label>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={exporting}
-                onClick={handleCsvDownload}
-                className="flex-1 sm:flex-none"
-                aria-label={`Download CSV (${periodLabel}, ${scope})`}
-              >
-                {exporting ? "Validating export…" : `Download CSV (${periodLabel}, ${scope})`}
-              </Button>
-              <a ref={exportLinkRef} href={csvHref} className="sr-only" tabIndex={-1} aria-hidden="true">Download</a>
-            </div>
           )}
         </div>
         {exportError !== undefined && (

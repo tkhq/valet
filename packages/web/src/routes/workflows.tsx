@@ -1,14 +1,15 @@
-import { Link, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
-import { pageClass } from "~/components/primitives";
+import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
+import { LinkTabs, PageHeader, pageClass } from "~/components/primitives";
+import { WorkflowsHeaderActions } from "~/components/workflows/workflows-header-actions";
 import { WorkspaceClause } from "~/components/workspace-clause";
-import { cn } from "~/lib/cn";
 
 /**
- * `/workflows` layout: a small header (title, `WorkspaceClause`, and the
- * Workflows/Runs pills) over the list, composer, and Runs view (spec Part A,
- * Part G). The editor (`/workflows/$workflowId`) and the run page
- * (`/workflows/runs/$runId`) need the full height, so they render without
- * the header; `workflowsTabFor` returns `undefined` for them.
+ * `/workflows` layout: the page header (title, `WorkspaceClause`, and on the
+ * Workflows tab its actions) and the Workflows/Runs tabs over the list,
+ * composer, and Runs view (spec Part A, Part G). The editor
+ * (`/workflows/$workflowId`) and the run page (`/workflows/runs/$runId`) need
+ * the full height, so they render without the header; `workflowsTabFor`
+ * returns `undefined` for them.
  */
 export const Route = createFileRoute("/workflows")({
   component: WorkflowsLayout,
@@ -34,27 +35,14 @@ function WorkflowsLayout() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className={pageClass}>
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="font-display text-2xl text-ink">Workflows</h1>
-          <WorkspaceClause />
+        <PageHeader
+          title="Workflows"
+          clause={<WorkspaceClause />}
+          actions={active === "/workflows" ? <WorkflowsHeaderActions /> : undefined}
+        />
+        <div className="mt-4">
+          <LinkTabs tabs={WORKFLOWS_TABS} activeTo={active} label="Workflows sections" />
         </div>
-
-        <nav aria-label="Workflows sections" className="mt-4 flex gap-2">
-          {WORKFLOWS_TABS.map((tab) => (
-            <Link
-              key={tab.to}
-              to={tab.to}
-              aria-current={tab.to === active ? "page" : undefined}
-              className={cn(
-                "rounded-full px-3 py-1 text-sm transition-colors",
-                tab.to === active ? "bg-ink-wash font-medium text-ink" : "text-muted hover:bg-ink-wash hover:text-ink",
-              )}
-            >
-              {tab.label}
-            </Link>
-          ))}
-        </nav>
-
         <div className="mt-6">
           <Outlet />
         </div>
