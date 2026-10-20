@@ -5068,10 +5068,26 @@ export class Thread {
     for (const ids of plan.toElide.values()) {
       for (const id of ids) elidedCallIds.add(id);
     }
+    let elided = false;
     for (const m of this.agent.state.messages) {
-      if (m.role !== "toolResult") continue;
-      if (!elidedCallIds.has(m.toolCallId)) continue;
-      m.content = [{ type: "text", text: ELIDED_TOOL_OUTPUT }];
+      if (m.role === "toolResult" && elidedCallIds.has(m.toolCallId)) {
+        m.content = [{ type: "text", text: ELIDED_TOOL_OUTPUT }];
+        elided = true;
+      } else if (m.role === "assistant" && elided) {
+        // This response's usage counted output that is now elided. Clear it
+        // like a rehydrated transcript, so the next request is measured from
+        // its pruned payload. pi-ai sizes the output budget from the newest
+        // usage, and a stale total leaves the model almost no room to answer.
+        // The entry already holds this usage; only the live copy changes.
+        m.usage = {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        };
+      }
     }
   }
 
