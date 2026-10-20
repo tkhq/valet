@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
-import { countPendingForCap } from "../../submission.js";
+import { countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
 import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
@@ -415,6 +415,8 @@ export class InMemorySessionStore implements SessionStore {
       const scope = continuationToolScope(item.metadata, [...r.threads.values()]);
       item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
     }
+    // The execution clock starts when the item first runs, not at admission.
+    if (item.attemptCount === 0) item.timeoutAt = now + SUBMISSION_TIMEOUT_MS;
     item.status = "running";
     item.attemptId = claim.attemptId;
     item.ownerId = claim.ownerId;
