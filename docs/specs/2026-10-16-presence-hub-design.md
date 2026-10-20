@@ -490,7 +490,10 @@ Pass criterion: all steps, in one run, from a clean start.
    UTC, in the row, the routine page title, the How it works When column,
    and the editor's side pane. The rows live in the overview's `On
    a schedule` group (Part B step 6), where `Next <time>` sits in the
-   place column.
+   place column. A routine that runs a workflow of its own name leaves out
+   `<name>: `, so the name reads once: `Every day at 6:00, run Nightly
+   memory sweep.` A template install names its routine after the workflow
+   it installs, with the same install count (`Nightly memory sweep (2)`).
 2. `/presence/routines/$id` follows the line page's anatomy (Part D step
    1): breadcrumb `Presence › On a schedule › <name>`, the sentence as the
    title with the clock mark, the status line (name, `set up by <owner>`

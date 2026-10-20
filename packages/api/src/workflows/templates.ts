@@ -1304,8 +1304,7 @@ export async function installWorkflowTemplate(
     }
 
     // The workflow id is minted above and unique by construction, so its
-    // tail keeps two installs of one template apart in the Triggers list —
-    // the same suffix rule the schedule name uses.
+    // tail keeps two installs of one template apart in the Triggers list.
     const name = `${event.name} (${workflowId.slice(-6)})`;
     // One gate for validation AND mention scoping (TKAI-299): this insert
     // path must hold the same rules the CRUD writers do, or a template
@@ -1394,7 +1393,10 @@ export async function installWorkflowTemplate(
           or(eq(workflowDefinitions.name, owned.template.name), like(workflowDefinitions.name, `${owned.template.name} (%`)),
         ),
       );
-    if (siblings.length > 0) workflowName = `${owned.template.name} (${siblings.length + 1})`;
+    // The schedule carries the same count, so a routine reads with the name
+    // of the workflow it runs, and two installs stay apart in the schedules list.
+    const installCount = siblings.length > 0 ? ` (${siblings.length + 1})` : "";
+    workflowName = `${owned.template.name}${installCount}`;
 
     await tx.insert(workflowDefinitions).values({
       id: workflowId,
@@ -1425,10 +1427,7 @@ export async function installWorkflowTemplate(
         ownerId,
         targetKind: "workflow",
         workflowId,
-        // The workflow id is minted in this transaction and unique by
-        // construction, so its tail is the suffix that keeps two installs
-        // of one template apart in the schedules list.
-        name: `${schedule.name} (${workflowId.slice(-6)})`,
+        name: `${schedule.name}${installCount}`,
         cron: schedule.cron,
         timezone,
         enabled: true,

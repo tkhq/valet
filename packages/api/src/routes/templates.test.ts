@@ -250,7 +250,7 @@ describe("POST /api/templates/:id/install", () => {
     const schedules = await a.providers.db.select().from(workflowSchedules);
     expect(schedules).toHaveLength(1);
     expect(schedules[0]!.workflowId).toBe(body.workflowId);
-    expect(schedules[0]!.name).toContain(body.workflowId.slice(-6));
+    expect(schedules[0]!.name).toBe(body.workflowName);
   });
 
   it("refuses a template whose service is not connected, and names the fix", async () => {

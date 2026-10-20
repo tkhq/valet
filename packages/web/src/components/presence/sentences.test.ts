@@ -34,6 +34,7 @@ import {
   presenceAction,
   presenceSentence,
   presenceSentenceParts,
+  routineRowParts,
   routineSentence,
   routineSentenceParts,
   whereLabel,
@@ -573,6 +574,15 @@ describe("routineSentence", () => {
   it("workflow: run <workflow>", () => {
     expect(routineSentence(routine({ targetKind: "workflow" }, "wf-1"), workflows, threads)).toBe(
       "Every day at 9:00, Morning summary: run Triage failures.",
+    );
+  });
+
+  it("names a routine once when it runs a workflow of the same name", () => {
+    const installed = { ...routine({ targetKind: "workflow" }, "wf-1"), name: "Triage failures" };
+    expect(routineSentence(installed, workflows, threads)).toBe("Every day at 9:00, run Triage failures.");
+    expect(partsText(routineRowParts(installed, workflows, threads))).toBe("Run Triage failures.");
+    expect(partsText(routineRowParts(routine({ targetKind: "workflow" }, "wf-1"), workflows, threads))).toBe(
+      "Morning summary: run Triage failures.",
     );
   });
 

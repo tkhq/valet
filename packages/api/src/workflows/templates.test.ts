@@ -912,8 +912,8 @@ describe("installWorkflowTemplate", () => {
     expect(schedules[0]!.workflowId).toBe(result.workflowId);
     expect(schedules[0]!.enabled).toBe(true);
     expect(schedules[0]!.nextFireAt).toBeGreaterThan(Date.now());
-    // The suffix comes from the workflow id minted in the same transaction.
-    expect(schedules[0]!.name).toBe(`Inbox sweeper (${result.workflowId.slice(-6)})`);
+    // The schedule reads with the workflow's name, so a routine names it once.
+    expect(schedules[0]!.name).toBe("Inbox sweeper");
     expect(result.scheduleId).toBe(schedules[0]!.id);
   });
 
@@ -1148,9 +1148,12 @@ describe("installWorkflowTemplate", () => {
     const schedules = await db.select().from(workflowSchedules);
     expect(schedules).toHaveLength(2);
     expect(new Set(schedules.map((s) => s.id)).size).toBe(2);
-    // Distinct names are the whole point of the suffix: two rows called
-    // "Inbox sweeper" cannot be told apart in the schedules list.
-    expect(new Set(schedules.map((s) => s.name)).size).toBe(2);
+    // Each schedule carries its workflow's install count, so the two rows
+    // stay apart in the schedules list.
+    expect(new Map(schedules.map((s) => [s.workflowId, s.name]))).toEqual(new Map([
+      [first.workflowId, "Inbox sweeper"],
+      [second.workflowId, "Inbox sweeper (2)"],
+    ]));
     expect(new Set(schedules.map((s) => s.workflowId))).toEqual(new Set([first.workflowId, second.workflowId]));
   });
 

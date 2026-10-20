@@ -12,7 +12,7 @@ import { useRunScheduleNow, useUpdateSchedule, useWorkflows } from "~/api/workfl
 import { errorText } from "~/lib/error-text";
 import { formatDateTime } from "~/lib/format-when";
 import { teamName, type TeamLike } from "./presence-rows";
-import { routineDoesParts, routineSentence, routineSentenceParts, text, tidy, type SentencePart } from "./sentences";
+import { routineRowParts, routineSentence, routineSentenceParts, type SentencePart } from "./sentences";
 
 /** A schedule row of the triggers list. */
 export type Routine = Extract<WorkflowTriggerItem, { kind: "schedule" }>;
@@ -38,13 +38,12 @@ export function useRoutineSentenceParts(routines: readonly Routine[]): (routine:
   return (routine) => routineSentenceParts(routine, names, pinned);
 }
 
-/** The roster sentence of each routine as parts: `<name>: <do>.`, with the
- * pinned thread or the workflow as a token. */
+/** The roster sentence of each routine as parts. See `routineRowParts`. */
 export function useRoutineRowParts(routines: readonly Routine[]): (routine: Routine) => SentencePart[] {
   const workflows = useWorkflows();
   const pinned = usePinnedThreadTitles(routines.map((r) => r.detail.thread));
   const names = workflows.data?.workflows ?? [];
-  return (routine) => tidy([text(`${routine.name}: `), ...routineDoesParts(routine, names, pinned), text(".")]);
+  return (routine) => routineRowParts(routine, names, pinned);
 }
 
 /**

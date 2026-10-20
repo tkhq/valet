@@ -882,6 +882,16 @@ export function cronInWords(cron: string): string {
   return fallback;
 }
 
+/**
+ * `<name>: ` before a routine's `<do>`. A routine that runs a workflow of
+ * the same name has no lead, so the name reads once: a template install
+ * names its routine after the workflow it installs.
+ */
+export function routineLead(routine: RoutineLike, workflows: WorkflowNames): string {
+  const runs = routine.detail.targetKind === "workflow" ? workflowName(workflows, routine.workflowId) : undefined;
+  return runs === routine.name ? "" : `${routine.name}: `;
+}
+
 /** The `<do>` of a routine (spec Part E step 1) as parts. */
 export function routineDoesParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   if (routine.detail.targetKind === "workflow") return workflowParts(workflows, routine.workflowId);
@@ -923,16 +933,28 @@ export function scheduleInWords(cron: string, timezone: string | undefined): str
   return zone === undefined ? words : `${words} (${zone})`;
 }
 
-/** A routine as parts of one sentence: `<schedule in words>, <name>: <do>.` */
+/** A routine as parts of one sentence: `<schedule in words>, <name>: <do>.` See `routineLead`. */
 export function routineSentenceParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   return tidy([
-    text(`${scheduleInWords(routine.detail.cron, routine.detail.timezone)}, ${routine.name}: `),
+    text(`${scheduleInWords(routine.detail.cron, routine.detail.timezone)}, ${routineLead(routine, workflows)}`),
     ...routineDoesParts(routine, workflows, threads),
     text("."),
   ]);
 }
 
-/** A routine as one sentence: `<schedule in words>, <name>: <do>.` */
+/**
+ * A routine's roster sentence as parts: `<name>: <do>.`, with the pinned
+ * thread or the workflow as a token. The overview row leaves the schedule
+ * to its place column (Part B step 6). Without a lead (`routineLead`), the
+ * sentence starts at `<do>`: `Run <workflow>.`
+ */
+export function routineRowParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
+  const parts = tidy([text(routineLead(routine, workflows)), ...routineDoesParts(routine, workflows, threads), text(".")]);
+  const [first, ...rest] = parts;
+  return first?.kind === "text" ? [text(upperFirst(first.text)), ...rest] : parts;
+}
+
+/** A routine as one sentence: `<schedule in words>, <name>: <do>.` See `routineLead`. */
 export function routineSentence(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
   return partsText(routineSentenceParts(routine, workflows, threads));
 }
