@@ -1512,6 +1512,18 @@ export class PgSessionStore implements SessionStore {
     return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
 
+  async listWakeupsForSessions(sessionIds: readonly string[], statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    if (sessionIds.length === 0) return [];
+    const params: unknown[] = [[...sessionIds]];
+    let where = "session_id = ANY($1::text[])";
+    if (statuses && statuses.length > 0) {
+      params.push([...statuses]);
+      where += ` AND status = ANY($2::text[])`;
+    }
+    const r = await this.db.query(`SELECT * FROM engine_wakeups WHERE ${where} ORDER BY created_at, id`, params);
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+  }
+
   async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
     const params: unknown[] = [now, limit];
     let keyset = "";

@@ -2303,6 +2303,12 @@ export interface SessionStore {
   /** An empty or absent `statuses` returns every row of the session. */
   listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
   /**
+   * The wakeups of several sessions in one read, ordered as `listWakeups`
+   * orders one session's rows. An empty `sessionIds` returns no rows. An
+   * empty or absent `statuses` returns every row of those sessions.
+   */
+  listWakeupsForSessions(sessionIds: readonly string[], statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
+  /**
    * Running process/watch wakeups (always due), pending process/watch
    * wakeups (a start that has not finished, or one a crash cut short),
    * pending timer wakeups whose fireAt <= now, and running event wakeups

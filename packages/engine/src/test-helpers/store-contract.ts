@@ -1051,6 +1051,18 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         ]);
       });
 
+      it("listWakeupsForSessions reads several sessions in one call, filtered by status", async () => {
+        await store.createWakeup(wakeup({ createdAt: 3 }));
+        await store.createWakeup(wakeup({ id: "wk_b", sessionId: "sess-2", leaseId: undefined, createdAt: 2 }));
+        await store.createWakeup(wakeup({ id: "wk_c", sessionId: "sess-2", status: "done", leaseId: undefined, createdAt: 1 }));
+        await store.createWakeup(wakeup({ id: "wk_d", sessionId: "sess-3", leaseId: undefined, createdAt: 1 }));
+        expect((await store.listWakeupsForSessions(["sess-1", "sess-2"], ["running"])).map((w) => w.id)).toEqual(["wk_b", "wk_a"]);
+        expect((await store.listWakeupsForSessions(["sess-1", "sess-2"])).map((w) => w.id)).toEqual(["wk_c", "wk_b", "wk_a"]);
+        expect((await store.listWakeupsForSessions(["sess-2"], [])).map((w) => w.id)).toEqual(["wk_c", "wk_b"]);
+        expect(await store.listWakeupsForSessions([], ["running"])).toEqual([]);
+        expect(await store.listWakeupsForSessions(["missing"])).toEqual([]);
+      });
+
       it("listWakeups with an empty status list returns every row of the session (L8)", async () => {
         await store.createWakeup(wakeup());
         await store.createWakeup(wakeup({ id: "wk_d", status: "done" }));

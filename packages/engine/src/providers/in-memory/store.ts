@@ -348,8 +348,13 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    return this.listWakeupsForSessions([sessionId], statuses);
+  }
+
+  async listWakeupsForSessions(sessionIds: readonly string[], statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    const sessions = new Set(sessionIds);
     return [...this.wakeups.values()]
-      .filter((w) => w.sessionId === sessionId && (!statuses || statuses.length === 0 || statuses.includes(w.status)))
+      .filter((w) => sessions.has(w.sessionId) && (!statuses || statuses.length === 0 || statuses.includes(w.status)))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map(copyWakeup);
   }
