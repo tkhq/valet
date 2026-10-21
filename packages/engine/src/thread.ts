@@ -953,6 +953,28 @@ export class Thread {
    * returned `queueItemId`.
    */
   async promoteQueuedItem(itemId: string): Promise<PromptReceipt> {
+    // Admit on the overheard-digest chain, as a cancel and mid-turn delivery
+    // do: either delivery takes the item first and this refuses it as no
+    // longer queued, or this supersedes it first and delivery skips it. The
+    // abort runs after, off the chain, because delivery waits on the chain
+    // inside the turn the abort ends.
+    const run = this.overheardCoalesceChain.then(() => this.admitPromotion(itemId));
+    this.overheardCoalesceChain = run.then(() => null, () => null);
+    const { item: admitted, supersededItemIds } = await run;
+    if (supersededItemIds.length > 0) {
+      await this.handleSteerSupersession(supersededItemIds);
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  private async admitPromotion(itemId: string): Promise<{ item: QueueItem; supersededItemIds: string[] }> {
     const store = this.session.providers.store;
     const existing = await store.getQueueItem(this.session.id, itemId);
     if (!existing || existing.threadId !== this.id) {
@@ -981,17 +1003,7 @@ export class Thread {
         promoteFromItemId: existing.id,
       },
     );
-    if (supersededItemIds.length > 0) {
-      await this.handleSteerSupersession(supersededItemIds);
-    }
-    await this.emitQueueState();
-    void this.kick();
-    return {
-      sessionId: this.session.id,
-      threadId: this.id,
-      queueItemId: admitted.id,
-      status: receiptStatus(admitted.status),
-    };
+    return { item: admitted, supersededItemIds };
   }
 
   /**

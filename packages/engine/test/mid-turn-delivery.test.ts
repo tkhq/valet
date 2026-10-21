@@ -200,6 +200,42 @@ describe("mid-turn delivery", () => {
   });
 });
 
+describe("mid-turn delivery and Send now", () => {
+  it("refuses a Send now that arrives while delivery takes the item, and leaves one entry", async () => {
+    const { tool, entered, release } = blockingTool();
+    let seen: string[] = [];
+    const h = await setup("mid-turn-promote", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      (context) => { seen = userTexts(context); return fauxAssistantMessage("done"); },
+    ], [tool]);
+
+    const first = await h.thread.submitPrompt("run it", { author: PERSON });
+    await entered;
+    const second = await h.thread.submitPrompt("check the logs too", { author: PERSON, queueMode: "inject" });
+
+    // Fire Send now after delivery wrote the user entry and before it
+    // settles the item, the window a promotion off the chain could win.
+    let promotion: Promise<unknown> | undefined;
+    const settle = h.store.settleUnclaimed.bind(h.store);
+    h.store.settleUnclaimed = async (...args: Parameters<typeof settle>) => {
+      if (args[3].outcome === "merged" && promotion === undefined) {
+        promotion = h.thread.promoteQueuedItem(second.queueItemId).then(() => "promoted", (err: Error) => err.message);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return settle(...args);
+    };
+    release();
+    await waitFor(() => h.settled(first.queueItemId));
+
+    expect(await promotion).toMatch(/no longer queued/);
+    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(seen).toEqual(["run it", "check the logs too"]);
+    expect((await h.userEntries()).map((e) => e.content)).toEqual(["run it", "check the logs too"]);
+    expect(h.faux.state.callCount).toBe(2);
+    h.faux.unregister();
+  });
+});
+
 describe("canDeliverMidTurn", () => {
   const base: QueueItem = {
     id: "q-run",
