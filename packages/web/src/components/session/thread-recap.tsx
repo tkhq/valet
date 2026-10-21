@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { recapWindow, writtenByOtherPerson } from "@valet/shared";
 import type { ThreadRecapPoint, ThreadSummary } from "@valet/api/wire";
@@ -8,16 +9,18 @@ import type { StreamMessage } from "~/stores/stream";
 
 /**
  * The recap a person sees when they open a thread that other people talked
- * to Valet in since their last visit.
- * `anchorId` is the first message the recap covers: the transcript shows the
- * "new" line and the card above it and opens scrolled there.
+ * to Valet in since their last visit. The card sits above the composer; the
+ * transcript shows the "new" line before `anchorId`, the first message the
+ * recap covers. The thread still opens at the newest message.
  */
 export interface ThreadRecapView {
-  /** Changes when the reader starts a new visit, so the list scrolls to the anchor once per visit. */
+  /** Changes when the reader starts a new visit; a closed card stays closed only for its visit. */
   key: string;
   anchorId: string;
   mode: "away" | "first";
-  /** The "new" line text. Absent for a first visit: the card leads the thread instead. */
+  /** The other people who wrote, for the card's heading. */
+  people: string;
+  /** The "new" line text. Absent for a first visit, which has no earlier part to set apart. */
   divider?: string;
   /** Absent while the recap loads, when it failed, and when the window reads at a glance. */
   points?: ThreadRecapPoint[];
@@ -118,28 +121,40 @@ export function useThreadRecap({ threadId, thread, messages, viewerId }: {
     key: `${visit.threadId}:${visit.readAt ?? "first"}:${visit.count}`,
     anchorId: anchor.id,
     mode: span.mode,
+    people,
     ...(span.mode === "away" && span.since !== undefined ? { divider: `New since ${recapSinceLabel(span.since)} · ${people}` } : {}),
     ...(span.worthRecap && recapQ.data?.recap ? { points: recapQ.data.recap.points } : {}),
   };
 }
 
-/** The "new" line and the recap card, placed before the recap's first message. */
-export function ThreadRecapBlock({ recap }: { recap: ThreadRecapView }) {
+/** The "new" line the transcript shows before the recap's first message. */
+export function NewSinceDivider({ label }: { label: string }) {
   return (
-    <div data-recap-anchor="" data-testid="thread-recap" className="space-y-2 px-5 pt-1 sm:px-8">
-      {recap.divider && (
-        <div className="mx-auto flex w-full max-w-3xl items-center gap-2 text-[11px] font-medium text-moss">
-          <span className="h-px flex-1 bg-moss-wash-strong" aria-hidden />
-          <span className="whitespace-nowrap">{recap.divider}</span>
-          <span className="h-px flex-1 bg-moss-wash-strong" aria-hidden />
-        </div>
-      )}
-      {recap.points && (
-        <section aria-label="Recap" className="mx-auto w-full max-w-3xl rounded-r-lg border-l-2 border-moss bg-moss-wash px-3 py-2 text-sm">
-          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">
-            {recap.mode === "away" ? "While you were away" : "Where this stands"}
+    <div data-testid="new-since-divider" className="px-5 pt-1 sm:px-8">
+      <div className="mx-auto flex w-full max-w-3xl items-center gap-2 text-[11px] font-medium text-moss">
+        <span className="h-px flex-1 bg-moss-wash-strong" aria-hidden />
+        <span className="whitespace-nowrap">{label}</span>
+        <span className="h-px flex-1 bg-moss-wash-strong" aria-hidden />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The recap card above the composer. It leaves when the reader closes it or
+ * sends a message, which ends the visit.
+ */
+export function ThreadRecapDock({ recap }: { recap?: ThreadRecapView }) {
+  const [closed, setClosed] = useState<string>();
+  if (!recap?.points || closed === recap.key) return null;
+  return (
+    <section aria-label="Recap" data-testid="thread-recap" className="mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
+      <div className="flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted">
+            {recap.mode === "away" ? `While you were away · ${recap.people}` : "Where this stands"}
           </h3>
-          <ul className="list-disc space-y-0.5 pl-4 marker:text-moss">
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[13px] leading-5 marker:text-moss">
             {recap.points.map((point, index) => (
               <li key={index}>
                 {point.forReader && <span className="font-semibold">Waiting on you: </span>}
@@ -147,8 +162,16 @@ export function ThreadRecapBlock({ recap }: { recap: ThreadRecapView }) {
               </li>
             ))}
           </ul>
-        </section>
-      )}
-    </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setClosed(recap.key)}
+          className="rounded p-1 text-muted hover:text-ink"
+          aria-label="Close recap"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      </div>
+    </section>
   );
 }

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import type { StreamMessage } from "~/stores/stream";
-import { recapSinceLabel, useThreadRecap, type ThreadRecapView } from "./thread-recap";
+import { recapSinceLabel, ThreadRecapDock, useThreadRecap, type ThreadRecapView } from "./thread-recap";
 import { MessageList } from "./message-list";
 
 const markMutate = vi.fn();
@@ -105,18 +105,34 @@ describe("useThreadRecap", () => {
   });
 });
 
-describe("MessageList recap", () => {
-  it("renders the line and the card before the anchor message", () => {
-    const recap: ThreadRecapView = { key: "t1:5000:0", anchorId: "m3", mode: "away", divider: "New since 9:00 AM · Mate",
-      points: [{ text: "Decide on the pen-test summary.", forReader: true }] };
-    render(<MessageList messages={messages} threadId="t1" recap={recap} />);
-    const block = screen.getByTestId("thread-recap");
-    expect(block.textContent).toContain("New since 9:00 AM · Mate");
-    expect(block.textContent).toContain("Waiting on you: Decide on the pen-test summary.");
-    const items = screen.getAllByTestId("message-item").map((item) => item.textContent);
-    expect(items).toEqual(["m1", "m2", "m3", "m4", "m5", "m6"]);
-    expect(block.compareDocumentPosition(screen.getByText("m3")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(block.compareDocumentPosition(screen.getByText("m2")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+describe("MessageList new-since line", () => {
+  it("renders the line before the anchor message", () => {
+    render(<MessageList messages={messages} threadId="t1" newSince={{ anchorId: "m3", label: "New since 9:00 AM · Mate" }} />);
+    const line = screen.getByTestId("new-since-divider");
+    expect(line.textContent).toBe("New since 9:00 AM · Mate");
+    expect(line.compareDocumentPosition(screen.getByText("m3")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(line.compareDocumentPosition(screen.getByText("m2")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+});
+
+describe("ThreadRecapDock", () => {
+  const recap: ThreadRecapView = { key: "t1:5000:0", anchorId: "m3", mode: "away", people: "Mate", divider: "New since 9:00 AM · Mate",
+    points: [{ text: "Decide on the pen-test summary.", forReader: true }, { text: "Mate sent the draft." }] };
+
+  it("shows the recap above the composer and closes for this visit", () => {
+    const { rerender } = render(<ThreadRecapDock recap={recap} />);
+    const card = screen.getByTestId("thread-recap");
+    expect(card.textContent).toContain("While you were away · Mate");
+    expect(card.textContent).toContain("Waiting on you: Decide on the pen-test summary.");
+    fireEvent.click(screen.getByRole("button", { name: "Close recap" }));
+    expect(screen.queryByTestId("thread-recap")).toBeNull();
+    rerender(<ThreadRecapDock recap={{ ...recap, key: "t1:16000:1" }} />);
+    expect(screen.getByTestId("thread-recap")).toBeTruthy();
+  });
+
+  it("renders nothing while the recap loads", () => {
+    render(<ThreadRecapDock recap={{ ...recap, points: undefined }} />);
+    expect(screen.queryByTestId("thread-recap")).toBeNull();
   });
 });
 

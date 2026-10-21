@@ -27,7 +27,7 @@ import {
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
-import { useThreadRecap } from "~/components/session/thread-recap";
+import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
@@ -355,7 +355,7 @@ export function SessionView({
               pendingIds={threadQueueState?.pendingIds}
               viewerId={me.data?.id}
               onReply={enableReplies ? setReplyTarget : undefined}
-              recap={recap}
+              newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
             />
             {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
@@ -384,6 +384,7 @@ export function SessionView({
           {/* Keyed by gate id: the question input's draft must not carry
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
+          <ThreadRecapDock recap={recap} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
