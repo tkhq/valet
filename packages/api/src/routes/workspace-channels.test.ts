@@ -348,3 +348,35 @@ it("keeps a newer channel list when an older scan fails after it", async () => {
   expect(after.get("C950")).toEqual({ name: "alerts-prod", isPrivate: false });
   resetChannelNameCaches();
 });
+
+// Review of PR #1012: an older scan that answers last must not restore a
+// channel's public mark after a newer scan saw it go private.
+it("keeps a newer channel list when an older scan answers after it", async () => {
+  resetChannelNameCaches();
+  let answerOld: (channels: Array<{ id: string; name: string; isPrivate: boolean }>) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerOld = resolve; }));
+  await cachedChannelDirectory("org-race", async () => [{ id: "C1", name: "plans", isPrivate: true }]);
+  answerOld([{ id: "C1", name: "plans", isPrivate: false }]);
+  expect((await old).get("C1")?.isPrivate).toBe(true);
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C1")?.isPrivate).toBe(true);
+  resetChannelNameCaches();
+});
+
+// Review of PR #1012: the scan that started last wins, also when the older
+// scan ends first and stores its list.
+it("replaces an older scan's list with the list of a scan that started later and ended last", async () => {
+  resetChannelNameCaches();
+  type Joined = Array<{ id: string; name: string; isPrivate: boolean }>;
+  let answerOld: (channels: Joined) => void = () => {};
+  let answerNew: (channels: Joined) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerOld = resolve; }));
+  const fresh = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerNew = resolve; }));
+  answerOld([{ id: "C1", name: "plans", isPrivate: false }]);
+  expect((await old).get("C1")?.isPrivate).toBe(false);
+  answerNew([{ id: "C1", name: "plans", isPrivate: true }]);
+  expect((await fresh).get("C1")?.isPrivate).toBe(true);
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C1")?.isPrivate).toBe(true);
+  resetChannelNameCaches();
+});

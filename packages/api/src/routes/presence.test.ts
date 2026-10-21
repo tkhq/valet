@@ -471,6 +471,32 @@ it("names every public channel a line lists, though no event made it a place", a
   expect(calls).toEqual(["users.conversations"]);
 });
 
+// Review of PR #1012: a channel that went private after the bot's list was
+// read must not show its name when the check hides its place.
+it("names no channel whose place the check hid, though the list still calls it public", async () => {
+  api = await boot();
+  await api.providers.engineCredentials.save({ type: "org", id: ORG }, "slack",
+    { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    const channel = url.searchParams.get("channel") ?? "";
+    const body = url.pathname.endsWith("users.conversations")
+      ? { ok: true, channels: [{ id: "C900", name: "formerly-public", is_private: false }, { id: "C950", name: "alerts-prod", is_private: false }] }
+      : url.pathname.endsWith("conversations.members") ? { ok: true, members: [] }
+      : { ok: true, channel: { name: channel.toLowerCase(), is_private: channel === "C900" } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-secret", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C900" }] });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950"] }] });
+
+  const read = await placesRead(api, "user");
+  expect(read.places.map((row) => row.subject)).not.toContain("slack:T1/C900");
+  expect(read.channelNames).toEqual({ C950: "alerts-prod" });
+});
+
 // Review of PR #1012: one conversations.info call for each channel did not
 // fit Slack's rate limit, and the channel picker stops at 100 channels.
 it("names a line's channels past the picker's first 100 with no Slack call for each channel", async () => {

@@ -16,7 +16,13 @@ export const workspaceChannelsRouter = new Hono<AppEnv>();
 const NAMES_TTL_MS = 5 * 60_000;
 /** How long a failed scan answers with no channels, so a read does not wait on a rate-limited Slack again. */
 const FAILED_SCAN_TTL_MS = 60_000;
-const directoryCache = new Map<string, { channels: ReadonlyMap<string, DirectoryChannel>; expiresAt: number }>();
+/** Each entry holds the `seq` of the scan that wrote it. */
+const directoryCache = new Map<string, { channels: ReadonlyMap<string, DirectoryChannel>; expiresAt: number; seq: number }>();
+/**
+ * Counts scans in the order they start. A counter, not a time: two scans can
+ * start in the same millisecond.
+ */
+let scanSeq = 0;
 
 type JoinedChannels = Awaited<ReturnType<typeof joinedChannelDirectory>>;
 
@@ -24,26 +30,33 @@ type JoinedChannels = Awaited<ReturnType<typeof joinedChannelDirectory>>;
  * The org's joined channels from the cache, else from `scan`, kept for five
  * minutes. A null scan (no Slack plugin, no credential) gives an empty list
  * and keeps nothing. A failed scan propagates and keeps an empty list for one
- * minute, so a read does not wait on a rate-limited Slack again. A scan that
- * fails after a newer scan answered leaves that answer in place.
+ * minute, so a read does not wait on a rate-limited Slack again. The answer
+ * of the scan that started last wins, whatever order the scans end in: an
+ * older list can mark as public a channel that has since gone private. A
+ * newer failure wins too, because an empty list names no channel.
  */
 export async function cachedChannelDirectory(
   orgId: string, scan: () => Promise<JoinedChannels | null>,
 ): Promise<ReadonlyMap<string, DirectoryChannel>> {
   const cached = directoryCache.get(orgId);
   if (cached && cached.expiresAt > Date.now()) return cached.channels;
+  const seq = ++scanSeq;
+  const newer = () => {
+    const stored = directoryCache.get(orgId);
+    return stored !== undefined && stored.seq > seq ? stored : undefined;
+  };
   let joined: JoinedChannels | null;
   try {
     joined = await scan();
   } catch (err) {
-    if (directoryCache.get(orgId) === cached) {
-      setCapped(directoryCache, orgId, { channels: new Map(), expiresAt: Date.now() + FAILED_SCAN_TTL_MS });
-    }
+    if (!newer()) setCapped(directoryCache, orgId, { channels: new Map(), expiresAt: Date.now() + FAILED_SCAN_TTL_MS, seq });
     throw err;
   }
   if (joined === null) return new Map();
+  const stored = newer();
+  if (stored) return stored.channels;
   const channels = new Map(joined.map(({ id, name, isPrivate }) => [id, { name, isPrivate }]));
-  setCapped(directoryCache, orgId, { channels, expiresAt: Date.now() + NAMES_TTL_MS });
+  setCapped(directoryCache, orgId, { channels, expiresAt: Date.now() + NAMES_TTL_MS, seq });
   return channels;
 }
 

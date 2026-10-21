@@ -638,8 +638,10 @@ async function loadPlaces(
 
   const channelIds = [...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null);
   // The list read also names a line's channels that are no place. The place
-  // page sends no such names, so it skips them.
-  const lineOnly = nameLineChannels ? [...lineChannels].filter((id) => !channelIds.includes(id)) : [];
+  // page sends no such names, so it skips them. A channel whose place the
+  // check hid stays unnamed, though the bot's list may still call it public.
+  const checkedChannels = new Set(channelPlaces.map(({ channelId }) => channelId));
+  const lineOnly = nameLineChannels ? [...lineChannels].filter((id) => !checkedChannels.has(id)) : [];
   const directory = channelIds.length + lineOnly.length > 0
     ? await access.directory().catch(() => new Map<string, DirectoryChannel>()) : new Map<string, DirectoryChannel>();
   // A public channel on the bot's list shows its name with no Slack call. A
