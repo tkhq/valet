@@ -96,6 +96,17 @@ describe("AppShell — mobile sidebar drawer", () => {
     expect(document.activeElement).toBe(opener);
   });
 
+  it("shows a Threads header whose close button closes the list", async () => {
+    renderShell();
+    await userEvent.click(screen.getByRole("button", { name: /open threads/i }));
+    const dialog = screen.getByRole("dialog", { name: "Threads" });
+    expect(within(dialog).getByText("Threads").className).not.toContain("sr-only");
+    // One close control, in the header row; no floating corner X.
+    expect(within(dialog).getAllByRole("button", { name: /close/i })).toHaveLength(1);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close threads" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("opens the drawer via the published control, closed by default", async () => {
     renderShell();
     expect(screen.queryByRole("dialog")).toBeNull();

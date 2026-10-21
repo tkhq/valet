@@ -362,6 +362,25 @@ describe("TopNav — sidebar toggle", () => {
     expect(screen.queryByRole("button", { name: /sidebar/i })).toBeNull();
   });
 
+  it("links a page without the thread sidebar to the open phone thread list", async () => {
+    renderNav({ withSidebar: false });
+    await screen.findByText("Valet");
+    const link = screen.getByRole("link", { name: "Open threads" });
+    expect(link.getAttribute("href")).toBe("/chat?threads=open");
+    // Phone only: the desktop nav has a Threads link of its own.
+    expect(link.className).toContain("md:hidden");
+    expect(link.className).toContain("max-md:min-h-11");
+  });
+
+  it("hides the logo on a phone, where the menu carries Home", async () => {
+    renderNav({ withSidebar: true });
+    await screen.findByText("Valet");
+    const logo = screen.getByRole("link", { name: "Valet — dashboard" });
+    expect(logo.className.split(" ")).toEqual(expect.arrayContaining(["hidden", "md:inline-flex"]));
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    expect((await screen.findByRole("menuitem", { name: "Home" })).getAttribute("href")).toBe("/");
+  });
+
   it("offers to collapse an open sidebar, and to expand it once collapsed", async () => {
     renderNav({ withSidebar: true });
     await screen.findByText("Valet");
@@ -393,7 +412,6 @@ describe("TopNav — sidebar toggle", () => {
     for (const control of [
       screen.getByRole("button", { name: "Open threads" }),
       screen.getByRole("button", { name: "Open navigation" }),
-      screen.getByRole("link", { name: "Valet — dashboard" }),
     ]) {
       expect(control.className).toContain("max-md:min-h-11");
     }

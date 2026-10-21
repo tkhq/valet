@@ -121,10 +121,20 @@ function NavLink({
  */
 function SidebarToggle() {
   const controls = useSidebarControls();
-  if (controls === null || !controls.present) return null;
+  if (controls === null) return null;
 
   const buttonClass =
     "shrink-0 min-h-8 min-w-8 max-md:min-h-11 max-md:min-w-11 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink focus-visible:bg-ink-wash focus-visible:outline-none";
+
+  // On a phone the thread list is one tap from every page: a page without
+  // the thread sidebar links to Threads with the list already open.
+  if (!controls.present) {
+    return (
+      <Link to="/chat" search={{ threads: "open" }} aria-label="Open threads" className={`md:hidden inline-flex ${buttonClass}`}>
+        <PanelLeftOpen className="h-4 w-4" aria-hidden />
+      </Link>
+    );
+  }
 
   return (
     <>
@@ -214,9 +224,10 @@ export function TopNav() {
     <header className="max-sm:[--nav-height:3rem] h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />
 
+      {/* On a phone the menu carries Home, so the mark would repeat it. */}
       <Link
         to="/"
-        className="inline-flex min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash max-md:min-h-11 max-md:min-w-11"
+        className="hidden min-h-8 min-w-8 shrink-0 items-center justify-center gap-2 rounded px-1.5 py-1 hover:bg-ink-wash md:inline-flex"
         aria-label="Valet — dashboard"
       >
         <span className="text-moss text-base leading-none" aria-hidden>
@@ -264,6 +275,9 @@ export function TopNav() {
           <DropdownMenuContent align="end" aria-label="Navigation" className="w-64 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
             <DropdownMenuItem onSelect={() => assistant.open()}><Sparkles className="h-4 w-4" aria-hidden />Ask Valet</DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link to="/" activeOptions={{ exact: true }} activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}>Home</Link>
+            </DropdownMenuItem>
             {destinations.map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link

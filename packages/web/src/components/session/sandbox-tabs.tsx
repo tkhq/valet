@@ -53,7 +53,10 @@ export function SandboxTabs({
   const tabs = profile === "full" ? TABS : TABS.filter((tab) => tab.id === "chat" || tab.id === "browser");
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
-      <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
+      {/* A phone shows no view tabs on Chat: the thread menu opens the
+          other views, and this strip returns to Chat from them. A team
+          thread keeps the strip for its sharing notice. */}
+      <div className={cn("flex shrink-0 items-center border-b border-line px-3 sm:px-4", activeTab === "chat" && !notice && "max-sm:hidden")}>
         <TabBar label="Thread view" size="sm" className="flex-1 shadow-none" tabs={tabs} active={activeTab} onSelect={onTabChange} />
         {notice && <>
           <span role="status" title={notice} className="hidden lg:block max-w-[50%] truncate pl-3 text-xs text-muted">{notice}</span>
