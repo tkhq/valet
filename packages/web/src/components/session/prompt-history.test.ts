@@ -7,7 +7,7 @@ function message(id: string, content: string, extra?: Partial<StreamMessage>): S
 }
 
 describe("promptHistory", () => {
-  const mine = { author: { id: "u1" } };
+  const mine = { author: { id: "u1", interactive: true } };
 
   it("keeps the viewer's prompts in this thread, oldest first, without a repeat in a row", () => {
     expect(promptHistory([
@@ -20,6 +20,7 @@ describe("promptHistory", () => {
       message("m7", "channel sender", { author: { id: "u1", name: "Slack person", externalSender: true } }),
       message("m8", "child settled", { ...mine, signal: { signalType: "child.settled" } }),
       message("m9", "mine, signed", mine),
+      message("m9b", "parent agent steering", { author: { id: "u1", name: "Valet" } }),
       message("m10", "/compact", mine),
       message("m11", "   ", mine),
     ], "t1", "u1")).toEqual(["first", "second", "mine, signed", "/compact"]);
@@ -36,7 +37,7 @@ describe("promptHistory", () => {
     expect(promptHistory([
       message("m1", "<skill name=\"review\">Long review instructions…</skill>\n\nfix the bug", { ...mine, skill: { name: "review", args: "fix the bug" } }),
       message("m2", "<skill name=\"status\">Status instructions…</skill>", { ...mine, skill: { name: "status" } }),
-    ], "t1", "u1")).toEqual(["/review fix the bug", "/status"]);
+    ], "t1", "u1")).toEqual(["/skill:review fix the bug", "/skill:status"]);
   });
 });
 

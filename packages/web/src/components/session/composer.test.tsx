@@ -1175,7 +1175,7 @@ describe("Composer — reply target", () => {
 
 describe("Composer prompt recall", () => {
   function sent(id: string, content: string, threadId = "thread-1"): StreamMessage {
-    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1, author: { id: "user-1" } };
+    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1, author: { id: "user-1", interactive: true } };
   }
 
   it("steps through this thread's earlier prompts with Up and Down", () => {

@@ -6,9 +6,10 @@ import { useStreamStore, type StreamMessage } from "~/stores/stream";
  * The viewer's earlier prompts in one thread, oldest first: what the
  * composer's Up and Down keys step through. A teammate's message, a channel
  * sender's message, and a signal card are not the viewer's prompts. Neither
- * is a message with no author, such as a delegated task's brief, which an
- * agent wrote; the one exception is the composer's own optimistic copy of a
- * prompt the viewer just sent. A repeat of the prompt just before it is kept
+ * is a message an agent wrote: a delegated task's brief has no author, and
+ * a parent's `child_send` carries the person's id without the `interactive`
+ * flag that a signed-in browser send gets. The one unauthored exception is
+ * the composer's own optimistic copy of a prompt the viewer just sent. A repeat of the prompt just before it is kept
  * once.
  */
 export function promptHistory(
@@ -20,7 +21,9 @@ export function promptHistory(
   for (const message of messages) {
     if (message.role !== "user" || message.threadId !== threadId || message.signal) continue;
     const author = message.author;
-    const own = author ? author.id === viewerId && !author.externalSender : message.persistence === "optimistic";
+    const own = author
+      ? author.id === viewerId && !author.externalSender && author.interactive === true
+      : message.persistence === "optimistic";
     if (!own) continue;
     const text = typedText(message);
     if (text && history.at(-1) !== text) history.push(text);
@@ -29,14 +32,16 @@ export function promptHistory(
 }
 
 /**
- * The text the person typed for one message. A skill invocation reads as the
- * slash command it came from: the server stores the expanded skill body as
- * the content and keeps the command in `skill`.
+ * The text to recall for one message. A skill invocation reads as a slash
+ * command that runs the same skill: the server stores the expanded skill
+ * body as the content and keeps the skill in `skill`. The command is the
+ * `skill:<name>` form, which every organization registers; the bare name may
+ * be off, or may name a built-in command instead.
  */
 function typedText(message: StreamMessage): string {
   if (message.skill) {
     const args = message.skill.args?.trim();
-    return args ? `/${message.skill.name} ${args}` : `/${message.skill.name}`;
+    return args ? `/skill:${message.skill.name} ${args}` : `/skill:${message.skill.name}`;
   }
   return message.content.trim();
 }
