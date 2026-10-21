@@ -31,6 +31,8 @@ const setMessageQueueItemId = vi.fn();
 // hoisted `vi.mock` factory closes over a stable binding and each test can
 // swap the value the composer reads.
 const queueStateRef: { current: WireQueueState | undefined } = { current: undefined };
+// The session's live transcript, which prompt recall reads.
+const streamMessagesRef: { current: StreamMessage[] } = { current: [] };
 
 function queueState(mode: WireQueueState["mode"]): WireQueueState {
   return {
@@ -61,12 +63,18 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+vi.mock("~/api/settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/settings")>()),
+  // Prompt recall reads the signed-in person; the fixtures' prompts are theirs.
+  useMe: () => ({ data: { id: "user-1" } }),
+}));
+
 vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
     ...actual,
     useStreamStore: (selector: (s: Record<string, unknown>) => unknown) =>
-      selector({ addUserMessage, setMessageQueueItemId }),
+      selector({ addUserMessage, setMessageQueueItemId, bySession: { "orchestrator:user-1": { messages: streamMessagesRef.current } } }),
     useQueueStateForThread: () => queueStateRef.current,
   };
 });
@@ -129,6 +137,7 @@ function renderComposer(
 
 beforeEach(() => {
   queueStateRef.current = undefined;
+  streamMessagesRef.current = [];
   sendState.pending = false;
   sendState.sessions = undefined;
   abortState.sessions = [];
@@ -823,6 +832,24 @@ describe("Composer beside the Ask Valet dock", () => {
     return { page: inputs()[0]!, dock: inputs().at(-1)!, inputs, rerender: (page = withPage, thread = pageThread) => view.rerender(tree(page, thread)) };
   }
 
+  it("ends a recall in both composers when either one edits the shared draft", () => {
+    streamMessagesRef.current = [
+      { id: "m1", sessionId: "orchestrator:user-1", threadId: "same", role: "user", content: "first prompt", parts: [], createdAt: 1, author: { id: "user-1", interactive: true } },
+      { id: "m2", sessionId: "orchestrator:user-1", threadId: "same", role: "user", content: "continue", parts: [], createdAt: 2, author: { id: "user-1", interactive: true } },
+    ];
+    const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "same", dockThread: "same" });
+    fireEvent.keyDown(page, { key: "ArrowUp" });
+    expect(dock.value).toBe("continue");
+
+    // The dock's edit is a fresh draft that happens to match the recall.
+    fireEvent.change(dock, { target: { value: "" } });
+    fireEvent.change(dock, { target: { value: "continue" } });
+    fireEvent.keyDown(page, { key: "ArrowUp" });
+    expect(page.value).toBe("continue");
+    fireEvent.keyDown(page, { key: "ArrowDown" });
+    expect(page.value).toBe("continue");
+  });
+
   it("leaves a page focus request to the page's composer", async () => {
     const { page } = renderPageAndDock();
     act(() => useComposerPrefillStore.getState().requestFocus());
@@ -1161,5 +1188,104 @@ describe("Composer — reply target", () => {
       undefined,
       { messageId: "assistant-7", excerpt: "Use the blue deployment." },
     );
+  });
+});
+
+describe("Composer prompt recall", () => {
+  function sent(id: string, content: string, threadId = "thread-1"): StreamMessage {
+    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1, author: { id: "user-1", interactive: true } };
+  }
+
+  it("steps through this thread's earlier prompts with Up and Down", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "elsewhere", "thread-2"), sent("m3", "second prompt")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("second prompt");
+    expect(box.selectionStart).toBe("second prompt".length);
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("second prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("");
+  });
+
+  it("keeps a typed draft and an edited recall", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.change(box, { target: { value: "my draft" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("my draft");
+
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.change(box, { target: { value: "first prompt, fixed" } });
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(box.value).toBe("first prompt, fixed");
+  });
+
+  it("steps past a recalled slash command without opening the command popup", async () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "/status")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("/status");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "/status" })));
+  });
+
+  it("opens the command popup again once a recalled command is edited", () => {
+    streamMessagesRef.current = [sent("m1", "/status")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.change(box, { target: { value: "/st" } });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+  });
+
+  it("treats typed text that matches an earlier prompt as a draft after a recall is sent", async () => {
+    streamMessagesRef.current = [sent("m1", "earlier prompt"), sent("m2", "continue")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("continue");
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "continue" })));
+
+    fireEvent.change(box, { target: { value: "continue" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("continue");
+  });
+
+  it("keeps a recall when a refetch rewrites its row as the skill command", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "/review")];
+    const { rerenderComposer } = renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("/review");
+
+    streamMessagesRef.current = [sent("m1", "first prompt"), { ...sent("m2", "Review the change."), skill: { name: "review" } }];
+    rerenderComposer();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
+  });
+
+  it("sends a recalled prompt as a new message", async () => {
+    streamMessagesRef.current = [sent("m1", "rerun the report")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "rerun the report", threadId: "thread-1" })));
   });
 });

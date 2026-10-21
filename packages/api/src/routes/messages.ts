@@ -237,6 +237,7 @@ function authorFromEntry(
     ...(author.email ? { email: author.email } : {}),
     ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}),
     ...(author.externalSender ? { externalSender: true } : {}),
+    ...(author.interactive ? { interactive: true } : {}),
   };
 }
 

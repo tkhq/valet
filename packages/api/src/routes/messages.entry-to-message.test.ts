@@ -377,6 +377,14 @@ describe("entryToMessage — author projection", () => {
     expect(entryToMessage(entry, "sess", "th")?.author).toEqual({ id: "u_creator", name: "Sam from Slack", externalSender: true });
   });
 
+  it("marks a verified browser send, and leaves an agent's message under the same id unmarked", () => {
+    const sent = baseEntry({ author: { id: "u_owner", name: "Owner", interactive: true } });
+    expect(entryToMessage(sent, "sess", "th")?.author).toEqual({ id: "u_owner", name: "Owner", interactive: true });
+    // A parent session's child_send stamps the person's id with the assistant's name.
+    const steering = baseEntry({ author: { id: "u_owner", name: "Valet" } });
+    expect(entryToMessage(steering, "sess", "th")?.author).toEqual({ id: "u_owner", name: "Valet" });
+  });
+
   it("omits the field for authorless entries and non-user roles", () => {
     expect(entryToMessage(baseEntry(), "sess", "th")?.author).toBeUndefined();
     const assistant = baseEntry({

@@ -1402,6 +1402,10 @@ export interface MessageAuthor {
    * is then the person it ran as, and `name` is the sender. The sender's
    * channel id stays off the wire. */
   externalSender?: boolean;
+  /** Set when the host verified a direct human submission: a signed-in
+   * browser send. A message an agent sent under a person's id, such as a
+   * parent session's `child_send`, has no flag. */
+  interactive?: boolean;
 }
 
 export interface MessageReplyReference {
