@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
+# `node -e` reads the nearest package.json above the working directory, and
+# Node 24 fails when a directory on that path is unreadable. CI runs this
+# test as another user from inside the runner's home, which Ubuntu 26.04
+# creates with mode 750. Running from the script's own directory keeps the
+# caller's directory out of the lookup.
+cd "$ROOT"
 HELPER=$ROOT/valet-kubernetes.mjs
 STATE=/home/dockerd/.local/state/valet/kubernetes
 LOCK=${STATE}.lock
