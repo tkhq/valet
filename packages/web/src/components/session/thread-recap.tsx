@@ -105,11 +105,20 @@ export function useThreadRecap({ threadId, thread, messages, viewerId }: {
   const span = useMemo(() => visit && visit.threadId === threadId && viewerId
     ? recapWindow(threadMessages, viewerId, visit.readAt)
     : null, [visit, threadId, viewerId, threadMessages]);
+  // Another person's new message makes a new recap; Valet's own messages do not.
+  const otherCount = span && viewerId ? span.messages.filter((message) => writtenByOtherPerson(message, viewerId)).length : 0;
   const recapQ = useQuery({
-    queryKey: ["thread-recap", threadId, visit?.readAt ?? "first", visit?.count ?? 0],
+    queryKey: ["thread-recap", threadId, visit?.readAt ?? "first", visit?.count ?? 0, otherCount],
     queryFn: () => api.getThreadRecap(threadId ?? "", visit?.readAt),
     enabled: Boolean(threadId && span?.worthRecap),
     staleTime: Infinity,
+    // A refreshed recap for the same visit replaces the shown one when it
+    // arrives, instead of hiding the card meanwhile. Another thread's or
+    // visit's recap never stands in.
+    placeholderData: (previous, previousQuery) => {
+      const key = previousQuery?.queryKey;
+      return key && key[1] === threadId && key[2] === (visit?.readAt ?? "first") && key[3] === (visit?.count ?? 0) ? previous : undefined;
+    },
     retry: false,
     refetchOnWindowFocus: false,
   });

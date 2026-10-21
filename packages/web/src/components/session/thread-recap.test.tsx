@@ -71,6 +71,16 @@ describe("useThreadRecap", () => {
     expect(markMutate).toHaveBeenCalledWith({ threadIds: ["t1"] });
   });
 
+  it("asks for a new recap when another person writes, not when Valet does", async () => {
+    const thread = { id: "t1", sessionId: "s1", readAt: 5_000 };
+    const { rerender } = renderHook(({ list }) => useThreadRecap({ threadId: "t1", thread, messages: list, viewerId: reader.id }),
+      { wrapper, initialProps: { list: messages } });
+    await waitFor(() => expect(getThreadRecap).toHaveBeenCalledTimes(1));
+    rerender({ list: [...messages, msg("m7", 14_000, "assistant", "Still here.")] });
+    rerender({ list: [...messages, msg("m7", 14_000, "assistant", "Still here."), msg("m8", 15_000, "user", "quote due Monday", mate)] });
+    await waitFor(() => expect(getThreadRecap).toHaveBeenCalledTimes(2));
+  });
+
   it("keeps the visit's read time after the thread is marked read", () => {
     const { result, rerender } = renderHook(({ readAt }) => useThreadRecap({ threadId: "t1", thread: { id: "t1", sessionId: "s1", readAt }, messages, viewerId: reader.id }),
       { wrapper, initialProps: { readAt: 5_000 } });
