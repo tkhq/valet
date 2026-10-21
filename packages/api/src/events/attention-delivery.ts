@@ -70,7 +70,7 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
     immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
   )).orderBy(asc(pendingChannelDeliveries.attempts), asc(pendingChannelDeliveries.deliverAfter)).limit(20);
   await mapBounded(due, 4, async job => {
-    if (!job.event) throw new Error("Active attention delivery has no event. Check the outbox row.");
+    if (!job.event) throw new Error("Active attention job has no event. Check the outbox row.");
     const event = job.event;
     const claimedAt = Math.max(now, Date.now());
     // Repeat the due predicate on the outer update to fence concurrent drains.
