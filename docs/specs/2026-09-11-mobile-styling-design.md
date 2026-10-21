@@ -22,8 +22,8 @@ Amended 2026-10-20 (phone navigation feedback):
 - Threads is one tap from every page. A page without the thread sidebar links to `/chat?threads=open`, and the chat page opens the list and clears the parameter.
 - The thread drawer is a full-screen list. Its "Threads" header holds the one close button, so no corner X floats over the list.
 - A phone thread row shows only its menu. Pin and Unpin are menu items; the hover pin icon stays on desktop.
-- Below `sm`, the thread menu holds Share and the sandbox views (browser, and terminal and VS Code when enabled). The view tabs are hidden on Chat. They return on another view as the way back to Chat, and a team thread keeps them for its sharing notice.
-- Fields focus with the theme's moss border and a soft wash ring at every width. Phones paint no tap highlight over a tapped control.
+- Below `sm`, the thread menu holds Share and the sandbox views (browser, and terminal and VS Code when enabled). The view tabs are hidden on Chat only where that menu exists. A child panel's header has no thread menu, so the panel keeps its tabs. The tabs return on another view as the way back to Chat, and a team thread keeps them for its sharing notice.
+- Fields focus with the theme's moss border and a soft wash ring at every width. Fields have no hover border, because a tap leaves `:hover` set and the hover border would replace the focus border. Phones paint no tap highlight over a tapped control.
 
 ## Validation
 

@@ -325,6 +325,7 @@ export function SessionView({
       onTabChange={changeTab}
       notice={scopeNotice}
       sandbox={stream.sandbox}
+      viewsInMenu={!panel}
     />
   );
 
