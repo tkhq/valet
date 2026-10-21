@@ -104,4 +104,52 @@ describe("Thread.contextUsage", () => {
     const session = await engine.createSession(options);
     expect((await session.thread().contextUsage())?.autoCompact).toBe(false);
   });
+
+  it("follows a size tier that an administrator re-points after the session was built", async () => {
+    const { engine, options } = setup("ctx-tier-a", { contextWindow: 50_000, maxTokens: 8_000 });
+    const large = registerFauxProvider({ provider: "ctx-tier-b", models: [{ id: "ctx-b", name: "ctx-b", contextWindow: 400_000, maxTokens: 8_000 }] });
+    cleanups.push(() => large.unregister());
+    let tier = options.model;
+    const session = await engine.createSession({
+      ...options, modelSpec: "m",
+      resolveModel: async (spec) => spec === "m" ? { model: tier } : null,
+    });
+    expect((await session.thread().contextUsage())?.model).toBe("ctx");
+
+    const repointed = large.getModel("ctx-b");
+    if (!repointed) throw new Error("Missing fixture model");
+    tier = repointed;
+    expect(await session.thread().contextUsage()).toMatchObject({ model: "ctx-b", contextWindow: 400_000 });
+  });
+
+  it("reads the thread's own model, not a one-off turn model, when the turn's settlement is announced", async () => {
+    const { faux, engine, providers, options } = setup("ctx-oneoff-small", { contextWindow: 50_000, maxTokens: 8_000 });
+    const big = registerFauxProvider({ provider: "ctx-oneoff-big", models: [{ id: "ctx-big", name: "ctx-big", contextWindow: 400_000, maxTokens: 8_000 }] });
+    cleanups.push(() => big.unregister());
+    const bigModel = big.getModel("ctx-big");
+    if (!bigModel) throw new Error("Missing fixture model");
+    big.setResponses([fauxAssistantMessage("answered on the big model")]);
+    faux.setResponses([]);
+    const session = await engine.createSession({
+      ...options, modelSpec: "small",
+      resolveModel: async (spec) => spec === "small" ? { model: options.model } : spec === "big" ? { model: bigModel } : null,
+    });
+    const thread = session.thread();
+
+    // The web refreshes the meter on submission.settled because a turn_end
+    // refetch can land while the turn still holds its one-off model. A read
+    // started as settlement is announced (bus delivery is synchronous) must
+    // already see the thread's own model.
+    const atSettle: Array<Promise<Awaited<ReturnType<typeof thread.contextUsage>>>> = [];
+    const unsubscribe = providers.stream.subscribe(
+      { sessionId: session.id, eventTypes: ["submission_settled"] },
+      () => { atSettle.push(thread.contextUsage()); },
+    );
+    cleanups.push(unsubscribe);
+    const receipt = await thread.submitPrompt("use the big model", { model: "big" });
+    expect((await thread.awaitResult(receipt.queueItemId)).outcome).toBe("completed");
+
+    expect(atSettle).toHaveLength(1);
+    expect(await atSettle[0]).toMatchObject({ model: "ctx", contextWindow: 50_000 });
+  });
 });

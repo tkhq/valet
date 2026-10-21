@@ -4635,7 +4635,9 @@ export class Thread {
     if (this.runningItem) return this.agent.state.model;
     const spec = this.turnModelSpec();
     const resolver = this.session.options.resolveModel;
-    if (resolver && spec !== (this.session.options.modelSpec ?? this.session.options.model.id)) {
+    // Resolve the spec on every read, as a turn does, so a re-pointed size
+    // tier shows the model and limit that the next turn uses.
+    if (resolver) {
       try {
         const resolved = await resolver(spec);
         if (resolved) return resolved.model;

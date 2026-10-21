@@ -171,13 +171,18 @@ summarizer prompt.
   compacts first. A thread that has not loaded its transcript is read from
   the store with `entriesToAgentMessages` and stays unloaded, so the read
   never wakes a sandbox. Outside a turn, the budget model comes from the
-  host resolver for the thread's spec; a failed resolution falls back to
+  host resolver for the thread's spec on every read, also when the spec is
+  the session default, so a re-pointed size tier shows the model the next
+  turn uses; a failed resolution falls back to
   `effectiveModelLenient`, because the turn path fails loud for the same
   spec. `GET /api/threads/:threadId/context` (also under
   `/api/sessions/:id/threads/:threadId/context`) returns `{ context: null }`
   for a model with no context window. Thread guests cannot read it. The web
-  client refetches the reading on `turn_end`, `compaction_end`, and
-  `model_switched`. The meter turns amber at 80%. Its popover names the
+  client refetches the reading on `turn_end`, `submission.settled`,
+  `compaction_end`, and `model_switched`. A `turn_end` refetch can land
+  before the turn clears its one-off model; the engine clears it before it
+  announces settlement, so the `submission.settled` refetch reads the
+  thread's own model. The meter turns amber at 80%. Its popover names the
   token counts and the model, says whether automatic compaction is on, and
   has a Compact now button that sends `/compact`. The button waits while a
   turn runs.

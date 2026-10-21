@@ -194,7 +194,9 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         }
         // The context meter's reading moves when a turn ends, a compaction
         // rewrites the transcript, or the model (and so the budget) changes.
-        if (wire.type === "turn_end" || wire.type === "compaction_end" || wire.type === "model_switched") {
+        // A turn_end refetch can land while the turn still holds a one-off
+        // model, so the turn's settlement refreshes the reading once more.
+        if (wire.type === "turn_end" || wire.type === "submission.settled" || wire.type === "compaction_end" || wire.type === "model_switched") {
           void qc.invalidateQueries({
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
           });

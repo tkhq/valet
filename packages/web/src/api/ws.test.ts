@@ -224,7 +224,7 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
-  it("refreshes a thread's context reading after its turn, its compaction, or a model switch", () => {
+  it("refreshes a thread's context reading after its turn, its settlement, its compaction, or a model switch", () => {
     const { queryClient, unmount } = renderSocketHook("s1");
     const reading = { context: { tokens: 1, limit: 10, contextWindow: 12, model: "m", autoCompact: true } };
     queryClient.setQueryData(["thread-context", "s1", "t1"], reading);
@@ -234,6 +234,7 @@ describe("useSessionWebSocket", () => {
 
     for (const frame of [
       { type: "turn_end", threadId: "t1", reason: "end_turn" },
+      { type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId: "q1", outcome: "completed" },
       { type: "compaction_end", threadId: "t1" },
       { type: "model_switched", threadId: "t1", fromModel: "a", toModel: "b", reason: "user" },
     ]) {
