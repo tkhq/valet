@@ -1370,6 +1370,52 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("keeps a once-waiter's source until page 17 excludes the historical failure", async () => {
+    const h = harness();
+    let now = NOW;
+    const pages: number[] = [];
+    const jobs = [
+      ...Array.from({ length: 1600 }, (_, i) => ({ id: i + 100000, run_attempt: 2 })),
+      { id: 10000, run_attempt: 1 },
+    ];
+    const http: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/pulls/42")) return Response.json({ head: { sha: "aaaa" } });
+      if (url.pathname.endsWith("/check-runs")) return Response.json({ check_runs: [
+        { id: 10000, app: { id: 1, slug: "github-actions" }, check_suite: { id: 10 }, name: "old job", status: "completed", conclusion: "failure" },
+        { id: 200, app: { id: 1, slug: "github-actions" }, check_suite: { id: 10 }, name: "current job", status: "completed", conclusion: "success" },
+      ] });
+      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [{ id: 10, workflow_id: 1, run_attempt: 2, event: "pull_request", check_suite_id: 10, status: "completed" }] });
+      if (url.pathname.endsWith("/jobs")) {
+        const page = Number(url.searchParams.get("page"));
+        pages.push(page);
+        return Response.json({ total_count: jobs.length, jobs: jobs.slice((page - 1) * 100, page * 100) });
+      }
+      if (url.pathname.endsWith("/status")) return Response.json({ statuses: [] });
+      throw new Error(`Unexpected read ${url.pathname}`);
+    };
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "membership-budget-org",
+      contextFor: (orgId) => ({ orgId, appToken: async () => "token", fetch: http }),
+    });
+    const source = digest(1, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source] }));
+    const watcher = h.watcher({ deriveEvent, now: () => now });
+    await watcher.sweep(now);
+    expect(pages).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
+    expect(await h.store.getWakeup("wk_ev")).toMatchObject({ status: "running", eventBuffer: [source] });
+    expect(h.prompt).not.toHaveBeenCalled();
+    now += 999;
+    await watcher.sweep(now);
+    expect(pages).toHaveLength(16);
+    now++;
+    await watcher.sweep(now);
+    expect(pages).toEqual(Array.from({ length: 17 }, (_, i) => i + 1));
+    expect(await h.store.getWakeup("wk_ev")).toMatchObject({ status: "done", cause: "fired" });
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const { content } = signalOf(h.prompt.mock.calls[0]);
+    expect(typeof content !== "string" && "body" in content ? content.body : "").toContain(`${CHECKS} · success`);
+  });
+
   it("retains rate-limited sources and retries only after the cooldown", async () => {
     const h = harness();
     let now = NOW;

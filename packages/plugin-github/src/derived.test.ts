@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { DeriveContext, NormalizedEvent } from "@valet/engine";
+import { DeriveRetryError, type DeriveContext, type NormalizedEvent } from "@valet/engine";
 import { checksCompleted, latestCompletedAt } from "./derived.js";
 
 // Spec: docs/specs/2026-10-15-event-wakeups-design.md, Part B1 and the B2
@@ -319,14 +319,14 @@ describe("checksCompleted (spec B1)", () => {
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
   });
 
-  it("resumes a large matrix from cached pages under the total request cap", async () => {
+  it("retains a retryable source for 1601 jobs until page 17 classifies the old failure", async () => {
     const old = { ...actionJob(10, "completed", "failure"), id: 10000, name: "old matrix job" };
     const stub = stubFetch({ pages: [[old, actionJob(20)]], workflows: [{ ...workflow(10), run_attempt: 2 }], jobs: { 10: [
-      ...Array.from({ length: 2500 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
+      ...Array.from({ length: 1600 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
       { id: 10000, name: "old matrix job", run_attempt: 1 },
     ] } });
     const ctx = ctxWith(stub.fetch);
-    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("failure"); // Conservative until membership is known.
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
     expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
     expect(stub.calls.length).toBeLessThanOrEqual(32);
     const before = stub.calls.length;
@@ -338,6 +338,67 @@ describe("checksCompleted (spec B1)", () => {
     const complete = stub.calls.length;
     expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
     expect(stub.calls.slice(complete).some((path) => path.includes("/jobs?"))).toBe(false);
+  });
+
+  it.each([
+    { pending: false, failedCheck: false, failedStatus: false, retry: true },
+    { pending: true, failedCheck: false, failedStatus: false, retry: true },
+    { pending: false, failedCheck: true, failedStatus: false, retry: false },
+    { pending: true, failedCheck: true, failedStatus: false, retry: true },
+    { pending: false, failedCheck: false, failedStatus: true, retry: false },
+  ])("retries incomplete membership only when it can change the result: %j", async ({ pending, failedCheck, failedStatus, retry }) => {
+    const unknown = { ...actionJob(10, pending ? "queued" : "completed", pending ? null : "failure"), id: 10000, name: "old job" };
+    const definite = { ...ok(1)[0], conclusion: failedCheck ? "failure" : "success" };
+    const stub = stubFetch({ pages: [[unknown, definite]], workflows: [{ ...workflow(10), run_attempt: 2 }], jobs: { 10: [
+      ...Array.from({ length: 1600 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
+      { id: 10000, name: "old job", run_attempt: 1 },
+    ] }, combined: { state: failedStatus ? "failure" : "success", statuses: failedStatus ? [{ state: "failure" }] : [] } });
+    const result = checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD));
+    if (retry) await expect(result).rejects.toBeInstanceOf(DeriveRetryError);
+    else expect((await result)?.status).toBe("failure");
+  });
+
+  it("does not consume an unclassified pending source from the current rerun's suite", async () => {
+    const pending = { ...actionJob(10, "queued", null), id: 10000, name: "old pending job" };
+    const stub = stubFetch({ pages: [[pending, actionJob(20)]], workflows: [{ ...workflow(10, "pull_request", "in_progress"), run_attempt: 2 }], jobs: { 10: [
+      ...Array.from({ length: 1600 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
+      { id: 10000, name: "old pending job", run_attempt: 1 },
+    ] } });
+    await expect(checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
+  });
+
+  it("shares unique cached pages between two readers and retries a transient page-5 failure", async () => {
+    const old = { ...actionJob(10, "completed", "failure"), id: 10000, name: "old attempt job" };
+    const stub = stubFetch({ pages: [[old, actionJob(20)]], workflows: [{ ...workflow(10), run_attempt: 2 }], jobs: { 10: [
+      ...Array.from({ length: 449 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
+      { id: 10000, name: "old attempt job", run_attempt: 1 },
+    ] } });
+    let failing = true;
+    const pages: number[] = [];
+    const fetchPage: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/jobs")) {
+        const page = Number(url.searchParams.get("page"));
+        pages.push(page);
+        // Each response yields to the other cache reader before its owner starts the next page.
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        if (page === 5 && failing) return new Response("temporary failure", { status: 503 });
+      }
+      return stub.fetch(input, init);
+    };
+    const ctx = ctxWith(fetchPage);
+    const results = await Promise.allSettled([
+      checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)),
+      checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)),
+    ]);
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    expect(pages).toEqual([1, 2, 3, 4, 5]);
+    failing = false;
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(pages).toEqual([1, 2, 3, 4, 5, 5]);
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(pages).toEqual([1, 2, 3, 4, 5, 5]);
   });
 
   it("invalidates finished-job membership when the run attempt changes", async () => {

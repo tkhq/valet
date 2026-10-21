@@ -337,10 +337,17 @@ subject.
    Read `/actions/runs/{run_id}/jobs?filter=all` with four workers and an eight-second membership budget.
    Each derive permits at most 32 GitHub requests, including at most 16 jobs pages.
    Reserve four request slots for remaining status and head reads.
-   At the membership cap or deadline, keep unclassified checks conservatively.
+   If incomplete membership could change the result, return a retryable error instead of a terminal event or `null`.
+   An unclassified pending check can change completion. An unclassified failed check can change success into failure.
+   Keep such sources buffered so the next derive resumes cached pages.
+   Unclassified checks can remain only when they cannot change the result.
+   A proven failure makes another unclassified failure irrelevant, but an unclassified pending check still requires retry.
    Completed pages of finished runs are cached by org, repository, run id, and attempt.
    The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
    Retries resume unfinished pagination rather than starting again at page one.
+   Concurrent readers share each page load. Only its owner can clear the matching in-flight promise.
+   Cache successful pages by unique page number. Completion requires contiguous successful pages through the last page or total count.
+   A failed page leaves the entry incomplete and does not advance its cursor.
    The jobs response contains all attempts. Parse the final path segment of `check_run_url` for its check id.
    Fall back to the job's `id` when that URL is absent or malformed.
    Map each check id to its run and `run_attempt`.
@@ -351,7 +358,7 @@ subject.
    Keep every unmapped Actions check, including reporters in superseded, dispatch, or separate suites.
    Neither suite ids, job names, nor suite conclusions prove check membership.
    An all-green PR makes no jobs calls.
-   A pending check in the current suite of an active relevant workflow can return `null` after three reads.
+   A pending check in the current suite of an active relevant attempt-1 workflow can return `null` after three reads.
    This conservative early return never drops a check. Completion still requires check-based selection.
    For non-Actions checks, select the latest check per `(app.id, name)` across all suites.
    Finished checks use `completed_at`, then id. Missing completion times fall back to id.
@@ -409,7 +416,10 @@ deadline ends that wait.
 | Same-suite rerun, `filter=latest` exposes only the passed new attempt | status `success`, no jobs reads |
 | Defensive changed-suite snapshot, jobs map older failed and current passed attempts | status `success` |
 | 28 completed runs and 900 ms jobs latency | delivers before the 20-second deadline |
-| Matrix exceeds membership page budget | keeps unclassified checks, next call resumes cached pagination |
+| 1601 jobs, historical failure on page 17 | first derive retains source for retry, second derive returns success |
+| Two concurrent readers, 450 jobs, transient failure on page 5 | no partial terminal result, repaired page resumes to success |
+| Unclassified failure with a proven failure elsewhere | failure, because classification cannot change the result |
+| Unclassified pending check, even with a proven failure | retry, because classification can change completion |
 | Mixed-precision completion arrives during an earlier derive returning `null` | new source stays, next pass delivers |
 | Non-Actions App: older suite failed `lint`, newer suite passed a different `test` | status `failure` |
 | Non-Actions App: same name across suites, latest completion passed | status `success` |
