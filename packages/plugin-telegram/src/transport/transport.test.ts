@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startFakeBotApi, type FakeBotApi } from "../../test/fake-bot-api.js";
 import { TelegramApi } from "./api.js";
 import { chatIdFromConversationKey, conversationKeyForChat, TelegramTransport } from "./transport.js";
@@ -25,6 +25,18 @@ describe("TelegramTransport", () => {
   });
   afterEach(async () => {
     await fake.close();
+  });
+
+  it.each(["summary", "gate", "settlement"])("does not begin an aborted attention %s request or fallback", async kind => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const signal = AbortSignal.abort(new Error("batch expired"));
+    try {
+      const call = kind === "summary" ? transport.send("telegram:dm:99", { markdown: "Summary", attentionDeliveryId: "job", signal })
+        : kind === "gate" ? transport.sendGatePrompt("telegram:dm:99", { gateId: "gate", title: "Approve", actions: [], attentionDeliveryId: "job", signal })
+        : transport.updateGatePrompt({ conversationKey: "telegram:dm:99", messageId: "1" }, { label: "Settled", attention: true, signal });
+      await expect(call).rejects.toThrow("batch expired");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); }
   });
 
   it("conversationKey codec round-trips", () => {
@@ -266,4 +278,18 @@ describe("TelegramTransport", () => {
     expect(Date.now() - started).toBeLessThan(500);
     expect(seen).toEqual([]);
   });
+});
+
+it("applies short deadlines only to attention messages and gate cards", async () => {
+  const fetchMock = vi.fn(async (_url: unknown, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } })));
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    const transport = new TelegramTransport(new TelegramApi("test"));
+    const key = conversationKeyForChat(7);
+    await transport.send(key, { markdown: "Attention", attentionDeliveryId: "token" });
+    await transport.sendGatePrompt(key, { gateId: "g", title: "Attention", actions: [], attentionDeliveryId: "token" });
+    await transport.send(key, { markdown: "Ordinary" });
+    await transport.sendGatePrompt(key, { gateId: "g", title: "Ordinary", actions: [] });
+    expect(fetchMock.mock.calls.map(([, init]) => init?.signal instanceof AbortSignal)).toEqual([true, true, false, false]);
+  } finally { vi.unstubAllGlobals(); }
 });

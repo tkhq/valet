@@ -4,7 +4,7 @@ import type { NotificationKind } from "@valet/api/wire";
 import { useNotificationPreferences, useSetNotificationPreference } from "~/api/queries";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
-import { Spinner, Switch } from "~/components/primitives";
+import { Select, Spinner, Switch } from "~/components/primitives";
 import { Sparkles } from "lucide-react";
 import { isAttentionSoundEnabled, setAttentionSoundEnabled } from "~/lib/use-attention-ping";
 import {
@@ -98,7 +98,7 @@ export function NotificationsPage() {
         </div>
       </FieldRow>
 
-      <p className="py-3 text-sm text-muted">Team DM copies are off by default. Enable copies for teams you can access using your linked messaging account. Approval permissions stay unchanged.</p>
+      <p className="py-3 text-sm text-muted">While you are active here, direct messages wait for the selected delay. Read notifications do not send a fallback. Team DM copies are off by default. Enable copies for teams you can access using your linked messaging account. Approval permissions stay unchanged.</p>
       {setPref.error && <div role="alert" className="text-sm text-danger-500">Could not save your preference. Try again.</div>}
       {prefsQ.isLoading && (
         <div className="flex items-center gap-2 py-4 text-sm text-muted">
@@ -118,12 +118,23 @@ export function NotificationsPage() {
           const web = byKind.get(kind)?.web ?? true;
           return (
             <FieldRow key={kind} label={KIND_LABEL[kind]} hint={KIND_DESCRIPTION[kind]}>
-              <div className="flex items-center gap-4"><label className="flex items-center gap-2 text-sm">Web<Switch
+              <div className="flex flex-wrap items-center gap-4"><label className="flex items-center gap-2 text-sm">Web<Switch
                 disabled={setPref.isPending}
                 checked={web}
                 onCheckedChange={(next) => setPref.mutate({ kind, web: next })}
                 aria-label={`${KIND_LABEL[kind]} web notifications`}
-              /></label>{kind !== "review" && <label className="flex items-center gap-2 text-sm">Team DM copies<Switch checked={byKind.get(kind)?.teamDm ?? false} disabled={setPref.isPending} onCheckedChange={(teamDm) => setPref.mutate({ kind, web, teamDm })} aria-label={`${KIND_LABEL[kind]} team DM copies`} /></label>}</div>
+              /></label>{kind !== "review" && <label className="flex items-center gap-2 text-sm">Team DM copies<Switch checked={byKind.get(kind)?.teamDm ?? false} disabled={setPref.isPending} onCheckedChange={(teamDm) => setPref.mutate({ kind, web, teamDm })} aria-label={`${KIND_LABEL[kind]} team DM copies`} /></label>}
+                <label className="flex items-center gap-2 text-sm">DM delay
+                  <Select size="sm" aria-label={`${KIND_LABEL[kind]} DM delay`}
+                    disabled={setPref.isPending || !web}
+                    value={String(byKind.get(kind)?.channelGraceSeconds)}
+                    onChange={e => setPref.mutate({ kind, web, channelGraceSeconds: Number(e.target.value) })}>
+                    {[0, 60, 120, 300, 600].map(seconds => <option key={seconds} value={seconds}>{seconds === 0 ? "Immediate" : `${seconds / 60} min`}</option>)}
+                    {byKind.get(kind)?.channelGraceSeconds !== undefined && ![0, 60, 120, 300, 600].includes(byKind.get(kind)?.channelGraceSeconds ?? 0) &&
+                      <option value={byKind.get(kind)?.channelGraceSeconds}>{byKind.get(kind)?.channelGraceSeconds} sec</option>}
+                  </Select>
+                </label>
+              </div>
             </FieldRow>
           );
         })}

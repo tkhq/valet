@@ -1,7 +1,10 @@
+import { routeAttention, type AttentionChannelDeliverer } from "../orchestrator/attention.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { notifications, pendingChannelDeliveries, agentSessions, teamMembers, teams, workflowDefinitions, workflowRuns, workflowCheckpoints, workflowSignals } from "../schema/index.js";
 import { mintCliToken } from "../auth/cli-tokens.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { getWorkflowRunDetail } from "../workflows/service.js";
@@ -283,4 +286,60 @@ it("requires a browser owner for lasting consent even when an API key names that
   expect((await answer({ "x-api-key": cli.access_token })).status).toBe(403);
   expect((await api.providers.engineStore.getDecisionGate("consent-auth-session", "consent-auth-gate"))?.status).toBe("pending");
   expect((await answer({ cookie })).status).toBe(200);
+});
+
+
+it("clears updates without suppressing a pending approval's DM fallback", async () => {
+  api = await bootTestApi();
+  await pendingGate(api, "unread", "user", "local-user", "local-user");
+  const db = api.providers.db;
+  const deliver = vi.fn(async () => {});
+  const channel: AttentionChannelDeliverer = { id: "dm", order: 1, grace: "when-web-active", deliver };
+  webPresence(db).report("local-user", "tab", true);
+  await routeAttention({ db, channels: [channel] }, { kind: "approval", owner: { type: "user", id: "local-user" }, title: "Approve", sessionId: "unread", gate: { id: "gate-unread", actions: [] }, dedupeKey: "gate-unread" });
+  await routeAttention({ db }, { kind: "notification", owner: { type: "user", id: "local-user" }, title: "Unrelated update" });
+  const response = await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  expect(response.status).toBe(200);
+  const rows = await db.select().from(notifications);
+  expect(rows.find(row => row.kind === "notification")?.readAt).toBeTypeOf("number");
+  const approval = rows.find(row => row.kind === "approval");
+  expect(approval?.readAt).toBeNull();
+  const [job] = await db.select().from(pendingChannelDeliveries);
+  if (!job || !approval) throw new Error("Expected a deferred approval");
+  await drainAttentionDeliveries({ db, channels: [channel] }, job.deliverAfter);
+  expect(deliver).toHaveBeenCalledOnce();
+  // Once its fallback is sent, bulk-read may clear the bell copy even while the gate is pending.
+  await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  const [sentCopy] = await db.select().from(notifications).where(eq(notifications.id, approval.id));
+  expect(sentCopy?.readAt).toBeTypeOf("number");
+  expect((await api.providers.engineStore.getDecisionGate("unread", "gate-unread"))?.status).toBe("pending");
+  await db.execute(sql`UPDATE engine_decision_gates SET status='resolved' WHERE id='gate-unread'`);
+  await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  const [cleared] = await db.select().from(notifications).where(eq(notifications.id, approval.id));
+  expect(cleared?.readAt).toBeTypeOf("number");
+  const read = await fetch(`${api.baseUrl}/api/notifications/${encodeURIComponent(approval.id)}/read`, { method: "POST" });
+  expect(read.status).toBe(200);
+  const [handled] = await db.select().from(notifications).where(eq(notifications.id, approval.id));
+  expect(handled?.readAt).toBeTypeOf("number");
+});
+
+
+it("can clear answered workflow approvals and legacy copies without hiding pending gates", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  await db.insert(workflowRuns).values({ id: "clear-run", workflowId: "wf", definitionVersionId: "v1", definition: {}, params: {}, ownerType: "user", ownerId: "local-user", status: "parked", createdAt: 1, updatedAt: 1 });
+  await db.insert(workflowCheckpoints).values({ runId: "clear-run", nodeId: "approve", iteration: 0, attempt: 1, status: "intent", effects: { gateId: "clear-gate" }, createdAt: 1 });
+  const deliver = vi.fn(async () => {});
+  const channels: AttentionChannelDeliverer[] = [{ id: "dm", order: 1, grace: "when-web-active", deliver }];
+  webPresence(db).report("local-user", "tab", true);
+  await routeAttention({ db, channels }, { kind: "approval", owner: { type: "user", id: "local-user" }, title: "Workflow approval", workflowGate: { runId: "clear-run", nodeId: "approve", iteration: 0, gateId: "clear-gate" } });
+  await db.insert(notifications).values({ id: "legacy", userId: "local-user", kind: "approval", urgency: "normal", title: "Legacy copy", createdAt: 1 });
+  await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  let rows = await db.select().from(notifications);
+  expect(rows.find(row => row.id === "legacy")?.readAt).toBeTypeOf("number");
+  expect(rows.find(row => row.title === "Workflow approval")?.readAt).toBeNull();
+  await db.insert(workflowSignals).values({ runId: "clear-run", signalId: "answered", signalType: "approval:approve", payload: { gateId: "clear-gate", approved: true }, createdAt: 1 });
+  await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  rows = await db.select().from(notifications);
+  expect(rows.find(row => row.title === "Workflow approval")?.readAt).toBeTypeOf("number");
 });

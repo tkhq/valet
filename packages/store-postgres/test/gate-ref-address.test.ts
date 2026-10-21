@@ -10,7 +10,8 @@ it("keeps gate prompt references with equal message IDs in different conversatio
   try {
     await applyEngineMigrations(db);
     const store = new PgSessionStore(db);
-    for (const channelId of ["slack:T1:DM_A", "slack:T1:DM_B"]) {
+    // Reconciliation can record the same confirmed provider ref after a restart.
+    for (const channelId of ["slack:T1:DM_A", "slack:T1:DM_B", "slack:T1:DM_A"]) {
       await store.saveDecisionGateRef("session", "thread", "gate", {
         channelType: "slack", ref: { channelId, messageId: "100.1" },
       });

@@ -1,4 +1,5 @@
 /** Thin typed client over the Telegram Bot API. All payloads narrowed from unknown. */
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 
 export interface TgUser { id: number; is_bot?: boolean; username?: string; first_name?: string }
 export interface TgFile { fileId: string; filePath: string; fileSize?: number }
@@ -24,7 +25,8 @@ export class TelegramApi {
     private readonly baseUrl = "https://api.telegram.org",
   ) {}
 
-  private async call(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  private async call(method: string, body: Record<string, unknown>, signal?: AbortSignal, attention = false): Promise<unknown> {
+    signal?.throwIfAborted();
     const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -32,7 +34,14 @@ export class TelegramApi {
       signal,
     });
     const parsed = (await res.json()) as TgResponse;
-    if (!parsed.ok) throw new TelegramApiError(method, parsed.description ?? `http ${res.status}`, parsed.error_code);
+    if (!parsed.ok) {
+      if (attention && parsed.error_code === 403) {
+        const description = parsed.description?.toLowerCase() ?? "";
+        if (description.includes("bot was blocked by the user")) throw new ChannelDeliveryRejectedError("telegram", "bot_blocked");
+        if (description.includes("user is deactivated")) throw new ChannelDeliveryRejectedError("telegram", "user_deactivated");
+      }
+      throw new TelegramApiError(method, parsed.description ?? `http ${res.status}`, parsed.error_code);
+    }
     return parsed.result;
   }
 
@@ -55,7 +64,7 @@ export class TelegramApi {
         timeout: opts.timeoutSeconds ?? 30,
         allowed_updates: ["message", "callback_query"],
       },
-      opts.signal,
+      opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000),
     );
     return Array.isArray(result) ? result : [];
   }
@@ -63,6 +72,8 @@ export class TelegramApi {
   async sendMessage(opts: {
     chatId: number | string;
     html: string;
+    attention?: boolean;
+    signal?: AbortSignal;
     replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
   }): Promise<{ messageId: number }> {
     const result = (await this.call("sendMessage", {
@@ -70,7 +81,7 @@ export class TelegramApi {
       text: opts.html,
       parse_mode: "HTML",
       reply_markup: opts.replyMarkup,
-    })) as { message_id: number };
+    }, opts.attention ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(10_000)]) : opts.signal, opts.attention)) as { message_id: number };
     return { messageId: result.message_id };
   }
 
@@ -93,6 +104,8 @@ export class TelegramApi {
   }
 
   async editMessageText(opts: {
+    signal?: AbortSignal;
+    attention?: boolean;
     chatId: number | string;
     messageId: number;
     html: string;
@@ -101,13 +114,13 @@ export class TelegramApi {
     await this.call("editMessageText", {
       chat_id: opts.chatId, message_id: opts.messageId, text: opts.html, parse_mode: "HTML",
       reply_markup: opts.replyMarkup,
-    });
+    }, opts.attention ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(10_000)]) : opts.signal);
   }
 
-  async editMessageReplyMarkup(opts: { chatId: number | string; messageId: number }): Promise<void> {
+  async editMessageReplyMarkup(opts: { chatId: number | string; messageId: number; signal?: AbortSignal }): Promise<void> {
     await this.call("editMessageReplyMarkup", {
       chat_id: opts.chatId, message_id: opts.messageId, reply_markup: { inline_keyboard: [] },
-    });
+    }, opts.signal);
   }
 
   async answerCallbackQuery(opts: { callbackQueryId: string; text?: string }): Promise<void> {

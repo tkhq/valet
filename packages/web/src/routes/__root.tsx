@@ -1,3 +1,4 @@
+import { useWebPresence } from "~/api/web-presence";
 import { AUTH_CHANGE_KEY } from "~/lib/auth-navigation";
 import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components/layout/workspace-assistant";
 import { ApiError } from "~/api/client";
@@ -146,6 +147,7 @@ function RootLayout() {
  * for a signed-out visitor and poll endpoints they cannot call.
  */
 function SignedInEffects() {
+  useWebPresence();
   useAttentionPing();
   useUnlockAudioOnFirstGesture();
   return null;

@@ -1,3 +1,10 @@
+import * as workspaceSender from "../services/workspace-sender.js";
+import * as identityLinks from "./identity-links.js";
+import * as attention from "../orchestrator/attention.js";
+import * as deliveryMetrics from "../observability/delivery-metrics.js";
+import slackPlugin from "@valet/plugin-slack/plugin";
+import { ATTENTION_BATCH_TIMEOUT_MS, drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
@@ -29,12 +36,12 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { userNotificationPreferences, pendingChannelDeliveries, agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import type { AttentionEvent } from "../orchestrator/attention.js";
+import { routeAttention as enqueueAttention, type AttentionEvent } from "../orchestrator/attention.js";
 import { savedGatePrompts } from "./gate-prompts.js";
 import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
@@ -2815,6 +2822,147 @@ describe("ChannelHost.attentionDeliverer", () => {
     };
   }
 
+  it("does not retain a backlog for a linked user without an org bot", async () => {
+    host = await buildHost({ plugins: [{ name: "slack", version: "0", transports: [{ channelType: "slack", create: () => new FakeTransport() }] }] });
+    await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U1", userId: USER_ID });
+    await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "notification", web: false });
+    const channels = host.attentionDeliverers();
+    await routeAttention({ db: testDb.appDb, channels }, event({ dedupeKey: "unconfigured" }));
+    expect(await testDb.appDb.select().from(pendingChannelDeliveries)).toHaveLength(0);
+    // A producer can enqueue before startup discovers the missing bot.
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "boot-job", userId: USER_ID, tierId: "personal-slack", event: event(), deliverAfter: 1 });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 10);
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 1_000_000);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "dropped", attempts: 1 });
+  });
+
+  it.each([false, true])("reconciles a confirmed card without resending when ref saving fails: %s", async saveFails => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "gate-session", workspace: "/", orgId: ORG_ID, userId: USER_ID, ownerType: "user", ownerId: USER_ID, createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("gate-session", "thread", { id: "gate", sessionId: "gate-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "gate" }));
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    const ref = { conversationKey: "fake:dm:77", messageId: "1", gateCard: true };
+    const reconcile = vi.fn(async () => ref);
+    if (saveFails) vi.spyOn(PgSessionStore.prototype, "saveDecisionGateRef").mockRejectedValueOnce(new Error("store unavailable"));
+    Object.assign(fakeTransport, { reconcileAttention: reconcile });
+    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2, event: event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] } }) });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 2);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "sent", attempts: 2 });
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'gate'")).rows).toHaveLength(1);
+  });
+
+  it("restores landed gate controls immediately after a timed-out post", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "timeout-session", workspace: "/", orgId: ORG_ID, userId: USER_ID, ownerType: "user", ownerId: USER_ID, createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("timeout-session", "thread", { id: "timeout-gate", sessionId: "timeout-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const timeout = new Error("request timed out");
+    timeout.name = "TimeoutError";
+    vi.spyOn(fakeTransport, "sendGatePrompt").mockRejectedValueOnce(timeout);
+    const ref = { conversationKey: "fake:dm:77", messageId: "landed", gateCard: true };
+    const reconcile = vi.fn(async () => ref);
+    Object.assign(fakeTransport, { reconcileAttention: reconcile });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "timeout-session", gate: { id: "timeout-gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "timeout" }));
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(host.gateForRef(ref)).toMatchObject({ gateId: "timeout-gate", sessionId: "timeout-session" });
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "sent", attempts: 1 });
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'timeout-gate'")).rows).toHaveLength(1);
+  });
+
+  it("does not register recovered summary messages as gate cards", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "other-session", workspace: "/", orgId: ORG_ID, userId: "other", ownerType: "user", ownerId: "other", createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("other-session", "thread", { id: "summary-gate", sessionId: "other-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "other-session", gate: { id: "summary-gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "summary" }));
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    const ref = { conversationKey: "fake:dm:77", messageId: "1" };
+    Object.assign(fakeTransport, { reconcileAttention: vi.fn(async () => ref) });
+    // Even if permissions expand after the summary send, it is not a gate card.
+    await testDb.appDb.update(agentSessions).set({ userId: USER_ID, ownerId: USER_ID }).where(eq(agentSessions.id, "other-session"));
+    // Restore the event to model a crash before the terminal acknowledgement.
+    const approval = event({ kind: "approval", sessionId: "other-session", gate: { id: "summary-gate", actions: [{ id: "approve", label: "Approve" }] } });
+    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2, event: approval });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 2);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(host.gateForRef(ref)).toBeNull();
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'summary-gate'")).rows).toHaveLength(0);
+  });
+
+  it("rechecks notifyAttention after the web grace period", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    webPresence(testDb.appDb).report(USER_ID, "tab", true);
+    await routeAttention({ db: testDb.appDb, channels: host.attentionDeliverers() }, event({ dedupeKey: "grace" }));
+    expect(fakeTransport.sent).toHaveLength(0);
+    await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    if (!job) throw new Error("Expected a durable delivery");
+    const audience = vi.spyOn(attention, "attentionAudience").mockRejectedValue(new Error("Slack membership unavailable"));
+    try {
+      await drainAttentionDeliveries({ db: testDb.appDb, channels: host.attentionDeliverers() }, job.deliverAfter);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(audience).not.toHaveBeenCalled();
+      const [dropped] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(dropped).toMatchObject({ status: "dropped", event: null, lastError: null });
+    } finally { audience.mockRestore(); }
+  });
+
+  it("retries a Slack account_inactive outage and records recovery failures", async () => {
+    const factory = slackPlugin.transports?.[0];
+    if (!factory) throw new Error("Expected the Slack transport factory");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: "account_inactive" }), { headers: { "content-type": "application/json" } }));
+    const failures = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    const rejections = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryRejected");
+    try {
+      host = await buildHost({ plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: ctx => factory.create({ ...ctx, credential: { ...ctx.credential, metadata: { teamId: "T123" } } }) }] }] });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "U123", userId: USER_ID });
+      await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "approval", web: false });
+      const channels = host.attentionDeliverers();
+      await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", dedupeKey: "outage" }));
+      const [failed] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      if (!failed) throw new Error("Expected a durable delivery");
+      expect(failed).toMatchObject({ status: "sending", attempts: 1 });
+      expect(failed.event).not.toBeNull();
+      await drainAttentionDeliveries({ db: testDb.appDb, channels }, failed.deliverAfter);
+      const [retried] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(retried).toMatchObject({ status: "sending", attempts: 2 });
+      expect(retried?.event).not.toBeNull();
+      expect(failures.mock.calls).toEqual([[false], [true]]);
+      expect(rejections).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); failures.mockRestore(); rejections.mockRestore(); }
+  });
+
+  it("keeps a provider failure recoverable and stores its confirmed ref", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const send = vi.spyOn(fakeTransport, "send").mockRejectedValueOnce(new Error("provider unavailable"));
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ dedupeKey: "retry" }));
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    if (!job) throw new Error("Expected a durable delivery");
+    expect(job.status).toBe("sending");
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, job.deliverAfter);
+    expect(send).toHaveBeenCalledTimes(2);
+    const [sent] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(sent).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", conversationKey: "fake:dm:77", messageId: "1" }] });
+    expect(fakeTransport.sent[0]?.message.attentionDeliveryId).toBe(job.deliveryToken);
+  });
+
   it("sends one DM to a linked user with notifyAttention enabled", async () => {
     host = await buildHost();
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
@@ -3017,6 +3165,137 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
   });
 
+  it.each([false, true])("does not post after a timed-out identity lookup resumes following opt-out recovery: gate=%s", async gate => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    if (gate) await seedUserSession("cancelled-preparation");
+    const channels = [host.attentionDeliverer("fake")];
+    const queued = event(gate ? { kind: "approval", sessionId: "cancelled-preparation", gate: { id: "cancelled-gate", actions: [] } } : {});
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "cancelled-preparation", userId: USER_ID, tierId: channels[0]!.id, event: queued, deliverAfter: 1 });
+    let release = () => {}; let started = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const prepared = new Promise<void>(resolve => { started = resolve; });
+    const readIdentity = identityLinks.identityForUser;
+    let lookups = 0;
+    const lookup = vi.spyOn(identityLinks, "identityForUser").mockImplementation(async (...args) => {
+      const link = await readIdentity(...args);
+      if (++lookups === 2) { started(); await blocked; }
+      return link;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const now = Date.now();
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, now, ["cancelled-preparation"]);
+    try {
+      await prepared;
+      await vi.advanceTimersByTimeAsync(ATTENTION_BATCH_TIMEOUT_MS);
+      await work;
+      await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
+      const [claimed] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "cancelled-preparation"));
+      await drainAttentionDeliveries({ db: testDb.appDb, channels }, claimed!.deliverAfter);
+      const [job] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "cancelled-preparation"));
+      expect(job).toMatchObject({ status: "dropped", event: null });
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(fakeTransport.gatePrompts).toHaveLength(0);
+    } finally { release(); await work; vi.useRealTimers(); lookup.mockRestore(); log.mockRestore(); }
+  });
+
+  it.each(["gate", "sender"])("checks batch cancellation after awaited %s preparation", async phase => {
+    const store = new PgSessionStore((await freshTestPgDb()).pgdb);
+    host = await buildHost({ engineStore: store });
+    await seedUserSession("blocked-card-prep");
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const channels = [host.attentionDeliverer("fake")];
+    const queued = event({ sessionId: "blocked-card-prep", ...(phase === "gate" ? { kind: "approval", gate: { id: "g", actions: [] } } : {}) });
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "blocked-card-prep", userId: USER_ID, tierId: channels[0]!.id, event: queued, deliverAfter: 1 });
+    let release = () => {}; let started = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const prepared = new Promise<void>(resolve => { started = resolve; });
+    const readGate = store.getDecisionGate.bind(store);
+    const readSender = workspaceSender.assistantSessionSender;
+    const gateLookup = vi.spyOn(store, "getDecisionGate").mockImplementation(async (...args) => {
+      const result = await readGate(...args);
+      if (phase === "gate") { started(); await blocked; }
+      return result;
+    });
+    const senderLookup = vi.spyOn(workspaceSender, "assistantSessionSender").mockImplementation(async (...args) => {
+      const result = await readSender(...args);
+      if (phase === "sender") { started(); await blocked; }
+      return result;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, Date.now(), ["blocked-card-prep"]);
+    try {
+      await prepared;
+      await vi.advanceTimersByTimeAsync(ATTENTION_BATCH_TIMEOUT_MS);
+      await work;
+      release(); await vi.advanceTimersByTimeAsync(1);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(fakeTransport.gatePrompts).toHaveLength(0);
+    } finally { release(); await work; vi.useRealTimers(); gateLookup.mockRestore(); senderLookup.mockRestore(); log.mockRestore(); }
+  });
+
+  it.each(["hang", "reject"])("does not hold an attention batch open on a %s settlement edit", async mode => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await seedUserSession("hanging-settlement");
+    // Remember expiry before the card lands; the subsequent edit is the backfill path.
+    await eventStream.append({ sessionId: "hanging-settlement", threadId: "t", timestamp: Date.now(),
+      event: { type: "decision_gate_expired", threadId: "t", gateId: "expired-during-post" } }, `settlement-${randomUUID()}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const update = vi.spyOn(fakeTransport, "updateGatePrompt").mockImplementation(async () => {
+      if (mode === "reject") throw new Error("provider edit failed");
+      await blocked;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const channels = [host.attentionDeliverer("fake")];
+    const approval = event({ kind: "approval", sessionId: "hanging-settlement", gate: { id: "expired-during-post", actions: [{ id: "approve", label: "Approve" }] } });
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "late-card", userId: USER_ID, tierId: channels[0]!.id, event: approval, deliverAfter: 1 });
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, Date.now(), ["late-card"]);
+    try {
+      await vi.waitFor(() => expect(update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ attention: true })));
+      await vi.waitFor(async () => {
+        const [job] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "late-card"));
+        expect(job).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", messageId: expect.any(String) }] });
+      });
+      await work;
+      await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "after-hung-edit", userId: USER_ID, tierId: channels[0]!.id, event: event(), deliverAfter: 1 });
+      await drainAttentionDeliveries({ db: testDb.appDb, channels });
+      expect(fakeTransport.sent).toHaveLength(1);
+      if (mode === "reject") expect(log).toHaveBeenCalledWith(expect.stringContaining("gate prompt update failed"), expect.any(Error));
+    } finally { release(); await work; update.mockRestore(); log.mockRestore(); }
+  });
+
+  it("publishes only an opaque token in a summary-only Slack DM's metadata", async () => {
+    const factory = slackPlugin.transports?.[0];
+    if (!factory) throw new Error("Expected the Slack transport factory");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: true, channel: { id: "D123" }, ts: "1" }), { headers: { "content-type": "application/json" } }));
+    try {
+      host = await buildHost({ plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: ctx => factory.create({ ...ctx, credential: { ...ctx.credential, metadata: { teamId: "T123" } } }) }] }] });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "U123", userId: USER_ID });
+      await seedUserSession("summary-private", "someone-else");
+      await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "approval", web: false });
+      const gateId = 'gate:resume-key:{"argument":"private-argument"}';
+      await routeAttention({ db: testDb.appDb, channels: [host.attentionDeliverer("fake")] }, event({ kind: "approval", sessionId: "summary-private", dedupeKey: gateId, gate: { id: gateId, actions: [{ id: "approve", label: "Approve" }] } }));
+      const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(job?.id).toContain("private-argument");
+      expect(job?.status).toBe("sent");
+      const posts = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/chat.postMessage"));
+      expect(posts).toHaveLength(1);
+      const body = JSON.parse(String(posts[0]?.[1]?.body)) as Record<string, unknown>;
+      expect(body.metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: job?.deliveryToken } });
+      const metadata = JSON.stringify(body.metadata);
+      for (const secret of [gateId, "gate:", "resume-key", "private-argument", "argument"]) expect(metadata).not.toContain(secret);
+      expect(job?.deliveryToken).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.blocks).toBeUndefined();
+    } finally { fetchMock.mockRestore(); }
+  });
+
   it("a recipient who may not resolve the gate gets the plain summary, not dead buttons", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
@@ -3086,3 +3365,9 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(host.gateForRef({ conversationKey: p?.conversationKey ?? "", messageId: p?.messageId ?? "" })).toBeNull();
   });
 });
+
+/** Flush detached sends only when this test needs their outcome. */
+async function routeAttention(...args: Parameters<typeof enqueueAttention>): Promise<void> {
+  await enqueueAttention(...args);
+  await drainAttentionDeliveries(args[0]);
+}

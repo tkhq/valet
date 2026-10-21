@@ -11,6 +11,8 @@ The gate applies to automatic pushes, version tags, and manual publishing. Pull 
 `ci-checks.yml` owns typecheck, all test shards, cgroup tests, docs lint, and their aggregate result.
 It also runs the existing web build and release-workflow tests. Every publishing entry point calls these same checks with read-only repository permissions.
 The aggregate job requires every dependency to succeed. Failed, cancelled, or skipped checks prevent publishing.
+The Kubernetes command test runs from its own temporary directory.
+Its reduced-privilege user cannot depend on access to the runner checkout or its parent directories for Node module resolution.
 
 `ci.yml` keeps the top-level `ci` status for existing branch protection. It reports the shared workflow result.
 Docker and CLI publishing require that status to succeed. Neither publisher has an independent push or manual trigger.

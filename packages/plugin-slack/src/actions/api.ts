@@ -1,14 +1,30 @@
 export const SLACK_API = 'https://slack.com/api';
 
+/** Attention calls alone bound rate-limit waits and response body reads. */
+export const SLACK_REQUEST_TIMEOUT_MS = 10_000;
+
+async function waitForRetry(res: Response, signal?: AbortSignal): Promise<void> {
+  const seconds = Number(res.headers.get('Retry-After') || '2');
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, Math.max(0, seconds) * 1000);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
 /** Authenticated POST against the Slack Web API. Automatically retries on 429 rate limits. */
 export async function slackFetch(
   method: string,
   token: string,
   body?: Record<string, unknown>,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
   for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
     const res = await fetch(`${baseUrl}/${method}`, {
+      signal,
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -18,8 +34,8 @@ export async function slackFetch(
     });
 
     if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      await res.body?.cancel();
+      await waitForRetry(res, signal);
       continue;
     }
 
@@ -50,18 +66,21 @@ export async function slackGet(
   token: string,
   params?: Record<string, unknown>,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const finalUrl = slackGetUrl(method, params, baseUrl);
 
   for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
     const res = await fetch(finalUrl, {
+      signal,
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
     });
 
     if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('Retry-After') || '2');
-      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      await res.body?.cancel();
+      await waitForRetry(res, signal);
       continue;
     }
 
@@ -82,10 +101,12 @@ export async function slackGetOnce(
   params: Record<string, unknown>,
   timeoutMs: number,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
+  signal?.throwIfAborted();
   return fetch(slackGetUrl(method, params, baseUrl), {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
   });
 }

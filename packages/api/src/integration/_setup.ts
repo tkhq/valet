@@ -1,3 +1,4 @@
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 /**
  * Shared boot harness for API integration tests.
  *
@@ -552,6 +553,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const eventDispatcher = new EventDispatcher({
     db,
+    drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
     deliverToAssistant: buildAssistantTarget({

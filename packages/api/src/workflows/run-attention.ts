@@ -62,6 +62,7 @@ export function buildRunApprovalAttention(deps: {
       const channel = run && !run.params.origin ? runEventChannel(run.params) : undefined;
       await routeAttention({ db: deps.db, channels: deps.channels, access: deps.access }, {
         kind: "approval",
+        workflowGate: { runId: info.runId, nodeId: info.nodeId, iteration: info.iteration ?? 0, ...(info.gateId ? { gateId: info.gateId } : {}) },
         owner: info.approver ? { type: "user", id: info.approver.userId } : owner,
         ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
         ...(channel ? { audienceKey: slackEventsThreadKey(channel) } : {}),

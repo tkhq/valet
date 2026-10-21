@@ -9,6 +9,7 @@ export interface ChannelAccessResult {
    *  which Slack gives no name, and when the check fails. */
   name?: string;
   error?: string;
+  errorCode?: string;
 }
 
 /**
@@ -25,10 +26,11 @@ export async function checkPrivateChannelAccess(
   /** Treat a direct or group direct message like a private channel: only its
    * members pass. Shared owners always treat DMs as private, regardless of
    * this option. Personal callers can require a membership check too. */
-  opts: { directIsPrivate?: boolean; ownerType?: "user" | "team" | "org" } = {},
+  opts: { directIsPrivate?: boolean; ownerType?: "user" | "team" | "org"; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChannelAccessResult> {
+  const signal = opts.timeoutMs ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(opts.timeoutMs)]) : opts.signal;
   // 1. Get channel info
-  const infoRes = await slackGet('conversations.info', token, { channel: channelId });
+  const infoRes = await slackGet('conversations.info', token, { channel: channelId }, undefined, signal);
   const infoData = (await infoRes.json()) as {
     ok: boolean;
     error?: string;
@@ -36,7 +38,7 @@ export async function checkPrivateChannelAccess(
   };
 
   if (!infoData.ok) {
-    return { allowed: false, isPrivate: false, error: `Slack API error checking channel: ${infoData.error}` };
+    return { allowed: false, isPrivate: false, errorCode: infoData.error, error: `Slack API error checking channel: ${infoData.error}` };
   }
 
   const channel = infoData.channel;
@@ -69,7 +71,7 @@ export async function checkPrivateChannelAccess(
       // conversations belonging to the token's bot; never supply a user id.
       let cursor: string | undefined;
       do {
-        const response = await slackGet('users.conversations', token, { types: 'private_channel', limit: 200, ...(cursor ? { cursor } : {}) });
+        const response = await slackGet('users.conversations', token, { types: 'private_channel', limit: 200, ...(cursor ? { cursor } : {}) }, undefined, signal);
         const body: unknown = await response.json();
         if (!response.ok || typeof body !== 'object' || body === null || !('ok' in body) || body.ok !== true) {
           const reason = typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
@@ -104,7 +106,7 @@ export async function checkPrivateChannelAccess(
     const params: Record<string, unknown> = { channel: channelId, limit: 200 };
     if (cursor) params.cursor = cursor;
 
-    const membersRes = await slackGet('conversations.members', token, params);
+    const membersRes = await slackGet('conversations.members', token, params, undefined, signal);
     const membersData = (await membersRes.json()) as {
       ok: boolean;
       error?: string;
@@ -113,7 +115,7 @@ export async function checkPrivateChannelAccess(
     };
 
     if (!membersData.ok) {
-      return { allowed: false, isPrivate: true, error: `Slack API error checking membership: ${membersData.error}` };
+      return { allowed: false, isPrivate: true, errorCode: membersData.error, error: `Slack API error checking membership: ${membersData.error}` };
     }
 
     if (membersData.members?.includes(ownerSlackUserId)) {
@@ -128,4 +130,9 @@ export async function checkPrivateChannelAccess(
     isPrivate: true,
     error: 'Access denied: you are not a member of this private channel',
   };
+}
+
+/** These answers deny access. Credential, rate-limit, and unknown errors can recover. */
+export function isPermanentSlackAccessError(code: string | undefined): boolean {
+  return code !== undefined && ["channel_not_found", "is_archived", "not_in_channel", "user_not_found", "user_not_visible"].includes(code);
 }

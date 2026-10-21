@@ -389,8 +389,32 @@ CREATE TABLE "user_notification_preferences" (
 	"kind" text NOT NULL,
 	"web" boolean DEFAULT true NOT NULL,
 	"team_dm" boolean DEFAULT false NOT NULL,
+	"channel_grace_seconds" integer,
 	PRIMARY KEY("user_id", "kind")
 );
+--> statement-breakpoint
+CREATE TABLE "pending_channel_deliveries" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"tier_id" text NOT NULL,
+	"notification_id" text,
+	"event" jsonb NOT NULL,
+	"created_at" bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp()) * 1000)::bigint,
+	"deliver_after" bigint NOT NULL,
+	"status" text NOT NULL DEFAULT 'pending',
+	"sending_at" bigint,
+	"first_sending_at" bigint,
+	"delivery_token" text NOT NULL DEFAULT gen_random_uuid()::text,
+	"attempts" integer NOT NULL DEFAULT 0,
+	"message_refs" jsonb,
+	"last_error" text
+);
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_age" ON "pending_channel_deliveries" ("created_at") WHERE "status" IN ('pending', 'sending');
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_due" ON "pending_channel_deliveries" ("deliver_after") WHERE "status" IN ('pending', 'sending');
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_notification" ON "pending_channel_deliveries" ("notification_id") WHERE "notification_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "event_drop_log" (
 	"id" text PRIMARY KEY NOT NULL,

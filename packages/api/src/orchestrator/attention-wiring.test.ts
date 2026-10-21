@@ -216,6 +216,7 @@ describe("wireAttentionRouter", () => {
       eventStream,
       channels: [
         {
+          id: "test", order: 1, grace: "when-web-active",
           deliver: async (_userId, event) => {
             delivered.push(event);
           },
@@ -244,7 +245,7 @@ describe("wireAttentionRouter", () => {
       { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
     const thread = await execution.session.ensureDefaultThread();
     const seen: AttentionEvent[] = [];
-    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async (_userId, event) => { seen.push(event); } }] });
     const runId = `run-${randomUUID()}`;
     await db.insert(workflowDefinitions).values({ id: "wf-private", orgId: "local-org", ownerType: "team", ownerId: team.id,
       name: "Private workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
@@ -263,7 +264,7 @@ describe("wireAttentionRouter", () => {
     api = await bootTestApi();
     const { db, engineStore, eventStream, workflowStore } = api.providers;
     const seen: AttentionEvent[] = [];
-    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ id: "test", order: 1, grace: "when-web-active", deliver: async (_userId, event) => { seen.push(event); } }] });
     const runId = `run-${randomUUID()}`;
     await db.insert(workflowDefinitions).values({ id: "wf-x", orgId: "local-org", ownerType: "user", ownerId: "local-user",
       name: "Slack event workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
@@ -288,6 +289,7 @@ describe("wireAttentionRouter", () => {
       eventStream,
       channels: [
         {
+          id: "test", order: 1, grace: "when-web-active",
           deliver: async (_userId, event) => {
             delivered.push(event);
           },

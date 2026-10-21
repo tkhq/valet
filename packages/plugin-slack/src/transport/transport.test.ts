@@ -1,5 +1,6 @@
+import { SlackApi } from "./api.js";
 import { createHmac } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChannelStreamError, type StoredCredential } from "@valet/engine";
 import { startFakeSlackApi, type FakeSlackApi } from "../../test/fake-slack-api.js";
 import {
@@ -1151,7 +1152,8 @@ describe("gate prompts", () => {
       user: { id: "U1" },
       team: { id: TEAM },
     });
-    expect(inbound?.gateCallback?.ref).toEqual(ref);
+    expect(ref.channelId).toBe("D-U1");
+    expect(inbound?.gateCallback?.ref).toEqual({ conversationKey: ref.conversationKey, messageId: ref.messageId });
     expect(inbound?.gateCallback?.gateId).toBe("gate-88");
   });
 
@@ -1180,6 +1182,16 @@ describe("gate prompts", () => {
     expect(text).not.toContain("deploy.ship");
     const blocks = body.blocks;
     expect(Array.isArray(blocks) ? blocks.length : 0).toBe(1);
+  });
+
+  it("passes the attention deadline flag through gate settlement edits", async () => {
+    const transport = makeTransport();
+    const ref = await transport.sendGatePrompt(KEY, { gateId: "attention-settlement", title: "Approve", actions: [], attentionDeliveryId: "token" });
+    const update = vi.spyOn(SlackApi.prototype, "updateMessage");
+    try {
+      await transport.updateGatePrompt(ref, { label: "Expired", attention: true });
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ attention: true }));
+    } finally { update.mockRestore(); }
   });
 
   it("keeps the human-written body through the edit for a gate without fields", async () => {
@@ -1469,5 +1481,19 @@ describe("lookupUserByEmail", () => {
       name: "ChannelLookupError",
       kind: "transport",
     });
+  });
+});
+
+
+describe("attention delivery metadata", () => {
+  it("tags plain DMs and approval cards with opaque tokens and no gate ids", async () => {
+    const transport = makeTransport();
+    const key = await transport.openDirectConversation("U1");
+    const plain = await transport.send(key, { markdown: "Needs you", attentionDeliveryId: "plain-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "plain-job" } });
+    expect(plain.channelId).toBe("D-U1");
+    const gate = await transport.sendGatePrompt(key, { gateId: "g", title: "Approve", actions: [], attentionDeliveryId: "gate-job" });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention_gate", event_payload: { delivery_id: "gate-job" } });
+    expect(gate.channelId).toBe("D-U1");
   });
 });

@@ -283,6 +283,8 @@ export interface InboundChannelMedia {
 
 /** Where a sent message landed; also the correlation handle for gate edits. */
 export interface SendRef {
+  /** Provider channel identifier, when separate from the conversation key. */
+  channelId?: string;
   conversationKey: string;
   messageId: string;
 }
@@ -345,6 +347,9 @@ export interface ChannelSenderIdentity {
 }
 
 export interface OutboundChannelMessage {
+  signal?: AbortSignal;
+  /** Opaque per-row token for provider-side reconciliation. Never a gate or derived job id. */
+  attentionDeliveryId?: string;
   markdown: string;
   /** Assistant identity override. Absent = the bot's own identity. */
   sender?: ChannelSenderIdentity;
@@ -355,6 +360,8 @@ export type OutboundChannelAttachment =
   | { type: "file"; data: Uint8Array; mimeType: string; name: string; caption?: string };
 
 export interface ChannelGatePrompt {
+  signal?: AbortSignal;
+  attentionDeliveryId?: string;
   gateId: string;
   title: string;
   body?: string;
@@ -373,6 +380,9 @@ export interface ChannelGatePrompt {
 }
 
 export interface ChannelGateResolution {
+  signal?: AbortSignal;
+  /** Settlement of an attention card uses the attention request deadline. */
+  attention?: boolean;
   actionId?: string;
   /** Human-readable outcome line, e.g. "✅ Approved by Conner". */
   label: string;
@@ -425,6 +435,14 @@ export class ChannelStreamError extends Error {
   }
 }
 
+/** A definite per-recipient rejection, not a transport outage. Use bounded provider reason codes. */
+export class ChannelDeliveryRejectedError extends Error {
+  constructor(readonly channel: string, readonly reason: string) {
+    super("The recipient cannot receive this message. Check the linked messaging account.");
+    this.name = "ChannelDeliveryRejectedError";
+  }
+}
+
 export interface ChannelTransport {
   readonly channelType: string;
   /**
@@ -440,6 +458,8 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
+  /** Match an opaque attention token. gateCard identifies an interactive prompt, not a summary. */
+  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Send a notice visible only to one channel member. Failures must reject. */

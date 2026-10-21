@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
+import { channelVisibility, cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -266,6 +266,34 @@ it("keeps a DM and a group DM to their members", async () => {
   expect(shared.rows[0]?.shared).toBe(false);
 });
 
+it("retries attention access when expired public privacy cannot refresh, without sharing the stale reader cache", async () => {
+  api = await bootTestApi();
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CEXPIRED", isPrivate: false, checkedAt: Date.now() - 60 * 60_000 });
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: "internal_error" }), { headers: { "content-type": "application/json" } }));
+  const viewer = { orgId: "local-org", userId: "outsider" };
+  // Ordinary readers retain their existing fallback, even if they populate memory first.
+  expect(await channelVisibility(api.providers, viewer)("slack:CEXPIRED")).toBe(true);
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).rejects.toThrow("privacy is unknown");
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).rejects.toThrow("privacy is unknown");
+  expect(fetch).toHaveBeenCalledTimes(3);
+  fetch.mockRestore();
+  await connectSlack(api, { CEXPIRED: ["USOMEONE"] });
+  expect(await channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).toBe(false);
+});
+
+it("does not extend stored public privacy freshness for attention when loading it into memory", async () => {
+  api = await bootTestApi();
+  const now = Date.now();
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CEXPIRING", isPrivate: false, checkedAt: now - 5 * 60_000 + 1_000 });
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  const viewer = { orgId: "local-org", userId: "outsider" };
+  expect(await channelVisibility(api.providers, viewer, true)("slack:CEXPIRING")).toBe(true);
+  clock.mockReturnValue(now + 1_001);
+  // No bot is connected. The cached public answer must expire at the stored deadline.
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRING")).rejects.toThrow("privacy is unknown");
+});
+
 it("rechecks a stale public answer, and keeps it when Slack cannot answer", async () => {
   api = await bootTestApi();
   await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
@@ -512,3 +540,23 @@ it("stops showing a child's frames once its parent thread records a private chan
   await parentThread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CPARENTPRIV");
   expect(await shown(child.id)).toBe(false);
 });
+
+it.each(["channel_not_found", "not_in_channel", "is_archived", "ratelimited", "internal_error", "unknown_failure"])(
+  "distinguishes permanent Slack access denial from retryable %s", async error => {
+    api = await bootTestApi();
+    const { providers } = api;
+    await providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    await linkIdentity(providers.db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error }), { headers: { "content-type": "application/json" } }));
+    const permanent = ["channel_not_found", "not_in_channel", "is_archived"].includes(error);
+    // Exercise both an unknown channel's info lookup and a known private channel's membership lookup.
+    for (const known of [false, true]) {
+      resetThreadAccessCache();
+      const channelId = known ? "CKNOWN" : "CUNKNOWN";
+      if (known) await providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId, isPrivate: true, checkedAt: Date.now() });
+      const check = channelVisibility(providers, { orgId: "local-org", userId: "member" }, true);
+      if (permanent) expect(await check(`slack:${channelId}`)).toBe(false);
+      else await expect(check(`slack:${channelId}`)).rejects.toThrow(/Retry/);
+    }
+  },
+);

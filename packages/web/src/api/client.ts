@@ -229,6 +229,7 @@ import type {
   SendPromptRequest,
   SendPromptResponse,
   SetNotificationPreferenceRequest,
+  WebPresenceRequest,
   StartIdentityLinkResponse,
   SetTeamMemberRoleRequest,
   StartWorkflowRunRequest,
@@ -1017,6 +1018,8 @@ export const api = {
     ),
 
   // notifications
+  reportWebPresence: (body: WebPresenceRequest) =>
+    request<{ ok: true }>("POST", "/notifications/presence", body),
   listNotifications: (opts?: { unread?: boolean }) =>
     request<ListNotificationsResponse>(
       "GET",

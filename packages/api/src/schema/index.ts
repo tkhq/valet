@@ -689,9 +689,33 @@ export const userNotificationPreferences = pgTable(
     kind: text("kind").notNull(),
     web: boolean("web").notNull().default(true),
     teamDm: boolean("team_dm").notNull().default(false),
+    channelGraceSeconds: integer("channel_grace_seconds"),
   },
   (t) => [primaryKey({ columns: [t.userId, t.kind] })],
 );
+
+/** Personal attention outbox. The event dispatcher owns due delivery. */
+export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  tierId: text("tier_id").notNull(),
+  notificationId: text("notification_id"),
+  // Terminal dedupe tombstones use JSON null, not SQL NULL.
+  event: jsonb("event").$type<import("../orchestrator/attention.js").AttentionEvent | null>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
+  deliverAfter: bigint("deliver_after", { mode: "number" }).notNull(),
+  status: text("status", { enum: ["pending", "sending", "sent", "dropped"] }).notNull().default("pending"),
+  sendingAt: bigint("sending_at", { mode: "number" }),
+  firstSendingAt: bigint("first_sending_at", { mode: "number" }),
+  deliveryToken: text("delivery_token").notNull().default(sql`gen_random_uuid()::text`),
+  attempts: integer("attempts").notNull().default(0),
+  messageRefs: jsonb("message_refs").$type<import("../orchestrator/attention.js").AttentionDeliveryRef[]>(),
+  lastError: text("last_error"),
+}, (t) => [
+  index("pending_channel_deliveries_age").on(t.createdAt).where(sql`${t.status} IN ('pending', 'sending')`),
+  index("pending_channel_deliveries_due").on(t.deliverAfter).where(sql`${t.status} IN ('pending', 'sending')`),
+  index("pending_channel_deliveries_notification").on(t.notificationId).where(sql`${t.notificationId} IS NOT NULL`),
+]);
 
 // ─── Event drop log ──────────────────────────────────────────────────────────
 //

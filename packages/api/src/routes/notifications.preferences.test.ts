@@ -27,6 +27,8 @@ describe("GET /api/notifications/preferences", () => {
     expect(preferences.map((p) => p.kind).sort()).toEqual(["approval", "escalation", "notification", "question", "review"]);
     expect(preferences.every((p) => p.web === true)).toBe(true);
     expect(preferences.every((p) => p.teamDm === false)).toBe(true);
+    expect(preferences.find(p => p.kind === "approval")?.channelGraceSeconds).toBe(120);
+    expect(preferences.find(p => p.kind === "notification")?.channelGraceSeconds).toBe(300);
   });
 });
 
@@ -102,5 +104,25 @@ describe("PUT /api/notifications/preferences", () => {
     });
     const { preferences: memberPrefs } = (await memberRes.json()) as ListNotificationPreferencesResponse;
     expect(memberPrefs.find((p) => p.kind === "approval")?.web).toBe(false);
+  });
+});
+
+
+describe("channel grace preferences", () => {
+  it("round-trips grace and preserves it on a web-only update", async () => {
+    api = await bootTestApi();
+    const put = (body: object) => fetch(`${api!.baseUrl}/api/notifications/preferences`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect((await put({ kind: "approval", web: true, channelGraceSeconds: 0 })).status).toBe(200);
+    expect((await put({ kind: "approval", web: false })).status).toBe(200);
+    const body = await (await fetch(`${api.baseUrl}/api/notifications/preferences`)).json() as ListNotificationPreferencesResponse;
+    expect(body.preferences.find(p => p.kind === "approval")?.channelGraceSeconds).toBe(0);
+    expect((await put({ kind: "approval", web: true, channelGraceSeconds: null })).status).toBe(200);
+    const reset = await (await fetch(`${api.baseUrl}/api/notifications/preferences`)).json() as ListNotificationPreferencesResponse;
+    expect(reset.preferences.find(p => p.kind === "approval")?.channelGraceSeconds).toBe(120);
+    for (const channelGraceSeconds of [-1, 1.5, 86401, "120"]) {
+      expect((await put({ kind: "approval", web: true, channelGraceSeconds })).status).toBe(400);
+    }
   });
 });

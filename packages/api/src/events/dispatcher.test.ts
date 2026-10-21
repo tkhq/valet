@@ -86,6 +86,22 @@ describe("EventDispatcher", () => {
     tdb = await freshTestPgDb();
   });
 
+  it("does not let a slow attention provider block unrelated event deliveries", async () => {
+    const { deliveryId } = await seedDelivery({ target: { kind: "assistant" } });
+    let finish: () => void = () => {};
+    const blocked = new Promise<void>(resolve => { finish = resolve; });
+    const drainAttention = vi.fn(() => blocked);
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToAssistant: vi.fn(async () => LANDED), plugins: [githubPlugin], drainAttention });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    await dispatcher.pollOnce();
+    expect(drainAttention).toHaveBeenCalledTimes(2);
+    // Shutdown must not wait for a blackholed personal delivery.
+    await dispatcher.stop();
+    finish();
+  });
+
   /** Seeds one event + subscription + due delivery; returns their ids. */
   async function seedDelivery(opts: SeedOpts) {
     const db = tdb.appDb;

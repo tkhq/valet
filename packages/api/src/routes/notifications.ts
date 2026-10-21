@@ -1,3 +1,6 @@
+import { attentionGatePending } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
+import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
 /**
  * Notifications — web delivery surface for the attention router (Phase 4
  * decision 19).
@@ -18,10 +21,10 @@
  */
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { Hono } from "hono";
-import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { agentSessions, workflowRuns, workflowDefinitions, pendingChannelDeliveries, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
 import type { WorkflowRunOrigin } from "@valet/workflow";
@@ -36,6 +39,17 @@ import type {
 } from "../wire/types.js";
 
 export const notificationsRouter = new Hono<AppEnv>();
+
+notificationsRouter.post("/presence", async c => {
+  if (c.var.authVia !== "session" && c.var.authVia !== "stub") return c.json({ error: "Web presence requires a browser session. Sign in to Valet." }, 403);
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !("tabId" in body) || !("active" in body)
+    || typeof body.tabId !== "string" || body.tabId.length < 1 || body.tabId.length > 128 || typeof body.active !== "boolean") {
+    return c.json({ error: "Invalid presence report. Send a tabId and an active boolean." }, 400);
+  }
+  webPresence(c.var.providers.db).report(c.var.user.id, body.tabId, body.active);
+  return c.json({ ok: true });
+});
 
 /** Read durable gates without waking their sessions or relying on notification read state. */
 notificationsRouter.get("/decisions", async (c) => {
@@ -187,7 +201,26 @@ notificationsRouter.post("/read-all", async (c) => {
   await db
     .update(notifications)
     .set({ readAt: Date.now() })
-    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+    // The bell's Updates list excludes approvals. Clearing it must not suppress
+    // a pending decision's personal-channel fallback.
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), ne(notifications.kind, "approval")));
+
+  // Completed or legacy approval copies must remain clearable. Only a
+  // durable pending gate may retain a row that still has a channel fallback.
+  const approvals = await db.select({ id: notifications.id, event: pendingChannelDeliveries.event }).from(notifications)
+    .leftJoin(pendingChannelDeliveries, and(eq(pendingChannelDeliveries.notificationId, notifications.id), inArray(pendingChannelDeliveries.status, ["pending", "sending"])))
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), eq(notifications.kind, "approval")));
+  const seen = new Set<string>();
+  const handled: string[] = [];
+  for (const approval of approvals) {
+    if (seen.has(approval.id)) continue;
+    seen.add(approval.id);
+    const event = approval.event;
+    if (event && (event.gate || event.workflowGate) && await attentionGatePending({ db }, event)) continue;
+    handled.push(approval.id);
+  }
+  if (handled.length > 0) await db.update(notifications).set({ readAt: Date.now() })
+    .where(and(eq(notifications.userId, userId), inArray(notifications.id, handled), isNull(notifications.readAt)));
 
   return c.json({ ok: true });
 });
@@ -206,6 +239,7 @@ notificationsRouter.get("/preferences", async (c) => {
     kind,
     web: byKind.get(kind)?.web ?? true,
     teamDm: byKind.get(kind)?.teamDm ?? false,
+    channelGraceSeconds: byKind.get(kind)?.channelGraceSeconds ?? defaultChannelGraceSeconds(kind),
   }));
 
   const body: ListNotificationPreferencesResponse = { preferences };
@@ -234,12 +268,17 @@ notificationsRouter.put("/preferences", async (c) => {
     return c.json({ error: "teamDm must be a boolean. Choose whether to receive team direct messages." }, 400);
   }
 
+  if (body.channelGraceSeconds !== undefined && body.channelGraceSeconds !== null && (!Number.isInteger(body.channelGraceSeconds)
+    || body.channelGraceSeconds < 0 || body.channelGraceSeconds > 86_400)) {
+    return c.json({ error: "channelGraceSeconds must be an integer from 0 to 86400. Choose a delay of at most one day." }, 400);
+  }
+
   await db
     .insert(userNotificationPreferences)
-    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false })
+    .values({ userId, kind: body.kind, web: body.web, teamDm: body.teamDm ?? false, channelGraceSeconds: body.channelGraceSeconds })
     .onConflictDoUpdate({
       target: [userNotificationPreferences.userId, userNotificationPreferences.kind],
-      set: { web: body.web, ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
+      set: { web: body.web, ...(body.channelGraceSeconds === undefined ? {} : { channelGraceSeconds: body.channelGraceSeconds }), ...(body.teamDm === undefined ? {} : { teamDm: body.teamDm }) },
     });
 
   return c.json({ ok: true });

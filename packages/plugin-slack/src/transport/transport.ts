@@ -863,9 +863,18 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: message.attentionDeliveryId,
+      signal: message.signal,
       ...slackIdentityOverride(message.sender),
     }, fallbackBlocks);
-    return { conversationKey, messageId: res.ts };
+    return { conversationKey, channelId: target.channelId, messageId: res.ts };
+  }
+
+  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null> {
+    const target = this.mustParse(conversationKey);
+    const found = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt, signal);
+    return found ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, found.ts), channelId: target.channelId,
+      messageId: found.ts, ...(found.gateCard ? { gateCard: true } : {}) } : null;
   }
 
   async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef> {
@@ -949,6 +958,9 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
+      attentionDeliveryId: gate.attentionDeliveryId,
+      signal: gate.signal,
+      attentionGateCard: true,
       ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
@@ -959,7 +971,7 @@ export class SlackTransport implements ChannelTransport {
     // thread we posted into, or the message's own ts for a root post.
     const refKey = conversationKeyFor(target.teamId, target.channelId, threadTs ?? res.ts);
     this.remember(this.gateRetainedTexts, `${refKey}#${res.ts}`, gate.fields?.length ? titleMrkdwn : text);
-    return { conversationKey: refKey, messageId: res.ts };
+    return { conversationKey: refKey, channelId: target.channelId, messageId: res.ts };
   }
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {
@@ -981,6 +993,8 @@ export class SlackTransport implements ChannelTransport {
     // parse: "none" — chat.update defaults parse to "client" and would
     // re-render link markup.
     await this.api.updateMessage({
+      attention: resolution.attention,
+      signal: resolution.signal,
       channel: target.channelId,
       ts: ref.messageId,
       text,
@@ -1335,8 +1349,8 @@ export class SlackTransport implements ChannelTransport {
    * `Date.now()` and the string build is atomic within an event-loop turn.
    * The function performs no `await` between those two points.
    */
-  async openDirectConversation(slackUserId: string): Promise<string> {
-    const channelId = await this.api.openConversation(slackUserId);
+  async openDirectConversation(slackUserId: string, attention = false, signal?: AbortSignal): Promise<string> {
+    const channelId = await this.api.openConversation(slackUserId, attention, signal);
     // Slack ts format is "seconds.microseconds" (6 fractional digits).
     // The seconds come from wall clock; the microseconds come from a local
     // counter so distinct calls always mint distinct keys within a 10^6

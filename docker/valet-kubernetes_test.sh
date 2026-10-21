@@ -14,6 +14,8 @@ cleanup() { [ -z "${owner:-}" ] || kill -KILL "$owner" 2>/dev/null || true; [ -z
 trap cleanup EXIT
 cleanup
 mkdir -m 700 "$TMP"
+# sudo can inherit a runner directory with unreadable parents. Node resolves eval imports from cwd.
+cd "$TMP"
 
 # Both no-op and real stop print stopped state but return success.
 out=$(VALET_SANDBOX_EPOCH=test node "$HELPER" stop) || fail "no-op stop failed"

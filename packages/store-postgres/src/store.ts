@@ -578,7 +578,7 @@ export class PgSessionStore implements SessionStore {
   ): Promise<void> {
     await this.db.query(
       `INSERT INTO engine_decision_gate_refs (id, gate_id, channel_type, ref, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`,
       [JSON.stringify([gateId, ref.channelType, ref.ref.channelId, ref.ref.messageId]), gateId, ref.channelType, JSON.stringify(ref.ref), Date.now(), Date.now()],
     );
   }

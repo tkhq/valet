@@ -13,6 +13,34 @@ describe("workspace singleton repair on an already migrated database", () => {
   beforeAll(async () => { await applyEngineMigrations(db); await applyAppMigrations(db); });
   afterAll(async () => { await db.close(); });
 
+  it("repairs attention scheduling on an existing database and is repeatable", async () => {
+    await db.query("DROP TABLE pending_channel_deliveries");
+    await db.query("ALTER TABLE user_notification_preferences DROP COLUMN channel_grace_seconds");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query(`INSERT INTO pending_channel_deliveries (id, user_id, tier_id, event, deliver_after)
+      VALUES ('repair-job', 'u', 'dm', '{}', 100)`);
+    expect((await db.query("SELECT status, sending_at, attempts, message_refs FROM pending_channel_deliveries WHERE id = 'repair-job'")).rows)
+      .toEqual([{ status: "pending", sending_at: null, attempts: 0, message_refs: null }]);
+    await db.query("DROP INDEX pending_channel_deliveries_age");
+    await db.query("ALTER TABLE pending_channel_deliveries DROP COLUMN created_at");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    const created = await db.query("SELECT created_at FROM pending_channel_deliveries WHERE id = 'repair-job'");
+    expect(Number(created.rows[0]?.created_at)).toBeGreaterThan(0);
+    await db.query("ALTER TABLE pending_channel_deliveries DROP COLUMN delivery_token, DROP COLUMN first_sending_at");
+    await applyAppMigrations(db);
+    const token = await db.query("SELECT delivery_token, first_sending_at FROM pending_channel_deliveries WHERE id = 'repair-job'");
+    expect(token.rows[0]?.delivery_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(token.rows[0]?.first_sending_at).toBeNull();
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT delivery_token FROM pending_channel_deliveries WHERE id = 'repair-job'")).rows[0]?.delivery_token).toBe(token.rows[0]?.delivery_token);
+    await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

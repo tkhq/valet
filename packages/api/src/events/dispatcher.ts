@@ -111,6 +111,8 @@ export interface AssistantDeliverFn {
 }
 
 export interface EventDispatcherDeps {
+  /** Drain the durable personal attention outbox on the existing event rail. */
+  drainAttention?: () => Promise<void>;
   db: AppDb;
   workflowRunHost: RunHost;
   workflowStore: WorkflowStore;
@@ -326,6 +328,8 @@ export class EventDispatcher {
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
     await this.ingressInFlight;
+    // Attention sends hold durable leases. Shutdown leaves unfinished sends
+    // for recovery instead of waiting for an external provider.
   }
 
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
@@ -349,6 +353,12 @@ export class EventDispatcher {
             this.ingressInFlight = null;
             if (this.ingressWakeRequested) { this.ingressWakeRequested = false; this.nudge(); }
           });
+      }
+      // A slow provider must not delay unrelated event deliveries.
+      if (this.deps.drainAttention) {
+        // The outbox serializes each transport independently across ticks.
+        void this.deps.drainAttention()
+          .catch(err => console.error("attention outbox drain failed:", err));
       }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving

@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { Thread, type StoredCredential, type ThreadAccessCheck, type ThreadData } from "@valet/engine";
 import type { WorkflowRunOrigin } from "@valet/workflow";
-import { checkPrivateChannelAccess } from "@valet/plugin-slack/actions";
+import { checkPrivateChannelAccess, isPermanentSlackAccessError } from "@valet/plugin-slack/actions";
 import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
@@ -156,37 +156,50 @@ const MEMBERSHIP_TTL_MS = 5 * 60_000;
 const privacyCache = new Map<string, { isPrivate: boolean | undefined; expiresAt: number }>();
 const membershipCache = new Map<string, { allowed: boolean; expiresAt: number }>();
 
+class SlackChannelDenied extends Error {}
+
 /**
  * Whether a Slack channel is private: from memory, then the stored answer
  * while it is fresh, then Slack, with the stored answer standing when Slack
- * cannot answer. Undefined only for a channel never classified.
+ * cannot answer. Attention checks return unknown instead of an expired fallback.
  */
 export async function slackChannelIsPrivate(
-  deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>,
+  deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>, retryUnknownAccess = false, signal?: AbortSignal,
 ): Promise<boolean | undefined> {
-  const cacheKey = `${orgId}:${channelId}`;
+  // Ordinary readers may use stale classifications. Attention must not share that fallback cache.
+  signal?.throwIfAborted();
+  const cacheKey = `${orgId}:${channelId}${retryUnknownAccess ? ":attention" : ""}`;
   const now = Date.now();
   const cached = privacyCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.isPrivate;
   const [stored] = await deps.db.select().from(slackChannelPrivacy)
     .where(and(eq(slackChannelPrivacy.orgId, orgId), eq(slackChannelPrivacy.channelId, channelId))).limit(1);
+  signal?.throwIfAborted();
   let isPrivate: boolean | undefined = stored?.isPrivate;
+  let checkedAt = stored?.checkedAt ?? now;
   const ttl = (value: boolean | undefined) => (value === false ? PUBLIC_TTL_MS : value === true ? PRIVATE_TTL_MS : MEMBERSHIP_TTL_MS);
   if (!stored || stored.checkedAt + ttl(stored.isPrivate) <= now) {
     const bot = await token();
+    signal?.throwIfAborted();
     // Privacy comes from `conversations.info`, which answers before any
     // membership check, so no viewer is needed here.
     // A DM or group DM counts as private: one person's conversation with the
     // bot is not the team's.
-    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined, { directIsPrivate: true }).catch(() => null) : null;
+    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined, { directIsPrivate: true, signal, ...(retryUnknownAccess ? { timeoutMs: 10_000 } : {}) }).catch(() => null) : null;
+    signal?.throwIfAborted();
+    if (retryUnknownAccess && isPermanentSlackAccessError(info?.errorCode)) throw new SlackChannelDenied();
     const answered = info && (!info.error || info.isPrivate);
     if (answered) {
       isPrivate = info.isPrivate;
+      checkedAt = now;
       await deps.db.insert(slackChannelPrivacy).values({ orgId, channelId, isPrivate, checkedAt: now })
         .onConflictDoUpdate({ target: [slackChannelPrivacy.orgId, slackChannelPrivacy.channelId], set: { isPrivate, checkedAt: now } });
+    } else if (retryUnknownAccess) {
+      // A failed refresh cannot grant deferred access using an expired public answer.
+      return undefined;
     }
   }
-  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + ttl(isPrivate) });
+  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: (retryUnknownAccess ? checkedAt : now) + ttl(isPrivate) });
   return isPrivate;
 }
 
@@ -418,29 +431,51 @@ export function requestViewer(orgId: string, principal: RequestPrincipal, userId
  * One instance per request or connection shares its credential and identity
  * lookups.
  */
-export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): ChannelVisibility {
+export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer, retryUnknownAccess = false, signal?: AbortSignal): ChannelVisibility {
   let token: Promise<string | null> | undefined;
   let slackUserId: Promise<string | undefined> | undefined;
   const bot = () => (token ??= orgSlackCredential(deps, viewer.orgId).then(botToken));
   return async (channelKey) => {
+    signal?.throwIfAborted();
     const channelId = /^slack:([^:]+)$/.exec(channelKey)?.[1];
     if (!channelId) return true;
-    const isPrivate = await slackChannelIsPrivate(deps, viewer.orgId, channelId, bot);
+    let isPrivate: boolean | undefined;
+    try {
+      isPrivate = await slackChannelIsPrivate(deps, viewer.orgId, channelId, bot, retryUnknownAccess, signal);
+    } catch (err) {
+      if (err instanceof SlackChannelDenied) return false;
+      throw err;
+    }
+    signal?.throwIfAborted();
     if (isPrivate === false) return true;
     // A channel never classified, with Slack unable to answer, may be
     // private: it stays hidden until Slack says otherwise.
-    if (isPrivate === undefined) return false;
+    if (isPrivate === undefined) {
+      if (retryUnknownAccess) throw new Error("Slack channel privacy is unknown. Retry the attention delivery.");
+      return false;
+    }
     if (!viewer.userId) return false;
     slackUserId ??= identityForUser(deps.db, "slack", viewer.userId).then((link) => link?.externalId);
     // Without a linked Slack account nobody can vouch for membership.
     const member = await slackUserId;
+    signal?.throwIfAborted();
     if (!member) return false;
     const cacheKey = `${viewer.orgId}:${member}:${channelId}`;
     const cached = membershipCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.allowed;
     const token = await bot();
-    if (!token) return false;
-    const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true }).catch(() => null);
+    signal?.throwIfAborted();
+    if (!token) {
+      if (retryUnknownAccess) throw new Error("Slack membership cannot be checked without credentials. Restore the Slack integration.");
+      return false;
+    }
+    signal?.throwIfAborted();
+    const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true, signal, ...(retryUnknownAccess ? { timeoutMs: 10_000 } : {}) }).catch(() => null);
+    signal?.throwIfAborted();
+    if (isPermanentSlackAccessError(access?.errorCode)) return false;
+    if (retryUnknownAccess && (!access || access.error?.startsWith("Slack API error"))) {
+      throw new Error("Slack membership lookup failed. Retry the attention delivery.");
+    }
     const allowed = access?.allowed === true;
     // A Slack error is not cached, so the next request asks again. "Not a
     // member" is an answer and is cached.
@@ -462,6 +497,9 @@ export function threadVisibility(
   session: { ownerType: string; id?: string },
   viewer: ThreadViewer,
   opts: {
+    signal?: AbortSignal;
+    /** Durable sends retry unknown access instead of treating it as a permanent denial. */
+    retryUnknownAccess?: boolean;
     /** The live engine thread for ids, when this process holds it. A child
      * then rechecks its parent's recorded channels on every call. */
     liveThread?: (sessionId: string, threadId: string) => ThreadRefObject | undefined;
@@ -469,7 +507,7 @@ export function threadVisibility(
   } = {},
 ): ThreadVisibility {
   if (session.ownerType !== "team") return async () => true;
-  const canSee = channelVisibility(deps, viewer);
+  const canSee = channelVisibility(deps, viewer, opts.retryUnknownAccess, opts.signal);
   const now = opts.now ?? Date.now;
   // The thread that started this child session: undefined until read, null for none.
   let parentIds: { sessionId: string; threadId: string } | null | undefined;
@@ -496,9 +534,11 @@ export function threadVisibility(
     return value;
   };
   const visible: ThreadVisibility = async (thread) => {
+    opts.signal?.throwIfAborted();
     const ownKey = typeof thread === "object" && thread !== null ? thread.key : thread;
     const ownChannels = typeof thread === "object" && thread !== null ? recordedSlackChannels(thread.metadata) : [];
     const parent = await governing();
+    opts.signal?.throwIfAborted();
     const key = parent === undefined ? ownKey : parent.key;
     if (isPersonalThreadKey(key)) {
       const owner = privateThreadOwner(key);
@@ -681,13 +721,16 @@ export async function runOriginVisible(
   deps: AccessDeps & Pick<Providers, "engineStore">,
   viewer: ThreadViewer,
   run: { ownerType: string; origin?: WorkflowRunOrigin | null; actorUserId?: string | null },
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (run.ownerType !== "team" || !run.origin) return true;
   const [session] = await deps.db.select({ id: agentSessions.id, ownerType: agentSessions.ownerType }).from(agentSessions)
     .where(eq(agentSessions.id, run.origin.assistantSessionId)).limit(1);
+  signal?.throwIfAborted();
   const thread = session && await deps.engineStore.getThread(run.origin.assistantSessionId, run.origin.threadId);
+  signal?.throwIfAborted();
   if (!thread) return viewer.userId !== undefined && viewer.userId === run.actorUserId;
-  return threadVisibility(deps, session, viewer)(thread);
+  return threadVisibility(deps, session, viewer, { signal, retryUnknownAccess: signal !== undefined })(thread);
 }
 
 /** The Slack channel an event came from. Ingest copies it to `refs.channel`
@@ -705,9 +748,10 @@ export function slackEventChannel(event: { service: string; refs: unknown; paylo
 /** Whether the viewer may see a workflow run started by a Slack event. The
  * run's input carries the event's message, so a run from a private channel
  * shows only to that channel's members, the same as the event itself. */
-export async function runEventVisible(deps: AccessDeps, viewer: ThreadViewer, params: { input?: unknown }): Promise<boolean> {
+export async function runEventVisible(deps: AccessDeps, viewer: ThreadViewer, params: { input?: unknown }, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   const channel = runEventChannel(params);
-  if (channel !== undefined) return channelVisibility(deps, viewer)(`slack:${channel}`);
+  if (channel !== undefined) return channelVisibility(deps, viewer, signal !== undefined, signal)(`slack:${channel}`);
   const input = params.input;
   if (input && typeof input === "object" && "type" in input && input.type === "event" && "data" in input) {
     const data = input.data;
