@@ -1533,21 +1533,24 @@ export class PgSessionStore implements SessionStore {
       params.push(after.createdAt, after.id);
       keyset = " AND (created_at, id) > ($3, $4)";
     }
-    // CASE guards the cast and array length. Invalid values reach mapGoodRows
-    // instead of aborting the global scan before per-row isolation can run.
+    // Select event candidates without parsing persisted text in SQL. Per-row
+    // decoding isolates corrupt history before the due predicate runs.
     const r = await this.db.query(
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR CASE WHEN COALESCE(event_seen, '[]') IS JSON ARRAY THEN jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) >= ${EVENT_DELIVERED_MAX_KEYS} ELSE true END OR deadline_at <= $1)))${keyset}
+          OR (kind = 'event' AND status = 'running'))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
     // The cursor comes from the last raw row, so an unreadable row that
-    // mapGoodRows skips never makes a full page look short (fix wave 4, data N1).
+    // mapGoodRows skips, or an event that is not due, never ends pagination early.
     const last = r.rows[r.rows.length - 1];
     const next = r.rows.length < limit || !last ? null : { createdAt: toNum(last.created_at, "created_at"), id: asString(last.id, "id") };
-    return { rows: mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw))), next };
+    const rows = mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)))
+      .filter((row) => row.kind !== "event" || (row.eventBuffer?.length ?? 0) > 0 ||
+        (row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS || (row.deadlineAt !== undefined && row.deadlineAt <= now));
+    return { rows, next };
   }
 
   async transitionWakeup(

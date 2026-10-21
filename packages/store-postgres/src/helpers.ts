@@ -926,6 +926,7 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
 export function parseEventSeenJson(raw: string): string[] {
   const parsed: unknown = JSON.parse(raw);
   if (!isStringArray(parsed)) throw new Error("engine_wakeups.event_seen is not a string array");
+  if (parsed.some((key) => key.includes("\0"))) throw new Error("engine_wakeups.event_seen contains a NUL key");
   return parsed;
 }
 

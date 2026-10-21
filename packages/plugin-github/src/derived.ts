@@ -74,7 +74,7 @@ async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string): Prom
     }
     if (res.status === 403) {
       const endpoint = path.split("?")[0];
-      const permission = /\/actions\/runs$/.test(endpoint) ? "actions" : /\/(check-runs|check-suites)$/.test(endpoint) ? "checks" : /\/status$/.test(endpoint) ? "statuses" : "pull_requests";
+      const permission = /\/actions\/runs(?:\/\d+\/jobs)?$/.test(endpoint) ? "actions" : /\/(check-runs|check-suites)$/.test(endpoint) ? "checks" : /\/status$/.test(endpoint) ? "statuses" : "pull_requests";
       throw new DerivePermissionError(`GitHub GET ${path} needs ${permission}: read. Ask an org owner to approve that permission.`);
     }
     throw new Error(`GitHub GET ${path} answered HTTP ${res.status}.`);
@@ -222,16 +222,35 @@ export const checksCompleted: DerivedEventDef = {
     const headSha = str(rec(pull?.head)?.sha)?.toLowerCase();
     if (headSha !== sha) return null;
 
-    // Workflow membership distinguishes superseded checks from current and unmapped reporter checks.
+    // Suite membership alone cannot distinguish workflow jobs from Checks-API reporter checks.
     // Pending current Actions checks stop after these three reads, before suites or statuses.
     let workflowRead: Promise<Record<string, unknown>[] | null> | undefined;
     const readWorkflows = () => workflowRead ??= listStates(ctx, token, `${base}/actions/runs?head_sha=${sha}`, "workflow_runs", () => false);
+    const jobsReads = new Map<number, Promise<Record<string, unknown>[] | null>>();
+    const ignoredCheck = async (check: Record<string, unknown>, all: Record<string, unknown>[]): Promise<boolean> => {
+      const suiteId = rec(check.check_suite)?.id;
+      if (!ignoredWorkflowSuites(all).has(suiteId)) return false;
+      // Passing checks cannot change failure or pending status. No jobs read is needed.
+      if (check.status === "completed" && ["success", "neutral", "skipped"].includes(String(check.conclusion))) return false;
+      for (const run of all) {
+        if (run.check_suite_id !== suiteId || typeof run.id !== "number") continue;
+        let jobs = jobsReads.get(run.id);
+        if (!jobs) {
+          jobs = listStates(ctx, token, `${base}/actions/runs/${run.id}/jobs?filter=all`, "jobs", () => false);
+          jobsReads.set(run.id, jobs);
+        }
+        if ((await jobs)?.some((job) =>
+          (typeof check.id === "number" && str(job.check_run_url)?.endsWith(`/check-runs/${check.id}`)) ||
+          (typeof check.name === "string" && job.name === check.name))) return true;
+      }
+      return false;
+    };
     const allRuns = await listCheckRuns(ctx, token, base, sha, async (check) => {
       const suiteId = rec(check.check_suite)?.id;
       if (typeof suiteId !== "number") return false;
       const all = await readWorkflows() ?? [];
       const workflows = latestBy(all, workflowKey);
-      return !ignoredWorkflowSuites(all).has(suiteId) &&
+      return !(await ignoredCheck(check, all)) &&
         (rec(check.app)?.slug === "github-actions" || workflows.some((run) => run.check_suite_id === suiteId && !excludedWorkflow(run)));
     });
     if (allRuns === null) return null;
@@ -243,7 +262,9 @@ export const checksCompleted: DerivedEventDef = {
     const ignoredSuites = ignoredWorkflowSuites(allWorkflows);
     const currentActions = new Map(workflows.filter((run) => typeof run.check_suite_id === "number").map((run) => [run.check_suite_id, run]));
     const actionsCheck = (check: Record<string, unknown>) => rec(check.app)?.slug === "github-actions" || workflowSuites.has(rec(check.check_suite)?.id);
-    const currentChecks = allRuns.filter((check) => !ignoredSuites.has(rec(check.check_suite)?.id));
+    const currentChecks: CheckRunState[] = [];
+    // Read jobs serially and cache per run, rather than fan out over every old suite.
+    for (const check of allRuns) if (!(await ignoredCheck(check, allWorkflows))) currentChecks.push(check);
     const checkKey = (check: Record<string, unknown>) => {
       const app = rec(check.app);
       if (typeof app?.id !== "number" || typeof check.name !== "string") return undefined;

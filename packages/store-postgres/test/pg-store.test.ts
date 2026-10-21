@@ -57,19 +57,9 @@ function corrupter(db: PgDb): (_store: unknown, id: string) => Promise<void> {
   };
 }
 
-describe("PgSessionStore (PGlite)", () => {
-  const pglite = new PGlite();
-  const db = pgDbFromPglite(pglite);
-  const factory = makeFactory(db);
-
-  afterAll(async () => {
-    await db.close();
-  });
-
-  runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
-  runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
-
-  it.each(["not json", "{}", "null", '"scalar"'])("isolates malformed event_seen %s during the global due scan", async (seen) => {
+/** Bad persisted text must not prevent a different kind of wakeup from being read. */
+function runDueScanSafetyTests(factory: () => Promise<PgSessionStore>, db: PgDb): void {
+  it.each(["not json", "{}", "null", '"scalar"', '["\\u0000"]'])("isolates malformed event_seen %s during the global due scan", async (seen) => {
     const store = await factory();
     const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
     await store.createWakeup({ ...base, id: "bad_event", kind: "event", status: "running", deadlineAt: 1000 });
@@ -82,6 +72,32 @@ describe("PgSessionStore (PGlite)", () => {
       expect(errors).toHaveBeenCalledWith(expect.stringContaining("bad_event"), expect.anything());
     } finally { errors.mockRestore(); }
   });
+
+  it("advances through an empty candidate page to a healthy due timer", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: "idle_event", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: "due_timer", kind: "timer", status: "pending", createdAt: 2, fireAt: 5 });
+    const first = await store.listDueWakeups(10, 1);
+    expect(first.rows).toEqual([]);
+    expect(first.next).toEqual({ createdAt: 1, id: "idle_event" });
+    expect((await store.listDueWakeups(10, 1, first.next ?? undefined)).rows.map((row) => row.id)).toEqual(["due_timer"]);
+  });
+}
+
+describe("PgSessionStore (PGlite)", () => {
+  const pglite = new PGlite();
+  const db = pgDbFromPglite(pglite);
+  const factory = makeFactory(db);
+
+  afterAll(async () => {
+    await db.close();
+  });
+
+  runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
+  runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
+
+  runDueScanSafetyTests(factory, db);
 
   it("maps future terminal causes to a generic cause instead of hiding the row", async () => {
     const store = await factory();
@@ -234,4 +250,5 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PgSessionStore (docker-pg)", ()
 
   runSessionStoreContract("PgSessionStore (docker-pg)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (docker-pg)", { factory });
+  runDueScanSafetyTests(factory, db);
 });

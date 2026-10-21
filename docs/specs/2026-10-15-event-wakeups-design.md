@@ -329,7 +329,8 @@ subject.
    Only `schedule` and `workflow_dispatch` events are excluded by name.
    Every other event on the head SHA counts under its own `(workflow_id, event)` key.
    This includes `pull_request_review` and `pull_request_target` when GitHub reports them on that SHA.
-   Ignore `schedule` and `workflow_dispatch` runs, including their checks and suites.
+   Ignore `schedule` and `workflow_dispatch` workflow results and suites.
+   Ignore their check runs only when jobs metadata proves each check's membership.
    A selected workflow that is pending still blocks completion before it creates checks.
    A relevant push or PR deploy with a `waiting` check blocks completion.
    When a pending Actions check appears, read workflow membership before deciding terminality.
@@ -339,7 +340,13 @@ subject.
    An older pending job cannot block its newer workflow run.
    Actions suites belong to workflow runs, not to the App as a whole.
    Keep unmatched Actions checks and suites, including Checks-API reporter jobs.
-   Drop them only when workflow membership proves they are superseded or belong to an excluded event.
+   Suite membership alone never proves that a check belongs to a workflow job.
+   For non-passing checks in superseded or excluded suites, read `/actions/runs/{id}/jobs?filter=all`.
+   A matching job name or `check_run_url` check id proves membership.
+   Keep reporter checks when no job matches, even when they share an ignored suite.
+   Read jobs only for affected suites with non-passing checks. Cache each run's jobs within the derive.
+   Read jobs serially and paginate them within the existing safety limit.
+   Passing checks and checks in current or unmapped suites add no jobs reads.
    Fixtures cover reruns with both the same suite id and a changed suite id.
    The approval-gated cli/cli example does not prove failed-job rerun suite behavior.
    For other Apps, select the latest suite per App for suite terminality.
@@ -347,7 +354,7 @@ subject.
    Ignore selected suites with `latest_check_runs_count = 0`.
    GitHub creates these suites for Apps that start no checks and workflows skipped by filters.
    Each remaining selected suite must have status `completed`.
-   Drop Actions check runs from superseded workflow runs.
+   Drop only proven workflow jobs from superseded or excluded runs.
    Select the latest remaining check per `(app.id, name)` within each workflow/event.
    Non-Actions checks use `(app.id, name)` across all suites.
    A distinct older check name still participates, even when its suite is older.
@@ -399,8 +406,9 @@ deadline ends that wait.
 | Current push failed, current PR run passed, same workflow | status `failure` |
 | Current PR failed, newer push passed, same workflow | status `failure` |
 | Newer scheduled or manual run, PR run still running | `null` |
-| Old cancelled job in a superseded Actions suite, new job passed | status `success` |
-| Old Actions suite proven superseded by a newer attempt, current attempt passed | status `success` |
+| Job metadata proves an old cancelled job is superseded, new job passed | status `success` |
+| Old Actions job proven superseded by a newer attempt, current attempt passed | status `success` |
+| Failed Checks-API reporter shares a superseded or dispatch suite | status `failure` |
 | Unmapped Actions reporter check failed or pending | status `failure` or `null` |
 | Head-SHA `pull_request_review` failed, `pull_request` passed | status `failure` |
 | Head-SHA `pull_request_target` in progress | `null` |
@@ -485,9 +493,15 @@ Each write method is one statement.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty, whose delivered-key budget is exhausted, or whose `deadlineAt` has passed.
-  The SQL cap predicate validates `event_seen` as a JSON array before casting it.
-  Invalid JSON or a non-array value selects the row for bad-row logging and isolation.
-  One invalid value cannot abort the due scan for other wakeups.
+  The global SQL query selects active event candidates without parsing persisted text.
+  TypeScript applies the buffer, cap, and deadline predicates after per-row decoding.
+  Invalid JSON, wrong shapes, and NUL-containing seen keys take the bad-row logging path.
+  The cursor uses raw candidate rows, including corrupt rows and valid events that are not due.
+  A page can have no returned rows and still have a next cursor.
+  This scan reads idle active event rows too, but does not derive or dispatch them.
+  No schema change or count backfill is needed.
+  The query adds no PostgreSQL requirement over `dev-v2`; PostgreSQL 14 and 16 are compatible.
+  It uses neither `IS JSON` nor JSONB casts in the global due query.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
 The replay risk is limited to waiters with more than 256 delivered keys.
