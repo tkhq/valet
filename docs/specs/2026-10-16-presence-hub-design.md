@@ -277,10 +277,13 @@ Pass criterion: all steps, in one run, from a clean start.
     follow, a waiter, or a recent event names it. A channel's name comes
     from the bot's channel list (every channel it has joined, with no
     picker limit), else a filter's label or a recent event. The api keeps
-    the list for five minutes. The list says which channels are private.
-    A public channel on it shows its name with no Slack call. A private
-    channel's name shows only to its members, with the check its place
-    takes. A channel the bot has not joined keeps its id.
+    the list for five minutes, and a failed list for one minute. The list
+    says which channels are private. A public channel on it shows its
+    name with no further Slack call. A private channel that is no place
+    keeps its id, because its name would take a membership check for each
+    viewer. A channel the bot has not joined keeps its id too. The place
+    page read does not name a line's channels, so it reads the list only
+    for its channel places.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.

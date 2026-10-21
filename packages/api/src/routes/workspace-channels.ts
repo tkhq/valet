@@ -14,13 +14,16 @@ import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 export const workspaceChannelsRouter = new Hono<AppEnv>();
 
 const NAMES_TTL_MS = 5 * 60_000;
+/** How long a failed scan answers with no channels, so a read does not wait on a rate-limited Slack again. */
+const FAILED_SCAN_TTL_MS = 60_000;
 const directoryCache = new Map<string, { channels: ReadonlyMap<string, DirectoryChannel>; expiresAt: number }>();
 
 /**
  * Every live Slack channel the org's bot has joined, by channel id, with its
  * name and privacy. It reads the Slack plugin's joined-channel scan, which
  * has no picker limit. No Slack plugin or no credential gives an empty list.
- * A provider error propagates.
+ * A provider error propagates, and the next minute's reads get an empty list
+ * without asking Slack.
  */
 export function slackChannelDirectory(c: Context<AppEnv>): ChannelDirectory {
   return async () => {
@@ -30,7 +33,14 @@ export function slackChannelDirectory(c: Context<AppEnv>): ChannelDirectory {
     if (!c.var.providers.plugins.some((candidate) => candidate.filterOptionResolvers?.["slack.channels"])) return new Map();
     const credential = await orgSlackCredential(c.var.providers, orgId);
     if (!credential) return new Map();
-    const channels = new Map((await joinedChannelDirectory(credential)).map(({ id, name, isPrivate }) => [id, { name, isPrivate }]));
+    let joined: Awaited<ReturnType<typeof joinedChannelDirectory>>;
+    try {
+      joined = await joinedChannelDirectory(credential);
+    } catch (err) {
+      setCapped(directoryCache, orgId, { channels: new Map(), expiresAt: Date.now() + FAILED_SCAN_TTL_MS });
+      throw err;
+    }
+    const channels = new Map(joined.map(({ id, name, isPrivate }) => [id, { name, isPrivate }]));
     setCapped(directoryCache, orgId, { channels, expiresAt: Date.now() + NAMES_TTL_MS });
     return channels;
   };

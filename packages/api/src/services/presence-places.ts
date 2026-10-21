@@ -456,11 +456,13 @@ interface LoadedPlaces {
   slackTeam: string;
   /** How many sessions the workspace has: its runtime and its team conversations. */
   sessionCount: number;
-  /** The names of the channels the workspace's lines name, by channel id (`ListPresencePlacesResponse.channelNames`). */
+  /** The names of the channels the workspace's lines name, by channel id (`ListPresencePlacesResponse.channelNames`). Empty unless the read names line channels. */
   channelNames: Record<string, string>;
 }
 
-async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<LoadedPlaces> {
+async function loadPlaces(
+  deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number, nameLineChannels: boolean,
+): Promise<LoadedPlaces> {
   const { db } = deps;
   const root = await runtimeSessionId(db, orgId, owner);
   const sessions = root ? await workspaceSessionIds(db, orgId, root) : [];
@@ -607,27 +609,15 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (channelId && natural.label.startsWith("#")) channelNames.set(channelId, natural.label.slice(1));
   }
 
-  // A private Slack channel's place and name show only to its members. A
-  // check that fails hides both, as an unknown audience does.
+  // A private Slack channel's place shows only to its members. A check that
+  // fails hides the place, as an unknown audience does.
   const channelPlaces = [...places.keys()].flatMap((place) => {
     const channelId = slackChannelOf(place);
     return channelId ? [{ place, channelId }] : [];
   });
-  const placeChannels = new Set(channelPlaces.map(({ channelId }) => channelId));
-  const directory = placeChannels.size + lineChannels.size > 0
-    ? await access.directory().catch(() => new Map<string, DirectoryChannel>()) : new Map<string, DirectoryChannel>();
-  // A line's channel that is no place has a name only when the bot has
-  // joined it. The bot's channel list says whether it is private, so only a
-  // private one takes the check, and a public one costs no Slack call.
-  const lineOnly = [...lineChannels].filter((id) => !placeChannels.has(id) && directory.has(id));
-  const checked = [...placeChannels, ...lineOnly.filter((id) => directory.get(id)?.isPrivate === true)];
-  const seen = await mapBounded(checked, CHANNEL_CHECK_CONCURRENCY,
-    (channelId) => access.canSee(`slack:${channelId}`).catch(() => false));
-  const visible = new Set([
-    ...checked.filter((_, index) => seen[index] === true),
-    ...lineOnly.filter((id) => directory.get(id)?.isPrivate === false),
-  ]);
-  for (const { place, channelId } of channelPlaces) if (!visible.has(channelId)) places.delete(place);
+  const seen = await mapBounded(channelPlaces, CHANNEL_CHECK_CONCURRENCY,
+    ({ channelId }) => access.canSee(`slack:${channelId}`).catch(() => false));
+  channelPlaces.forEach(({ place }, index) => { if (seen[index] !== true) places.delete(place); });
 
   // Every parent a row names is a row. A parent that only its children name
   // has no counts of its own and takes its children's newest activity.
@@ -646,12 +636,22 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     pending = next;
   }
 
-  for (const id of visible) {
+  const channelIds = [...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null);
+  // The list read also names a line's channels that are no place. The place
+  // page sends no such names, so it skips them.
+  const lineOnly = nameLineChannels ? [...lineChannels].filter((id) => !channelIds.includes(id)) : [];
+  const directory = channelIds.length + lineOnly.length > 0
+    ? await access.directory().catch(() => new Map<string, DirectoryChannel>()) : new Map<string, DirectoryChannel>();
+  // A public channel on the bot's list shows its name with no Slack call. A
+  // private one that is no place keeps its id: its name would take a
+  // membership check for each viewer.
+  const shownChannels = new Set([...channelIds, ...lineOnly.filter((id) => directory.get(id)?.isPrivate === false)]);
+  for (const id of shownChannels) {
     const name = directory.get(id)?.name;
     if (name) channelNames.set(id, name);
   }
   const lineNames = Object.fromEntries([...lineChannels].flatMap((id) => {
-    const name = visible.has(id) ? channelNames.get(id)?.replace(/^#/, "") : undefined;
+    const name = shownChannels.has(id) ? channelNames.get(id)?.replace(/^#/, "") : undefined;
     return name && name !== id ? [[id, name]] : [];
   }));
   for (const state of places.values()) {
@@ -679,7 +679,7 @@ export interface PresencePlacesList extends ListPresencePlacesResponse {
 export async function listPresencePlaces(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now = Date.now(),
 ): Promise<PresencePlacesList> {
-  const loaded = await loadPlaces(deps, orgId, owner, access, now);
+  const loaded = await loadPlaces(deps, orgId, owner, access, now, true);
   const rows = [...loaded.places.values()].map((state) => state.wire);
   rows.sort((a, b) => SERVICES.indexOf(a.service) - SERVICES.indexOf(b.service)
     || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.label.localeCompare(b.label));
@@ -705,7 +705,7 @@ export interface PresencePlaceDetail {
 export async function getPresencePlace(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, subject: string, now = Date.now(),
 ): Promise<PresencePlaceDetail | null> {
-  const { places, slackTeam } = await loadPlaces(deps, orgId, owner, access, now);
+  const { places, slackTeam } = await loadPlaces(deps, orgId, owner, access, now, false);
   const state = places.get(subject);
   if (!state) return null;
   const covered = [...places.values()].filter((candidate) => placeCovers(subject, candidate.wire.subject));
