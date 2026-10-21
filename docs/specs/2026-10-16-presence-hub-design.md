@@ -395,8 +395,10 @@ Pass criterion: all steps, in one run, from a clean start.
       the warnings, and **Cancel** and **Save**. Cancel drops the change.
       Leaving the page with a change asks `Leave without saving?`. The form
       reads the stored line at mount, and the patch diffs against that
-      copy. While the form is clean, a refetched line that reads
-      differently mounts a new form on it; while the reader has a change,
+      copy. A save moves the copy to the line as saved, so a change back
+      to the first value still sends. While the form is clean, a refetched
+      line that reads differently mounts a new form on it (filter row ids
+      do not count); while the reader has a change,
       the form keeps it. A move to another line's page starts a new form,
       so a change is never saved to a different line. The form is locked
       while a save is in flight. After a save that stores the line with

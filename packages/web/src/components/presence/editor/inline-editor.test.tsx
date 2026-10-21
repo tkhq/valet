@@ -144,6 +144,17 @@ describe("InlineEditor", () => {
     expect(body).toEqual({ thread: { mode: "new" } });
   });
 
+  it("sends a change back to the first value after a save, before the refetch", () => {
+    patchSubscription.mockImplementation((_vars: unknown, handlers: { onSuccess: (resp: { id: string }) => void }) => handlers.onSuccess({ id: "l1" }));
+    render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
+    fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
+    fireEvent.click(within(bar() ?? document.body).getByRole("button", { name: "Save" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Its own thread" }));
+    fireEvent.click(within(bar() ?? document.body).getByRole("button", { name: "Save" }));
+    const bodies = patchSubscription.mock.calls.map(([vars]) => (vars as { body: PatchEventSubscriptionRequest }).body);
+    expect(bodies).toEqual([{ thread: { mode: "new" } }, { thread: { mode: "own" } }]);
+  });
+
   it("starts over for another line, so it never saves one line's change to a different line", () => {
     const { rerender } = render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
     fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));

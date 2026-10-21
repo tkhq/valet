@@ -6,7 +6,8 @@
  * or a routine on its own page.
  *
  * The form reads the mode once, at mount, so the patch diffs against that
- * copy. A new mode needs a new mount (CLAUDE.md, mount-time state).
+ * copy. A new mode needs a new mount (CLAUDE.md, mount-time state). An
+ * inline save moves the copy to the row as saved.
  */
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { EventSubscriptionCollisionsWire, EventSubscriptionWire } from "@valet/api/wire";
@@ -98,6 +99,13 @@ function sentenceOf(
   }
 }
 
+/** The mode after a save of `body`: the row as the patch stores it. */
+function savedMode(mode: EditorMode, body: EditorBody): EditorMode {
+  if (body.kind === "patch-line" && mode.kind === "edit") return { ...mode, line: applyLinePatch(mode.line, body.body) };
+  if (body.kind === "patch-routine" && mode.kind === "edit-routine") return { ...mode, routine: applyRoutinePatch(mode.routine, body.body) };
+  return mode;
+}
+
 /** The team whose line also covers this personal line's events, by name. */
 function overlapTeamName(
   draft: Draft,
@@ -151,7 +159,7 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
   // refetch replaces while the form is open. The draft seeds from this copy,
   // so the patch diffs against it too; a diff against a newer row would send
   // the old value of a field another tab changed.
-  const [mode] = useState(openedMode);
+  const [mode, setMode] = useState(openedMode);
   const catalogQ = useEventCatalog();
   const services = catalogQ.data?.services ?? [];
   const pluginsQ = usePlugins();
@@ -325,6 +333,9 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
       return;
     }
     onSaved?.(result);
+    // The next save diffs against the row as saved, so a change back to the
+    // value first read still sends.
+    setMode(savedMode(mode, body));
     setBaseline(draftKey(draft));
   }
 
