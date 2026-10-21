@@ -486,6 +486,8 @@ export class Thread {
    */
   private gateCycleTail: Promise<void> = Promise.resolve();
   private mode: QueueMode;
+  /** Queue items whose user entry this process wrote during mid-turn delivery. */
+  private readonly midTurnAppended = new Set<string>();
   private aborted = false;
   /**
    * Set by `runItem` when the host resolver threw `NoCredentialsError` at
@@ -5486,7 +5488,9 @@ export class Thread {
         if (this.staleFenceDetected) return { action: "end" };
         const decision = this.chargeModelCall(turn.message);
         if (decision) return decision;
-        if (turn.toolResults.length > 0 && turn.message.stopReason !== "error" && turn.message.stopReason !== "aborted") {
+        // `toolUse` only: a `length` stop also carries (failed) tool results,
+        // but it persists as a terminal entry, the same recovery hazard.
+        if (turn.message.stopReason === "toolUse") {
           await this.deliverQueuedIntoRunningTurn();
         }
         return undefined;
@@ -5598,10 +5602,20 @@ export class Thread {
       .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const before = taken.length;
+    // A Stop, an abort, or a successor attempt can land while an earlier item
+    // is written. The item then stays queued and runs as a followup.
+    const stopped = () => this.aborted || running.abortRequestedAt !== undefined || this.staleFenceDetected || this.runningItem !== running;
     try {
       for (const item of queued) {
+        if (stopped()) break;
         if (digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId())) break;
+        // An entry that an earlier process wrote before it crashed is already
+        // in the transcript this turn was rebuilt from, so it is settled but
+        // not steered again. An entry this process wrote is steered.
+        const recovered = !this.midTurnAppended.has(item.id) && await this.hasUserEntry(item.id);
         const { text, attachments } = await this.appendUserEntry(item);
+        if (stopped()) break;
+        this.midTurnAppended.add(item.id);
         // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
         // that answers it.
         const settled = await store.settleUnclaimed(
@@ -5611,16 +5625,24 @@ export class Thread {
           this.emitError("mid_turn_delivery_conflict", `Queued message ${item.id} settled before it could join the running turn; it was not delivered.`);
           break;
         }
-        taken.push({
-          text,
-          attachments,
-          ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
-        });
+        if (!recovered) {
+          taken.push({
+            text,
+            attachments,
+            ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
+          });
+        }
         await this.emitSettled(item.id, { outcome: "merged" });
       }
     } finally {
       if (taken.length > before) await this.emitQueueState();
     }
+  }
+
+  /** Whether the transcript already holds the user entry of queue item `itemId`. */
+  private async hasUserEntry(itemId: string): Promise<boolean> {
+    const entries = await this.session.providers.store.getEntries(this.session.id, this.id);
+    return entries.some((e) => e.type === "message" && e.role === "user" && e.queueItemId === itemId);
   }
 
   /** The actor of a turn whose item names no author (`buildToolContext`). */

@@ -236,6 +236,91 @@ describe("mid-turn delivery", () => {
   });
 });
 
+describe("mid-turn delivery when the turn stops or recovers", () => {
+  it("leaves an item queued when Stop lands while it is written, and runs it next", async () => {
+    const { tool, entered, release } = blockingTool();
+    const answer = (context: { messages: Array<{ role: string; content: unknown }> }) =>
+      fauxAssistantMessage(userTexts(context).at(-1) === "message b" ? "b answered" : "a continued");
+    const h = await setup("mid-turn-stop", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      answer, answer, answer,
+    ], [tool]);
+
+    const first = await h.thread.submitPrompt("run it", { author: PERSON });
+    await entered;
+    const b = await h.thread.submitPrompt("message b", { author: PERSON, queueMode: "inject" });
+    const append = h.store.appendEntries.bind(h.store);
+    let stopped = false;
+    h.store.appendEntries = async (...args: Parameters<typeof append>) => {
+      if (!stopped && args[2].some((e) => e.type === "message" && e.queueItemId === b.queueItemId)) {
+        stopped = true;
+        void h.thread.interrupt(first.queueItemId);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return append(...args);
+    };
+    release();
+    await waitFor(() => h.settled(b.queueItemId));
+
+    expect(await h.outcome(first.queueItemId)).toBe("aborted");
+    expect(await h.outcome(b.queueItemId)).toBe("completed");
+    const entries = await h.store.getEntries(h.session.id, h.thread.id);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user" && e.queueItemId === b.queueItemId)).toHaveLength(1);
+    h.faux.unregister();
+  });
+
+  it("does not steer an item whose entry an earlier process wrote before a crash", async () => {
+    const { tool, entered, release } = blockingTool();
+    let seen: string[] = [];
+    const h = await setup("mid-turn-recovered", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      (context) => { seen = userTexts(context); return fauxAssistantMessage("done"); },
+    ], [tool]);
+
+    const first = await h.thread.submitPrompt("run it", { author: PERSON });
+    await entered;
+    const b = await h.thread.submitPrompt("do b once", { author: PERSON, queueMode: "inject" });
+    // An earlier process wrote b's entry and died before settling it. A
+    // recovered turn rebuilds its context from that entry.
+    await h.store.appendEntries(h.session.id, h.thread.id, [{
+      id: "e-from-before", sessionId: h.session.id, threadId: h.thread.id, parentId: null, type: "message",
+      role: "user", content: "do b once", queueItemId: b.queueItemId, createdAt: Date.now(),
+    }]);
+    release();
+    await waitFor(() => h.settled(first.queueItemId));
+
+    expect(await h.outcome(b.queueItemId)).toBe("merged");
+    expect(seen).toEqual(["run it"]);
+    const entries = await h.store.getEntries(h.session.id, h.thread.id);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user" && e.queueItemId === b.queueItemId)).toHaveLength(1);
+    h.faux.unregister();
+  });
+
+  it("delivers nothing after a response the output limit cut off", async () => {
+    const modelEntered = latch();
+    const modelGate = latch();
+    const h = await setup("mid-turn-length", [
+      async () => {
+        modelEntered.open();
+        await modelGate.promise;
+        return fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "length" });
+      },
+      fauxAssistantMessage("after the cut"),
+      fauxAssistantMessage("b answered"),
+      fauxAssistantMessage("spare"),
+    ], [blockingTool().tool]);
+
+    await h.thread.submitPrompt("long answer", { author: PERSON });
+    await modelEntered.promise;
+    const b = await h.thread.submitPrompt("message b", { author: PERSON, queueMode: "inject" });
+    modelGate.open();
+    await waitFor(() => h.settled(b.queueItemId));
+
+    expect(await h.outcome(b.queueItemId)).toBe("completed");
+    h.faux.unregister();
+  });
+});
+
 describe("mid-turn delivery and Send now", () => {
   it("refuses a Send now that arrives while delivery takes the item, and leaves one entry", async () => {
     const { tool, entered, release } = blockingTool();
