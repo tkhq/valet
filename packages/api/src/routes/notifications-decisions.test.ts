@@ -1,7 +1,10 @@
+import { routeAttention, type AttentionChannelDeliverer } from "../orchestrator/attention.js";
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { webPresence } from "../services/web-presence.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { notifications, pendingChannelDeliveries, agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { mintCliToken } from "../auth/cli-tokens.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { getWorkflowRunDetail } from "../workflows/service.js";
@@ -283,4 +286,30 @@ it("requires a browser owner for lasting consent even when an API key names that
   expect((await answer({ "x-api-key": cli.access_token })).status).toBe(403);
   expect((await api.providers.engineStore.getDecisionGate("consent-auth-session", "consent-auth-gate"))?.status).toBe("pending");
   expect((await answer({ cookie })).status).toBe(200);
+});
+
+
+it("clears updates without suppressing a pending approval's DM fallback", async () => {
+  api = await bootTestApi();
+  await pendingGate(api, "unread", "user", "local-user", "local-user");
+  const db = api.providers.db;
+  const deliver = vi.fn(async () => {});
+  const channel: AttentionChannelDeliverer = { id: "dm", order: 1, grace: "when-web-active", deliver };
+  webPresence(db).report("local-user", "tab", true);
+  await routeAttention({ db, channels: [channel] }, { kind: "approval", owner: { type: "user", id: "local-user" }, title: "Approve", sessionId: "unread", gate: { id: "gate-unread", actions: [] }, dedupeKey: "gate-unread" });
+  await routeAttention({ db }, { kind: "notification", owner: { type: "user", id: "local-user" }, title: "Unrelated update" });
+  const response = await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  expect(response.status).toBe(200);
+  const rows = await db.select().from(notifications);
+  expect(rows.find(row => row.kind === "notification")?.readAt).toBeTypeOf("number");
+  const approval = rows.find(row => row.kind === "approval");
+  expect(approval?.readAt).toBeNull();
+  const [job] = await db.select().from(pendingChannelDeliveries);
+  if (!job || !approval) throw new Error("Expected a deferred approval");
+  await drainAttentionDeliveries({ db, channels: [channel] }, job.deliverAfter);
+  expect(deliver).toHaveBeenCalledOnce();
+  const read = await fetch(`${api.baseUrl}/api/notifications/${encodeURIComponent(approval.id)}/read`, { method: "POST" });
+  expect(read.status).toBe(200);
+  const [handled] = await db.select().from(notifications).where(eq(notifications.id, approval.id));
+  expect(handled?.readAt).toBeTypeOf("number");
 });

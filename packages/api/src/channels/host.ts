@@ -374,6 +374,8 @@ export function hasOpenDirect(
 
 export class ChannelHost {
   private transports = new Map<string, ChannelTransport>();
+  /** Unknown during startup; known missing bot credentials must not queue a backlog. */
+  private unconfiguredTransports = new Set<string>();
   private botUsernames = new Map<string, string>();
   private seenDispatchIds = new Set<string>();
   private seenOrder: string[] = [];
@@ -502,6 +504,7 @@ export class ChannelHost {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    this.unconfiguredTransports.clear();
     if (this.feedbackRetryController.signal.aborted) {
       this.feedbackRetryController = new AbortController();
     }
@@ -544,6 +547,7 @@ export class ChannelHost {
           throw err;
         }
         if (!credential) {
+          this.unconfiguredTransports.add(factory.channelType);
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;
         }
@@ -557,6 +561,7 @@ export class ChannelHost {
         try {
           transport = factory.create({ credential, config: {} });
         } catch (err) {
+          this.unconfiguredTransports.add(factory.channelType);
           console.error(`[channels] ${factory.channelType}: transport not started`, err);
           continue;
         }
@@ -1928,6 +1933,7 @@ export class ChannelHost {
     const transports = () => [...this.transports].filter(([type]) => !channelTypeFilter || type === channelTypeFilter);
     return {
       id: channelTypeFilter ? `personal-${channelTypeFilter}` : "personal-dm", order: 1, grace: "when-web-active",
+      enabled: () => !channelTypeFilter || !this.unconfiguredTransports.has(channelTypeFilter),
       deliverTeam: async (event): Promise<void> => {
         if (event.owner.type !== "team" || (channelTypeFilter && channelTypeFilter !== "slack")) return;
         const transport = this.transports.get("slack");

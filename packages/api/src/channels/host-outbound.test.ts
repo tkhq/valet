@@ -31,7 +31,7 @@ import { eq } from "drizzle-orm";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { assemblePlugins } from "../plugins/assemble.js";
-import { pendingChannelDeliveries, agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { userNotificationPreferences, pendingChannelDeliveries, agentSessions, assistants, childReplyDeliveries, childWatches, eventDropLog, orgMembers, teamMembers, teams, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -2816,6 +2816,42 @@ describe("ChannelHost.attentionDeliverer", () => {
       ...overrides,
     };
   }
+
+  it("does not retain a backlog for a linked user without an org bot", async () => {
+    host = await buildHost({ plugins: [{ name: "slack", version: "0", transports: [{ channelType: "slack", create: () => new FakeTransport() }] }] });
+    await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U1", userId: USER_ID });
+    await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "notification", web: false });
+    const channels = host.attentionDeliverers();
+    await routeAttention({ db: testDb.appDb, channels }, event({ dedupeKey: "unconfigured" }));
+    expect(await testDb.appDb.select().from(pendingChannelDeliveries)).toHaveLength(0);
+    // A producer can enqueue before startup discovers the missing bot.
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "boot-job", userId: USER_ID, tierId: "personal-slack", event: event(), deliverAfter: 1 });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 10);
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 1_000_000);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "dropped", attempts: 1 });
+  });
+
+  it("reconciles an approval whose gate ref was saved before the outbox acknowledgement", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "gate-session", workspace: "/", orgId: ORG_ID, userId: USER_ID, ownerType: "user", ownerId: USER_ID, createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("gate-session", "thread", { id: "gate", sessionId: "gate-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "gate" }));
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    const ref = { conversationKey: "fake:dm:77", messageId: "1" };
+    const reconcile = vi.fn(async () => ref);
+    Object.assign(fakeTransport, { reconcileAttention: reconcile });
+    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2 });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 2);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "sent", attempts: 2 });
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'gate'")).rows).toHaveLength(1);
+  });
 
   it("rechecks notifyAttention after the web grace period", async () => {
     host = await buildHost();

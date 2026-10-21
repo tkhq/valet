@@ -7,6 +7,9 @@ Date: 2026-10-20. Issue: TKAI-649.
 The attention router inserts the web notification immediately.
 It stores personal delivery jobs in the same Postgres transaction.
 Team home-channel posts remain immediate.
+Transports without configured bot credentials do not queue personal jobs.
+Jobs created before credential discovery are dropped if the transport is unconfigured.
+Transient credential lookup failures keep their jobs recoverable.
 Existing audience rules and team DM opt-in remain in force.
 
 Web notifications are tier zero.
@@ -71,6 +74,8 @@ Gate buttons and their authorization checks use the existing channel path.
 Approver-only events keep their explicit recipient.
 Org-admin audiences follow the same per-recipient presence policy as personal and team audiences.
 One recipient's read state does not suppress another recipient's job.
+The bell's bulk-read action clears updates, not its separate approval inbox.
+Gate resolution and explicit per-row reads still mark approval notifications handled.
 
 The immediate producer can run before a workflow finishes parking.
 Its immediate drain therefore trusts the current gate event.
@@ -103,6 +108,7 @@ Its reconciliation hook reads recent DM history with metadata included.
 The lookup checks at most five pages of 100 messages.
 Missing history permissions cause a resend, not a lost notification.
 Recovered approval refs restore the existing gate callback mapping.
+Saving the same gate reference twice is idempotent.
 Transports without history reconciliation still recover by resending.
 
 A provider failure retains `sending` and its error for the next recovery attempt.

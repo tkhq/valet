@@ -110,6 +110,8 @@ export interface AttentionDeliveryAttempt {
 
 /** A personal delivery tier. Web rows are tier zero. */
 export interface AttentionChannelDeliverer {
+  /** False when this channel is not configured. Startup is not a disabled channel. */
+  enabled?(): boolean;
   /** Stable across restarts. Used in the durable delivery key. */
   id: string;
   order: number;
@@ -280,6 +282,7 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
       let deliverAfter = now;
       let previousOrder: number | undefined;
       for (const tier of tiers) {
+        if (tier.enabled?.() === false) continue;
         if (active && tier.grace === "when-web-active" && tier.order !== previousOrder) deliverAfter += graceMs;
         previousOrder = tier.order;
         const jobId = JSON.stringify([id, tier.id]);

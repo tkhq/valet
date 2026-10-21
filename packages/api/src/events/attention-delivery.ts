@@ -56,11 +56,11 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
     if (!claimed) continue;
     const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
     try {
-      let handled = false;
+      let handled = tier.enabled?.() === false;
       if (job.notificationId) {
         const [row] = await deps.db.select({ readAt: notifications.readAt }).from(notifications)
           .where(and(eq(notifications.id, job.notificationId), eq(notifications.userId, job.userId))).limit(1);
-        handled = !row || row.readAt !== null;
+        handled ||= !row || row.readAt !== null;
       }
       // Immediate producers can run before a workflow finishes parking.
       if (!immediateIds && !await attentionGatePending(deps, job.event)) handled = true;

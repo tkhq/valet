@@ -199,7 +199,9 @@ notificationsRouter.post("/read-all", async (c) => {
   await db
     .update(notifications)
     .set({ readAt: Date.now() })
-    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+    // The bell's Updates list excludes approvals. Clearing it must not suppress
+    // a pending decision's personal-channel fallback.
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), ne(notifications.kind, "approval")));
 
   return c.json({ ok: true });
 });
