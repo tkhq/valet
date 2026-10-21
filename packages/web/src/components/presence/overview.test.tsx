@@ -117,6 +117,7 @@ const TRIGGER_CATALOG: GetWorkflowTriggerCatalogResponse = { catalog: [] };
 // ── The fetch stub ───────────────────────────────────────────────────────
 
 let places: PresencePlaceWire[] = [];
+let channelNames: Record<string, string> = {};
 let rules: EventSubscriptionWire[] = [];
 let routines: WorkflowTriggerItem[] = [];
 let placesFail = false;
@@ -177,7 +178,7 @@ function answer(method: string, url: URL, body: string | undefined): Response {
   if (path === "/api/presence/places") {
     placesReads.push(url.search);
     if (placesFail) return json({ error: "boom" }, 500);
-    return json({ places } satisfies ListPresencePlacesResponse);
+    return json({ places, channelNames } satisfies ListPresencePlacesResponse);
   }
   if (path === "/api/event-subscriptions") return json({ subscriptions: rules } satisfies ListEventSubscriptionsResponse);
   if (path === "/api/workflows/triggers") return json({ triggers: routines } satisfies ListWorkflowTriggersResponse);
@@ -192,6 +193,7 @@ function answer(method: string, url: URL, body: string | undefined): Response {
 
 beforeEach(() => {
   places = [SLACK_ROOT, INCIDENTS, ACME_API, ACME_API_12, ENG];
+  channelNames = {};
   rules = [R1, R4, ANYWHERE, ENG_LINE];
   routines = [S1];
   placesFail = false;
@@ -364,6 +366,20 @@ describe("Presence overview", () => {
     expect(sentences(slack)).toEqual(["When you mention Valet, reply in a new thread."]);
     const everywhere = screen.getAllByRole("link").filter((link) => link.textContent === "When you mention Valet, reply in a new thread.");
     expect(everywhere).toHaveLength(1);
+  });
+
+  // Dev, 10-21: a line over 21 channels lists at the Slack workspace, so a
+  // channel with no event in 30 days is no place. The places read names it.
+  it("names a line's channel that is no place from the places read's channel names", async () => {
+    rules = [line("M", {
+      name: "Alert triage", eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "in", value: ["C900", "C0QUIET"] }], target: { kind: "assistant", thread: { mode: "new" } },
+    })];
+    channelNames = { C0QUIET: "alerts-prod" };
+    mountOverview();
+    const slack = await screen.findByRole("region", { name: "Everywhere in Slack" });
+    expect(within(slack).getByRole("link", { name: "When someone posts a message in #incidents or #alerts-prod, work in a new thread each time." })).toBeTruthy();
+    expect(within(slack).queryByText(/C0QUIET/)).toBeNull();
   });
 
   it("fixes a line from the banner: the item and the row's problem line go (Review Focus 3, INV-H6)", async () => {

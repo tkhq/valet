@@ -3,7 +3,9 @@ import type { Message, SessionDetail } from "@valet/api/wire";
 import {
   Check,
   ClipboardCopy,
+  Code2,
   FolderInput,
+  Globe,
   Moon,
   MoreHorizontal,
   RefreshCw,
@@ -59,6 +61,7 @@ import { canAdministerSession } from "./use-can-administer-session";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
+import type { SandboxTabId } from "./sandbox-tabs";
 import { ShareThreadDialog } from "./share-thread-dialog";
 import { ThreadStatusIcon } from "./thread-status-icon";
 import { buildTranscript } from "./transcript";
@@ -155,6 +158,7 @@ export function SessionHeader({
   threadId,
   messages,
   summaryControl,
+  onOpenView,
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -163,6 +167,11 @@ export function SessionHeader({
   threadId?: string;
   messages?: Message[];
   summaryControl?: ReactNode;
+  /**
+   * Opens a sandbox view. On a phone the view tabs are hidden, so the thread
+   * menu lists the views instead. Omit it when the thread has no sandbox views.
+   */
+  onOpenView?: (view: Exclude<SandboxTabId, "chat">) => void;
 }) {
   const navigate = useNavigate();
   const sessionMenu = useResponsiveOverlay("sm");
@@ -446,7 +455,7 @@ export function SessionHeader({
               type="button"
               onClick={beginRename}
               aria-label={`Rename session: ${title}`}
-              className="max-sm:min-h-11 max-sm:text-left text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+              className="max-sm:min-h-11 max-sm:text-left text-sm font-semibold tracking-tight truncate text-ink font-display rounded px-0.5 -mx-0.5 hover:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
             >
               {rename.isPending ? <Spinner size={14} /> : title}
             </button>
@@ -533,9 +542,10 @@ export function SessionHeader({
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
+        {/* On a phone, Share is in the thread menu with the other actions. */}
         {canShare && (
           <Tooltip content="Share this thread with your organization">
-            <Button variant="ghost" size="sm" onClick={() => setSharing(true)} aria-label="Share thread">
+            <Button variant="ghost" size="sm" className="max-sm:hidden" onClick={() => setSharing(true)} aria-label="Share thread">
               <Share2 className="h-4 w-4" aria-hidden />
             </Button>
           </Tooltip>
@@ -583,6 +593,28 @@ export function SessionHeader({
               >
                 <ClipboardCopy className="h-4 w-4" aria-hidden />{copied ? "Transcript copied" : "Copy transcript"}
               </DropdownMenuItem>
+              {canShare && (
+                <DropdownMenuItem onSelect={() => setSharing(true)}>
+                  <Share2 className="h-4 w-4" aria-hidden />Share thread
+                </DropdownMenuItem>
+              )}
+              {onOpenView && (
+                <>
+                  <DropdownMenuItem onSelect={() => onOpenView("browser")}>
+                    <Globe className="h-4 w-4" aria-hidden />Open browser
+                  </DropdownMenuItem>
+                  {session.profile === "full" && (
+                    <>
+                      <DropdownMenuItem onSelect={() => onOpenView("terminal")}>
+                        <SquareTerminal className="h-4 w-4" aria-hidden />Open terminal
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => onOpenView("vscode")}>
+                        <Code2 className="h-4 w-4" aria-hidden />Open VS Code
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </>
+              )}
               <DropdownMenuSeparator />
             </div>
             {canAdminister && (

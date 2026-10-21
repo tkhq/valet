@@ -20,7 +20,9 @@ import { isAssistantKind, readScheduleTargetKind, readStoredTarget } from "../ev
 import { slackMessageUrl } from "./channel-messages.js";
 import { eventHeadColumns, type EventHead } from "./event-columns.js";
 import { mapBounded } from "../lib/bounded-map.js";
-import { channelFilterIds, runtimeSessionId, type ChannelNames, type ChannelVisibility, type ThreadPairsShown } from "./channels.js";
+import {
+  channelFilterIds, runtimeSessionId, type ChannelDirectory, type ChannelVisibility, type DirectoryChannel, type ThreadPairsShown,
+} from "./channels.js";
 import type {
   ChannelConversation, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceService, PresencePlaceWire,
   ThreadFeederWire,
@@ -376,7 +378,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** What the place reads see of the request: names, channel access, thread access, and the org's Slack workspace. */
 export interface PresenceAccess {
-  names: ChannelNames;
+  /** The channels the org's bot has joined, with their names and privacy. */
+  directory: ChannelDirectory;
   canSee: ChannelVisibility;
   threadsShown: ThreadPairsShown;
   /** The org's Slack workspace id, from its bot credential, or null. */
@@ -453,9 +456,13 @@ interface LoadedPlaces {
   slackTeam: string;
   /** How many sessions the workspace has: its runtime and its team conversations. */
   sessionCount: number;
+  /** The names of the channels the workspace's lines name, by channel id (`ListPresencePlacesResponse.channelNames`). Empty unless the read names line channels. */
+  channelNames: Record<string, string>;
 }
 
-async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<LoadedPlaces> {
+async function loadPlaces(
+  deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number, nameLineChannels: boolean,
+): Promise<LoadedPlaces> {
   const { db } = deps;
   const root = await runtimeSessionId(db, orgId, owner);
   const sessions = root ? await workspaceSessionIds(db, orgId, root) : [];
@@ -537,11 +544,16 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (state.wire.lastActivityAt === null || at > state.wire.lastActivityAt) state.wire.lastActivityAt = at;
   };
   const channelNames = new Map<string, string>();
+  // Every channel a line's exact channel filter names. A line over several
+  // channels lists at the Slack workspace, so its channels need not be places.
+  const lineChannels = new Set<string>();
 
   const rules = (await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, orgId), ownedBy(owner))))
     .filter(isListener);
   for (const rule of rules) {
-    for (const [id, label] of channelFilterIds(rule.filters).labels) channelNames.set(id, label);
+    const filtered = channelFilterIds(rule.filters);
+    for (const id of filtered.ids) lineChannels.add(id);
+    for (const [id, label] of filtered.labels) channelNames.set(id, label);
     const own = listenerPlaces(rule, slackTeam);
     for (const place of own) placeFor(place)?.listeners.push(rule);
     // A pull request or issue line also lists at its overview row
@@ -625,8 +637,25 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
   }
 
   const channelIds = [...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null);
-  const resolved = channelIds.length > 0 ? await access.names(channelIds).catch(() => new Map<string, string>()) : new Map<string, string>();
-  for (const [id, name] of resolved) channelNames.set(id, name);
+  // The list read also names a line's channels that are no place. The place
+  // page sends no such names, so it skips them. A channel whose place the
+  // check hid stays unnamed, though the bot's list may still call it public.
+  const checkedChannels = new Set(channelPlaces.map(({ channelId }) => channelId));
+  const lineOnly = nameLineChannels ? [...lineChannels].filter((id) => !checkedChannels.has(id)) : [];
+  const directory = channelIds.length + lineOnly.length > 0
+    ? await access.directory().catch(() => new Map<string, DirectoryChannel>()) : new Map<string, DirectoryChannel>();
+  // A public channel on the bot's list shows its name with no Slack call. A
+  // private one that is no place keeps its id: its name would take a
+  // membership check for each viewer.
+  const shownChannels = new Set([...channelIds, ...lineOnly.filter((id) => directory.get(id)?.isPrivate === false)]);
+  for (const id of shownChannels) {
+    const name = directory.get(id)?.name;
+    if (name) channelNames.set(id, name);
+  }
+  const lineNames = Object.fromEntries([...lineChannels].flatMap((id) => {
+    const name = shownChannels.has(id) ? channelNames.get(id)?.replace(/^#/, "") : undefined;
+    return name && name !== id ? [[id, name]] : [];
+  }));
   for (const state of places.values()) {
     state.wire.label = placeLabel(state.wire.subject, channelNames);
     // The reach describes listeners that list here or roll up here, so a row
@@ -636,7 +665,7 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     state.wire.listenerCount = state.listeners.length + state.rolledUp.length;
     state.wire.activeThreadCount = state.active.size;
   }
-  return { places, slackTeam, sessionCount: sessions.length };
+  return { places, slackTeam, sessionCount: sessions.length, channelNames: lineNames };
 }
 
 function compareConversations(a: ChannelConversation, b: ChannelConversation): number {
@@ -652,11 +681,11 @@ export interface PresencePlacesList extends ListPresencePlacesResponse {
 export async function listPresencePlaces(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now = Date.now(),
 ): Promise<PresencePlacesList> {
-  const loaded = await loadPlaces(deps, orgId, owner, access, now);
+  const loaded = await loadPlaces(deps, orgId, owner, access, now, true);
   const rows = [...loaded.places.values()].map((state) => state.wire);
   rows.sort((a, b) => SERVICES.indexOf(a.service) - SERVICES.indexOf(b.service)
     || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.label.localeCompare(b.label));
-  return { places: rows, sessionCount: loaded.sessionCount };
+  return { places: rows, channelNames: loaded.channelNames, sessionCount: loaded.sessionCount };
 }
 
 /** One place with the rows its page shows. The route maps the rows to their wire shapes. */
@@ -678,7 +707,7 @@ export interface PresencePlaceDetail {
 export async function getPresencePlace(
   deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, subject: string, now = Date.now(),
 ): Promise<PresencePlaceDetail | null> {
-  const { places, slackTeam } = await loadPlaces(deps, orgId, owner, access, now);
+  const { places, slackTeam } = await loadPlaces(deps, orgId, owner, access, now, false);
   const state = places.get(subject);
   if (!state) return null;
   const covered = [...places.values()].filter((candidate) => placeCovers(subject, candidate.wire.subject));

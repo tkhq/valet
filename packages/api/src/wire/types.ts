@@ -1040,6 +1040,26 @@ export interface ThreadAddress {
   guest?: { mode: ThreadShareMode; ownerName: string };
 }
 
+/** `GET /api/threads/:threadId/context` — how full the thread's model
+ * context is. The engine measures it like the proactive compaction check
+ * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn
+ * compacts first. `context` is null when the model reports no context
+ * window. */
+export interface ThreadContextResponse {
+  context: {
+    /** Estimated tokens the next model request sends. */
+    tokens: number;
+    /** Usable budget: the context window minus the output reserve. */
+    limit: number;
+    /** The model's full context window. */
+    contextWindow: number;
+    /** Id of the model the budget belongs to. */
+    model: string;
+    /** False when the session disables automatic compaction. */
+    autoCompact: boolean;
+  } | null;
+}
+
 /** A channel as a thread names it. */
 export interface ThreadChannel {
   /** `slack:C123` or `github:owner/repo#12`. */
@@ -1149,6 +1169,14 @@ export interface PresencePlaceWire {
 /** `GET /api/presence/places?scope=<workspace>`. Rows are ordered Slack, GitHub, Linear, then newest activity first. */
 export interface ListPresencePlacesResponse {
   places: PresencePlaceWire[];
+  /**
+   * The name without `#` of each Slack channel that an exact `channel`
+   * filter of the workspace's lines names, by channel id, such as
+   * `{ C900: "incidents" }`. A line over several channels lists at the Slack
+   * workspace, so its channels need not be places. A channel the viewer may
+   * not see, or one with no known name, has no entry.
+   */
+  channelNames: Record<string, string>;
 }
 
 /** `GET /api/presence/places/:subject?scope=<workspace>`. A parent row's thread lists include its child places' threads. */
@@ -1402,6 +1430,10 @@ export interface MessageAuthor {
    * is then the person it ran as, and `name` is the sender. The sender's
    * channel id stays off the wire. */
   externalSender?: boolean;
+  /** Set when the host verified a direct human submission: a signed-in
+   * browser send. A message an agent sent under a person's id, such as a
+   * parent session's `child_send`, has no flag. */
+  interactive?: boolean;
 }
 
 export interface MessageReplyReference {

@@ -19,6 +19,17 @@ describe("Select", () => {
     expect(select.value).toBe("b");
   });
 
+  it("keeps the focus border after a tap: no hover border can replace it", () => {
+    render(
+      <Select aria-label="Interval">
+        <option value="a">A</option>
+      </Select>,
+    );
+    const classes = screen.getByRole("combobox", { name: "Interval" }).className.split(" ");
+    expect(classes).toContain("focus-visible:border-moss");
+    expect(classes.filter((c) => /hover:border/.test(c))).toEqual([]);
+  });
+
   it("uses the compact size for size=\"sm\"", () => {
     render(
       <Select aria-label="Scope" size="sm">

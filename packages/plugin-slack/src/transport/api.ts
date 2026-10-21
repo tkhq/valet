@@ -62,6 +62,8 @@ export interface SlackChannel {
   id: string;
   name: string;
   isArchived: boolean;
+  /** A private channel (`is_private`). */
+  isPrivate: boolean;
 }
 
 export class SlackApi {
@@ -436,7 +438,7 @@ export class SlackApi {
       const id = str(c.id);
       const name = str(c.name);
       if (!id || !name) continue;
-      channels.push({ id, name, isArchived: c.is_archived === true });
+      channels.push({ id, name, isArchived: c.is_archived === true, isPrivate: c.is_private === true });
     }
     const nextCursor = str(rec(res.response_metadata)?.next_cursor);
     return { channels, nextCursor: nextCursor !== undefined && nextCursor !== "" ? nextCursor : undefined };

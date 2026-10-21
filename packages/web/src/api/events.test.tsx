@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ListEventSubscriptionsResponse } from "@valet/api/wire";
 
@@ -109,6 +109,30 @@ it("does not request receipts without admin permission or a resolved org", () =>
   renderHook(() => useEventReceipts("org", {}, false), { wrapper });
   renderHook(() => useEventReceipts(undefined, {}, true), { wrapper });
   expect(listEventReceipts).not.toHaveBeenCalled();
+});
+
+describe("a line edit", () => {
+  it("stays pending until the line list is read again", async () => {
+    const client = newClient();
+    let release: (value: ListEventSubscriptionsResponse) => void = () => {};
+    listEventSubscriptions
+      .mockResolvedValueOnce(ORG_SUBSCRIPTIONS)
+      .mockImplementationOnce(() => new Promise<ListEventSubscriptionsResponse>((resolve) => { release = resolve; }));
+    const { result } = renderHook(() => ({ list: useEventSubscriptions(), patch: usePatchEventSubscription() }), {
+      wrapper: makeWrapper(client),
+    });
+    await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
+
+    let saved = false;
+    act(() => { void result.current.patch.mutateAsync({ id: "sub_1", body: { enabled: false } }).then(() => { saved = true; }); });
+    await waitFor(() => expect(listEventSubscriptions).toHaveBeenCalledTimes(2));
+    expect(saved).toBe(false);
+    expect(result.current.patch.isPending).toBe(true);
+
+    await act(async () => { release(ORG_SUBSCRIPTIONS); });
+    await waitFor(() => expect(saved).toBe(true));
+    expect(result.current.patch.isPending).toBe(false);
+  });
 });
 
 describe("a line's Activity refresh", () => {

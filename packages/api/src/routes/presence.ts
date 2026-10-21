@@ -16,7 +16,7 @@ import { canViewSession } from "../services/session-access.js";
 import { orgSlackCredential, storedThreadRef } from "../services/thread-access.js";
 import { getPresencePlace, listPresencePlaces, listThreadFeeders, resolveSlackTeam, type PresenceAccess } from "../services/presence-places.js";
 import { channelsVisibleTo, spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
-import { slackChannelNames, threadPairsShownTo } from "./workspace-channels.js";
+import { slackChannelDirectory, threadPairsShownTo } from "./workspace-channels.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { rowToEventSummary, subscriptionProblems, subscriptionToWire } from "./events.js";
 import type { ListPresencePlacesResponse, PresencePlaceDetailResponse } from "../wire/types.js";
@@ -28,7 +28,7 @@ export const FEEDERS_THREAD_REFUSAL = "This thread belongs to another owner. Ope
 
 function presenceAccess(c: Context<AppEnv>, owner: Principal): PresenceAccess {
   return {
-    names: slackChannelNames(c),
+    directory: slackChannelDirectory(c),
     canSee: channelsVisibleTo(c),
     threadsShown: threadPairsShownTo(c, owner),
     slackTeamId: async () => {
@@ -58,10 +58,10 @@ presenceRouter.get("/places", async (c) => {
   const owner = await scopeOwner(c);
   if (owner instanceof Response) return owner;
   const started = performance.now();
-  const { places, sessionCount } = await listPresencePlaces(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner));
+  const { places, channelNames, sessionCount } = await listPresencePlaces(c.var.providers, c.var.user.orgId, owner, presenceAccess(c, owner));
   const slow = slowPlacesLine(c.req.query("scope") ?? "", performance.now() - started, sessionCount);
   if (slow) console.info(slow);
-  const body: ListPresencePlacesResponse = { places };
+  const body: ListPresencePlacesResponse = { places, channelNames };
   return c.json(body);
 });
 

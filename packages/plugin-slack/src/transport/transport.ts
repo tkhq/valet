@@ -78,7 +78,7 @@ const PICKER_RESULT_LIMIT = 100;
  * a whole directory at all.
  */
 const memberDirectory = new DirectoryCache<Array<{ id: string; name: string; realName?: string }>>();
-const channelDirectory = new DirectoryCache<Array<{ id: string; name: string }>>();
+const channelDirectory = new DirectoryCache<Array<{ id: string; name: string; isPrivate: boolean }>>();
 
 /** Drop both directory caches. For tests, which reuse one fake Slack server
  * across cases and would otherwise see the previous case's members. */
@@ -1274,10 +1274,18 @@ export class SlackTransport implements ChannelTransport {
     return matched.slice(0, PICKER_RESULT_LIMIT);
   }
 
+  /**
+   * Every live channel the bot has joined, with no picker limit, cached for
+   * the directory TTL. Valet names a channel from this list.
+   */
+  async listJoinedChannelDirectory(): Promise<Array<{ id: string; name: string; isPrivate: boolean }>> {
+    return [...await this.allJoinedChannels()];
+  }
+
   /** Every live channel the bot has joined, cached for the directory TTL. */
-  private allJoinedChannels(): Promise<Array<{ id: string; name: string }>> {
+  private allJoinedChannels(): Promise<Array<{ id: string; name: string; isPrivate: boolean }>> {
     return channelDirectory.get(this.api.directoryKey, async () => {
-      const out: Array<{ id: string; name: string }> = [];
+      const out: Array<{ id: string; name: string; isPrivate: boolean }> = [];
       let cursor: string | undefined;
       // A bot in more than 2000 channels is not a workspace this picker can
       // serve well anyway; bound the scan so one runaway install cannot hang it.
@@ -1288,7 +1296,7 @@ export class SlackTransport implements ChannelTransport {
         pages += 1;
         for (const channel of page.channels) {
           if (channel.isArchived) continue;
-          out.push({ id: channel.id, name: channel.name });
+          out.push({ id: channel.id, name: channel.name, isPrivate: channel.isPrivate });
         }
         cursor = page.nextCursor;
         if (pages >= MAX_PAGES) break;

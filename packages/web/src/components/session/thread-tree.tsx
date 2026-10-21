@@ -1006,7 +1006,7 @@ function ThreadNode({
             />
           </button>
         )}
-        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
+        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:hidden hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -1018,6 +1018,11 @@ function ThreadNode({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+            {/* A phone row shows only this menu, so Pin lives here too. */}
+            <DropdownMenuItem disabled={organizingDisabled} onSelect={onPin}>
+              {pinned ? <PinOff className="h-4 w-4" aria-hidden /> : <Pin className="h-4 w-4" aria-hidden />}
+              {pinned ? "Unpin thread" : "Pin thread"}
+            </DropdownMenuItem>
             <DropdownMenuSub>
               <DropdownMenuSubTrigger disabled={organizingDisabled}><Folder className="h-4 w-4" />Move to project</DropdownMenuSubTrigger>
               <DropdownMenuSubContent>

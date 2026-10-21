@@ -1,7 +1,7 @@
 /**
- * Turn-level transient-error retry (TKAI-319): unattended sessions re-run a
- * turn that settled with a transient provider error; interactive sessions
- * surface it untouched.
+ * Turn-level transient-error retry (TKAI-319): a turn that settled with a
+ * transient provider error re-runs. Unattended turns wait longer; a person's
+ * prompt retries briefly, and a long provider-requested wait fails at once.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -16,6 +16,7 @@ import {
   MESSAGE_TURN_ERROR_KEY,
   VirtualSandboxProvider,
   formatTransientRetryMessage,
+  parseProviderRetryHintMs,
   type BusEvent,
   type MessageEntry,
   type PromptContent,
@@ -127,6 +128,21 @@ describe("formatTransientRetryMessage (TKAI-325)", () => {
   });
 });
 
+describe("parseProviderRetryHintMs", () => {
+  it("reads the wait each provider format names", () => {
+    expect(parseProviderRetryHintMs("Limit 1000000, Used 842906, Requested 160830. Please try again in 224ms.")).toBe(224);
+    expect(parseProviderRetryHintMs("Please try again in 1.722s. Visit the docs")).toBe(1722);
+    expect(parseProviderRetryHintMs("Rate limit reached. Please try again in 6m0s.")).toBe(360_000);
+    expect(parseProviderRetryHintMs("Server requested 45s retry delay (max 30s)")).toBe(45_000);
+    expect(parseProviderRetryHintMs("429: retry after 3 seconds")).toBe(3_000);
+  });
+
+  it("names no wait when the text has none", () => {
+    expect(parseProviderRetryHintMs("overloaded_error: Overloaded")).toBeUndefined();
+    expect(parseProviderRetryHintMs(undefined)).toBeUndefined();
+  });
+});
+
 describe("turn-level transient retry (TKAI-319)", () => {
   it("an unattended (child) session retries past a transient error and completes", async () => {
     const faux = registerFauxProvider({
@@ -214,10 +230,12 @@ describe("turn-level transient retry (TKAI-319)", () => {
     { label: "text", content: "go" },
     { label: "file attachment", content: { text: "Read this", attachments: [{ type: "file", path: "/workspace/nda.docx", bytes: 10, sha256: "abc", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", name: "nda.docx" }] } },
     { label: "image only", content: { attachments: [{ type: "image", data: new Uint8Array([1]), mimeType: "image/png" }] } },
-  ])("settles a human orchestrator failure and accepts a fresh prompt without background retries ($label)", async ({ content }) => {
+  ])("settles a person's prompt at once when the provider asks for a long wait, and accepts a fresh prompt ($label)", async ({ content }) => {
     const faux = registerFauxProvider({ provider: "retry-human-orchestrator" });
     faux.setResponses([
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded" }),
+      // Five minutes is past a person's retry window, so the turn fails now
+      // instead of holding the queued prompt behind a background wait.
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit exceeded. Please try again in 5m." }),
       fauxAssistantMessage("queued response"),
       fauxAssistantMessage("fresh response"),
     ]);
@@ -244,15 +262,16 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
-  it("an interactive session does not auto-retry", async () => {
+  it("a person's prompt retries a transient error briefly and completes", async () => {
     const faux = registerFauxProvider({
       provider: "retry-interactive",
       models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
     });
     faux.setResponses([
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" }),
+      fauxAssistantMessage("recovered response"),
     ]);
-    const { engine, events } = makeEngine();
+    const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
       userId: "u",
       orgId: "o",
@@ -260,15 +279,61 @@ describe("turn-level transient retry (TKAI-319)", () => {
       sandbox: {},
       model: faux.getModel("m")!,
       purpose: "interactive",
+      turnRetry: { backoffMs: [1] },
     });
-    const receipt = await session.prompt("do the thing");
-    await waitFor(() =>
-      events.some((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId),
-    );
-    expect(
-      events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry"),
-    ).toBe(false);
-    expect(faux.getPendingResponseCount()).toBe(0);
+    const receipt = await session.prompt("do the thing", { author: { id: "u" } });
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId));
+    expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("completed");
+    const retries = events.filter((e) => e.event.type === "error" && e.event.code === "turn_transient_retry");
+    expect(retries).toHaveLength(1);
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const lastAssistant = [...entries].reverse().find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant?.type === "message" && lastAssistant.content).toBe("recovered response");
+    faux.unregister();
+  });
+
+  it("waits the provider's short hint before a person's retry", async () => {
+    const faux = registerFauxProvider({
+      provider: "retry-interactive-hint",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 Rate limit reached. Please try again in 300ms." }),
+      fauxAssistantMessage("after the hint"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("m")!,
+      purpose: "interactive", turnRetry: { backoffMs: [1] },
+    });
+    const started = Date.now();
+    const receipt = await session.prompt("do the thing", { author: { id: "u" } });
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId));
+    // The 1ms backoff alone would retry at once; the provider asked for 300ms.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+    expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("completed");
+    faux.unregister();
+  });
+
+  it("does not retry a person's prompt past the provider's long hint", async () => {
+    const faux = registerFauxProvider({
+      provider: "retry-interactive-long-hint",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 Rate limit reached. Please try again in 6m0s." }),
+      fauxAssistantMessage("must not run"),
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("m")!,
+      purpose: "interactive", turnRetry: { backoffMs: [1] },
+    });
+    const receipt = await session.prompt("do the thing", { author: { id: "u" } });
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId));
+    expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("failed");
+    expect(events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")).toBe(false);
+    expect(faux.getPendingResponseCount()).toBe(1);
     faux.unregister();
   });
 
@@ -288,6 +353,7 @@ describe("turn-level transient retry (TKAI-319)", () => {
       sandbox: {},
       model: faux.getModel("m")!,
       purpose: "interactive",
+      turnRetry: { maxAttempts: 0 },
     });
     const receipt = await session.prompt("do the thing");
     await waitFor(() =>

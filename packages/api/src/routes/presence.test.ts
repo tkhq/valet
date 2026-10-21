@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import githubPlugin from "@valet/plugin-github/plugin";
@@ -11,12 +12,13 @@ import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowS
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { slowPlacesLine } from "./presence.js";
+import { resetChannelNameCaches } from "./workspace-channels.js";
 import type {
   ListEventSubscriptionsResponse, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceDetailResponse, PresencePlaceWire,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
+afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); resetChannelNameCaches(); await api?.cleanup(); api = undefined; });
 
 const ORG = "local-org";
 const USER = "local-user";
@@ -28,21 +30,28 @@ async function boot(): Promise<TestApi> {
 
 /** Connects the org Slack bot for team `T1` and answers Slack's channel
  * checks: `members` lists each private channel's members; any other channel
- * is public. */
-async function connectSlack(a: TestApi, members: Record<string, string[]> = {}) {
+ * is public. `joined` names the channels the bot has joined, by id. The
+ * returned list holds each Slack call as `<method> <channel>`. */
+async function connectSlack(a: TestApi, members: Record<string, string[]> = {}, joined: Record<string, string> = {}) {
+  const calls: string[] = [];
+  // The Slack plugin caches its directory and its names by token, so each
+  // test's bot has its own token.
   await a.providers.engineCredentials.save({ type: "org", id: ORG }, "slack",
-    { type: "oauth2", accessToken: "xoxb-test", metadata: { teamId: "T1" } });
+    { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
   const realFetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.hostname !== "slack.com") return realFetch(input, init);
     const channel = url.searchParams.get("channel") ?? "";
     const privateMembers = members[channel];
-    const body = url.pathname.endsWith("conversations.members")
-      ? { ok: true, members: privateMembers ?? [] }
+    calls.push(`${url.pathname.split("/").pop() ?? ""} ${channel}`.trim());
+    const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: privateMembers ?? [] }
+      : url.pathname.endsWith("users.conversations")
+        ? { ok: true, channels: Object.entries(joined).map(([id, name]) => ({ id, name, is_private: members[id] !== undefined })) }
       : { ok: true, channel: { name: channel.toLowerCase(), is_private: privateMembers !== undefined } };
     return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
   });
+  return calls;
 }
 
 interface RuleSeed {
@@ -431,5 +440,122 @@ it("sends only the places on the list route", async () => {
   const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
   await session.createThread("subject:github:acme/api#12");
   const res = await fetch(`${api.baseUrl}/api/presence/places?scope=user`);
-  expect(Object.keys(await res.json() as Record<string, unknown>)).toEqual(["places"]);
+  expect(Object.keys(await res.json() as Record<string, unknown>)).toEqual(["places", "channelNames"]);
+});
+
+/** The places read as the overview reads it. */
+async function placesRead(a: TestApi, scope: string): Promise<ListPresencePlacesResponse> {
+  const res = await fetch(`${a.baseUrl}/api/presence/places?scope=${encodeURIComponent(scope)}`);
+  expect(res.status).toBe(200);
+  return await res.json() as ListPresencePlacesResponse;
+}
+
+// Dev, 10-21: a line over 21 channels lists at the Slack workspace, so its 8
+// channels with no event in 30 days were no place and read as raw ids.
+it("names every public channel a line lists, though no event made it a place", async () => {
+  api = await boot();
+  const calls = await connectSlack(api, { CPRIV: ["USOMEONE"] }, { C900: "incidents", C950: "alerts-prod", CPRIV: "secret-plans" });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950", "CPRIV", "CGONE"] }] });
+
+  const read = await placesRead(api, "user");
+  expect(read.places.map((row) => row.subject)).toEqual(["slack:T1"]);
+  // A private channel that is no place keeps its id, and the bot has not
+  // joined CGONE. The read takes one list of the bot's channels and checks
+  // no channel one by one.
+  expect(read.channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
+  expect(calls).toEqual(["users.conversations"]);
+
+  // A second read asks Slack nothing.
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
+  expect(calls).toEqual(["users.conversations"]);
+});
+
+// Review of PR #1012: a channel that went private after the bot's list was
+// read must not show its name when the check hides its place.
+it("names no channel whose place the check hid, though the list still calls it public", async () => {
+  api = await boot();
+  await api.providers.engineCredentials.save({ type: "org", id: ORG }, "slack",
+    { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    const channel = url.searchParams.get("channel") ?? "";
+    const body = url.pathname.endsWith("users.conversations")
+      ? { ok: true, channels: [{ id: "C900", name: "formerly-public", is_private: false }, { id: "C950", name: "alerts-prod", is_private: false }] }
+      : url.pathname.endsWith("conversations.members") ? { ok: true, members: [] }
+      : { ok: true, channel: { name: channel.toLowerCase(), is_private: channel === "C900" } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-secret", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C900" }] });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950"] }] });
+
+  const read = await placesRead(api, "user");
+  expect(read.places.map((row) => row.subject)).not.toContain("slack:T1/C900");
+  expect(read.channelNames).toEqual({ C950: "alerts-prod" });
+});
+
+// Review of PR #1012: one conversations.info call for each channel did not
+// fit Slack's rate limit, and the channel picker stops at 100 channels.
+it("names a line's channels past the picker's first 100 with no Slack call for each channel", async () => {
+  api = await boot();
+  const ids = Array.from({ length: 150 }, (_, n) => `C${String(n).padStart(3, "0")}`);
+  const calls = await connectSlack(api, {}, Object.fromEntries(ids.map((id) => [id, `ch-${id.slice(1)}`])));
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  const listed = ids.slice(100, 125);
+  await rule(api, { id: "r-many", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: listed }] });
+
+  const read = await placesRead(api, "user");
+  expect(read.channelNames).toEqual(Object.fromEntries(listed.map((id) => [id, `ch-${id.slice(1)}`])));
+  expect(calls).toEqual(["users.conversations"]);
+});
+
+it("reads a renamed channel's new name once the five-minute list expires", async () => {
+  api = await boot();
+  const joined = { C950: "alerts-prod" };
+  await connectSlack(api, {}, joined);
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C950", "C951"] }] });
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
+
+  joined.C950 = "alerts-production";
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-production" });
+});
+
+// Review of PR #1012: the place page sends no channel names, so a line's
+// channels must not cost it a Slack call.
+it("asks Slack nothing for a line's channels on a place page", async () => {
+  api = await boot();
+  const calls = await connectSlack(api, {}, { C950: "alerts-prod" });
+  const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await session.createThread("subject:github:acme/api#12");
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C950", "C951"] }] });
+  expect((await detailOf(api, "github:acme/api#12")).status).toBe(200);
+  expect(calls).toEqual([]);
+});
+
+// Review of PR #1012: a rate-limited scan must not make every read wait again.
+it("keeps a failed channel list for a minute instead of asking Slack on every read", async () => {
+  api = await boot();
+  await api.providers.engineCredentials.save({ type: "org", id: ORG }, "slack",
+    { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
+  const realFetch = globalThis.fetch;
+  let scans = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    scans += 1;
+    return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), { status: 429, headers: { "retry-after": "0" } });
+  });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C950", "C951"] }] });
+
+  expect((await placesRead(api, "user")).channelNames).toEqual({});
+  const first = scans;
+  expect(first).toBeGreaterThan(0);
+  expect((await placesRead(api, "user")).channelNames).toEqual({});
+  expect(scans).toBe(first);
 });

@@ -357,7 +357,7 @@ export function RunDetailBody({
             )}
           </h2>
           <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} modelChanges={modelChanges}
-            onExplainFailure={run.status === "settled" ? onExplainFailure : undefined} timeline={timeline} now={now} />
+            onExplainFailure={run.status === "settled" ? onExplainFailure : undefined} timeline={timeline} settled={run.status === "settled"} now={now} />
         </div>
         {definition && (
           <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>

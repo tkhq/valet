@@ -28,6 +28,12 @@ export interface ComposerDraft {
   imageErrors: string[];
   /** Intake refusals and send failures for file attachments. */
   fileErrors: string[];
+  /**
+   * The history index of the prompt that Up or Down put in `text`. Every
+   * composer on the thread reads it, and any other text change drops it, so
+   * an edit in one composer ends the recall in all of them.
+   */
+  recall?: number;
 }
 
 /**
@@ -72,7 +78,10 @@ interface ComposerDraftStore {
   owner: string;
   activateOwner(owner: string): void;
   byKey: Record<string, ComposerDraft>;
+  /** Replace the text. This ends a recall. */
   setText(key: string, text: string): void;
+  /** Show history prompt `index` as the text, or an empty text when `index` is null. */
+  recallText(key: string, index: number | null, text: string): void;
   setImages(key: string, update: ListUpdate<ComposerImage>): void;
   setFiles(key: string, update: ListUpdate<ComposerFile>): void;
   setImageErrors(key: string, update: ListUpdate<string>): void;
@@ -134,7 +143,9 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
     byKey: {},
     // Never attribute legacy unscoped drafts to whichever account signs in next.
     activateOwner: (owner) => set((state) => state.owner === owner ? state : { owner, byKey: owner ? storedDrafts(owner) : {} }),
-    setText: (key, text) => patch(key, (d) => ({ ...d, text })),
+    setText: (key, text) => patch(key, ({ recall: _, ...d }) => ({ ...d, text })),
+    recallText: (key, index, text) =>
+      patch(key, ({ recall: _, ...d }) => (index === null ? { ...d, text } : { ...d, text, recall: index })),
     setImages: (key, update) => patch(key, (d) => ({ ...d, images: resolve(update, d.images) })),
     setFiles: (key, update) => patch(key, (d) => ({ ...d, files: resolve(update, d.files) })),
     setImageErrors: (key, update) =>

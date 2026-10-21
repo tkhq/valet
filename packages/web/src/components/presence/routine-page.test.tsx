@@ -3,7 +3,7 @@
  * A routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
  * step 2): the line page's anatomy. The sentence as the title with the
  * clock mark, the status line with fire now, edit, and enable or disable,
- * the health strip, the problem with the picker inline, How it works, and
+ * the health strip, the problem with the picker inline, How it works (the inline form), and
  * Activity as the routine's firings.
  *
  * The api client is mocked at the transport, so the real query hooks run.
@@ -24,7 +24,7 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const navigate = vi.fn<(to: { to: string }) => Promise<void>>();
+const navigate = vi.fn<(to: { to: string; ignoreBlocker?: boolean }) => Promise<void>>();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => navigate,
@@ -78,6 +78,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => ({
 
 /** The editor is its own suite's; here it records the mode it opened on. */
 vi.mock("~/components/presence/editor/line-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).stubModule);
+vi.mock("~/components/presence/editor/inline-editor", async () => (await import("~/components/presence/editor/test-editor-stub")).inlineStubModule);
 
 vi.mock("./thread-picker", () => ({
   ThreadPicker: ({ workspace, onPick }: {
@@ -93,7 +94,6 @@ vi.mock("./thread-picker", () => ({
 import { routineWhen } from "./routine-helpers";
 import { RoutinePage, routineReadOnly, scheduleRunPrefix } from "./routine-page";
 import { routine } from "./test-fixtures";
-import { zoneLongName } from "~/lib/time-zones";
 
 const PIN_TEXT = "Pick another thread in Presence.";
 
@@ -129,10 +129,9 @@ beforeEach(() => {
   listThreads.mockResolvedValue({ threads: [] });
 });
 
-/** How it works as the text of each column, When, Do, Where. */
-async function columns(): Promise<string[]> {
-  const how = await screen.findByRole("region", { name: "How it works" });
-  return Array.from(how.querySelectorAll<HTMLElement>("[data-section]")).map((column) => column.textContent ?? "");
+/** The inline form's mode in words, from the stub. */
+async function inlineForm(): Promise<string> {
+  return (await screen.findByTestId("inline-editor")).textContent ?? "";
 }
 
 /** The timeline's rows as their text, newest first. */
@@ -157,14 +156,16 @@ describe("scheduleRunPrefix", () => {
 });
 
 describe("RoutinePage", () => {
-  it("shows the sentence and offers fire now, edit, and disable", async () => {
+  it("shows the sentence, edits inline, and offers fire now and disable", async () => {
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Fire now" }));
     await waitFor(() => expect(runWorkflowScheduleNow).toHaveBeenCalledWith("S1"));
     expect(await screen.findByText("Fired. The routine runs now.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
+    // How it works is the editor itself: no Edit button, no sheet.
+    expect(await inlineForm()).toBe("Inline: edit-routine Morning summary");
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.queryByTestId("line-editor")).toBeNull();
     fireEvent.click(screen.getByRole("switch", { name: "Turn off Morning summary" }));
     await waitFor(() => expect(updateWorkflowSchedule).toHaveBeenCalledWith("S1", { enabled: false }));
   });
@@ -203,29 +204,12 @@ describe("RoutinePage", () => {
     expect(screen.queryByText("Runs in")).toBeNull();
   });
 
-  it("shows When with the timezone, Do, and Where for an assistant routine", async () => {
-    wrap(<RoutinePage id="S2" />);
-    const zone = zoneLongName("America/Denver");
-    expect(await columns()).toEqual([
-      `WhenEvery weekday at 8:30 (${zone})The times are in ${zone}.Change`,
-      "Dowork on its promptValet reads the prompt and acts in the thread.Change",
-      "Wherein a new thread each timeEvery firing starts a fresh thread.Change",
-    ]);
-  });
-
-  it("shows When, Do, and a run for Where on a workflow routine", async () => {
+  it("edits an assistant routine and a workflow routine inline", async () => {
+    const { unmount } = wrap(<RoutinePage id="S2" />);
+    expect(await inlineForm()).toBe("Inline: edit-routine Standup");
+    unmount();
     wrap(<RoutinePage id="S3" />);
-    await waitFor(async () => expect(await columns()).toEqual([
-      "WhenEvery day at 2:00The times are in UTC.Change",
-      "Dorun BuildValet starts the Build workflow.Change",
-      "Wherein a workflow runA workflow run has no thread. Open the run from Activity to follow it.Change",
-    ]));
-  });
-
-  it("opens the editor on the section a Change names", async () => {
-    wrap(<RoutinePage id="S1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Change When" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary at when");
+    expect(await inlineForm()).toBe("Inline: edit-routine Nightly build");
   });
 
   it("names a pinned thread from the archived list", async () => {
@@ -297,10 +281,9 @@ describe("RoutinePage", () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerId: "u-other" } })] });
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByText("Only its owner can change this routine.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Fire now" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("switch", { name: "Turn off Morning summary" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Change When" }).hasAttribute("disabled")).toBe(true);
+    expect(await inlineForm()).toBe("Inline: edit-routine Morning summary (read-only)");
   });
 
   it("keeps a team routine read-only for a viewer outside the team", async () => {
@@ -308,17 +291,16 @@ describe("RoutinePage", () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByText("Only members of SRE can change this.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Edit" }).hasAttribute("disabled")).toBe(true);
+    expect(await inlineForm()).toBe("Inline: edit-routine Morning summary (read-only)");
     await userEvent.click(screen.getByRole("button", { name: "More for Morning summary" }));
     expect(screen.getByRole("menuitem", { name: "Delete" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("opens Edit on a team routine and marks the routine Team", async () => {
+  it("edits a team routine inline for a member and marks the routine Team", async () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { ownerType: "team", ownerId: "team-sre" } })] });
     wrap(<RoutinePage id="S1" />);
     expect(await screen.findByText("Team")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
+    expect(await inlineForm()).toBe("Inline: edit-routine Morning summary");
   });
 
   it("deletes the routine after the confirm, then opens Presence", async () => {
@@ -328,7 +310,7 @@ describe("RoutinePage", () => {
     expect(within(dialog).getByText("Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteWorkflowSchedule).toHaveBeenCalledWith("S1"));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence", ignoreBlocker: true }));
   });
 
   it("names a team routine's team in the Delete confirm", async () => {
@@ -338,7 +320,7 @@ describe("RoutinePage", () => {
     expect(await screen.findByText("This is SRE's routine. Valet stops acting on this schedule. Its past runs stay.")).toBeTruthy();
   });
 
-  it("shows a scheduler reason as written, with Edit to fix it", async () => {
+  it("shows a scheduler reason as written, above the form that fixes it", async () => {
     const reason = "Its workflow was deleted. Delete this routine and make a new one with another workflow.";
     listWorkflowTriggers.mockResolvedValue({
       triggers: [routine("S1", { enabled: false, workflowId: "wf-gone", detail: { targetKind: "workflow", disabledReason: reason } })],
@@ -346,8 +328,8 @@ describe("RoutinePage", () => {
     wrap(<RoutinePage id="S1" />);
     const problem = await screen.findByRole("region", { name: "Problem" });
     expect(within(problem).getByText(reason)).toBeTruthy();
-    fireEvent.click(within(problem).getByRole("button", { name: "Edit the routine" }));
-    expect(screen.getByTestId("line-editor").textContent).toBe("Editor: edit-routine Morning summary");
+    const how = screen.getByRole("region", { name: "How it works" });
+    expect(problem.compareDocumentPosition(how) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("names who may change a routine with a scheduler reason for a read-only viewer (S10)", async () => {
@@ -359,7 +341,6 @@ describe("RoutinePage", () => {
     const problem = await screen.findByRole("region", { name: "Problem" });
     expect(within(problem).getByText(reason)).toBeTruthy();
     expect(within(problem).getByText("Only its owner can change this routine.")).toBeTruthy();
-    expect(within(problem).queryByRole("button", { name: "Edit the routine" })).toBeNull();
   });
 
   it("reads a routine as read-only until the viewer and the teams load", () => {
@@ -450,14 +431,13 @@ describe("RoutinePage", () => {
     expect(listWorkflowRuns).not.toHaveBeenCalled();
   });
 
-  it("links its own thread from the title, Where, and the firing", async () => {
+  it("links its own thread from the title and the firing", async () => {
     const own = { sessionId: "s-own", threadId: "t-own", title: "Morning summary", archived: false };
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000, lastFiredThread: own } })] });
     wrap(<RoutinePage id="S1" />);
     const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
-    const how = screen.getByRole("region", { name: "How it works" });
     const timeline = screen.getByRole("region", { name: "Activity" });
-    for (const place of [title, how, timeline]) {
+    for (const place of [title, timeline]) {
       expect(within(place).getByRole("link", { name: /^its own thread\.?$/ }).getAttribute("href")).toBe("/threads/t-own");
     }
     expect(activityRows()).toEqual([expect.stringContaining("Fired → worked in its own thread")]);
@@ -468,7 +448,7 @@ describe("RoutinePage", () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000, lastFiredThread: own } })] });
     wrap(<RoutinePage id="S1" />);
     const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
-    for (const place of [title, screen.getByRole("region", { name: "How it works" }), screen.getByRole("region", { name: "Activity" })]) {
+    for (const place of [title, screen.getByRole("region", { name: "Activity" })]) {
       const link = within(place).getByRole("link");
       expect(link.getAttribute("aria-disabled")).toBe("true");
       expect(link.getAttribute("href")).toBeNull();
@@ -491,7 +471,7 @@ describe("RoutinePage", () => {
     listWorkflowTriggers.mockResolvedValue({ triggers: [routine("S1", { detail: { lastFiredAt: Date.now() - 3_600_000 } })] });
     wrap(<RoutinePage id="S1" />);
     const title = await screen.findByRole("heading", { level: 1, name: "Every day at 9:00, Morning summary: work in its own thread." });
-    for (const place of [title, screen.getByRole("region", { name: "How it works" }), screen.getByRole("region", { name: "Activity" })]) {
+    for (const place of [title, screen.getByRole("region", { name: "Activity" })]) {
       expect(within(place).queryByRole("link", { name: /^its own thread/ })).toBeNull();
     }
   });

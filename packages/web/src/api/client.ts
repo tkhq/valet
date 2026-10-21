@@ -17,6 +17,7 @@ import type {
   ListThreadFeedersResponse,
   PresencePlaceDetailResponse,
   ThreadChannelActivity,
+  ThreadContextResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
   AbortThreadRequest,
@@ -646,6 +647,9 @@ export const api = {
     request<ListThreadFeedersResponse>("GET", `/presence/feeders?sessionId=${encodeURIComponent(sessionId)}&threadId=${encodeURIComponent(threadId)}`),
   getThreadChannelActivity: (threadId: string) =>
     request<ThreadChannelActivity>("GET", `/threads/${encodeURIComponent(threadId)}/channel-activity`),
+  /** How full the thread's model context is. Reading it never wakes the sandbox. */
+  getThreadContext: (threadId: string) =>
+    request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
   threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
     `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,

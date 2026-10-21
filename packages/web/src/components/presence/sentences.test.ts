@@ -17,23 +17,17 @@ import {
   cronInWords,
   deadErrorSentence,
   derivedClause,
-  doExplanation,
-  doParts,
   eventInWords,
   firingParts,
   lineEntryParts,
-  routineDoExplanation,
-  scheduleExplanation,
   tookInWords,
-  whenExplanation,
-  whereExplanation,
-  whereParts,
   eventLabel,
   hasEventWords,
   partsText,
   presenceAction,
   presenceSentence,
   presenceSentenceParts,
+  routineRowParts,
   routineSentence,
   routineSentenceParts,
   whereLabel,
@@ -422,14 +416,6 @@ describe("a Slack channel's name (spec Part C step 2)", () => {
       "When someone mentions Valet in C0AK0T8KPPY, run Triage failures.",
     );
   });
-
-  // Review of PR #986: the matcher tests the id against the pattern, so a
-  // name in a When condition would describe a match the pattern never makes.
-  // An exact channel is a place, and the place clause names it.
-  it("keeps a pattern over the channel id literal in a When condition", () => {
-    expect(whenExplanation([{ field: "channel", op: "prefix", value: "C1" }], ["slack.message"], { channels: { C1: "eng" } }))
-      .toBe("Only when the channel starts with C1.");
-  });
 });
 
 describe("presenceSentence without the place clause (spec Part B step 5)", () => {
@@ -505,15 +491,12 @@ describe("scheduleZone", () => {
 const OWN_THREAD = { sessionId: "s-own", threadId: "t-own", title: "Morning summary", archived: false };
 
 describe("a routine's own thread", () => {
-  it("links its own thread in the sentence, Where, and the firing, with the words unchanged", () => {
+  it("links its own thread in the sentence and the firing, with the words unchanged", () => {
     const r = routine({ lastFiredThread: OWN_THREAD });
     const token = { kind: "thread", text: "its own thread", sessionId: "s-own", threadId: "t-own" };
     const sentence = routineSentenceParts(r, workflows, threads);
     expect(sentence).toContainEqual(token);
     expect(partsText(sentence)).toBe("Every day at 9:00, Morning summary: work in its own thread.");
-    const where = whereParts({ mode: "own" }, null, threads, r.detail.lastFiredThread);
-    expect(where).toEqual([{ kind: "text", text: "in " }, token]);
-    expect(partsText(where)).toBe("in its own thread");
     const firing = firingParts(r, workflows, threads);
     expect(firing).toEqual([{ kind: "text", text: "Fired → worked in " }, token]);
   });
@@ -538,7 +521,6 @@ describe("a routine's own thread", () => {
       expect(routineSentenceParts(r, workflows, threads).some((part) => part.kind === "thread")).toBe(false);
       expect(firingParts(r, workflows, threads)).toEqual([{ kind: "text", text: "Fired → worked in its own thread" }]);
     }
-    expect(whereParts({ mode: "own" }, null, threads)).toEqual([{ kind: "text", text: "in its own thread" }]);
   });
 });
 
@@ -574,6 +556,20 @@ describe("routineSentence", () => {
     expect(routineSentence(routine({ targetKind: "workflow" }, "wf-1"), workflows, threads)).toBe(
       "Every day at 9:00, Morning summary: run Triage failures.",
     );
+  });
+
+  it("names a routine once when it runs a workflow of the same name", () => {
+    const installed = { ...routine({ targetKind: "workflow" }, "wf-1"), name: "Triage failures" };
+    expect(routineSentence(installed, workflows, threads)).toBe("Every day at 9:00, run Triage failures.");
+    expect(partsText(routineRowParts(installed, workflows, threads))).toBe("Run Triage failures.");
+    expect(partsText(routineRowParts(routine({ targetKind: "workflow" }, "wf-1"), workflows, threads))).toBe(
+      "Morning summary: run Triage failures.",
+    );
+  });
+
+  it("keeps the casing of a routine's own name on its row", () => {
+    const named = { ...routine({}), name: "iOS release check" };
+    expect(partsText(routineRowParts(named, workflows, threads))).toBe("iOS release check: work in its own thread.");
   });
 
   it("names a timezone other than UTC after the schedule words", () => {
@@ -969,98 +965,6 @@ describe("every catalog key reads as words", () => {
         expect(said, key).not.toMatch(/happens/);
       }
     }
-  });
-});
-
-describe("How it works explanations (Part D step 1.6)", () => {
-  const ACME = { field: "repo", op: "eq" as const, value: "acme/api" };
-
-  it("reads each key's default words only for the keys they fit (S15)", () => {
-    expect(whenExplanation([], ["slack.reaction_added"])).toBe("No other conditions.");
-    expect(whenExplanation([], ["slack.channel_created"])).toBe("No other conditions.");
-    expect(whenExplanation([ACME], ["github.issues.opened"])).toBe("Any issue.");
-    expect(whenExplanation([ACME], ["github.release.published"])).toBe("Any release.");
-    expect(whenExplanation([ACME], ["github.push", "github.pull_request.opened"])).toBe("Any branch, any author.");
-    expect(whenExplanation([ACME], ["github.push", "github.issues.opened"])).toBe("No other conditions.");
-  });
-
-  it("reads a line that names only its place as what it hears there", () => {
-    expect(whenExplanation([ACME], ["github.check_run.completed"])).toBe("Any branch, any author.");
-    expect(whenExplanation([], ["linear.issue.create"])).toBe("Any issue, any author.");
-    expect(whenExplanation([{ field: "channel", op: "eq", value: "C1" }], ["slack.message"])).toBe("Any message, in a thread or not.");
-    expect(whenExplanation([], [])).toBe("No other conditions.");
-  });
-
-  it("lists every other condition after Only, and skips the creator scope", () => {
-    expect(whenExplanation([ACME, { field: "branch", op: "eq", value: "main" }], ["github.push"])).toBe("Only the main branch.");
-    expect(whenExplanation(
-      [{ field: "branch", op: "in", value: ["main", "release"] }, { field: "sender", op: "eq", value: "U1", label: "Alice" }],
-      ["github.push"],
-    )).toBe("Only the main or release branch and from Alice.");
-    expect(whenExplanation(
-      [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U-me" }],
-      ["slack.app_mention"],
-    )).toBe("Any message, in a thread or not.");
-    expect(whenExplanation([{ field: "title", op: "contains", value: "deploy" }], ["github.issues.opened"]))
-      .toBe("Only when the title contains deploy.");
-  });
-
-  it("reads a place field with another op as a condition, never as any place (S3)", () => {
-    const prefix = { field: "repo", op: "prefix" as const, value: "acme/" };
-    expect(whenExplanation([prefix], ["github.push"])).toBe("Only when the repository starts with acme/.");
-    expect(whenExplanation([{ field: "channel", op: "contains", value: "inc" }], ["slack.message"]))
-      .toBe("Only when the channel contains inc.");
-    const push = sub({ eventKeys: ["github.push"], filters: [prefix], target: { kind: "assistant", thread: { mode: "own" } } });
-    expect(presenceSentence(push, catalog, workflows, threads)).toBe("When a push lands on a repository that starts with acme/, work in its own thread.");
-    // An eq place filter still names the place.
-    const both = sub({ eventKeys: ["github.push"], filters: [acmeApi, { field: "repo", op: "contains", value: "api" }], target: { kind: "assistant", thread: { mode: "own" } } });
-    expect(presenceSentence(both, catalog, workflows, threads)).toBe("When a push lands on acme/api, work in its own thread.");
-  });
-
-  it("reads Do as what Valet does and as whom", () => {
-    const check = { eventKeys: ["github.check_run.completed"], target: { kind: "assistant" as const } };
-    expect(partsText(doParts(check, []))).toBe("work on it as Valet");
-    // The default name is plain text; only a custom display name is a person token.
-    expect(doParts(check, [])).toEqual([{ kind: "text", text: "work on it as Valet" }]);
-    expect(doExplanation(check, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
-    const mention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const, follow: true, appearance: { displayName: "Ops Bot" } } };
-    const workOnMention = { eventKeys: ["slack.app_mention"], target: { kind: "assistant" as const } };
-    expect(partsText(doParts(workOnMention, []))).toBe("work on it as Valet");
-    expect(doExplanation(workOnMention, [])).toBe("Valet reads the event and acts in the thread. It appears as Valet.");
-    expect(partsText(doParts(mention, []))).toBe("reply as Ops Bot");
-    expect(doParts(mention, [])[1]).toEqual({ kind: "person", text: "Ops Bot" });
-    expect(doExplanation(mention, [])).toBe("Valet reads the message and replies. It appears as Ops Bot.");
-    expect(whereExplanation({ mode: "new" }, "channel", "presence", { mention: true })).toBe(
-      "Valet replies where it was mentioned. Every event starts a fresh thread.",
-    );
-    const workflow = { eventKeys: ["github.push"], target: { kind: "workflow" as const, workflowId: "wf-1" } };
-    expect(partsText(doParts(workflow, [{ id: "wf-1", name: "Triage" }]))).toBe("run Triage");
-    expect(doExplanation(workflow, [{ id: "wf-1", name: "Triage" }])).toBe("Valet starts the Triage workflow with the event as its input.");
-  });
-
-  it("reads each Where policy as behavior", () => {
-    expect(whereExplanation({ mode: "subject" }, "pull request")).toBe("Each pull request gets its own thread; every event for it lands there.");
-    expect(whereExplanation({ mode: "existing", sessionId: "s", threadId: "t" }, null)).toBe("Every event lands in this one thread, so the history stays in one place.");
-    expect(whereExplanation({ mode: "new" }, "channel")).toBe("Every event starts a fresh thread.");
-    expect(whereExplanation({ mode: "own" }, null)).toBe("Every event lands in this line's own thread, so the history stays in one place.");
-    expect(whereExplanation({ mode: "own" }, null, "routine")).toBe("Every firing lands in this routine's own thread, so the history stays in one place.");
-    expect(whereExplanation({ mode: "new" }, null, "routine")).toBe("Every firing starts a fresh thread.");
-  });
-
-  it("reads Where's value with the pinned thread as a token", () => {
-    const parts = whereParts({ mode: "existing", sessionId: "s", threadId: "t-ci" }, null, { "t-ci": { title: "Platform CI" } });
-    expect(partsText(parts)).toBe("in the Platform CI thread");
-    expect(parts).toContainEqual({ kind: "thread", text: "Platform CI", sessionId: "s", threadId: "t-ci" });
-    expect(partsText(whereParts({ mode: "subject" }, "pull request", {}))).toBe("in one thread per pull request");
-    expect(partsText(whereParts({ mode: "new" }, null, {}))).toBe("in a new thread each time");
-  });
-
-  it("reads a routine's zone and Do", () => {
-    expect(scheduleExplanation("UTC")).toBe("The times are in UTC.");
-    expect(scheduleExplanation("America/Denver")).toBe(`The times are in ${zoneLongName("America/Denver")}.`);
-    const routine: RoutineLike = { name: "Nightly", workflowId: "wf-1", detail: { cron: "0 2 * * *", targetKind: "workflow" } };
-    expect(routineDoExplanation(routine, [{ id: "wf-1", name: "Build" }])).toBe("Valet starts the Build workflow.");
-    expect(routineDoExplanation({ name: "M", detail: { cron: "0 9 * * *", targetKind: "assistant" } }, [])).toBe("Valet reads the prompt and acts in the thread.");
   });
 });
 

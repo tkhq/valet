@@ -8,7 +8,6 @@
  * routine's `disabledReason`. Any other text, such as a routine the
  * scheduler turned off for an empty prompt, shows as written.
  */
-import type { ReactNode } from "react";
 import type { AssistantThreadPolicy } from "@valet/shared";
 import { Badge } from "~/components/primitives";
 import { Ref } from "./ref";
@@ -70,7 +69,6 @@ export function ThreadProblem({
   lead,
   leadParts,
   threadId,
-  action,
 }: {
   problem: string;
   /** Muted words before the problem text, such as `In acme/api,`. */
@@ -94,8 +92,6 @@ export function ThreadProblem({
   /** `box` frames the problem on a page of its own. `inline` sits under a
    * row in a list, without the frame. */
   variant?: "box" | "inline";
-  /** A control after a problem that has no picker, such as the routine page's `Edit`. */
-  action?: ReactNode;
 }) {
   const pin = isPinProblem(problem);
   const text = pin ? pinProblemText(threadTitle) : problem;
@@ -112,9 +108,10 @@ export function ThreadProblem({
       {readOnly && <p className="text-xs text-muted">{readOnlyText}</p>}
       {pin && !readOnly && workspace !== undefined && <ThreadPicker workspace={workspace} onPick={(policy) => onPick(policy)} />}
       {pin && !readOnly && workspace === undefined && (
-        <p className="text-xs text-muted">Select Edit, then choose another option under Where.</p>
+        <p className="text-xs text-muted">
+          {variant === "inline" ? "Select Edit, then choose another option under Where." : "Choose another option under Where on this page."}
+        </p>
       )}
-      {!pin && action}
       {pending && <p className="text-xs text-muted">Saving…</p>}
       {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
     </>

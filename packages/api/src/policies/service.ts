@@ -75,6 +75,14 @@ export const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
  *  override in a personal session, the team's policy in a team session. It
  *  writes the same rows as the Integrations and team permission settings. */
 export const GATE_ACTION_ALWAYS_ALLOW_OWNER = "always_allow_owner";
+/** The labels of the extra approval-card choices. The `approvals` skill
+ *  quotes each one, and a test holds the two together. */
+export const GATE_ACTION_LABELS = {
+  approveSession: "Approve for this session",
+  alwaysAllowForMe: "Always allow for me",
+  alwaysAllowForTeam: "Always allow for this team",
+  alwaysAllowOrg: "Always allow (org)",
+} as const;
 
 /**
  * May `userId` pick `always_allow` on a gate raised in `sessionOrgId`?
@@ -820,7 +828,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
           return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };
         }
         return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver,
-          extraGateActions: [{ id: "always_allow_account", label: "Always allow for this team", approves: true }] };
+          extraGateActions: [{ id: "always_allow_account", label: GATE_ACTION_LABELS.alwaysAllowForTeam, approves: true }] };
       }
       if (decision.mode !== "require_approval") return decision;
 
@@ -842,11 +850,11 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       return {
         ...decision,
         extraGateActions: [
-          { id: GATE_ACTION_APPROVE_SESSION, label: "Approve for this session", approves: true },
+          { id: GATE_ACTION_APPROVE_SESSION, label: GATE_ACTION_LABELS.approveSession, approves: true },
           ...(ownerMayAllow
-            ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? "Always allow for this team" : "Always allow for me", approves: true }]
+            ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? GATE_ACTION_LABELS.alwaysAllowForTeam : GATE_ACTION_LABELS.alwaysAllowForMe, approves: true }]
             : []),
-          { id: GATE_ACTION_ALWAYS_ALLOW, label: "Always allow (org)", approves: true },
+          { id: GATE_ACTION_ALWAYS_ALLOW, label: GATE_ACTION_LABELS.alwaysAllowOrg, approves: true },
         ],
       };
     },

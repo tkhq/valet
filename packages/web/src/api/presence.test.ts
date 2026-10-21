@@ -41,6 +41,7 @@ describe("usePlaceSubject", () => {
   it("reads the places only for a channel-only Slack key", async () => {
     const read = vi.spyOn(api, "listPresencePlaces").mockResolvedValue({
       places: [place("slack:T1", null), place("slack:T1/C900", "slack:T1")],
+      channelNames: {},
     });
     const placeKey = renderHook(() => usePlaceSubject("github:acme/api#12"), { wrapper });
     expect(placeKey.result.current).toBe("github:acme/api#12");

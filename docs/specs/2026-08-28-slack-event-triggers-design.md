@@ -274,6 +274,10 @@ select `slack.app_mention` — the exact key or a trailing wildcard — is a
    from that. On PATCH the server derives the row's stored any-channel state
    itself, so an edit that leaves channel scope alone needs no flag; only a
    patch that strips an existing channel filter must assert `anyChannel`.
+   A `channel_name` filter (see "Channel names" below) is not a channel scope
+   either: a name pattern also matches channels created later. A mention line
+   with only a name condition needs `anyChannel`, and it reads back as an
+   any-channel row.
 
 Every subscription writer goes through ONE gate:
 `validateSubscriptionWrite` (`events/subscription-write.ts`), which runs the
@@ -325,6 +329,55 @@ mention rules remain creator-scoped. Redelivery uses the same membership gate.
 The dispatcher uses the mentioner as actor and preserves that actor on the follow row.
 The wizard offers the team's assistant and explains member-only routing.
 See `2026-09-04-team-slack-mention-subscriptions-design.md` for the full contract.
+
+## Channel names (added 2026-10-21)
+
+Slack message events name their channel by ID only. A line that must cover
+every `alerts-` channel, including channels created later, cannot list IDs.
+`slack.message`, `slack.bot_message`, and `slack.app_mention` therefore
+declare a `channel_name` filter at payload path `channel_name`. It takes the
+usual ops; `prefix` and `regex` are the intended ones. The name has no `#`.
+
+Intake adds the name. After a trigger def verifies a message event and before
+`toEvent`, the Slack inbox calls `withEventChannelName`
+(`packages/plugin-slack/src/event-channel-name.ts`) with the org's bot token:
+
+1. A name that the payload already carries stays.
+2. A direct message (`channel_type: im`) gets no name, because Slack gives it
+   none. A `channel_name` condition never matches a direct message.
+3. Otherwise the name comes from the per-token channel name cache
+   (`actions/channel-names.ts`), which the action guards also fill. On a miss,
+   intake sends one `conversations.info` request with no retry and a
+   3-second timeout. Concurrent intake misses for one channel share that
+   request. Intake never joins an action's lookup, which retries after a 429.
+   A name written while a request waits, such as a rename, wins over its
+   response.
+4. A lookup that fails leaves the payload without a name. The filter then
+   fails closed: the line does not match, and Activity shows the
+   `channel_name` condition as the failed one. Intake does not guess a name.
+
+The name lands in the stored payload and in `refs.channel_name`, so a prompt
+template can use `{{payload.channel_name}}`, and redelivery matches on the
+name that intake saw.
+
+Renames. A cache entry answers for five minutes, then the next event reads
+Slack again. A `channel_rename` or `channel_created` event writes the new name
+into the cache at once, so on the api process that receives it the old name
+stops matching immediately. Slack sends `channel_rename` for public channels
+only. A private channel rename, or a rename that another api process
+received, shows within the five-minute window.
+
+Scope and consent. A name condition does not name places. Presence lists such
+a line under the Slack workspace row, and `lineNamedPlaces` gives it no
+channel, the same as a `channel prefix` filter. For mention lines see
+"Mention scoping" above: a name condition needs `anyChannel`. `slack.message`
+and `slack.bot_message` lines have no channel consent requirement, with or
+without a name condition.
+
+Cost. Intake reads the name for every message event in a channel the bot is
+in, whether or not a line uses `channel_name`. With the cache, that is at most
+one `conversations.info` request per active channel every five minutes. It is
+a Tier 3 method.
 
 ## Custom slash commands that route to triggers or assistants
 

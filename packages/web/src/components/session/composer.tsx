@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -36,6 +37,8 @@ import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
 import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
+import { stepHistory, usePromptHistory } from "./prompt-history";
+import { ContextMeter } from "./context-meter";
 import {
   acceptImages,
   filesFromClipboard,
@@ -145,7 +148,7 @@ export function Composer({
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
   const key = draftKey(sessionId, threadId);
-  const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
+  const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const localSubmissionLock = useRef(false);
   const submitting = submissionLock ?? localSubmissionLock;
@@ -169,6 +172,17 @@ export function Composer({
     };
   }, []);
   useAutosizeTextarea(inputRef, text);
+  // Up and Down step through the person's earlier prompts in this thread
+  // (`stepHistory`). The recalled index lives in the draft slot, which the
+  // Ask Valet dock shares, so typing or sending in either composer ends it.
+  const history = usePromptHistory(sessionId, threadId);
+  const caretToEnd = useRef(false);
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (!caretToEnd.current || !field) return;
+    caretToEnd.current = false;
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, [text]);
   useEffect(() => {
     if (replyTarget) inputRef.current?.focus();
   }, [replyTarget]);
@@ -264,8 +278,14 @@ export function Composer({
       : undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const popupOpen = !dismissed && popupItems.length > 0;
-  const noticeOpen = !dismissed && !popupOpen && argNotice !== undefined;
+  // A recalled prompt reads as already written: its slash command opens no
+  // popup, so Up and Down keep stepping and Enter sends it, until an edit.
+  // The slot keeps the recall when a refetch rewrites the history row, such
+  // as an optimistic `/review` that persists as `/skill:review`.
+  const recalledIndex = recall ?? null;
+  const showingRecall = recalledIndex !== null;
+  const popupOpen = !dismissed && !showingRecall && popupItems.length > 0;
+  const noticeOpen = !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
   useEffect(() => {
     setSelectedIndex(0);
@@ -821,6 +841,22 @@ export function Composer({
       }
     }
 
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+      const field = e.currentTarget;
+      const step = stepHistory(
+        history,
+        { index: recalledIndex, text },
+        e.key === "ArrowUp" ? "older" : "newer",
+        { start: field.selectionStart, end: field.selectionEnd },
+      );
+      if (step) {
+        e.preventDefault();
+        caretToEnd.current = true;
+        useComposerDraftStore.getState().recallText(key, step.index, step.text);
+        return;
+      }
+    }
+
     // Enter submits; Shift+Enter inserts a newline. Skip while an IME
     // composition is active so Enter confirms the composition instead of
     // sending a half-finished message.
@@ -1018,7 +1054,11 @@ export function Composer({
           <Textarea
             ref={inputRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              // Typing ends a recall (`setText`): text that matches an earlier
+              // prompt by hand is the person's draft, and Up must not replace it.
+              setText(e.target.value);
+            }}
             onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
@@ -1064,8 +1104,10 @@ export function Composer({
             <span className={cn("min-w-0 flex-1 text-xs text-muted", !expanded && "hidden")}>
               <span className="hidden sm:inline">
                 Enter to {ACTION_LABEL[action].toLowerCase()} · Shift+Enter for a new line
+                {text === "" && history.length > 0 && " · ↑ for earlier messages"}
               </span>
             </span>
+            {!guest && threadId && <ContextMeter sessionId={sessionId} threadId={threadId} working={working} />}
             {working && queueState?.activeItemId && (
               <Button
                 type="button"

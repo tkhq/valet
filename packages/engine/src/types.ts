@@ -453,6 +453,24 @@ export interface MessageUsage {
   total: number;
 }
 
+/**
+ * How full a thread's model context is (`Thread.contextUsage`). It uses the
+ * same estimate and budget as the proactive compaction check, so `tokens`
+ * at or above `limit` means the next turn compacts first.
+ */
+export interface ThreadContextUsage {
+  /** Estimated tokens the next model request sends. */
+  tokens: number;
+  /** Usable budget: the context window minus the output reserve. */
+  limit: number;
+  /** The model's full context window. */
+  contextWindow: number;
+  /** Id of the model the budget belongs to. */
+  model: string;
+  /** False when the session disables automatic compaction. */
+  autoCompact: boolean;
+}
+
 /** Per-turn USD cost from pi-ai's pricing registry. Present only when the
  * model is priced — never zero-filled: a missing field reads "unpriced",
  * never "$0". */
@@ -2778,6 +2796,11 @@ export interface CreateSessionOptions {
     maxAttempts?: number;
     /** Backoff before each retry, in ms; the last entry repeats. */
     backoffMs?: number[];
+    /**
+     * The longest provider-requested wait ("try again in 6s") a retry honors,
+     * in ms. A longer hint ends the retries.
+     */
+    maxHintMs?: number;
   };
   /**
    * Session-default sampling knobs, forwarded to pi-ai per turn as

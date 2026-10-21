@@ -2,9 +2,9 @@
  * One routine's page (docs/specs/2026-10-16-presence-hub-design.md Part E
  * step 2). It follows the line page's anatomy: the breadcrumb, the sentence
  * as the title with the clock mark, the status line (name, who set it up,
- * the switch, when it fires next, **Fire now**, **Edit**, and the overflow
- * menu with Delete), the health strip, the problem, How it works, and
- * Activity as its firings.
+ * the switch, when it fires next, **Fire now**, and the overflow menu with
+ * Delete), the health strip, the problem, How it works as the editor with
+ * every section open, and Activity as its firings.
  *
  * A routine that runs a workflow reads its firings from the workflow's runs
  * this routine started. An assistant routine records only when it last
@@ -12,7 +12,7 @@
  * one firing and its strip shows no count. The title, Where, and the firing
  * link that thread when the viewer may open it. A routine the scheduler turned off for an archived thread shows its
  * problem with the thread picker inline; a pick repins the routine and
- * turns it on again. Edit's **Where** lists the routine owner's threads.
+ * turns it on again. **Where** lists the routine owner's threads.
  */
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -26,10 +26,8 @@ import {
   Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, ErrorRow, LoadingRow, Switch,
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { LineEditor } from "./editor/line-editor";
-import type { SectionId } from "./editor/section";
+import { InlineEditor } from "./editor/inline-editor";
 import { HealthStrip, perDayCounts } from "./health-strip";
-import { HowItWorks, type HowColumn } from "./how-it-works";
 import { ActivityTimeline, type TimelineEntry } from "./line-activity";
 import { MissingPage, PRESENCE_CRUMB, PresenceDetailPage } from "./page-shell";
 import { OwnerBadge } from "./presence-rows";
@@ -40,10 +38,7 @@ import {
 } from "./routine-helpers";
 import { DeleteRoutineDialog } from "./routine-row";
 import { Sentence } from "./sentence";
-import {
-  firingParts, partsText, routineDoExplanation, routineDoParts, scheduleExplanation, scheduleInWords, text, tookInWords,
-  whereExplanation, whereParts, type ThreadTitles, type WorkflowNames,
-} from "./sentences";
+import { firingParts, partsText, tookInWords, type ThreadTitles, type WorkflowNames } from "./sentences";
 import { ServiceMark } from "./service-mark";
 import { useSentenceNames } from "./use-sentence-names";
 
@@ -75,19 +70,6 @@ export function RoutinePage({ id }: { id: string }) {
       {routine !== undefined && <RoutineBody routine={routine} />}
     </PresenceDetailPage>
   );
-}
-
-/** How it works for a routine: When (the schedule and its zone), Do, and Where (spec Part E step 2). */
-export function routineColumns(routine: Routine, workflows: WorkflowNames, threads: ThreadTitles): HowColumn[] {
-  const policy = routine.detail.thread ?? { mode: "own" };
-  const where: HowColumn = routine.detail.targetKind === "workflow"
-    ? { section: "where", value: [text("in a workflow run")], explanation: "A workflow run has no thread. Open the run from Activity to follow it." }
-    : { section: "where", value: whereParts(policy, null, threads, routine.detail.lastFiredThread), explanation: whereExplanation(policy, null, "routine") };
-  return [
-    { section: "when", value: [text(scheduleInWords(routine.detail.cron, routine.detail.timezone))], explanation: scheduleExplanation(routine.detail.timezone) },
-    { section: "do", value: routineDoParts(routine, workflows), explanation: routineDoExplanation(routine, workflows) },
-    where,
-  ];
 }
 
 /** A run this routine started, as a firing on its Activity. A settled run shows the time it took. */
@@ -144,8 +126,6 @@ function RoutineBody({ routine }: { routine: Routine }) {
   const workspace = routineWorkspace(routine);
   const workflowRoutine = routine.detail.targetKind === "workflow" && routine.workflowId !== undefined;
   const runsQ = useWorkflowRuns(workflowRoutine ? routine.workflowId ?? "" : "", { limit: 50 });
-  // The section the editor opens on, "form" for none, or null while it is closed.
-  const [editing, setEditing] = useState<SectionId | "form" | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const workflowNames = workflows.data?.workflows ?? [];
@@ -201,7 +181,6 @@ function RoutineBody({ routine }: { routine: Routine }) {
           {repinned && <span role="status" className="text-ink">Pinned. Turn the routine on to resume.</span>}
           <span className="ml-auto flex items-center gap-2">
             <Button size="sm" variant="secondary" disabled={readOnly || fire.isPending} onClick={fireNow}>Fire now</Button>
-            <Button size="sm" variant="secondary" disabled={readOnly} onClick={() => setEditing("form")}>Edit</Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button type="button" variant="ghost" size="icon" aria-label={`More for ${routine.name}`}>
@@ -241,15 +220,12 @@ function RoutineBody({ routine }: { routine: Routine }) {
             readOnly={readOnly}
             readOnlyText={readOnlyText}
             onPick={(thread) => save({ thread, enabled: true })}
-            action={readOnly ? undefined : (
-              <Button size="sm" variant="secondary" onClick={() => setEditing("form")}>Edit the routine</Button>
-            )}
             pending={update.isPending}
           />
         )}
       </section>
 
-      <HowItWorks columns={routineColumns(routine, workflowNames, pinTitles)} readOnly={readOnly} onChange={(section) => setEditing(section)} />
+      <InlineEditor mode={{ kind: "edit-routine", routine }} readOnly={readOnly} />
 
       <ActivityTimeline
         entries={firings}
@@ -263,17 +239,14 @@ function RoutineBody({ routine }: { routine: Routine }) {
           : "Nothing yet. Activity appears here when the routine fires."}
       />
 
-      <LineEditor
-        open={editing !== null}
-        onOpenChange={(open) => { if (!open) setEditing(null); }}
-        mode={{ kind: "edit-routine", routine, ...(editing !== null && editing !== "form" ? { initialSection: editing } : {}) }}
-      />
       <DeleteRoutineDialog
         routine={routine}
         teams={teams.data?.teams}
         open={deleting}
         onOpenChange={setDeleting}
-        onDeleted={() => { void navigate({ to: "/presence" }); }}
+        // The routine is gone, so the inline form's unsaved change has
+        // nothing to save into, and its leave guard must not hold the page.
+        onDeleted={() => { void navigate({ to: "/presence", ignoreBlocker: true }); }}
       />
     </div>
   );

@@ -1,7 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { useCreateThread, useThreads } from "~/api/queries";
 import { useTeams } from "~/api/settings";
 import { Button, LoadingRow } from "~/components/primitives";
+import { useSidebarControls } from "~/components/layout/app-shell";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
 import { useWorkspaceConversation } from "~/hooks/use-workspace-conversation";
@@ -10,18 +12,22 @@ import { errorText } from "~/lib/error-text";
 import { defaultThreadId, teamThreadNotice } from "~/lib/thread-default";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
-interface ChatSearch { thread?: string; child?: string; workspace?: string }
+// `threads: "open"` opens the phone thread list on arrival (the top nav's
+// Threads button on other pages). The page clears it once handled.
+interface ChatSearch { thread?: string; child?: string; workspace?: string; threads?: "open" }
 export const Route = createFileRoute("/chat")({
   validateSearch: (raw): ChatSearch => ({
     thread: typeof raw.thread === "string" ? raw.thread : undefined,
     child: typeof raw.child === "string" ? raw.child : undefined,
     workspace: typeof raw.workspace === "string" ? raw.workspace : undefined,
+    threads: raw.threads === "open" ? "open" : undefined,
   }),
   component: ChatPage,
 });
 
 function ChatPage() {
-  const { thread, child, workspace } = Route.useSearch();
+  const { thread, child, workspace, threads: threadsParam } = Route.useSearch();
+  const sidebar = useSidebarControls();
   const conversation = useWorkspaceConversation();
   const scope = useWorkspaceScope();
   const teams = useTeams();
@@ -29,6 +35,12 @@ function ChatPage() {
   const teamId = workspaceKey === "user" ? undefined : workspaceKey;
   const team = teams.data?.teams.find(t => t.id === teamId);
   const navigate = useNavigate({ from: Route.fullPath });
+  const openDrawer = sidebar?.present ? sidebar.openDrawer : undefined;
+  useEffect(() => {
+    if (threadsParam !== "open" || !openDrawer) return;
+    openDrawer();
+    void navigate({ search: (prev) => ({ ...prev, threads: undefined }), replace: true });
+  }, [threadsParam, openDrawer, navigate]);
   const runtimeId = conversation.data?.sessionId;
   const createThread = useCreateThread(runtimeId ?? "");
   // The notice follows the open thread: a helper thread is private, a Slack thread follows its channel.

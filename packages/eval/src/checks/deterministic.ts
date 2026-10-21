@@ -8,6 +8,7 @@
  */
 import { aggregateUsage, toolResultText } from "../trajectory.js";
 import type { CheckResult, DeterministicCheck, Trajectory, TrajectoryToolCall } from "../types.js";
+import { runWorkflowDefinitionCheck } from "./workflow.js";
 
 function pass(check: DeterministicCheck, detail?: string): CheckResult {
   return { check, pass: true, ...(detail !== undefined ? { detail } : {}) };
@@ -279,6 +280,9 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       }
       return pass(check, `\`${check.command}\` exited ${verification.exitCode}`);
     }
+
+    case "workflow_definition":
+      return runWorkflowDefinitionCheck(check, trajectory);
   }
 }
 

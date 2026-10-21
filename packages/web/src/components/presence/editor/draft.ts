@@ -735,15 +735,19 @@ export function routineFromCreate(body: CreateWorkflowScheduleRequest): RoutineL
 }
 
 /** A stored routine with a patch applied. */
-export function applyRoutinePatch(routine: Routine, patch: UpdateWorkflowScheduleRequest): RoutineLike {
-  const thread = patch.thread === undefined ? routine.detail.thread : patch.thread ?? undefined;
+export function applyRoutinePatch(routine: Routine, patch: UpdateWorkflowScheduleRequest): Routine {
+  const { thread: storedThread, ...detail } = routine.detail;
+  const thread = patch.thread === undefined ? storedThread : patch.thread ?? undefined;
   return {
+    ...routine,
     name: patch.name ?? routine.name,
-    ...(routine.workflowId !== undefined ? { workflowId: routine.workflowId } : {}),
+    enabled: patch.enabled ?? routine.enabled,
     detail: {
-      cron: patch.cron ?? routine.detail.cron,
-      timezone: patch.timezone ?? routine.detail.timezone,
-      targetKind: routine.detail.targetKind,
+      ...detail,
+      cron: patch.cron ?? detail.cron,
+      timezone: patch.timezone ?? detail.timezone,
+      ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
+      ...(patch.input !== undefined ? { input: patch.input } : {}),
       ...(thread !== undefined ? { thread } : {}),
     },
   };
@@ -925,7 +929,10 @@ export function saveBlocker(
       return "A mention line can only listen for mentions. Uncheck the other events or the mention.";
     }
     if (mention && !draft.anyChannel && !scoped) {
-      return "Add a channel, or choose Any channel.";
+      // A name condition also matches channels created later (`enforceMentionScope`).
+      return filters.some((f) => f.field === "channel_name")
+        ? "A channel name condition also matches new channels. Choose Any channel to keep it."
+        : "Add a channel, or choose Any channel.";
     }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";
@@ -962,6 +969,9 @@ export function draftKey(draft: Draft): string {
     events: [...draft.events].sort(),
     schedule: { ...draft.schedule, days: [...draft.schedule.days].sort() },
     conditions: draft.conditions.map((row) => ({ ...row, id: undefined })),
+    // Row ids are new on every read of a stored row, so the creator scope
+    // reads as its position.
+    creatorScopeId: draft.conditions.findIndex((row) => row.id === draft.creatorScopeId),
     placeRow: undefined,
   });
 }

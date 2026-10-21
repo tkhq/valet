@@ -102,7 +102,7 @@ async function countedPlaces(a: TestApi, teamId: string) {
   const { db, log } = countingDb(a.providers.db);
   const shownCalls: Array<Array<{ sessionId: string; threadId: string }>> = [];
   const access: PresenceAccess = {
-    names: async () => new Map(),
+    directory: async () => new Map(),
     canSee: async () => true,
     threadsShown: async (threads) => {
       shownCalls.push([...threads]);

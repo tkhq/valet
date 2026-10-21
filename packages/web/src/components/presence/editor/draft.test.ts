@@ -10,6 +10,7 @@ import {
   type Draft,
   draftFromLine,
   draftFromRoutine,
+  draftKey,
   draftThread,
   type EditorMode,
   hasCreatorScope,
@@ -195,6 +196,15 @@ describe("place condition (Part H step 11, Review Focus 4)", () => {
     expect(draft.conditions).toEqual([]);
   });
 
+  it("reads two copies of one mention line as the same draft, whatever their row ids", () => {
+    const sub = line("l1", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user" },
+    });
+    expect(draftKey(draftFromLine(sub))).toBe(draftKey(draftFromLine(structuredClone(sub))));
+  });
+
   it("never removes the creator scope", () => {
     const sub = line("l1", {
       eventKeys: ["slack.app_mention"],
@@ -219,6 +229,14 @@ describe("Any channel and follow", () => {
     let draft = toggleEvent(newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), "slack.app_mention", SERVICES);
     draft = { ...draft, anyChannel: true, name: "x" };
     expect(saveBlocker(draft, CREATE, { connected: true })).toBe("Turn off Any channel or remove the channel condition.");
+  });
+
+  it("asks for Any channel when a mention line names channels only by name", () => {
+    let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = addCondition({ ...draft, name: "x" }, { id: "c1", field: "channel_name", op: "prefix", value: "alerts-" });
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe("A channel name condition also matches new channels. Choose Any channel to keep it.");
+    // A name is not a fixed channel list, so Any channel stays on with it.
+    expect(saveBlocker({ ...draft, anyChannel: true }, CREATE, { connected: true })).toBeNull();
   });
 
   it("follows only a mention, never a channel message", () => {

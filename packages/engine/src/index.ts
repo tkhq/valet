@@ -325,6 +325,7 @@ export {
   skillInvocationsInContext,
   buildSpilledInputMarker,
   formatTransientRetryMessage,
+  parseProviderRetryHintMs,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

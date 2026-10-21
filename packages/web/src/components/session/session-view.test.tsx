@@ -101,21 +101,17 @@ function renderComponent(component: () => ReactNode) {
 }
 
 describe("SessionView header chrome", () => {
-  afterEach(() => vi.unstubAllGlobals());
   it("suppresses summary portals for a hidden embedded chat", async () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true })));
     renderInRouter("sess-1", false, undefined, false);
-    await screen.findByRole("button", { name: "Toggle summary" });
+    fireEvent.click(await screen.findByRole("button", { name: "Toggle summary" }));
     expect(screen.queryByText("Thread summary contents")).toBeNull();
   });
-  it("leaves the chat unobscured until the user opens the summary on mobile", async () => {
-    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false })));
+  it("leaves the chat unobscured until the user opens the summary", async () => {
     renderInRouter("sess-1", false);
     const toggle = await screen.findByRole("button", { name: "Toggle summary" });
     expect(screen.queryByText("Thread summary contents")).toBeNull();
     fireEvent.click(toggle);
     expect(await screen.findByText("Thread summary contents")).toBeTruthy();
-
   });
   it("shows a recovery instruction instead of a composer for legacy history", async () => {
     readOnlyReason = "This legacy conversation is read-only. Start a new thread to continue.";
@@ -157,6 +153,18 @@ describe("SessionView header chrome", () => {
     const closeBtn = screen.getByLabelText("Close panel");
     closeBtn.click();
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("keeps the phone tab strip in a panel, whose header has no thread menu", async () => {
+    renderInRouter("sess-1", true);
+    const panelStrip = (await screen.findByRole("tab", { name: "Chat" })).closest(".border-b");
+    expect(panelStrip?.className).not.toContain("max-sm:hidden");
+  });
+
+  it("hides the phone tab strip on Chat when the thread menu lists the views", async () => {
+    renderInRouter("sess-1", false);
+    const strip = (await screen.findByRole("tab", { name: "Chat" })).closest(".border-b");
+    expect(strip?.className).toContain("max-sm:hidden");
   });
 
   it("keeps focus on the selected sandbox tab across chat transitions", async () => {

@@ -34,7 +34,7 @@ import { linearEventArmBlock } from "../services/linear-ingress.js";
  */
 import { githubAppRepositoryAccess } from "../services/github-app.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import {
   collectTemplatePaths,
@@ -1046,6 +1046,24 @@ function withInstallStep(reason: string): string {
  * services must be connected, the inputs must type-check, and the cron
  * must parse. The transaction then only writes.
  */
+/**
+ * The highest install number that `names` use for a template named `base`:
+ * 0 when none does, 1 for the bare name, n for `base (n)`. The next install
+ * takes one more, so a deleted earlier install leaves its number unused and a
+ * later install never repeats a number that a remaining install still shows.
+ */
+export function installNumber(base: string, names: readonly string[]): number {
+  let highest = 0;
+  for (const name of names) {
+    if (name === base) highest = Math.max(highest, 1);
+    else if (name.startsWith(`${base} (`) && name.endsWith(")")) {
+      const digits = name.slice(base.length + 2, -1);
+      if (/^[1-9][0-9]*$/.test(digits)) highest = Math.max(highest, Number(digits));
+    }
+  }
+  return highest;
+}
+
 export async function installWorkflowTemplate(
   deps: TemplateServiceDeps,
   owner: WorkflowOwner,
@@ -1304,8 +1322,7 @@ export async function installWorkflowTemplate(
     }
 
     // The workflow id is minted above and unique by construction, so its
-    // tail keeps two installs of one template apart in the Triggers list —
-    // the same suffix rule the schedule name uses.
+    // tail keeps two installs of one template apart in the Triggers list.
     const name = `${event.name} (${workflowId.slice(-6)})`;
     // One gate for validation AND mention scoping (TKAI-299): this insert
     // path must hold the same rules the CRUD writers do, or a template
@@ -1380,12 +1397,13 @@ export async function installWorkflowTemplate(
     const ownerId = teamId ?? owner.userId;
 
     // Repeat installs get a counted name. There is no template_id column
-    // to count by, so the count comes from the names already installed —
-    // exact match, or the same name with a "(n)" suffix. A race between
-    // two installs can produce two rows with one name, which is harmless:
-    // names are display text, and every id is unique.
+    // to count by, so the number comes from the names already installed:
+    // exact match, or the same name with a "(n)" suffix. One install at a
+    // time per owner and template reads those names, so two installs never
+    // pick one number.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`workflow-install:${ownerType}:${ownerId}:${owned.template.name}`}))`);
     const siblings = await tx
-      .select({ id: workflowDefinitions.id })
+      .select({ name: workflowDefinitions.name })
       .from(workflowDefinitions)
       .where(
         and(
@@ -1394,7 +1412,28 @@ export async function installWorkflowTemplate(
           or(eq(workflowDefinitions.name, owned.template.name), like(workflowDefinitions.name, `${owned.template.name} (%`)),
         ),
       );
-    if (siblings.length > 0) workflowName = `${owned.template.name} (${siblings.length + 1})`;
+    // The schedule carries the same count, so a routine reads with the name
+    // of the workflow it runs, and two installs stay apart in the schedules
+    // list. A renamed workflow keeps its routine's name, so the routines'
+    // names count too.
+    const routines = schedule
+      ? await tx
+        .select({ name: workflowSchedules.name })
+        .from(workflowSchedules)
+        .where(
+          and(
+            eq(workflowSchedules.ownerType, ownerType),
+            eq(workflowSchedules.ownerId, ownerId),
+            or(eq(workflowSchedules.name, schedule.name), like(workflowSchedules.name, `${schedule.name} (%`)),
+          ),
+        )
+      : [];
+    const inUse = Math.max(
+      installNumber(owned.template.name, siblings.map((row) => row.name)),
+      schedule ? installNumber(schedule.name, routines.map((row) => row.name)) : 0,
+    );
+    const installCount = inUse === 0 ? "" : ` (${inUse + 1})`;
+    workflowName = `${owned.template.name}${installCount}`;
 
     await tx.insert(workflowDefinitions).values({
       id: workflowId,
@@ -1425,10 +1464,7 @@ export async function installWorkflowTemplate(
         ownerId,
         targetKind: "workflow",
         workflowId,
-        // The workflow id is minted in this transaction and unique by
-        // construction, so its tail is the suffix that keeps two installs
-        // of one template apart in the schedules list.
-        name: `${schedule.name} (${workflowId.slice(-6)})`,
+        name: `${schedule.name}${installCount}`,
         cron: schedule.cron,
         timezone,
         enabled: true,

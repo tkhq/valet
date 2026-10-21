@@ -12,11 +12,14 @@ import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { RunHost } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { storedAnyChannel } from "@valet/shared";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { ingestEvent } from "../events/ingest.js";
 import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
+import { resetChannelNameCaches } from "./workspace-channels.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
@@ -899,19 +902,22 @@ describe("GET /api/event-subscriptions/:id/activity", () => {
   // Review S1 and A11: a Slack place reads as its channel name, and a
   // credential fault degrades the label to the id instead of failing the page.
   it("names a Slack channel place, and keeps the id when the credential read fails", async () => {
-    const names: ValetPlugin = { ...slackPlugin, filterOptionResolvers: { "slack.channels": async () => [{ id: "C900", label: "#incidents" }] } };
-    api = await bootTestApi({ plugins: [names, githubPlugin] });
+    resetChannelNameCaches();
+    api = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
     const a = api;
+    // The Slack plugin caches the bot's channel list by token.
     await a.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack",
-      { type: "oauth2", accessToken: "xoxb-test", metadata: { teamId: "T1" } });
+      { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
     const realFetch = globalThis.fetch;
     const slackStub = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       if (url.hostname !== "slack.com") return realFetch(input, init);
-      return new Response(JSON.stringify({ ok: true, channel: { name: "incidents", is_private: false }, members: [] }),
-        { headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({
+        ok: true, channel: { name: "incidents", is_private: false }, members: [],
+        channels: [{ id: "C900", name: "incidents", is_private: false }],
+      }), { headers: { "content-type": "application/json" } });
     });
-    onTestFinished(() => { slackStub.mockRestore(); resetThreadAccessCache(); });
+    onTestFinished(() => { slackStub.mockRestore(); resetThreadAccessCache(); resetChannelNameCaches(); });
     await seedSubscriptionRow(a, "sub_line", "local-org", {
       eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C900" }],
     });
@@ -2447,6 +2453,22 @@ describe("mention scoping (slack.app_mention)", () => {
       filters: [{ field: "channel", op: "prefix", value: "C" }],
     });
     expect(res.status).toBe(400);
+  });
+
+  it("treats a channel_name condition as any channel, so a mention line with one needs anyChannel", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const named = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }];
+    const refused = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain('Choose "Any channel" to keep the name condition');
+
+    const accepted = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named, anyChannel: true });
+    expect(accepted.status).toBe(201);
+    const body = (await accepted.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([...named, { field: "user", op: "eq", value: "U_LOCAL" }]);
+    // The stored row reads back as the any-channel state that Presence shows.
+    expect(storedAnyChannel(body.eventKeys, body.filters ?? [])).toBe(true);
   });
 
   it("accepts multiple channels via an in filter", async () => {

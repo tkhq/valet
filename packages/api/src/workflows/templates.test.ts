@@ -36,6 +36,7 @@ import {
   installWorkflowTemplate,
   listPluginTemplates,
   listWorkflowTemplateSummaries,
+  installNumber,
   templateInputs,
   type TemplateServiceDeps,
 } from "./templates.js";
@@ -912,8 +913,8 @@ describe("installWorkflowTemplate", () => {
     expect(schedules[0]!.workflowId).toBe(result.workflowId);
     expect(schedules[0]!.enabled).toBe(true);
     expect(schedules[0]!.nextFireAt).toBeGreaterThan(Date.now());
-    // The suffix comes from the workflow id minted in the same transaction.
-    expect(schedules[0]!.name).toBe(`Inbox sweeper (${result.workflowId.slice(-6)})`);
+    // The schedule reads with the workflow's name, so a routine names it once.
+    expect(schedules[0]!.name).toBe("Inbox sweeper");
     expect(result.scheduleId).toBe(schedules[0]!.id);
   });
 
@@ -1148,10 +1149,50 @@ describe("installWorkflowTemplate", () => {
     const schedules = await db.select().from(workflowSchedules);
     expect(schedules).toHaveLength(2);
     expect(new Set(schedules.map((s) => s.id)).size).toBe(2);
-    // Distinct names are the whole point of the suffix: two rows called
-    // "Inbox sweeper" cannot be told apart in the schedules list.
-    expect(new Set(schedules.map((s) => s.name)).size).toBe(2);
+    // Each schedule carries its workflow's install count, so the two rows
+    // stay apart in the schedules list.
+    expect(new Map(schedules.map((s) => [s.workflowId, s.name]))).toEqual(new Map([
+      [first.workflowId, "Inbox sweeper"],
+      [second.workflowId, "Inbox sweeper (2)"],
+    ]));
     expect(new Set(schedules.map((s) => s.workflowId))).toEqual(new Set([first.workflowId, second.workflowId]));
+  });
+
+  it("gives a later install a routine name that a renamed install's routine does not use", async () => {
+    await connect("gmail");
+    const first = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    const second = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!first.ok || !second.ok) throw new Error("expected both installs to succeed");
+    // A rename changes the workflow's name; its routine keeps `Inbox sweeper (2)`.
+    await db.update(workflowDefinitions).set({ name: "My triage" }).where(eq(workflowDefinitions.id, second.workflowId));
+
+    const third = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!third.ok) throw new Error("expected the install to succeed");
+    expect(third.workflowName).toBe("Inbox sweeper (3)");
+    const names = (await db.select().from(workflowSchedules)).map((s) => s.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+  });
+
+  it("never repeats a number that a remaining install still shows after an earlier one is deleted", async () => {
+    await connect("gmail");
+    const installs = [];
+    for (let i = 0; i < 3; i++) {
+      const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+      if (!result.ok) throw new Error("expected the install to succeed");
+      installs.push(result);
+    }
+    expect(installs.map((install) => install.workflowName)).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+
+    // Delete the second install with its schedule, as deleting a workflow does.
+    await db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, installs[1].workflowId));
+    await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, installs[1].workflowId));
+    await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, installs[1].workflowId));
+
+    const again = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!again.ok) throw new Error("expected the install to succeed");
+    expect(again.workflowName).toBe("Inbox sweeper (4)");
+    const names = (await db.select().from(workflowSchedules)).map((schedule) => schedule.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (3)", "Inbox sweeper (4)"]);
   });
 
   it("bakes a supplied input into the installed definition", async () => {
@@ -1532,5 +1573,18 @@ describe("team GitHub template repository prerequisites", () => {
     expect(await db.select().from(workflowDefinitions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(eventSubscriptions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(workflowVersions)).toHaveLength(ok ? 1 : 0);
+  });
+});
+
+describe("installNumber", () => {
+  it("reads the highest install number in use", () => {
+    expect(installNumber("Inbox sweeper", [])).toBe(0);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper"])).toBe(1);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper", "Inbox sweeper (3)"])).toBe(3);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (2)"])).toBe(2);
+  });
+
+  it("ignores a name that only starts like the template's", () => {
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (draft)", "Inbox sweeper (0)", "Inbox sweeper (2.5)", "Inbox sweeper (1e9)"])).toBe(0);
   });
 });

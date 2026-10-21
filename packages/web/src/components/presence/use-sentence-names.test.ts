@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { channelNames } from "./use-sentence-names";
+import { channelNames, sentenceChannels } from "./use-sentence-names";
 import { filterLabels } from "./sentences";
+import { place } from "./test-fixtures";
 
 // Review of PR #986: a place whose label is its own channel id carries no
 // name, so the sentence must show the raw id, never `#<id>`.
@@ -58,5 +59,24 @@ describe("filterLabels with an unnamed channel", () => {
   it("shows the raw id when the places list carries no name for it", () => {
     const names = { channels: channelNames([{ subject: "slack:T1/C0AK0T8KPPY", label: "C0AK0T8KPPY" }]) };
     expect(filterLabels({ field: "channel", op: "eq", value: "C0AK0T8KPPY" }, names)).toEqual(["C0AK0T8KPPY"]);
+  });
+});
+
+// Dev, 10-21: 8 of a line's 21 channels had no event in 30 days, so they
+// were no place, and the sentence showed their raw ids.
+describe("sentenceChannels", () => {
+  const read = {
+    places: [place("slack:T1/C900", "#incidents", "slack", "slack:T1")],
+    channelNames: { C06MXK5J1R7: "alerts-prod" },
+  };
+
+  it("names a line's channel that is no place from the read's channel names", () => {
+    const names = { channels: sentenceChannels(read) };
+    expect(filterLabels({ field: "channel", op: "in", value: ["C900", "C06MXK5J1R7", "C0UNKNOWN"] }, names))
+      .toEqual(["#incidents", "#alerts-prod", "C0UNKNOWN"]);
+  });
+
+  it("adds the places the caller already has, before the read loads", () => {
+    expect(sentenceChannels(undefined, [{ subject: "slack:T1/C900", label: "#incidents" }])).toEqual({ C900: "incidents" });
   });
 });

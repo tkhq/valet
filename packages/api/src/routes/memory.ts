@@ -36,6 +36,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import { buildMemoryGraph, MAX_GRAPH_NODES } from "../lib/memory-graph.js";
+import { journalHasEntries } from "../orchestrator/bootstrap.js";
 import { ReservedPathError } from "../lib/okf.js";
 import { getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { assistantMemoryNamespace, workflowMemoryNamespace } from "../services/memory-scope.js";
@@ -392,7 +393,9 @@ memoryRouter.get("/journal-summary", async (c) => {
     // Missing journal (404-shaped service error) → no summary yet today.
     return c.json({ date, summary: null });
   }
-  if (!content || content.trim().length === 0) return c.json({ date, summary: null });
+  // The wake bootstrap writes a heading-only journal every day. Sent alone,
+  // the heading gets a refusal from the model instead of a summary.
+  if (!journalHasEntries(content)) return c.json({ date, summary: null });
 
   const cacheKey = `${scope.owner.type}:${scope.owner.id}:${date}:${djb2(content)}`;
   const cached = journalSummaryCache.get(cacheKey);

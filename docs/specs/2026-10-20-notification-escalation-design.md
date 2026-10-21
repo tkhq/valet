@@ -249,3 +249,11 @@ They also cover queue-age metrics and alerts, re-draining, permanent Slack denia
 Recovery tests distinguish summaries from cards and tolerate failed callback-ref saves.
 
 Regression tests cover summary metadata secrecy, stable row tokens, terminal provider rejection, earliest-send recovery, and ordinary Telegram operations over ten seconds.
+
+
+## Integration with dev-v2
+
+The branch merges dev-v2 without rewriting notification commits or their review history.
+Slack exports retain both terminal access-error classification and event channel-name enrichment.
+The joined-channel directory retains private-channel metadata alongside attention cancellation and reconciliation.
+The attention outbox repairs create the table before adding columns, then create indexes after their columns exist.

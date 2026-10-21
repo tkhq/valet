@@ -19,7 +19,8 @@ import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js"
 import { acceptTargetWrite } from "./target-names.js";
 import { NO_SUBJECT_ERROR, subjectModeAllowed } from "./thread-policy-write.js";
 
-const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
+/** The filter operators a subscription accepts. The `event-subscriptions` skill names each one. */
+export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
 /** The optional prompt templates an assistant target may carry. */
 const PROMPT_FIELDS = ["systemPrompt", "userPromptTemplate"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:

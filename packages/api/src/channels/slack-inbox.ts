@@ -12,7 +12,8 @@
  *   `app_context_changed`) and Block Kit approval callbacks.
  * - events: the Slack `TriggerDef`s then `ingestEvent` — workflow
  *   subscriptions. Ingest is match-gated: an event that matches no
- *   subscription is dropped and never lands in the events table.
+ *   subscription is dropped and never lands in the events table. A message
+ *   event gets its channel name first, for `channel_name` filters.
  * - follow: `handleFollowedMessage` for threads bound to an assistant.
  *
  * ── Durability and redelivery ────────────────────────────────────────────
@@ -55,6 +56,7 @@ import { encryptSecret, decryptSecret, deriveSecretKey } from "../lib/secret-cry
 import type { Providers } from "../providers/types.js";
 import { createEventReceipt, appendReceiptStage } from "../events/receipts.js";
 import { credentialSecret } from "@valet/engine";
+import { withEventChannelName } from "@valet/plugin-slack/actions";
 import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
@@ -164,6 +166,8 @@ interface FanOutDeps {
   botUserId?: string;
   botId?: string;
   resolveBotIdentity?: () => Promise<SlackWorkspaceIdentity | undefined>;
+  /** The org's Slack bot token. It reads channel names for `channel_name` filters. */
+  slackToken?: string;
   db: AppDb;
   plugins: ValetPlugin[];
   transport: ChannelTransport;
@@ -286,7 +290,9 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
     for (const def of deps.triggerDefs) {
       const verified = await def.verify({ headers: deps.headers, rawBody: deps.rawBody }, { webhookSecret: deps.webhookSecret, ...(deps.verifiedReceivedAt !== undefined ? { verifiedReceivedAt: String(deps.verifiedReceivedAt) } : {}), ...(deps.botId ? { botId: deps.botId } : {}), ...(deps.botUserId ? { botUserId: deps.botUserId } : {}) });
       if (!verified) continue;
-      const normalized = def.toEvent(verified);
+      // A message event names its channel by ID only. Add the name before
+      // matching, so a `channel_name` filter and the stored payload see it.
+      const normalized = def.toEvent(await withEventChannelName(verified, deps.slackToken));
       eventPhase = "line matching";
       const ingestResult = await ingestEvent(
         { db: deps.db, plugins: deps.plugins, onIngest: deps.onIngest, ...(deps.waiters ? { waiters: deps.waiters } : {}) },
@@ -405,6 +411,7 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
         botId: typeof credential.metadata?.botId === "string" ? credential.metadata.botId : undefined,
         resolveBotIdentity: accessToken ? () => resolveSlackBotIdentity(providers.engineCredentials,
           { orgId: row.orgId, accessToken, teamId: credentialTeamId }) : undefined,
+        ...(accessToken ? { slackToken: accessToken } : {}),
         triggerDefs: slackTriggerDefs(providers.plugins), onIngest: providers.eventDispatcher.nudge,
       };
       const waiters = waiterMatchDeps(providers, { nudge: (ids) => providers.wakeWatcher.nudge(ids) });

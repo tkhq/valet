@@ -9,6 +9,7 @@ import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
+import { cachedChannelDirectory, resetChannelNameCaches } from "./workspace-channels.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
@@ -143,17 +144,18 @@ it("applies a private Slack thread's access to every route that addresses the th
   const statuses = async () => [
     (await fetch(`${api!.baseUrl}/api/threads/${thread.id}`)).status,
     (await fetch(`${base}/threads/${thread.id}/channel-activity`)).status,
+    (await fetch(`${api!.baseUrl}/api/threads/${thread.id}/context`)).status,
     (await fetch(`${base}/threads/${thread.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ title: "Renamed" }) })).status,
     (await fetch(`${base}/threads/${thread.id}/resume`, { method: "POST" })).status,
     (await fetch(`${base}/threads`, { method: "POST", headers: json, body: JSON.stringify({ sourceThreadId: thread.id }) })).status,
   ];
   // Outside the channel, every path reads the thread as missing, and nothing is sent into it.
-  expect(await statuses()).toEqual([404, 404, 404, 404, 404]);
+  expect(await statuses()).toEqual([404, 404, 404, 404, 404, 404]);
   const send = await fetch(`${base}/messages`, { method: "POST", headers: json, body: JSON.stringify({ text: "hi", threadId: thread.id }) });
   expect(send.status).toBe(404);
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "UROUTES", userId: "local-user" });
-  const [read, activity, rename, resume, fork] = await statuses();
-  expect([read, activity, rename, resume]).toEqual([200, 200, 200, 200]);
+  const [read, activity, context, rename, resume, fork] = await statuses();
+  expect([read, activity, context, rename, resume]).toEqual([200, 200, 200, 200, 200]);
   expect(fork).toBeLessThan(300);
 });
 
@@ -331,4 +333,51 @@ it("does not hydrate archived-only executions in the active thread list", async 
   }
   const archived = await (await fetch(`${url}?archived=1`)).json() as ListThreadsResponse;
   expect(archived.threads.map(t => t.sessionId).sort()).toEqual(archivedIds.sort());
+});
+
+// Review of PR #1012: a scan that waits through Slack's retries and then
+// fails must not replace the list a newer scan already stored.
+it("keeps a newer channel list when an older scan fails after it", async () => {
+  resetChannelNameCaches();
+  let failOld: (err: Error) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((_, reject) => { failOld = reject; }));
+  const fresh = await cachedChannelDirectory("org-race", async () => [{ id: "C950", name: "alerts-prod", isPrivate: false }]);
+  expect([...fresh.keys()]).toEqual(["C950"]);
+  failOld(new Error("ratelimited"));
+  await expect(old).rejects.toThrow("ratelimited");
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C950")).toEqual({ name: "alerts-prod", isPrivate: false });
+  resetChannelNameCaches();
+});
+
+// Review of PR #1012: an older scan that answers last must not restore a
+// channel's public mark after a newer scan saw it go private.
+it("keeps a newer channel list when an older scan answers after it", async () => {
+  resetChannelNameCaches();
+  let answerOld: (channels: Array<{ id: string; name: string; isPrivate: boolean }>) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerOld = resolve; }));
+  await cachedChannelDirectory("org-race", async () => [{ id: "C1", name: "plans", isPrivate: true }]);
+  answerOld([{ id: "C1", name: "plans", isPrivate: false }]);
+  expect((await old).get("C1")?.isPrivate).toBe(true);
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C1")?.isPrivate).toBe(true);
+  resetChannelNameCaches();
+});
+
+// Review of PR #1012: the scan that started last wins, also when the older
+// scan ends first and stores its list.
+it("replaces an older scan's list with the list of a scan that started later and ended last", async () => {
+  resetChannelNameCaches();
+  type Joined = Array<{ id: string; name: string; isPrivate: boolean }>;
+  let answerOld: (channels: Joined) => void = () => {};
+  let answerNew: (channels: Joined) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerOld = resolve; }));
+  const fresh = cachedChannelDirectory("org-race", () => new Promise((resolve) => { answerNew = resolve; }));
+  answerOld([{ id: "C1", name: "plans", isPrivate: false }]);
+  expect((await old).get("C1")?.isPrivate).toBe(false);
+  answerNew([{ id: "C1", name: "plans", isPrivate: true }]);
+  expect((await fresh).get("C1")?.isPrivate).toBe(true);
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C1")?.isPrivate).toBe(true);
+  resetChannelNameCaches();
 });

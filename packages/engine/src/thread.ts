@@ -145,6 +145,7 @@ import type {
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
+  ThreadContextUsage,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -224,12 +225,20 @@ const TURN_STREAM_MAX_RETRY_DELAY_MS = 30_000;
 const TURN_STREAM_TIMEOUT_MS = 600_000;
 
 /**
- * Turn-level retry defaults for transient provider errors (TKAI-319),
- * applied only to unattended sessions (orchestrator, workflow, child). The
- * last backoff entry repeats when maxAttempts exceeds the list.
+ * Turn-level retry defaults for transient provider errors (TKAI-319). An
+ * unattended turn (orchestrator, workflow, child, not a person's prompt)
+ * waits longer. A person's own prompt retries briefly, so a passing rate
+ * limit does not cost them a resend, and a long provider wait fails at once
+ * instead of holding the thread's queue. The last backoff entry repeats when
+ * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
+ * wait up to the max hint; a longer hint ends the retries.
  */
 const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
 const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 2;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 8_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 20_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -367,6 +376,34 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
+
+const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
+  [/^(?:ms|milliseconds?)$/i, 1],
+  [/^(?:h|hours?)$/i, 3_600_000],
+  [/^(?:m|mins?|minutes?)$/i, 60_000],
+  [/^(?:s|secs?|seconds?)$/i, 1_000],
+];
+
+/**
+ * The wait a provider's error text asks for, in ms, or undefined when it
+ * names none. Reads "try again in 224ms", "try again in 1.722s",
+ * "try again in 6m0s", "retry after 3 seconds", and pi-ai's
+ * "Server requested 45s retry delay". Exported for tests.
+ */
+export function parseProviderRetryHintMs(errorMessage: string | undefined): number | undefined {
+  if (!errorMessage) return undefined;
+  const requested = /server requested (\d+(?:\.\d+)?)s retry delay/i.exec(errorMessage);
+  if (requested) return Math.ceil(Number(requested[1]) * 1000);
+  const unit = "ms|milliseconds?|hours?|h|minutes?|mins?|m|seconds?|secs?|s";
+  const phrase = new RegExp(`(?:try again|retry)(?: after| in)\\s*:?\\s*((?:\\d+(?:\\.\\d+)?\\s*(?:${unit})(?![a-z])\\s*)+)`, "i").exec(errorMessage);
+  if (!phrase) return undefined;
+  let total = 0;
+  for (const part of phrase[1].matchAll(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unit})(?![a-z])`, "gi"))) {
+    const scale = RETRY_HINT_UNIT_MS.find(([re]) => re.test(part[2]))?.[1] ?? 0;
+    total += Number(part[1]) * scale;
+  }
+  return total > 0 ? Math.ceil(total) : undefined;
+}
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
 function delay(ms: number): Promise<void> {
@@ -4360,8 +4397,11 @@ export class Thread {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
     const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
-    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
-    const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : INTERACTIVE_TURN_RETRY_ATTEMPTS);
+    const backoff = cfgd?.backoffMs?.length
+      ? cfgd.backoffMs
+      : unattended ? UNATTENDED_TURN_RETRY_BACKOFF_MS : INTERACTIVE_TURN_RETRY_BACKOFF_MS;
+    const maxHintMs = cfgd?.maxHintMs ?? (unattended ? UNATTENDED_TURN_RETRY_MAX_HINT_MS : INTERACTIVE_TURN_RETRY_MAX_HINT_MS);
     const resolveFallback = this.session.options.resolveFallbackModel;
     const attemptedProviderIds = new Set([this.agent.state.model.provider]);
     let sameProviderAttempts = 0;
@@ -4412,8 +4452,12 @@ export class Thread {
         );
       } else {
         if (!transient || sameProviderAttempts >= maxAttempts) return;
+        // A provider that asks for a longer wait than this turn allows gets
+        // no retry: the failed turn already shows its text, which says when.
+        const hintMs = parseProviderRetryHintMs(last.errorMessage);
+        if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0;
+        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
         this.emitError("turn_transient_retry", formatTransientRetryMessage({
           provider: this.agent.state.model.provider,
           errorMessage: last.errorMessage,
@@ -4592,16 +4636,65 @@ export class Thread {
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
-    // reach the LLM, so they must not count toward the context estimate.
-    const llmMessages = this.agent.state.messages.filter(
-      (m): m is Message =>
-        m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-    );
     const estimated = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model), llmMessages,
+      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
+      this.agent.state.messages.filter(isLlmMessage),
     );
     return estimated >= usable;
+  }
+
+  /**
+   * How full the model context is, for display. It measures like
+   * `shouldCompactProactive`: the usage-anchored estimate of the next request
+   * against the usable budget of the thread's model. A thread that has not
+   * loaded its transcript is read from the store and stays unloaded.
+   * Undefined when the model reports no context window.
+   */
+  async contextUsage(): Promise<ThreadContextUsage | undefined> {
+    const cfg = this.session.options.compaction;
+    const model = await this.budgetModel();
+    const limit = usableTokens(model, cfg);
+    if (limit === 0) return undefined;
+    let messages: readonly AgentMessage[] = this.agent.state.messages;
+    if (this.transcriptPending) {
+      const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+      messages = snapshot
+        ? entriesToAgentMessages(snapshot.entries, model, {
+            attributeAuthors: this.attributeAuthors,
+            threadKey: this.key,
+            activeLeafEntryId: snapshot.thread.activeLeafEntryId,
+          })
+        : [];
+    }
+    const tokens = estimateLiveContextTokens(
+      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+      messages.filter(isLlmMessage),
+    );
+    return { tokens, limit, contextWindow: model.contextWindow, model: model.id, autoCompact: cfg?.enabled !== false };
+  }
+
+  /** The model the next turn budgets against: the live turn model mid-turn, else the thread's effective spec. */
+  private async budgetModel(): Promise<PiModel> {
+    // A turn publishes its model state at claim and clears it when settlement
+    // starts. The turn's cleanup restores the session's baseline model before
+    // `submission_settled` is delivered, so the live model counts only while
+    // the running item still owns that state.
+    if (this.runningItem && this.committedModelState?.queueItemId === this.runningItem.id) return this.agent.state.model;
+    const spec = this.turnModelSpec();
+    const resolver = this.session.options.resolveModel;
+    // Resolve the spec on every read, as a turn does, so a re-pointed size
+    // tier shows the model and limit that the next turn uses.
+    if (resolver) {
+      try {
+        const resolved = await resolver(spec);
+        if (resolved) return resolved.model;
+      } catch (err) {
+        if (err instanceof NoCredentialsError) return err.model;
+        // A display read must not fail on resolution. The next turn resolves
+        // the same spec and fails loud there (thread pinning spec, decision 3).
+      }
+    }
+    return this.effectiveModelLenient();
   }
 
   /** Tool results and model changes can exhaust the budget within one agent loop. */
@@ -4613,9 +4706,7 @@ export class Thread {
     const cfg = this.session.options.compaction;
     const budget = usableTokens(model, cfg);
     if (budget === 0) return undefined;
-    const messages = context.messages.filter(
-      (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-    );
+    const messages = context.messages.filter(isLlmMessage);
     const prompt = () => this.modelSystemPrompt(this.agent.state.systemPrompt, model);
     const toolTokens = estimateTokens(JSON.stringify((context.tools ?? []).map((tool) => ({
       name: tool.name, description: tool.description, parameters: tool.parameters,
@@ -6721,6 +6812,11 @@ export function renderReplyContext(
     "",
     text,
   ].join("\n");
+}
+
+/** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */
+function isLlmMessage(message: AgentMessage): message is Message {
+  return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
 }
 
 export function entriesToAgentMessages(
