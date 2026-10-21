@@ -74,10 +74,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # system store, so a Chrome policy built from the committed root files in
 # docker/distrusted-roots distrusts the roots for it. Removal condition is
 # documented in docker/distrust-compromised-roots.sh. The Bun-compiled `valet`
-# binary is not shipped in this image.
+# binary is not shipped in this image. The check step upgrades ca-certificates
+# first: a build cache can restore the install layer above from before
+# 20250419~deb12u2, and the check must see the current package.
 COPY docker/distrust-compromised-roots.sh /usr/local/sbin/distrust-compromised-roots.sh
 COPY docker/distrusted-roots /usr/local/share/valet/distrusted-roots
-RUN /usr/local/sbin/distrust-compromised-roots.sh --chromium-policy /usr/local/share/valet/distrusted-roots
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends --only-upgrade ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && /usr/local/sbin/distrust-compromised-roots.sh --chromium-policy /usr/local/share/valet/distrusted-roots
 ENV NODE_OPTIONS=--use-openssl-ca
 
 RUN mkdir -p /workspace
