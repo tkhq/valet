@@ -22,10 +22,9 @@ turns:
       not run it.
 timeout_ms: 600000
 checks:
-  - type: tool_called
-    tool: workflows.save_workflow
   - type: tool_not_called
     tool: workflows.start_run
   - type: workflow_definition
+    saved: true
     schedule_input: true
     run_date: true

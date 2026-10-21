@@ -223,6 +223,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       const scheduleInput = optBoolean("schedule_input");
       const runDate = optBoolean("run_date");
       const declaredInputs = optBoolean("declared_inputs");
+      const saved = optBoolean("saved");
       const toolSteps = optSelectors("tool_steps");
       const approvedActions = optSelectors("approved_actions");
       const order = optSelectors("order");
@@ -238,6 +239,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         ...(scheduleInput !== undefined ? { schedule_input: scheduleInput } : {}),
         ...(runDate !== undefined ? { run_date: runDate } : {}),
         ...(declaredInputs !== undefined ? { declared_inputs: declaredInputs } : {}),
+        ...(saved !== undefined ? { saved } : {}),
       };
     }
     case "judge_output":

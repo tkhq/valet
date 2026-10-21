@@ -174,6 +174,16 @@ describe("workflow_definition", () => {
     });
   });
 
+  it("fails a saved: true case when the save stored nothing", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, saved: true };
+    const rejectedSave = saveCall(0, leadWorkflow(), false);
+    const r = runDeterministicCheck(check, trajectory([rejectedSave]));
+    expect(r.pass).toBe(false);
+    expect(r.detail).toContain("no workflow was saved");
+    const stored = runDeterministicCheck(check, trajectory([saveCall(0, leadWorkflow(), true)], { savedWorkflows: [{ id: "wf_1", definition: leadWorkflow() }] }));
+    expect(stored.pass).toBe(true);
+  });
+
   it("fails when the agent drafted nothing", () => {
     const r = runDeterministicCheck(CHECK, trajectory([]));
     expect(r.pass).toBe(false);
@@ -255,22 +265,61 @@ describe("workflow rules", () => {
       ],
     };
     expect(workflowRuleFailures(writeFirst, check)).toEqual([
+      'step "write" matches sheets.write_* and can run before the approval',
       "no step that matches sheets.write_* runs after one that matches approval",
     ]);
   });
 
   it("does not count a step on an approval's denial branch as after the approval", () => {
     const check: WorkflowDefinitionCheck = { ...CHECK, order: ["approval", "sheets.write_*", "sheets.read_spreadsheet"] };
-    const failure = "no step that matches sheets.write_* runs after one that matches approval";
+    const failure = [
+      'step "write" matches sheets.write_* and can run before the approval',
+      "no step that matches sheets.write_* runs after one that matches approval",
+    ];
     const withGateEdge = (definition: Record<string, unknown>, edge: Record<string, unknown>): Record<string, unknown> => ({
       ...definition,
       edges: (definition.edges as Array<Record<string, unknown>>).map((e) => (e.from === "gate" ? { ...e, ...edge } : e)),
     });
 
-    expect(workflowRuleFailures(withGateEdge(leadWorkflow(), { fromOutput: "false" }), check)).toEqual([failure]);
+    expect(workflowRuleFailures(withGateEdge(leadWorkflow(), { fromOutput: "false" }), check)).toEqual(failure);
     const skip = withNode(leadWorkflow(), "gate", { onDeny: "skip" });
-    expect(workflowRuleFailures(skip, check)).toEqual([failure]);
+    expect(workflowRuleFailures(skip, check)).toEqual(failure);
     expect(workflowRuleFailures(withGateEdge(skip, { fromOutput: "true" }), check)).toEqual([]);
+  });
+
+  it("fails a matching write that can run before the approval, but allows an earlier read", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, order: ["approval", "sheets.write_*", "sheets.read_spreadsheet"] };
+    const base = leadWorkflow();
+    const extra = (id: string, action: string): Record<string, unknown> => ({
+      id,
+      type: "tool",
+      service: "google_workspace",
+      action,
+      params: action === "sheets.write_spreadsheet"
+        ? { spreadsheetId: "sheet-1", range: "Leads!D2", data: [["early"]] }
+        : { spreadsheetId: "sheet-1", range: "Leads!A2:F2" },
+    });
+    const before = (node: Record<string, unknown>): Record<string, unknown> => ({
+      ...base,
+      nodes: [...(base.nodes as unknown[]), node],
+      edges: [
+        { from: "start", to: node.id },
+        { from: node.id, to: "propose" },
+        ...(base.edges as Array<Record<string, unknown>>).filter((edge) => edge.from !== "start"),
+      ],
+    });
+    expect(workflowRuleFailures(before(extra("early_write", "sheets.write_spreadsheet")), check)).toEqual([
+      'step "early_write" matches sheets.write_* and can run before the approval',
+    ]);
+    expect(workflowRuleFailures(before(extra("lookup", "sheets.read_spreadsheet")), check)).toEqual([]);
+  });
+
+  it("reads bracket notation like dotted notation", () => {
+    const check: WorkflowDefinitionCheck = { ...CHECK, schedule_input: true, run_date: true };
+    const bracketed = withNode(leadWorkflow(), "propose", {
+      prompt: 'Rates for {{trigger["data"]["input"].symbols}} on {{trigger["timestamp"]}}.',
+    });
+    expect(workflowRuleFailures(bracketed, check)).toEqual([]);
   });
 
   it("requires schedule input reads under trigger.data.input", () => {

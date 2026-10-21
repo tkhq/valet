@@ -238,8 +238,10 @@ export interface WorkflowDefinitionCheck {
   approved_actions?: string[];
   /**
    * Steps that match these selectors must occur in this order on one path.
-   * A step on an approval step's denial branch (a `"false"` edge, or any
-   * edge with `onDeny: "skip"` and no `fromOutput`) does not run after it.
+   * After a selector that names approval steps, every step that matches
+   * the next selector must run after an approval. A step on an approval
+   * step's denial branch (a `"false"` edge, or any edge with
+   * `onDeny: "skip"` and no `fromOutput`) does not run after it.
    */
   order?: string[];
   /**
@@ -252,6 +254,12 @@ export interface WorkflowDefinitionCheck {
   run_date?: boolean;
   /** Every `trigger.data.<field>` read has a `dataSchema` entry on the trigger. */
   declared_inputs?: boolean;
+  /**
+   * The case must save the workflow (`metadata.savedWorkflows`, product
+   * drive). A save that returns an error stores nothing, so a rejected
+   * draft does not satisfy it.
+   */
+  saved?: boolean;
 }
 
 /** LLM-as-judge checks — score with a grading model, pass at score >= threshold. */

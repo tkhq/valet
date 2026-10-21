@@ -410,7 +410,13 @@ glob for tool steps and foreach tool bodies. A selector without a dot is
 a step type.
 
 For `order`, a step on an approval step's denial branch does not run
-after the approval. A denial fails the approval step, except with
+after the approval. After an approval selector, every step that matches
+the next selector must run after an approval: a second write before the
+approval fails the rule. Other steps can also run earlier, such as a read
+that finds the row before the write. `saved: true` fails a case that
+stored no workflow, because a save that returns an error stores nothing.
+Bracket reads such as `trigger["data"]["input"]` count the same as
+dotted reads. A denial fails the approval step, except with
 `onDeny: "skip"`. Then the step completes with approved false and runs
 its `"false"` edges and its edges without `fromOutput`.
 
@@ -485,6 +491,10 @@ drive, 3 runs per case. Runs: 2026-10-20 18:03 to 18:58 EDT, and the
   parser rejects.
 - One `claude-sonnet-4-6` onboarding run created the issues without a
   foreach step.
+- The saved run in each file replays with the same verdict under the
+  final rules (`saved`, and every matching write after the approval). A
+  file saves one run of three, so the other two keep the verdict from
+  the rules they ran with.
 - Batches that ended with `Connection error.` or `terminated` were run
   again alone, and only the clean batch is kept. The first
   `claude-sonnet-5-5` sales-tracker batch also logged a failed Docker

@@ -210,11 +210,16 @@ function strings(value: unknown): string[] {
   return [];
 }
 
+/** Template text with `["name"]` reads written as `.name`, so both spellings match one pattern. */
+function dotted(text: string): string {
+  return text.replace(/\[\s*["']([A-Za-z_$][\w$]*)["']\s*\]/g, ".$1");
+}
+
 /** The property path of each `trigger.data` read, such as `.input.symbols`. Bare reads are skipped. */
 function triggerDataReads(definition: unknown): string[] {
   const reads: string[] = [];
   for (const text of strings(isRecord(definition) ? [definition.nodes, definition.edges] : [])) {
-    for (const match of text.matchAll(TRIGGER_DATA_READ)) {
+    for (const match of dotted(text).matchAll(TRIGGER_DATA_READ)) {
       if (match[1] !== "") reads.push(match[1]);
     }
   }
@@ -240,6 +245,27 @@ function reachableFrom(start: string, edges: Edge[], nodesById: Map<string, Json
     if (seen.has(id)) continue;
     seen.add(id);
     for (const edge of edges) if (edge.from === id) queue.push(edge.to);
+  }
+  return seen;
+}
+
+/**
+ * Node ids that can run before every step in `gate` has run: all that the
+ * trigger reaches without passing a gate step. A path passes a gate
+ * approval step only on its approve path, so it continues along the edges
+ * that also run on a denial.
+ */
+function reachableWithout(gate: Set<string>, nodes: Json[], edges: Edge[], nodesById: Map<string, Json>): Set<string> {
+  const triggers = nodes.filter((node) => node.type === "trigger").map(stepId);
+  const entries = triggers.length > 0 ? triggers : nodes.map(stepId).filter((id) => !edges.some((edge) => edge.to === id));
+  const seen = new Set<string>();
+  const queue = [...entries];
+  for (let id = queue.shift(); id !== undefined; id = queue.shift()) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) {
+      if (edge.from === id && (!gate.has(id) || runsOnDenial(edge, nodesById))) queue.push(edge.to);
+    }
   }
   return seen;
 }
@@ -302,6 +328,17 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
     if (current.length === 0) failures.push(`no step matches ${head}`);
     for (const selector of rest) {
       if (current.length === 0) break;
+      // After an approval, every matching step must wait for it, not just
+      // one of them: a second write before the approval runs unapproved.
+      // Other steps may repeat earlier, such as a read before a write.
+      if (current.every((id) => nodesById.get(id)?.type === "approval")) {
+        const early = reachableWithout(new Set(current), nodes, edges, nodesById);
+        for (const node of nodes) {
+          if (selectorMatches(selector, node) && early.has(stepId(node))) {
+            failures.push(`step "${stepId(node)}" matches ${selector} and can run before the approval`);
+          }
+        }
+      }
       const reachable = new Set(current.flatMap((id) => [...reachableFrom(id, edges, nodesById)]));
       current = nodes.filter((node) => selectorMatches(selector, node) && reachable.has(stepId(node))).map(stepId);
       if (current.length === 0) failures.push(`no step that matches ${selector} runs after one that matches ${previous}`);
@@ -317,7 +354,7 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
     }
   }
   if (check.run_date === true) {
-    if (!strings(nodes).some((text) => text.includes("trigger.timestamp"))) {
+    if (!strings(nodes).some((text) => dotted(text).includes("trigger.timestamp"))) {
       failures.push("no step reads the run date from trigger.timestamp");
     }
     const dated = nodes.filter((node) => node.type !== "trigger" && strings(node).some((text) => LITERAL_DATE.test(text)));
@@ -389,7 +426,12 @@ export function runWorkflowDefinitionCheck(check: WorkflowDefinitionCheck, traje
   ];
   const effort = `${firstLine}; ${drafts.length} draft(s), ${rejections} validator rejection(s)${extras.map((e) => `, ${e}`).join("")}`;
   const source = saved !== undefined ? "saved definition" : "last draft";
-  const problems = [...finalScore.errors.map((error) => `validator: ${error}`), ...finalScore.rules];
+  const problems = [
+    // A save that returns an error stores nothing, so its draft does not count as saved.
+    ...(check.saved === true && saved === undefined ? ["no workflow was saved"] : []),
+    ...finalScore.errors.map((error) => `validator: ${error}`),
+    ...finalScore.rules,
+  ];
   if (problems.length > 0) {
     return { check, pass: false, detail: `the ${source} fails: ${summarize(problems)}. ${effort}.`, metrics };
   }
