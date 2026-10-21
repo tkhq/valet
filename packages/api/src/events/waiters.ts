@@ -154,7 +154,7 @@ export async function evaluateWaiterCandidates(
         const bound = await deps.engineStore.bindEventWaiter(waiter.id, branch, pullRequest, repository, deps.now(), event.key === "github.pull_request.reopened");
         if (bound) {
           console.info("[event-waiters] bound branch", { waiterId: waiter.id, branch, pullRequest });
-          for (const digest of currentStateDigests(bound, deps.now(), derived.filter((def) => def.evaluateOnArm).map((def) => def.key))) await deps.engineStore.appendEventMatch(bound.id, digest, deps.now());
+          for (const digest of currentStateDigests(bound, deps.now(), derived.filter((def) => def.evaluateOnArm).map((def) => def.key), true)) await deps.engineStore.appendEventMatch(bound.id, digest, deps.now());
           deps.nudge?.([bound.id]);
         }
         waiter = bound ?? await deps.engineStore.getWakeup(waiter.id) ?? waiter;

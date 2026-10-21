@@ -352,7 +352,7 @@ describe("checkArm refusals", () => {
     );
     expect(result).toEqual({
       ok: false,
-      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request subject. Pass the pull request URL.",
+      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request or branch subject. Pass the pull request or branch URL.",
     });
   });
 
@@ -364,7 +364,7 @@ describe("checkArm refusals", () => {
     );
     expect(result).toEqual({
       ok: false,
-      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request subject. Pass the pull request URL.",
+      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request or branch subject. Pass the pull request or branch URL.",
     });
   });
 

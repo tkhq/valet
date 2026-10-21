@@ -84,7 +84,10 @@ function evaluateClause(
 ): { matched: false } | { matched: true; derive?: string } {
   const key = matchedKey(clause, event, derived);
   if (!key.ok) return { matched: false };
-  if (key.derive !== undefined) return { matched: true, derive: key.derive };
+  if (key.derive !== undefined) {
+    if (spec.primarySubject?.includes(":branch/") && !(event.subjects ?? []).includes(spec.primarySubject)) return { matched: false };
+    return { matched: true, derive: key.derive };
+  }
   const primary = spec.boundPullRequest ?? spec.primarySubject;
   if (primary !== undefined && !(event.subjects ?? []).includes(primary)) {
     return { matched: false };

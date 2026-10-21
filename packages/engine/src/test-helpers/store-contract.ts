@@ -845,7 +845,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
           eventBuffer: [digest({ merge_commit_sha: "b".repeat(40), subjectClosed: true })], eventSeen: ["seen"],
         }));
         const row = await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#42", "github:acme/lean-proofs", 30);
-        expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", branch, "github:acme/lean-proofs"]);
+        expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", branch]);
         expect(row?.eventMatch?.primarySubject).toBe(branch);
         expect(row?.eventMatch?.boundPullRequest).toBe("github:acme/lean-proofs#42");
         expect(row?.eventMatch?.endOnClose).toBe(false);
@@ -856,6 +856,42 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.closeBranchEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", digest({ branchClosed: true }), 32)).toBeNull();
         expect((await store.closeBranchEventWaiter("wk_ev", branch, "github:acme/lean-proofs#42", digest({ branchClosed: true }), 33))?.eventMatch?.boundPullRequest).toBeUndefined();
         expect((await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", "github:acme/lean-proofs", 34))?.eventMatch?.boundPullRequest).toBe("github:acme/lean-proofs#7");
+      });
+
+      it("drops other-branch sources and coalesces unbound sources by SHA", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/x";
+        const repo = "github:acme/lean-proofs";
+        await store.createWakeup(eventWaiter({ subjects: [branch, repo],
+          eventMatch: { clauses: [], self: [], once: false, primarySubject: branch },
+        }));
+        await store.bindEventWaiter("wk_ev", branch, `${repo}#42`, repo, 30);
+        const unbound = await store.closeBranchEventWaiter("wk_ev", branch, `${repo}#42`, digest({ branchClosed: true }), 30);
+        expect(unbound?.subjects).toEqual([branch]);
+        for (let n = 0; n < 205; n++) {
+          expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", dedupeKey: `other-${n}`,
+            subjects: [repo, `${repo}:branch/other`, `${repo}@a`] }), 30)).toBe(false);
+        }
+        for (let n = 0; n < 205; n++) {
+          expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", dedupeKey: `own-${n}`,
+            subjects: [repo, branch, `${repo}@a`] }), 30)).toBe(true);
+        }
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1", "own-204"]);
+      });
+
+      it("transitions a newer-pod digest without comparing parsed JSON", async () => {
+        const future = { ...digest(), futureField: { version: 2 } };
+        await store.createWakeup(eventWaiter({ eventBuffer: [future] }));
+        const row = await store.getWakeup("wk_ev");
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row?.eventRevision ?? 0)).not.toBeNull();
+      });
+
+      it("admits current-state work beyond a full buffer and guards only on revision", async () => {
+        await store.createWakeup(eventWaiter({ eventBuffer: Array.from({ length: 200 }, (_, n) => digest({ dedupeKey: `d-${n}` })) }));
+        expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", evaluateCurrent: true, dedupeKey: "arm" }), 30)).toBe(true);
+        const row = await store.getWakeup("wk_ev");
+        expect(row?.eventBuffer).toHaveLength(201);
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, 0)).toBeNull();
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row?.eventRevision ?? 0)).not.toBeNull();
       });
 
       it("admits exactly one concurrent PR binding and rejects a stale unbind", async () => {
@@ -895,7 +931,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         const row = eventWaiter({ eventBuffer: [digest()], updatedAt: 30 });
         await store.createWakeup(row);
         await store.appendEventMatch(row.id, digest({ dedupeKey: "merge", subjectClosed: true }), 30);
-        expect(await store.transitionWakeup(row.id, ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row)).toBeNull();
+        expect(await store.transitionWakeup(row.id, ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row.eventRevision ?? 0)).toBeNull();
         expect((await store.getWakeup(row.id))?.eventBuffer).toHaveLength(2);
       });
 

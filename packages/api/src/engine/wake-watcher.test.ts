@@ -1083,6 +1083,37 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(h.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it("retries a redirected once wait after a concurrent buffer write without double firing", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow());
+    const original = h.store.transitionWakeup.bind(h.store);
+    const cas = vi.spyOn(h.store, "transitionWakeup").mockImplementationOnce(async (...args) => {
+      await h.store.appendEventMatch("wk_ev", digest(1), NOW);
+      return original(...args);
+    });
+    const watcher = h.watcher();
+    expect(await watcher.endDeliveredWaiter({ waiterId: "wk_ev", sessionId: "sess-1", threadId: "thread-1" })).toBe(true);
+    expect(cas).toHaveBeenCalledTimes(2);
+    await watcher.sweep(NOW + 1000);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect((await h.store.getWakeup("wk_ev"))?.status).toBe("done");
+  });
+
+  it("backs off lost CAS decisions but lets deadline expiry bypass that backoff", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)], deadlineAt: NOW + 500 }));
+    const original = h.store.transitionWakeup.bind(h.store);
+    const cas = vi.spyOn(h.store, "transitionWakeup").mockResolvedValueOnce(null);
+    const watcher = h.watcher();
+    await watcher.sweep(NOW);
+    await watcher.sweep(NOW + 1);
+    expect(cas).toHaveBeenCalledTimes(1);
+    cas.mockImplementation(original);
+    await watcher.sweep(NOW + 500);
+    expect(cas).toHaveBeenCalledTimes(2);
+    expect((await h.store.getWakeup("wk_ev"))?.status).toBe("expired");
+  });
+
   it("puts a digest that arrived meanwhile in the one terminal event.matched signal", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)] }));

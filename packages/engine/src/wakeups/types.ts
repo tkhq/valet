@@ -52,9 +52,12 @@ export interface EventMatchSpec {
   boundPullRequest?: string;
   /** Distinguishes current-state work for successive bindings, including reopen. */
   bindingGeneration?: number;
+  /** Persisted open-PR lookup schedule, also recovers missed webhooks after restart. */
+  branchLookupAt?: number;
+  branchLookupAttempt?: number;
   /** Closed PRs cannot bind again until an explicit reopened event. */
   closedPullRequests?: string[];
-  /** False skips current-state evaluation at arm and after binding. */
+  /** False skips current-state evaluation at arm. Later branch bindings always evaluate. */
   evaluateCurrent?: boolean;
   /**
    * Stream mode: the shortest gap between two `event.matched` signals (ms).
@@ -66,7 +69,7 @@ export interface EventMatchSpec {
 /** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
 export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
 
-/** The normal buffer cap. An implicit close reserves one additional digest. */
+/** The normal buffer cap. Close notes and current-state work bypass this cap. */
 export const EVENT_BUFFER_MAX_DIGESTS = 200;
 
 /** Admission budget for delivered outputs. Exhaustion refuses new outputs, never evicts keys. */
@@ -162,6 +165,8 @@ export interface Wakeup {
   eventSeen?: string[];
   /** Consumed derivation sources, bounded independently of delivered keys. */
   eventSourceSeen?: string[];
+  /** Monotonic event-state CAS revision. Legacy rows start at zero. */
+  eventRevision?: number;
 }
 
 /** What kind of owner holds a lease open. */

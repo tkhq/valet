@@ -20,6 +20,7 @@ import type {
   DecisionGateEntry,
   DecisionGateRef,
   EventMatchDigest,
+  EventMatchSpec,
   Lease,
   LeaseReleaseCause,
   ListOpts,
@@ -1537,7 +1538,7 @@ export class PgSessionStore implements SessionStore {
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1 OR (match_json::jsonb->>'primarySubject' LIKE '%:branch/%' AND NOT match_json::jsonb ? 'boundPullRequest' AND COALESCE((match_json::jsonb->>'branchLookupAt')::bigint, 0) <= $1))))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
@@ -1554,20 +1555,28 @@ export class PgSessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
-    expected?: Wakeup,
+    expectedRevision?: number,
   ): Promise<Wakeup | null> {
-    const guard = expected ? ` AND updated_at = $18 AND event_count = $19
-      AND COALESCE(event_buffer, '[]')::jsonb = $20::jsonb AND match_json::jsonb IS NOT DISTINCT FROM $21::jsonb` : "";
+    const guard = expectedRevision !== undefined ? " AND event_revision = $18" : "";
     const params = transitionParams(id, from, to, patch, updatedAt);
-    if (expected) params.push(expected.updatedAt, expected.eventCount, JSON.stringify(expected.eventBuffer ?? []), jsonOrNull(expected.eventMatch));
+    if (expectedRevision !== undefined) params.push(expectedRevision);
     const r = await this.db.query(`${TRANSITION_SQL}${guard} RETURNING *`, params);
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async updateEventMatch(id: string, patch: Partial<EventMatchSpec>, updatedAt: number, expectedRevision: number): Promise<Wakeup | null> {
+    const result = await this.db.query(`UPDATE engine_wakeups
+      SET match_json = (match_json::jsonb || $2::jsonb)::text, event_revision = event_revision + 1, updated_at = $3
+      WHERE id = $1 AND kind = 'event' AND status = 'running' AND event_revision = $4 RETURNING *`,
+      [id, JSON.stringify(patch), updatedAt, expectedRevision]);
+    return result.rows[0] ? rowToWakeup(rawToWakeupRow(result.rows[0])) : null;
   }
 
   async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number, reopened = false): Promise<Wakeup | null> {
     const result = await this.db.query(
       `UPDATE engine_wakeups SET
-         subjects = ARRAY[$3::text] || array_remove(subjects, $3::text) || CASE WHEN $4 = ANY(subjects) THEN '{}'::text[] ELSE ARRAY[$4::text] END,
+         subjects = ARRAY[$3::text] || array_remove(array_remove(subjects, $3::text), $4::text),
+         event_revision = event_revision + 1,
          match_json = (jsonb_set(match_json::jsonb, '{boundPullRequest}', to_jsonb($3::text)) ||
            jsonb_build_object('bindingGeneration', COALESCE((match_json::jsonb->>'bindingGeneration')::int, 0) + 1) ||
            CASE WHEN $6 THEN jsonb_build_object('closedPullRequests',
@@ -1576,6 +1585,7 @@ export class PgSessionStore implements SessionStore {
          updated_at = $5
        WHERE id = $1 AND kind = 'event' AND status = 'running'
          AND match_json::jsonb->>'primarySubject' = $2 AND NOT match_json::jsonb ? 'boundPullRequest'
+         AND (deadline_at IS NULL OR deadline_at > $5)
          AND ($6 OR NOT COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) @> jsonb_build_array($3::text))
        RETURNING *`, [id, branch, pullRequest, repository, updatedAt, reopened],
     );
@@ -1584,10 +1594,11 @@ export class PgSessionStore implements SessionStore {
 
   async closeBranchEventWaiter(id: string, branch: string, pullRequest: string, digest: EventMatchDigest, updatedAt: number): Promise<Wakeup | null> {
     const result = await this.db.query(
-      `UPDATE engine_wakeups SET subjects = array_remove(subjects, $3::text),
+      `UPDATE engine_wakeups SET subjects = array_remove(array_remove(subjects, $3::text), split_part($2, ':branch/', 1)),
+         event_revision = event_revision + 1,
          match_json = ((match_json::jsonb - 'boundPullRequest') || jsonb_build_object('closedPullRequests',
            COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) || jsonb_build_array($3::text)))::text,
-         event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($4::jsonb))::text, updated_at = $5
+         event_buffer = ((SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT (e ? 'derive' AND COALESCE(e->>'evaluateCurrent', 'false') = 'true')) || jsonb_build_array($4::jsonb))::text, updated_at = $5
        WHERE id = $1 AND kind = 'event' AND status = 'running' AND match_json::jsonb->>'primarySubject' = $2
          AND (NOT match_json::jsonb ? 'boundPullRequest' OR match_json::jsonb->>'boundPullRequest' = $3)
          AND NOT COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) @> jsonb_build_array($3::text)
@@ -1620,10 +1631,22 @@ export class PgSessionStore implements SessionStore {
        ),
        u AS (
          UPDATE engine_wakeups
-            SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
+            SET event_buffer = ((SELECT COALESCE(jsonb_agg(e), '[]'::jsonb)
+                  FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
+                  WHERE NOT ($2::jsonb ? 'derive' AND NOT $2::jsonb ? 'evaluateCurrent'
+                    AND match_json::jsonb->>'primarySubject' LIKE '%:branch/%' AND NOT match_json::jsonb ? 'boundPullRequest'
+                    AND e ? 'derive' AND NOT e ? 'evaluateCurrent'
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements_text($2::jsonb->'subjects') s
+                      WHERE s LIKE '%@%' AND e->'subjects' @> jsonb_build_array(s)))) || jsonb_build_array($2::jsonb))::text,
+                event_revision = event_revision + 1,
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
-            AND ($2::jsonb->>'subjectClosed' = 'true' OR jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4)
+            AND (NOT $2::jsonb ? 'derive' OR $2::jsonb ? 'evaluateCurrent' OR COALESCE(match_json::jsonb->>'primarySubject', '') NOT LIKE '%:branch/%' OR $2::jsonb->'subjects' @> jsonb_build_array(match_json::jsonb->>'primarySubject'))
+            AND ($2::jsonb->>'subjectClosed' = 'true' OR $2::jsonb->>'evaluateCurrent' = 'true' OR jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+              OR ($2::jsonb ? 'derive' AND NOT match_json::jsonb ? 'boundPullRequest'
+                AND match_json::jsonb->>'primarySubject' LIKE '%:branch/%'
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e,
+                  jsonb_array_elements_text($2::jsonb->'subjects') s WHERE s LIKE '%@%' AND e ? 'derive' AND e->'subjects' @> jsonb_build_array(s))))
             AND ($2::jsonb->>'subjectClosed' = 'true' OR $2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
@@ -1655,7 +1678,7 @@ export class PgSessionStore implements SessionStore {
     const keys = [...new Set(dedupeKeys)];
     const r = await this.db.query(
       `UPDATE engine_wakeups
-          SET event_buffer = (
+          SET event_revision = event_revision + 1, event_buffer = (
                 SELECT COALESCE(jsonb_agg(b.e ORDER BY b.ord), '[]'::jsonb)::text
                   FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) WITH ORDINALITY AS b(e, ord)
                  WHERE NOT (b.e->>'dedupeKey' = ANY($2::text[]))),
@@ -1778,7 +1801,7 @@ export class PgSessionStore implements SessionStore {
  * `transitionWakeupAndReleaseLease`. `COALESCE` keeps a column the patch
  * does not set. Parameters come from `transitionParams`.
  */
-const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
+const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4, event_revision = event_revision + 1,
          cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
          log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
          exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
@@ -1820,8 +1843,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
        origin_json, window_start_at, window_count, watch_buffer, last_emit_at, match_json, subjects, event_buffer,
-       event_seen, event_source_seen)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
+       event_seen, event_source_seen, event_revision)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)`,
     [
       w.id,
       w.sessionId,
@@ -1853,6 +1876,7 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       jsonOrNull(w.eventBuffer),
       jsonOrNull(w.eventSeen),
       jsonOrNull(w.eventSourceSeen),
+      w.eventRevision ?? 0,
     ],
   );
 }

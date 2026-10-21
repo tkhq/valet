@@ -295,7 +295,7 @@ export const waitForEventTool = defineTool({
     "hibernate while you wait. Arm the wait before the action that triggers it, for example before `git push`. " +
     "`once` (default true) ends the wait at the first match; `once: false` streams every match until `max_hours`. " +
     `One waiter admits at most ${EVENT_DELIVERED_MAX_KEYS} output digests. Create a new wait for more outputs. ` +
-    "Set evaluate_current to false to skip the current-state check at arm time. " +
+    "For PR subjects, set `evaluate_current: false` when you arm before a push. Later branch bindings always evaluate current state. " +
     "PR waits end when the PR closes or merges unless end_on_close is false. " +
     "Recipes: CI on a pull request: subject the PR URL, on " +
     '[{ "key": "github.check_run.completed", "status": ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, ' +
@@ -311,7 +311,7 @@ export const waitForEventTool = defineTool({
     'on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
     "To watch something with no end, propose an event subscription instead.",
   parameters: Type.Object({
-    evaluate_current: Type.Optional(Type.Boolean({ description: "Default true: check current derived state after arm and after branch binding." })),
+    evaluate_current: Type.Optional(Type.Boolean({ description: "Default true for PR subjects. Set false before a push. Later branch bindings always evaluate." })),
     end_on_close: Type.Optional(Type.Boolean({ description: "Default true: end PR waits on close or merge. Branch waits stay armed for another PR." })),
     subject: Type.String({ description: "A GitHub branch, pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
     on: Type.Array(clauseSchema, { description: "1 to 8 clauses. Any clause that matches wakes you." }),

@@ -1,3 +1,4 @@
+import { productionBranchLookup } from "../events/branch-lookup.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -494,7 +495,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let statusRef: ChildStatusReader | undefined;
   let wakeWatcherRef: WakeWatcher | undefined;
   const engineHost = new EngineHost({
-    nudgeEventWaiters: (ids, work) => wakeWatcherRef?.nudge(ids, work),
+    nudgeEventWaiters: (ids) => wakeWatcherRef?.nudge(ids),
     engineStore,
     sandboxProvider,
     eventStream,
@@ -619,6 +620,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     provider: sandboxProvider,
     limits: wakeupLimits,
+    lookupBranch: productionBranchLookup({ db, githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) } }),
+    evaluateKeys: plugins.flatMap((p) => p.derivedEvents?.filter((d) => d.evaluateOnArm).map((d) => d.key) ?? []),
     deriveEvent: productionEventWaiterDeriver({
       db,
       plugins,

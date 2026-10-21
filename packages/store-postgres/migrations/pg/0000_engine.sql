@@ -253,7 +253,8 @@ CREATE TABLE "engine_wakeups" (
 	"subjects" text[],
 	"event_buffer" text,
 	"event_seen" text,
-	"event_source_seen" text
+	"event_source_seen" text,
+	"event_revision" integer NOT NULL DEFAULT 0
 );
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");

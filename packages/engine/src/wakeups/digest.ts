@@ -59,8 +59,8 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
 }
 
 /** Persisted work for the normal watcher pass, including after a process restart. */
-export function currentStateDigests(row: Wakeup, now: number, keys: readonly string[]): EventMatchDigest[] {
-  if (!row.eventMatch || row.eventMatch.evaluateCurrent === false) return [];
+export function currentStateDigests(row: Wakeup, now: number, keys: readonly string[], afterBinding = false): EventMatchDigest[] {
+  if (!row.eventMatch || row.eventMatch.evaluateCurrent === false && !afterBinding) return [];
   const subject = row.eventMatch.boundPullRequest ?? row.eventMatch.primarySubject ?? row.subjects?.[0];
   if (!subject || subject.includes(":branch/")) return [];
   return [...new Set(row.eventMatch.clauses.map((clause) => clause.key))].filter((key) => keys.includes(key)).map((key) => ({

@@ -116,7 +116,7 @@ const R4 = (channel: string) =>
 const R5 = (key: string, service: string) =>
   `[wait_for_event] ${key} is not an event key for ${service}. Call workflows.list_event_types for the keys.`;
 const R5_PULL_REQUEST = (key: string) =>
-  `[wait_for_event] ${key} needs a pull request subject. Pass the pull request URL.`;
+  `[wait_for_event] ${key} needs a pull request or branch subject. Pass the pull request or branch URL.`;
 const R6 = "[wait_for_event] This thread already receives replies from that Slack thread. No wait is needed.";
 const R7 = (service: string) =>
   `[wait_for_event] ${SERVICE_NAMES[service] ?? service} is not connected for this organization. Connect it in Settings, Integrations.`;

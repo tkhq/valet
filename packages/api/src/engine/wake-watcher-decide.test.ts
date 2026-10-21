@@ -640,6 +640,25 @@ describe("decideEventWaiter (event wakeups spec, Part F)", () => {
       expect(layoutStreamSignal([big(1)], false, 100).full.map((x) => x.dedupeKey)).toEqual(["d-1"]);
     });
 
+    it.each(["subjectClosed", "branchClosed"] as const)("caps a %s flush and keeps the outcome", (kind) => {
+      const mergeSha = "b".repeat(40);
+      const close = digest(201, { key: "github.pull_request.closed", status: "merged", merge_commit_sha: mergeSha, [kind]: true });
+      const all = [...Array.from({ length: 200 }, (_, i) => big(i)), close];
+      const d = decideEventWaiter(NOW, waiter({ eventBuffer: all, lastEmitAt: NOW - 1 }, { once: false }), OPTS);
+      expect(sizeOf(d?.signals[0])).toBeLessThanOrEqual(EVENT_SIGNAL_MAX_BYTES);
+      expect(d?.signals[0]?.attributes.matchCount).toBe("201");
+      expect(d?.signals[0]?.body).toContain(mergeSha);
+      if (kind === "branchClosed") {
+        expect(d?.to).toBe("running");
+        expect(d?.deliveredKeys).toHaveLength(201);
+        expect(d?.patch?.lastEmitAt).toBeUndefined();
+        expect(d?.signals[0]?.body).toContain("branch wait stays armed");
+      } else {
+        expect(d?.to).toBe("done");
+        expect(d?.signals[1]?.signalType).toBe("event.ended");
+      }
+    });
+
     it("the deadline flush lists the digests past the cap as header lines only", () => {
       const all = Array.from({ length: 200 }, (_, i) => big(i));
       const d = decideEventWaiter(NOW, waiter({ eventBuffer: all, deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR }, { once: false }), OPTS);

@@ -757,6 +757,7 @@ export interface WakeupRow {
   event_seen: string | null;
   /** `event`: a bounded JSON array of consumed derivation source keys. */
   event_source_seen: string | null;
+  event_revision: number;
 }
 
 /**
@@ -814,6 +815,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
     event_seen: asStringOrNull(raw.event_seen, "event_seen"),
     event_source_seen: asStringOrNull(raw.event_source_seen, "event_source_seen"),
+    event_revision: toNum(raw.event_revision ?? 0, "event_revision"),
   };
 }
 
@@ -894,6 +896,13 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
   const evaluateCurrent = optBoolean(parsed, "evaluateCurrent", field);
   const boundPullRequest = optString(parsed, "boundPullRequest", field);
   const closedPullRequests = optStringArray(parsed, "closedPullRequests", field);
+  const lookup: { branchLookupAt?: number; branchLookupAttempt?: number } = {};
+  for (const key of ["branchLookupAt", "branchLookupAttempt"] as const) {
+    const value = parsed[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${field}.${key} is not a non-negative integer`);
+    lookup[key] = value;
+  }
   const bindingGeneration = parsed.bindingGeneration;
   if (bindingGeneration !== undefined && (typeof bindingGeneration !== "number" || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 0)) {
     throw new Error(`${field}.bindingGeneration is not a non-negative integer`);
@@ -913,6 +922,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     ...(boundPullRequest !== undefined ? { boundPullRequest } : {}),
     ...(closedPullRequests !== undefined ? { closedPullRequests } : {}),
     ...(bindingGeneration !== undefined ? { bindingGeneration } : {}),
+    ...lookup,
   };
 }
 
@@ -992,6 +1002,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     logOffset: row.log_offset,
     logTail: row.log_tail,
     eventCount: row.event_count,
+    ...(row.event_revision > 0 ? { eventRevision: row.event_revision } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
