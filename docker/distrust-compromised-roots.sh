@@ -2,22 +2,26 @@
 # INCIDENT: 2026-10-20 eMudhra intermediate CA private-key compromise
 # (https://emudhra.we-have-a-problem.com/). The compromised intermediates chain
 # to the roots "emSign ECC Root CA - G3" and "Comodo AAA Services root".
-# Browsers already block them; clients using a static CA bundle do not.
 #
-# This script distrusts both roots in the Debian system store. Run as root,
-# after `ca-certificates` is installed.
+# Debian removed both roots from bookworm `ca-certificates` in version
+# 20250419~deb12u2 (DLA-4845-1, Debian bug #1151413). This script does not
+# change the system store. It fails the build if either root is still in it,
+# so an older or pinned package cannot bring a root back. Run it after
+# `ca-certificates` is installed.
 #
-# With `--chromium-policy` it also writes a Chrome managed policy
+# With `--chromium-policy DIR` it also writes a Chrome managed policy
 # (CADistrustedCertificates) for Playwright's Chrome for Testing, which ships its
-# own Chrome Root Store and ignores the system store. Playwright installs this
-# browser under the "chrome_for_testing" policy directory.
+# own Chrome Root Store and ignores the system store. DIR holds the two roots as
+# PEM files from docker/distrusted-roots/. Playwright installs this browser under
+# the "chrome_for_testing" policy directory. Chrome for Testing 153.0.8010.12
+# (playwright-core 1.63.0) still lists the emSign root as a trust anchor.
 #
-# REMOVAL CONDITION: delete this script and every `distrust-compromised-roots`
-# line in the Dockerfiles once the Debian bookworm `ca-certificates` package
-# ships the distrust (check `apt-cache policy ca-certificates` and the Debian
-# security tracker). Keep `--use-openssl-ca` (the safe flag) until Node and Bun bundled stores
-# are also patched. `--use-system-ca` only adds to Node's bundled store and does
-# not remove the bad roots.
+# REMOVAL CONDITION: remove `--chromium-policy` and docker/distrusted-roots/
+# when the Chrome for Testing version that playwright-core pins no longer lists
+# the emSign root in net/data/ssl/chrome_root_store/root_store.textproto.
+# Keep the store check and `--use-openssl-ca` (the safe flag) until Node and Bun
+# bundled stores are also patched. `--use-system-ca` only adds to Node's bundled
+# store and does not remove the bad roots.
 set -eu
 
 ROOTS='emSign_ECC_Root_CA_-_G3 Comodo_AAA_Services_root'
@@ -32,6 +36,17 @@ fail() {
   echo "distrust-compromised-roots: $*" >&2
   exit 1
 }
+
+src_dir=''
+case "${1:-}" in
+  '') ;;
+  --chromium-policy)
+    src_dir=${2:-}
+    [ -n "$src_dir" ] ||
+      fail "--chromium-policy needs a directory. Pass the directory that holds the docker/distrusted-roots files."
+    ;;
+  *) fail "unknown argument $1. Use no argument or --chromium-policy DIR." ;;
+esac
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -66,76 +81,69 @@ check_pem_file() {
     [ -e "$c" ] || continue
     fp=$(cert_fp "$c") || fail "cannot fingerprint a PEM block in $1"
     for bad in $BAD_FPS; do
-      [ "$fp" != "$bad" ] || fail "distrusted root $bad still present in $1"
+      [ "$fp" != "$bad" ] ||
+        fail "distrusted root $bad still present in $1. Install ca-certificates 20250419~deb12u2 or later."
     done
   done
 }
 
-# The source certs must be the expected roots before we trust them as inputs.
-check_source() {
-  src="/usr/share/ca-certificates/mozilla/$1.crt"
-  [ -s "$src" ] || fail "source certificate $src is missing"
-  fp=$(cert_fp "$src") || fail "$src is not a valid certificate"
-  [ "$fp" = "$2" ] || fail "$src has unexpected fingerprint $fp"
-}
-check_source emSign_ECC_Root_CA_-_G3 "$FP_EMSIGN_G3"
-check_source Comodo_AAA_Services_root "$FP_COMODO_AAA"
-
-sed -i \
-  -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
-  -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
-  /etc/ca-certificates.conf
-update-ca-certificates --fresh
-
-# Fail the build if the sed patterns no longer match (conf renamed upstream).
-for f in $ROOTS; do
-  grep -q "^!mozilla/$f.crt" /etc/ca-certificates.conf ||
-    fail "$f entry not disabled in ca-certificates.conf"
-done
-
 # Fail the build if either root is in the final bundle or the hashed dir, under
 # any filename. Compare by certificate fingerprint, not by name.
+[ -s /etc/ssl/certs/ca-certificates.crt ] ||
+  fail "/etc/ssl/certs/ca-certificates.crt is missing. Install ca-certificates before this script runs."
 check_pem_file /etc/ssl/certs/ca-certificates.crt
 for f in /etc/ssl/certs/*; do
   [ -f "$f" ] || continue
   check_pem_file "$f"
 done
 
-if [ "${1:-}" = "--chromium-policy" ]; then
-  dir=/etc/opt/chrome_for_testing/policies/managed
-  policy="$dir/valet-distrust-compromised-roots.json"
-  mkdir -p "$dir"
-  sep=''
-  : > "$work/policy.json"
-  printf '{"CADistrustedCertificates":[' >> "$work/policy.json"
-  for f in $ROOTS; do
-    src="/usr/share/ca-certificates/mozilla/$f.crt"
-    openssl x509 -in "$src" -outform DER -out "$work/$f.der" ||
-      fail "cannot convert $src to DER"
-    b64=$(base64 -w0 "$work/$f.der") || fail "cannot encode $f"
-    [ -n "$b64" ] || fail "empty policy entry for $f"
-    printf '%s"%s"' "$sep" "$b64" >> "$work/policy.json"
-    sep=','
-  done
-  printf ']}\n' >> "$work/policy.json"
+[ -n "$src_dir" ] || exit 0
 
-  # Verify each entry decodes to one of the expected roots.
-  seen=''
-  for b64 in $(tr -d '\n' < "$work/policy.json" | sed -e 's/^{"CADistrustedCertificates":\[//' -e 's/\]}$//' -e 's/[",]/ /g'); do
-    printf '%s' "$b64" | base64 -d > "$work/entry.der" ||
-      fail "policy entry is not valid base64"
-    fp=$(cert_fp "$work/entry.der" DER) || fail "policy entry is not a valid certificate"
-    case " $BAD_FPS " in
-      *" $fp "*) seen="$seen $fp" ;;
-      *) fail "policy entry has unexpected fingerprint $fp" ;;
-    esac
-  done
-  for bad in $BAD_FPS; do
-    case "$seen" in
-      *"$bad"*) ;;
-      *) fail "policy is missing root $bad" ;;
-    esac
-  done
+# The committed source certs must be the expected roots before they go into
+# the policy.
+check_source() {
+  src="$src_dir/$1.pem"
+  [ -s "$src" ] ||
+    fail "source certificate $src is missing. Copy docker/distrusted-roots into the image first."
+  fp=$(cert_fp "$src") || fail "$src is not a valid certificate"
+  [ "$fp" = "$2" ] || fail "$src has unexpected fingerprint $fp"
+}
+check_source emSign_ECC_Root_CA_-_G3 "$FP_EMSIGN_G3"
+check_source Comodo_AAA_Services_root "$FP_COMODO_AAA"
 
-  install -m 0644 "$work/policy.json" "$policy"
-fi
+dir=/etc/opt/chrome_for_testing/policies/managed
+policy="$dir/valet-distrust-compromised-roots.json"
+mkdir -p "$dir"
+sep=''
+: > "$work/policy.json"
+printf '{"CADistrustedCertificates":[' >> "$work/policy.json"
+for f in $ROOTS; do
+  src="$src_dir/$f.pem"
+  openssl x509 -in "$src" -outform DER -out "$work/$f.der" ||
+    fail "cannot convert $src to DER"
+  b64=$(base64 -w0 "$work/$f.der") || fail "cannot encode $f"
+  [ -n "$b64" ] || fail "empty policy entry for $f"
+  printf '%s"%s"' "$sep" "$b64" >> "$work/policy.json"
+  sep=','
+done
+printf ']}\n' >> "$work/policy.json"
+
+# Verify each entry decodes to one of the expected roots.
+seen=''
+for b64 in $(tr -d '\n' < "$work/policy.json" | sed -e 's/^{"CADistrustedCertificates":\[//' -e 's/\]}$//' -e 's/[",]/ /g'); do
+  printf '%s' "$b64" | base64 -d > "$work/entry.der" ||
+    fail "policy entry is not valid base64"
+  fp=$(cert_fp "$work/entry.der" DER) || fail "policy entry is not a valid certificate"
+  case " $BAD_FPS " in
+    *" $fp "*) seen="$seen $fp" ;;
+    *) fail "policy entry has unexpected fingerprint $fp" ;;
+  esac
+done
+for bad in $BAD_FPS; do
+  case "$seen" in
+    *"$bad"*) ;;
+    *) fail "policy is missing root $bad" ;;
+  esac
+done
+
+install -m 0644 "$work/policy.json" "$policy"

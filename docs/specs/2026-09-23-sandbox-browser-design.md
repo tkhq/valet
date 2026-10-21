@@ -755,17 +755,17 @@ coding agent.
 
 ### Distrusted root certificates
 
-On 2026-10-20 the eMudhra intermediate CA keys were compromised. The affected roots are "emSign ECC Root CA - G3" and "Comodo AAA Services root". The sandbox and API images distrust both roots. `docker/distrust-compromised-roots.sh` does this.
+On 2026-10-20 the eMudhra intermediate CA keys were compromised. The affected roots are "emSign ECC Root CA - G3" and "Comodo AAA Services root". The sandbox and API images distrust both roots. `docker/distrust-compromised-roots.sh` checks this at build time.
 
-The script disables both roots in the Debian system store. It fails the build if either root fingerprint is in `/etc/ssl/certs/ca-certificates.crt` or in the hashed `/etc/ssl/certs` directory. The check compares SHA-256 fingerprints, not file names.
+Debian removed both roots from bookworm `ca-certificates` in version 20250419~deb12u2 (DLA-4845-1). The script does not change the system store. It fails the build if either root fingerprint is in `/etc/ssl/certs/ca-certificates.crt` or in the hashed `/etc/ssl/certs` directory, so an older package cannot bring a root back. The check compares SHA-256 fingerprints, not file names.
 
-Playwright's Chrome for Testing has its own root store and ignores the system store. With `--chromium-policy`, the script writes a managed policy to `/etc/opt/chrome_for_testing/policies/managed`. The policy uses `CADistrustedCertificates`.
+Playwright's Chrome for Testing has its own root store and ignores the system store. Chrome for Testing 153.0.8010.12, which playwright-core 1.63.0 installs, still lists the emSign root as a trust anchor. With `--chromium-policy DIR`, the script writes a managed policy to `/etc/opt/chrome_for_testing/policies/managed`. The policy uses `CADistrustedCertificates`. Its two certificates come from PEM files committed in `docker/distrusted-roots/`, not from the system package. The script checks each file against its pinned fingerprint before it writes the policy.
 
 The confined launcher builds a new filesystem with bwrap, and that filesystem has no `/etc`. The launcher therefore binds the managed policy directory read-only into the namespace. It binds only that directory, and only when the directory exists. `chromium-wrapper-args.ts` builds the bwrap arguments.
 
 Node uses `NODE_OPTIONS=--use-openssl-ca` so that it reads the patched system store. `--use-system-ca` only adds to the bundled store and does not remove the roots. Browser-workload execs on the docker provider set `NODE_OPTIONS=--use-openssl-ca` and drop any user value. A user `NODE_OPTIONS` replaces the image default, so a user override removes the protection.
 
-Remove the script when the Debian `ca-certificates` package ships the distrust. Known gaps: Bun 1.4.3 ignores every system-CA option, so the compiled `valet` binary still trusts the roots. The legacy and compose-only images are not changed. The docker provider's default `node:20-bookworm` image is an upstream image and is not changed. No RDS CA is provisioned.
+Remove the Chrome policy and `docker/distrusted-roots/` when the Chrome for Testing version that playwright-core pins no longer lists the emSign root in its root store. Keep the store check and `--use-openssl-ca` until the Node and Bun bundled stores drop both roots. Known gaps: Bun 1.4.3 ignores every system-CA option, so the compiled `valet` binary still trusts the roots. The legacy and compose-only images are not changed. The docker provider's default `node:20-bookworm` image is an upstream image and is not changed. No RDS CA is provisioned.
 
 ## 10. Files, tools and diagnostics
 
