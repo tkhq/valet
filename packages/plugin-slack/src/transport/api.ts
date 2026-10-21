@@ -90,7 +90,7 @@ export class SlackApi {
     const res = await slackFetch(method, this.token, body, this.baseUrl, attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
-      if (attention && res.ok && ["user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"].includes(parsed.error ?? "")) {
+      if (attention && res.ok && ["user_not_found", "cannot_dm_bot", "channel_not_found"].includes(parsed.error ?? "")) {
         throw new ChannelDeliveryRejectedError("slack", parsed.error!);
       }
       throw new SlackApiError(

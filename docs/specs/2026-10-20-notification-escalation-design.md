@@ -148,7 +148,9 @@ Transports without history reconciliation still recover by resending.
 
 A transient or unknown provider failure retains `sending` and its error for the next recovery attempt.
 Definite per-recipient rejections instead mark the job `dropped` on the first attempt.
-Slack rejects `user_not_found`, `account_inactive`, `cannot_dm_bot`, and DM `channel_not_found`.
+Slack rejects recipient-specific `user_not_found`, `cannot_dm_bot`, and DM `channel_not_found`.
+Slack `account_inactive` describes the token user or workspace, not the recipient.
+It remains retryable and contributes to the recovery-failure alert.
 Telegram rejects a 403 response that states the user blocked the bot or is deactivated.
 Plugins normalize these replies to `ChannelDeliveryRejectedError`.
 Mixed permanent and transient failures keep retrying.
@@ -160,12 +162,15 @@ There is no retry limit or age cutoff for an unhandled notification.
 This preserves blocking approvals across long channel outages.
 The failure counter labels recovery failures with `retry=true`.
 The provisioned attention recovery alert reports those failures for operator action.
-The `valet_attention_oldest_job_age` gauge samples the oldest pending or sending enqueue time from Postgres.
+The `valet_attention_oldest_job_age` gauge measures overdue time from the earliest pending or sending `deliver_after` in Postgres.
+It clamps future deadlines to zero, excluding intentional grace periods and scheduled retry waits.
 Its `s` unit exports as `valet_attention_oldest_job_age_seconds`.
-An alert warns when that age exceeds 30 minutes, even if a transport has never become ready.
-The active-row enqueue-time index bounds this query.
+An alert warns when a job is more than 30 minutes overdue, even if a transport has never become ready.
+The active-row due-time index bounds this query.
 Existing branch databases get their initial enqueue timestamp when the schema repair adds the column.
 Every retry repeats the read, gate, audience, and preference checks.
+Local read markers, terminal gates, team-DM preferences, and disabled identity links drop the job before remote audience checks.
+A remote Slack outage cannot keep a locally handled job active.
 
 Only attention Slack posts, DM opens, and delivery-time audience checks use a ten-second deadline.
 That deadline includes rate-limit waits and response body reads.

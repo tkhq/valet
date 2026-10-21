@@ -1,3 +1,5 @@
+import * as attention from "../orchestrator/attention.js";
+import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { webPresence } from "../services/web-presence.js";
@@ -2908,8 +2910,39 @@ describe("ChannelHost.attentionDeliverer", () => {
     await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
     const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
     if (!job) throw new Error("Expected a durable delivery");
-    await drainAttentionDeliveries({ db: testDb.appDb, channels: host.attentionDeliverers() }, job.deliverAfter);
-    expect(fakeTransport.sent).toHaveLength(0);
+    const audience = vi.spyOn(attention, "attentionAudience").mockRejectedValue(new Error("Slack membership unavailable"));
+    try {
+      await drainAttentionDeliveries({ db: testDb.appDb, channels: host.attentionDeliverers() }, job.deliverAfter);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(audience).not.toHaveBeenCalled();
+      const [dropped] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(dropped).toMatchObject({ status: "dropped", event: null, lastError: null });
+    } finally { audience.mockRestore(); }
+  });
+
+  it("retries a Slack account_inactive outage and records recovery failures", async () => {
+    const factory = slackPlugin.transports?.[0];
+    if (!factory) throw new Error("Expected the Slack transport factory");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: "account_inactive" }), { headers: { "content-type": "application/json" } }));
+    const failures = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    const rejections = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryRejected");
+    try {
+      host = await buildHost({ plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: ctx => factory.create({ ...ctx, credential: { ...ctx.credential, metadata: { teamId: "T123" } } }) }] }] });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "U123", userId: USER_ID });
+      await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "approval", web: false });
+      const channels = host.attentionDeliverers();
+      await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", dedupeKey: "outage" }));
+      const [failed] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      if (!failed) throw new Error("Expected a durable delivery");
+      expect(failed).toMatchObject({ status: "sending", attempts: 1 });
+      expect(failed.event).not.toBeNull();
+      await drainAttentionDeliveries({ db: testDb.appDb, channels }, failed.deliverAfter);
+      const [retried] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(retried).toMatchObject({ status: "sending", attempts: 2 });
+      expect(retried?.event).not.toBeNull();
+      expect(failures.mock.calls).toEqual([[false], [true]]);
+      expect(rejections).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); failures.mockRestore(); rejections.mockRestore(); }
   });
 
   it("keeps a provider failure recoverable and stores its confirmed ref", async () => {

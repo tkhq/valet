@@ -1935,6 +1935,12 @@ export class ChannelHost {
       id: channelTypeFilter ? `personal-${channelTypeFilter}` : "personal-dm", order: 1, grace: "when-web-active",
       enabled: () => !channelTypeFilter || !this.unconfiguredTransports.has(channelTypeFilter),
       ready: () => transports().length > 0,
+      recipientEnabled: async userId => {
+        const types = channelTypeFilter ? [channelTypeFilter]
+          : [...new Set(this.deps.plugins.flatMap(plugin => (plugin.transports ?? []).map(factory => factory.channelType)))];
+        const links = await Promise.all(types.map(type => identityForUser(this.deps.db, type, userId)));
+        return links.some(link => link && link.notifyAttention !== false);
+      },
       deliverTeam: async (event): Promise<void> => {
         if (event.owner.type !== "team" || (channelTypeFilter && channelTypeFilter !== "slack")) return;
         const transport = this.transports.get("slack");

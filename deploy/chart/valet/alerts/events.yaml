@@ -73,7 +73,7 @@ groups:
         labels: { severity: warning }
 
       - uid: valet-attention-oldest-job
-        title: Valet personal notification queue is too old
+        title: Valet personal notification queue is overdue
         condition: C
         data:
           - refId: A
@@ -99,6 +99,6 @@ groups:
         execErrState: Alerting
         for: 0s
         annotations:
-          summary: A personal attention job has waited more than 30 minutes.
-          description: Inspect pending_channel_deliveries and channel startup logs. Restore the channel or resolve the pending request. Jobs do not expire.
+          summary: A personal attention job is more than 30 minutes overdue.
+          description: Inspect pending_channel_deliveries.deliver_after and channel startup logs. Restore the channel or resolve the pending request. Jobs do not expire.
         labels: { severity: warning }

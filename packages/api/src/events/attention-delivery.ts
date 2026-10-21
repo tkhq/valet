@@ -121,12 +121,14 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
         handled ||= !row || row.readAt !== null;
       }
       // Immediate producers can run before a workflow finishes parking.
-      if (!immediateIds?.includes(job.id) && !await attentionGatePending(deps, event)) handled = true;
+      if (!handled && !immediateIds?.includes(job.id) && !await attentionGatePending(deps, event)) handled = true;
       const [preference] = await deps.db.select().from(userNotificationPreferences).where(and(
         eq(userNotificationPreferences.userId, job.userId), eq(userNotificationPreferences.kind, event.kind),
       )).limit(1);
       if (event.owner.type === "team" && preference?.teamDm !== true) handled = true;
-      if (!(await attentionAudience(deps, event, true)).audience.includes(job.userId)) handled = true;
+      if (!handled && tier.recipientEnabled && !await tier.recipientEnabled(job.userId)) handled = true;
+      // Local terminal state wins even while Slack audience checks are unavailable.
+      if (!handled && !(await attentionAudience(deps, event, true)).audience.includes(job.userId)) handled = true;
       if (handled) {
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence);
         return;

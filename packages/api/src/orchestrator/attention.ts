@@ -115,6 +115,8 @@ export interface AttentionChannelDeliverer {
   enabled?(): boolean;
   /** False while a configured transport is still starting. Do not claim jobs yet. */
   ready?(): boolean;
+  /** Local link/preference check only. False drops the job before remote audience checks. */
+  recipientEnabled?(userId: string): Promise<boolean>;
   /** Stable across restarts. Used in the durable delivery key. */
   id: string;
   order: number;

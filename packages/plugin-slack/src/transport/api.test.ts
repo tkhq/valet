@@ -144,15 +144,17 @@ describe("attention-only deadlines", () => {
 
 describe("definite attention rejections", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it.each(["user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"])("classifies %s on attention sends and DM opens", async error => {
+  it.each(["user_not_found", "cannot_dm_bot", "channel_not_found"])("classifies %s on attention sends and DM opens", async error => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: false, error })));
     const api = new SlackApi("test");
     await expect(api.postMessage({ channel: "D123", text: "Attention", attentionDeliveryId: "token" })).rejects.toMatchObject({ channel: "slack", reason: error });
     await expect(api.openConversation("U123", true)).rejects.toBeInstanceOf(ChannelDeliveryRejectedError);
     await expect(api.postMessage({ channel: "C123", text: "Ordinary" })).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
   });
-  it.each(["ratelimited", "internal_error", "unknown_failure", "missing_scope", "invalid_auth"])("keeps %s retryable", async error => {
+  it.each(["ratelimited", "internal_error", "unknown_failure", "missing_scope", "invalid_auth", "account_inactive"])("keeps %s retryable", async error => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: false, error })));
-    await expect(new SlackApi("test").postMessage({ channel: "D123", text: "Attention", attentionDeliveryId: "token" })).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
+    const api = new SlackApi("test");
+    await expect(api.postMessage({ channel: "D123", text: "Attention", attentionDeliveryId: "token" })).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
+    await expect(api.openConversation("U123", true)).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
   });
 });

@@ -1,4 +1,5 @@
 import { ChannelDeliveryRejectedError } from "@valet/engine";
+import * as attention from "../orchestrator/attention.js";
 import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
@@ -74,6 +75,30 @@ describe("personal attention outbox", () => {
     const job = await pending();
     await drainAttentionDeliveries({ db, channels: [tier] }, job.deliverAfter);
     expect(deliver).toHaveBeenCalledTimes(status === "pending" ? 1 : 0);
+  });
+
+  it.each(["read", "gate-resolved", "link-off", "team-dm-off", "still-active"])("checks local state before a failing audience lookup: %s", async condition => {
+    const gated: AttentionEvent = { ...event, owner: { type: "team", id: "team" }, sessionId: "s", gate: { id: "g", actions: [] } };
+    await db.execute(sql`INSERT INTO engine_decision_gates (id, session_id, thread_id, queue_item_id, resume_key, ordinal, type, status, title, body, actions, created_at, updated_at)
+      VALUES ('g', 's', 't', 'q', 'resume', 0, 'tool_approval', ${condition === "gate-resolved" ? "resolved" : "pending"}, 'Approve', '', '[]', 1, 1)`);
+    await db.insert(notifications).values({ id: "local-terminal", userId: "u", kind: event.kind, urgency: "normal", title: "Choose", createdAt: 1, readAt: condition === "read" ? 2 : null });
+    await db.insert(userNotificationPreferences).values({ userId: "u", kind: event.kind, teamDm: condition !== "team-dm-off" });
+    await db.insert(pendingChannelDeliveries).values({ id: "terminal-test", userId: "u", tierId: tier.id, event: gated, notificationId: "local-terminal", deliverAfter: 1 });
+    const lookup = vi.spyOn(attention, "attentionAudience").mockRejectedValue(new Error("Slack membership lookup failed"));
+    const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    try {
+      await drainAttentionDeliveries({ db, channels: [{ ...tier, recipientEnabled: async () => condition !== "link-off" }] });
+      if (condition === "still-active") {
+        expect(lookup).toHaveBeenCalledOnce();
+        expect(await pending()).toMatchObject({ status: "sending", lastError: "Slack membership lookup failed" });
+        expect(failure).toHaveBeenCalledWith(false);
+      } else {
+        expect(lookup).not.toHaveBeenCalled();
+        expect(await pending()).toMatchObject({ status: "dropped", event: null, lastError: null });
+        expect(failure).not.toHaveBeenCalled();
+      }
+      expect(deliver).not.toHaveBeenCalled();
+    } finally { lookup.mockRestore(); failure.mockRestore(); }
   });
 
   it("deduplicates producer replay, concurrent drains, and later passes", async () => {
@@ -208,7 +233,7 @@ describe("provider outage scheduling", () => {
     expect(send).toHaveBeenCalledTimes(6);
   });
 
-  it.each(["bot_blocked", "user_deactivated", "user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"])("drops a definite %s rejection on the first drain", async reason => {
+  it.each(["bot_blocked", "user_deactivated", "user_not_found", "cannot_dm_bot", "channel_not_found"])("drops a definite %s rejection on the first drain", async reason => {
     const channel = reason === "bot_blocked" || reason === "user_deactivated" ? "telegram" : "slack";
     const rejected = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryRejected");
     const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
@@ -226,7 +251,7 @@ describe("provider outage scheduling", () => {
   });
 
   it("retries mixed permanent and transient failures instead of dropping uncertain sends", async () => {
-    const send = vi.fn(async () => { throw new AggregateError([new ChannelDeliveryRejectedError("slack", "account_inactive"), new Error("provider unavailable")]); });
+    const send = vi.fn(async () => { throw new AggregateError([new ChannelDeliveryRejectedError("slack", "user_not_found"), new Error("provider unavailable")]); });
     await routeAttention({ db, channels: [{ ...tier, deliver: send }] }, event);
     expect(await pending()).toMatchObject({ status: "sending", attempts: 1 });
   });

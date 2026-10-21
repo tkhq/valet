@@ -35,7 +35,7 @@ describe("delivery destination metrics", () => {
     recordAttentionDeliveryFailure(false);
     recordAttentionDeliveryFailure(true);
     recordAttentionDeliveryRejected("telegram", "bot_blocked");
-    recordAttentionDeliveryRejected("slack", "account_inactive");
+    recordAttentionDeliveryRejected("slack", "user_not_found");
     await provider.forceFlush();
 
     const metric = exporter
@@ -56,13 +56,13 @@ describe("delivery destination metrics", () => {
       .find(candidate => candidate.descriptor.name === "valet_attention_delivery_rejected");
     if (!rejections || rejections.dataPointType !== DataPointType.SUM) throw new Error("expected a rejection counter");
     expect(rejections.dataPoints.map(point => ({ channel: point.attributes.channel, reason: point.attributes.reason, value: point.value })))
-      .toEqual([{ channel: "telegram", reason: "bot_blocked", value: 1 }, { channel: "slack", reason: "account_inactive", value: 1 }]);
+      .toEqual([{ channel: "telegram", reason: "bot_blocked", value: 1 }, { channel: "slack", reason: "user_not_found", value: 1 }]);
 
     await provider.shutdown();
   });
 });
 
-it("samples oldest outstanding enqueue age even when retries are scheduled in the future", async () => {
+it.each(["future-grace", "overdue"])("samples only time past the delivery deadline: %s", async mode => {
   metrics.disable();
   const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
   const provider = new MeterProvider({ readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })] });
@@ -74,8 +74,8 @@ it("samples oldest outstanding enqueue age even when retries are scheduled in th
   const clock = vi.spyOn(Date, "now").mockReturnValue(now);
   try {
     await db.insert(pendingChannelDeliveries).values([
-      { id: "pending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "pending", createdAt: now - 1_900_000, deliverAfter: now + 100_000 },
-      { id: "sending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "sending", createdAt: now - 2_000_000, deliverAfter: now + 200_000 },
+      { id: "pending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "pending", createdAt: now - 7_200_000, deliverAfter: mode === "overdue" ? now - 1_900_000 : now + 3_600_000 },
+      { id: "sending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "sending", createdAt: now - 3_600_000, deliverAfter: mode === "overdue" ? now - 2_000_000 : now + 200_000 },
       { id: "sent", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "sent", createdAt: 1, deliverAfter: 1 },
       { id: "rejected", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "dropped", createdAt: 1, deliverAfter: 1 },
     ]);
@@ -85,7 +85,7 @@ it("samples oldest outstanding enqueue age even when retries are scheduled in th
     const values = () => exporter.getMetrics().flatMap(resource => resource.scopeMetrics).flatMap(scope => scope.metrics)
       .filter(metric => metric.descriptor.name === "valet_attention_oldest_job_age")
       .flatMap(metric => metric.dataPoints.map(point => point.value));
-    expect(values()).toEqual([2_000]);
+    expect(values()).toEqual([mode === "overdue" ? 2_000 : 0]);
     await db.delete(pendingChannelDeliveries);
     exporter.reset();
     await provider.forceFlush();
