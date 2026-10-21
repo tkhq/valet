@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
+# `node -e` resolves modules from the working directory and reads each parent package.json.
+# This test runs as dockerd, which can lack read access to the caller's directory.
+cd "$ROOT"
 HELPER=$ROOT/valet-kubernetes.mjs
 STATE=/home/dockerd/.local/state/valet/kubernetes
 LOCK=${STATE}.lock
