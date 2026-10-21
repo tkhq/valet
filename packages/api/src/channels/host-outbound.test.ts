@@ -3163,6 +3163,39 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
   });
 
+  it.each(["hang", "reject"])("does not hold an attention batch open on a %s settlement edit", async mode => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await seedUserSession("hanging-settlement");
+    // Remember expiry before the card lands; the subsequent edit is the backfill path.
+    await eventStream.append({ sessionId: "hanging-settlement", threadId: "t", timestamp: Date.now(),
+      event: { type: "decision_gate_expired", threadId: "t", gateId: "expired-during-post" } }, `settlement-${randomUUID()}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const update = vi.spyOn(fakeTransport, "updateGatePrompt").mockImplementation(async () => {
+      if (mode === "reject") throw new Error("provider edit failed");
+      await blocked;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const channels = [host.attentionDeliverer("fake")];
+    const approval = event({ kind: "approval", sessionId: "hanging-settlement", gate: { id: "expired-during-post", actions: [{ id: "approve", label: "Approve" }] } });
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "late-card", userId: USER_ID, tierId: channels[0]!.id, event: approval, deliverAfter: 1 });
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, Date.now(), ["late-card"]);
+    try {
+      await vi.waitFor(() => expect(update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ attention: true })));
+      await vi.waitFor(async () => {
+        const [job] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "late-card"));
+        expect(job).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", messageId: expect.any(String) }] });
+      });
+      await work;
+      await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "after-hung-edit", userId: USER_ID, tierId: channels[0]!.id, event: event(), deliverAfter: 1 });
+      await drainAttentionDeliveries({ db: testDb.appDb, channels });
+      expect(fakeTransport.sent).toHaveLength(1);
+      if (mode === "reject") expect(log).toHaveBeenCalledWith(expect.stringContaining("gate prompt update failed"), expect.any(Error));
+    } finally { release(); await work; update.mockRestore(); log.mockRestore(); }
+  });
+
   it("publishes only an opaque token in a summary-only Slack DM's metadata", async () => {
     const factory = slackPlugin.transports?.[0];
     if (!factory) throw new Error("Expected the Slack transport factory");

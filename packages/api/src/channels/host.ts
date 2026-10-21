@@ -1279,10 +1279,14 @@ export class ChannelHost {
     }
     const settled = this.settledGates.get(prompt.gateId);
     const ended = this.endedGates.get(prompt.gateId);
-    if (settled) {
-      await this.deliverGateResolution(prompt.gateId, settled);
-    } else if (ended) {
-      await this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs });
+    const attention = prompt.attentionDeliveryId !== undefined;
+    const settlement = settled ? this.deliverGateResolution(prompt.gateId, settled, attention)
+      : ended ? this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs, attention }) : undefined;
+    if (attention) {
+      // The card is confirmed. A settlement edit must not hold the durable delivery batch open.
+      void settlement?.catch(err => console.error(`[channels] attention gate settlement failed for ${prompt.gateId}`, err));
+    } else {
+      await settlement;
     }
     return ref;
   }
@@ -1300,7 +1304,7 @@ export class ChannelHost {
   }
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
-  private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
+  private async deliverGateResolution(gateId: string, resolution: DecisionResolution, attention = false): Promise<void> {
     // Remember the resolution BEFORE the refs check: a prompt still in
     // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
     // backfill the edit when that send lands.
@@ -1318,6 +1322,7 @@ export class ChannelHost {
     await this.settleGatePrompts(gateId, label, {
       ...(resolution.actionId !== undefined ? { actionId: resolution.actionId } : {}),
       resolvedAtMs: resolution.resolvedAt,
+      ...(attention ? { attention: true } : {}),
     });
   }
 
@@ -1334,7 +1339,7 @@ export class ChannelHost {
   private async settleGatePrompts(
     gateId: string,
     label: string,
-    outcome: { actionId?: string; resolvedAtMs?: number } = {},
+    outcome: { actionId?: string; resolvedAtMs?: number; attention?: boolean } = {},
   ): Promise<void> {
     let allUpdated = true;
     for (const ref of this.gatePrompts.get(gateId) ?? []) {

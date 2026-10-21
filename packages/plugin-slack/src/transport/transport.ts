@@ -991,6 +991,7 @@ export class SlackTransport implements ChannelTransport {
     // parse: "none" — chat.update defaults parse to "client" and would
     // re-render link markup.
     await this.api.updateMessage({
+      attention: resolution.attention,
       channel: target.channelId,
       ts: ref.messageId,
       text,

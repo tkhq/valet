@@ -84,6 +84,9 @@ Before sending a deferred job, the drain checks:
    A definite denial drops the job.
    Slack errors such as `channel_not_found`, `not_in_channel`, and `is_archived` are definite denials.
    Unknown channel privacy or a failed membership lookup retries without sending.
+   Attention checks never authorize with an expired public classification after a failed refresh.
+   Their privacy cache is separate from ordinary readers, which retain the stale fallback.
+   Loading a stored classification into memory does not extend its original freshness deadline.
 5. The recipient still allows team DM copies, for team events.
 
 The channel deliverer checks the current identity link's `notifyAttention` setting before sending.
@@ -97,7 +100,9 @@ Legacy copies without a fallback job remain clearable.
 Gate resolution and explicit per-row reads still mark approval notifications handled.
 
 The immediate producer can run before a workflow finishes parking.
-Its immediate drain therefore trusts the current gate event.
+Its immediate drain trusts the current gate event only during the first five seconds after enqueue.
+The age check runs when processing the claimed row, not when queuing the drain.
+After that window, even queued immediate requests check durable gate state.
 A later dispatcher pass always checks durable gate state.
 
 ## Delivery boundary
@@ -110,6 +115,11 @@ The same statement moves its next deadline forward by two minutes from the claim
 The update repeats the due predicate to fence concurrent workers.
 Only the winning worker sends.
 Each completion also checks the attempt number, so a stale worker cannot overwrite recovery.
+Each tier batch has a 90-second backstop, shorter than its sending lease.
+A timeout logs the stalled batch and increments the recovery-failure counter.
+It releases the in-memory tier lock while claimed jobs remain recoverable.
+Abandoned workers cannot claim another row or start another provider call after the timeout.
+A provider call already in flight can still finish; the attempt fence protects later recovery.
 
 After the provider confirms, the worker records `sent` and the provider message refs.
 Slack refs include the channel identifier and message timestamp.
@@ -143,6 +153,9 @@ The host maps the row token back to its local gate event during reconciliation.
 Reconciliation restores gate callbacks only for an actual gate card and a currently authorized recipient.
 A plain summary never becomes a gate card during recovery.
 A failed callback-ref save is logged but does not resend a confirmed message.
+If a gate settles while its attention card posts, the host detaches the settlement edit and logs failures.
+The confirmed delivery does not wait for this edit.
+Slack settlement edits on this path use the attention deadline; ordinary edits keep their prior behavior.
 Saving the same gate reference twice is idempotent.
 Transports without history reconciliation still recover by resending.
 

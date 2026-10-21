@@ -194,6 +194,7 @@ export class SlackApi {
   }
 
   async updateMessage(opts: {
+    attention?: boolean;
     channel: string;
     ts: string;
     text: string;
@@ -203,7 +204,7 @@ export class SlackApi {
     const body: Record<string, unknown> = { channel: opts.channel, ts: opts.ts, text: opts.text };
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.parse !== undefined) body.parse = opts.parse;
-    await this.call("chat.update", body);
+    await this.call("chat.update", body, opts.attention === true);
   }
 
   /**

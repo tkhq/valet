@@ -161,18 +161,20 @@ class SlackChannelDenied extends Error {}
 /**
  * Whether a Slack channel is private: from memory, then the stored answer
  * while it is fresh, then Slack, with the stored answer standing when Slack
- * cannot answer. Undefined only for a channel never classified.
+ * cannot answer. Attention checks return unknown instead of an expired fallback.
  */
 export async function slackChannelIsPrivate(
   deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>, retryUnknownAccess = false,
 ): Promise<boolean | undefined> {
-  const cacheKey = `${orgId}:${channelId}`;
+  // Ordinary readers may use stale classifications. Attention must not share that fallback cache.
+  const cacheKey = `${orgId}:${channelId}${retryUnknownAccess ? ":attention" : ""}`;
   const now = Date.now();
   const cached = privacyCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.isPrivate;
   const [stored] = await deps.db.select().from(slackChannelPrivacy)
     .where(and(eq(slackChannelPrivacy.orgId, orgId), eq(slackChannelPrivacy.channelId, channelId))).limit(1);
   let isPrivate: boolean | undefined = stored?.isPrivate;
+  let checkedAt = stored?.checkedAt ?? now;
   const ttl = (value: boolean | undefined) => (value === false ? PUBLIC_TTL_MS : value === true ? PRIVATE_TTL_MS : MEMBERSHIP_TTL_MS);
   if (!stored || stored.checkedAt + ttl(stored.isPrivate) <= now) {
     const bot = await token();
@@ -185,11 +187,15 @@ export async function slackChannelIsPrivate(
     const answered = info && (!info.error || info.isPrivate);
     if (answered) {
       isPrivate = info.isPrivate;
+      checkedAt = now;
       await deps.db.insert(slackChannelPrivacy).values({ orgId, channelId, isPrivate, checkedAt: now })
         .onConflictDoUpdate({ target: [slackChannelPrivacy.orgId, slackChannelPrivacy.channelId], set: { isPrivate, checkedAt: now } });
+    } else if (retryUnknownAccess) {
+      // A failed refresh cannot grant deferred access using an expired public answer.
+      return undefined;
     }
   }
-  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: now + ttl(isPrivate) });
+  setCapped(privacyCache, cacheKey, { isPrivate, expiresAt: (retryUnknownAccess ? checkedAt : now) + ttl(isPrivate) });
   return isPrivate;
 }
 

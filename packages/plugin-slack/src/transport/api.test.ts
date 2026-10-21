@@ -129,16 +129,18 @@ describe("attention reconciliation", () => {
 describe("attention-only deadlines", () => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  it("bounds attention posts and DM opens, not ordinary posts or uploads", async () => {
+  it("bounds attention posts, settlements, and DM opens, not ordinary requests", async () => {
     const fetchMock = vi.fn(async (_url: unknown, _init?: RequestInit) => jsonResponse(200, { ok: true, ts: "1", channel: { id: "D123" } }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new SlackApi("test");
     await api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job" });
     await api.openConversation("U123", true);
+    await api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true });
+    await api.updateMessage({ channel: "C123", ts: "2", text: "Ordinary" });
     await api.postMessage({ channel: "C123", text: "Reply" });
     await api.openConversation("U123");
     await api.uploadToUrl("https://uploads.test/file", new Uint8Array([1]), "text/plain");
-    expect(fetchMock.mock.calls.map(([, init]) => init?.signal instanceof AbortSignal)).toEqual([true, true, false, false, false]);
+    expect(fetchMock.mock.calls.map(([, init]) => init?.signal instanceof AbortSignal)).toEqual([true, true, true, false, false, false, false]);
   });
 });
 

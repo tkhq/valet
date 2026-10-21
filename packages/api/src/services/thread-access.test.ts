@@ -266,6 +266,34 @@ it("keeps a DM and a group DM to their members", async () => {
   expect(shared.rows[0]?.shared).toBe(false);
 });
 
+it("retries attention access when expired public privacy cannot refresh, without sharing the stale reader cache", async () => {
+  api = await bootTestApi();
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CEXPIRED", isPrivate: false, checkedAt: Date.now() - 60 * 60_000 });
+  const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error: "internal_error" }), { headers: { "content-type": "application/json" } }));
+  const viewer = { orgId: "local-org", userId: "outsider" };
+  // Ordinary readers retain their existing fallback, even if they populate memory first.
+  expect(await channelVisibility(api.providers, viewer)("slack:CEXPIRED")).toBe(true);
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).rejects.toThrow("privacy is unknown");
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).rejects.toThrow("privacy is unknown");
+  expect(fetch).toHaveBeenCalledTimes(3);
+  fetch.mockRestore();
+  await connectSlack(api, { CEXPIRED: ["USOMEONE"] });
+  expect(await channelVisibility(api.providers, viewer, true)("slack:CEXPIRED")).toBe(false);
+});
+
+it("does not extend stored public privacy freshness for attention when loading it into memory", async () => {
+  api = await bootTestApi();
+  const now = Date.now();
+  await api.providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CEXPIRING", isPrivate: false, checkedAt: now - 5 * 60_000 + 1_000 });
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  const viewer = { orgId: "local-org", userId: "outsider" };
+  expect(await channelVisibility(api.providers, viewer, true)("slack:CEXPIRING")).toBe(true);
+  clock.mockReturnValue(now + 1_001);
+  // No bot is connected. The cached public answer must expire at the stored deadline.
+  await expect(channelVisibility(api.providers, viewer, true)("slack:CEXPIRING")).rejects.toThrow("privacy is unknown");
+});
+
 it("rechecks a stale public answer, and keeps it when Slack cannot answer", async () => {
   api = await bootTestApi();
   await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });

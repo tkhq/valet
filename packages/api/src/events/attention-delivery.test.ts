@@ -8,7 +8,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowRuns, workflowCheckpoints, workflowSignals } from "../schema/index.js";
 import { routeAttention as enqueueAttention, type AttentionChannelDeliverer, type AttentionEvent } from "../orchestrator/attention.js";
 import { webPresence } from "../services/web-presence.js";
-import { ATTENTION_SENDING_TIMEOUT_MS, ATTENTION_STARTUP_GRACE_MS, drainAttentionDeliveries } from "./attention-delivery.js";
+import { ATTENTION_BATCH_TIMEOUT_MS, ATTENTION_IMMEDIATE_GATE_GRACE_MS, ATTENTION_SENDING_TIMEOUT_MS, ATTENTION_STARTUP_GRACE_MS, drainAttentionDeliveries } from "./attention-delivery.js";
 
 let db: AppDb;
 const event: AttentionEvent = { kind: "question", owner: { type: "user", id: "u" }, title: "Choose", dedupeKey: "event-1" };
@@ -321,6 +321,34 @@ describe("isolated delivery execution", () => {
     }
   });
 
+  it("releases a tier after a batch deadline and prevents its abandoned workers claiming more jobs", async () => {
+    await db.insert(pendingChannelDeliveries).values(Array.from({ length: 5 }, (_, n) => ({ id: `hung-${n}`, userId: "u", tierId: tier.id, event, deliverAfter: 1 })));
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let started = () => {};
+    const allStarted = new Promise<void>(resolve => { started = resolve; });
+    const send = vi.fn(async () => { if (send.mock.calls.length === 4) started(); await blocked; });
+    const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const work = drainAttentionDeliveries({ db, channels: [{ ...tier, deliver: send }] });
+    try {
+      await allStarted;
+      await vi.advanceTimersByTimeAsync(ATTENTION_BATCH_TIMEOUT_MS);
+      await work;
+      expect(failure).toHaveBeenCalledWith(true);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("timed out"));
+      const jobs = await db.select().from(pendingChannelDeliveries);
+      expect(jobs.filter(job => job.status === "sending")).toHaveLength(4);
+      expect(jobs.filter(job => job.status === "pending")).toHaveLength(1);
+      await drainAttentionDeliveries({ db, channels: [tier] });
+      expect(deliver).toHaveBeenCalledOnce();
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(send).toHaveBeenCalledTimes(4);
+    } finally { release(); vi.useRealTimers(); failure.mockRestore(); log.mockRestore(); }
+  });
+
   it("bounds concurrency and stamps leases when each row is claimed", async () => {
     await db.insert(pendingChannelDeliveries).values(Array.from({ length: 5 }, (_, n) => ({
       id: `claim-${n}`, userId: "u", tierId: tier.id, event, deliverAfter: 1,
@@ -409,6 +437,33 @@ describe("isolated delivery execution", () => {
       expect(send).toHaveBeenCalledTimes(2);
       expect((await db.select().from(pendingChannelDeliveries)).every(job => job.status === "sent")).toBe(true);
     } finally { release(); await Promise.all([first, second]); }
+  });
+
+  it("rechecks a workflow approval that settles while its immediate request waits behind a batch", async () => {
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn(async () => { await blocked; });
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    await db.insert(workflowRuns).values({ id: "waiting-run", workflowId: "wf", definitionVersionId: "v1", definition: {}, params: {}, updatedAt: now, ownerType: "user", ownerId: "u", status: "parked", createdAt: now });
+    await db.insert(pendingChannelDeliveries).values({ id: "first", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+    const first = drainAttentionDeliveries(deps);
+    let immediate: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      // No web row exists: only the durable workflow state can suppress this notification.
+      await db.insert(pendingChannelDeliveries).values({ id: "settled-while-waiting", userId: "u", tierId: tier.id, createdAt: now,
+        event: { ...event, kind: "approval", workflowGate: { runId: "waiting-run", nodeId: "approve", iteration: 0 } }, deliverAfter: now });
+      immediate = drainAttentionDeliveries(deps, now, ["settled-while-waiting"]);
+      await db.update(workflowRuns).set({ status: "settled" }).where(eq(workflowRuns.id, "waiting-run"));
+      clock.mockReturnValue(now + ATTENTION_IMMEDIATE_GATE_GRACE_MS + 1);
+      release();
+      await Promise.all([first, immediate]);
+      expect(send).toHaveBeenCalledOnce();
+      const [job] = await db.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "settled-while-waiting"));
+      expect(job).toMatchObject({ status: "dropped", event: null });
+    } finally { release(); await Promise.all([first, immediate]); clock.mockRestore(); }
   });
 
   it("keeps immediate gate events trusted when a full rail request also queues a re-drain", async () => {

@@ -38,6 +38,10 @@ export const ATTENTION_SENDING_TIMEOUT_MS = 120_000;
 
 /** Startup may defer claims briefly, but a failed startup must become visible. */
 export const ATTENTION_STARTUP_GRACE_MS = 30_000;
+/** A stuck provider or storage promise must release the in-memory tier lock before its lease expires. */
+export const ATTENTION_BATCH_TIMEOUT_MS = 90_000;
+/** Trust producer-before-parking state only during this short enqueue window. */
+export const ATTENTION_IMMEDIATE_GATE_GRACE_MS = 5_000;
 const startedAt = new WeakMap<AppDb, number>();
 interface DrainRequest {
   deps: AttentionDeps;
@@ -75,7 +79,21 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
       let next: typeof request | undefined = request;
       while (next) {
         state.requested = undefined;
-        await drainTier(next);
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            drainTier(next, controller.signal),
+            new Promise<void>(resolve => {
+              timer = setTimeout(() => {
+                controller.abort();
+                recordAttentionDeliveryFailure(true);
+                console.error(`[attention] batch ${tier.id} timed out; check provider and database health. Claimed jobs remain recoverable.`);
+                resolve();
+              }, ATTENTION_BATCH_TIMEOUT_MS);
+            }),
+          ]);
+        } finally { clearTimeout(timer); }
         next = state.requested;
       }
     })().finally(() => { running.delete(tier.id); });
@@ -84,7 +102,7 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
   }));
 }
 
-async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): Promise<void> {
+async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest, signal: AbortSignal): Promise<void> {
   const tier = deps.channels?.[0];
   if (!tier) return;
   const dueCondition = and(
@@ -96,6 +114,7 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
     !selectAll && immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
   )).orderBy(asc(pendingChannelDeliveries.attempts), asc(pendingChannelDeliveries.deliverAfter)).limit(20);
   await mapBounded(due, 4, async job => {
+    if (signal.aborted) return;
     const event = job.event;
     const claimedAt = Math.max(now, Date.now());
     // Repeat the due predicate on the outer update to fence concurrent drains.
@@ -106,7 +125,7 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
       deliverAfter: claimedAt + ATTENTION_SENDING_TIMEOUT_MS,
       attempts: sql`${pendingChannelDeliveries.attempts} + 1`, lastError: null,
     }).where(and(eq(pendingChannelDeliveries.id, job.id), dueCondition)).returning();
-    if (!claimed) return;
+    if (!claimed || signal.aborted) return;
     const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
     try {
       if (!event) {
@@ -120,8 +139,10 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
           .where(and(eq(notifications.id, job.notificationId), eq(notifications.userId, job.userId))).limit(1);
         handled ||= !row || row.readAt !== null;
       }
-      // Immediate producers can run before a workflow finishes parking.
-      if (!handled && !immediateIds?.includes(job.id) && !await attentionGatePending(deps, event)) handled = true;
+      // The exemption ends while a producer waits behind an active batch, not when that batch selected it.
+      const age = Math.max(claimedAt, Date.now()) - job.createdAt;
+      const freshImmediate = immediateIds?.includes(job.id) && age >= 0 && age < ATTENTION_IMMEDIATE_GATE_GRACE_MS;
+      if (!handled && !freshImmediate && !await attentionGatePending(deps, event)) handled = true;
       const [preference] = await deps.db.select().from(userNotificationPreferences).where(and(
         eq(userNotificationPreferences.userId, job.userId), eq(userNotificationPreferences.kind, event.kind),
       )).limit(1);
@@ -133,6 +154,7 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence);
         return;
       }
+      if (signal.aborted) return;
       if (tier.ready?.() === false) throw new Error("Attention transport is not ready. Check channel startup and credentials.");
       let refs;
       if (job.status === "sending" && tier.reconcile) {
@@ -145,11 +167,12 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
       }
       // The deliverer checks the current per-link notifyAttention setting.
       if (!refs) {
+        if (signal.aborted) return;
         try {
           refs = await tier.deliver(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
         } catch (err) {
           // A timed-out post may have landed. Restore its gate controls now when possible.
-          if (!isAttentionTimeout(err) || !tier.reconcile) throw err;
+          if (signal.aborted || !isAttentionTimeout(err) || !tier.reconcile) throw err;
           refs = await tier.reconcile(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
           if (!refs) throw err;
         }

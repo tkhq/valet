@@ -378,6 +378,8 @@ export interface ChannelGatePrompt {
 }
 
 export interface ChannelGateResolution {
+  /** Settlement of an attention card uses the attention request deadline. */
+  attention?: boolean;
   actionId?: string;
   /** Human-readable outcome line, e.g. "✅ Approved by Conner". */
   label: string;
