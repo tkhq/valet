@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - docker/Dockerfile.sandbox-k8s
+      - docker/distrust-compromised-roots.sh
+      - docker/distrusted-roots/**
       - docker/native-documents/**
       - .github/workflows/native-documents.yml
   workflow_dispatch:
