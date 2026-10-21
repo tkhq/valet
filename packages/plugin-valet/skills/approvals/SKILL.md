@@ -50,7 +50,7 @@ Only that member can choose **Always allow for this team**, in the browser or fr
 
 Tell the person who asked that you are waiting for that member, and name them. To avoid the wait, the team can connect an account that the team owns.
 
-For Slack and Linear, a team session picks an account in this order: the asking member's own shared account, the team's own connection, another member's shared account (which asks that member, as above), then Valet's own app identity when the organization connected it. GitHub never uses another member's shared account: a team session uses the team's own GitHub connection, then the organization's GitHub App. So these actions can run as the Valet app when nobody's account applies. A workflow `tool` step can pin `credential: "app"` or `credential: "user"`. Other services use only an account that someone connected.
+For Slack and Linear, a team session picks an account in this order: the asking member's own shared account, the team's own connection, another member's shared account (which asks that member, as above), then Valet's own app identity when the organization connected it. GitHub never uses another member's shared account: a team session uses the asking member's own shared GitHub account, then the team's own GitHub connection, then the organization's GitHub App. So these actions can run as the Valet app when nobody's account applies. A workflow `tool` step can pin `credential: "app"` or `credential: "user"`. Other services use only an account that someone connected.
 
 ## Runs that cannot ask
 
