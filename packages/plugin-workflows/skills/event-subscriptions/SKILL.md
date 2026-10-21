@@ -96,5 +96,5 @@ When no Where choice is set, a message that a person wrote in Slack (`slack.mess
 ## Debug a line that did not reply
 
 1. Call `events.list_problems` with the event key and channel. It lists received events that started no run, with the reason, such as a filter that excluded the event or a classifier that rejected it.
-2. If you run for an organization admin in a private chat (not a channel), call `events.list_event_logs` to trace one event through intake and each line's decision. Otherwise, send the person to the line's Activity in Presence, which shows the same decisions. Organization admins also see Diagnostics there.
+2. If you run for an organization admin in their personal workspace, in a private chat (not a channel), call `events.list_event_logs` to trace one event through intake and each line's decision. A team workspace is refused. Otherwise, send the person to the line's Activity in Presence, which shows the same decisions. Organization admins also see Diagnostics there.
 3. If the line matched, check whether a conversation or a waiting thread claimed the event, then open the thread where it landed and read the turn. A turn that asked a question was refused, not stuck.

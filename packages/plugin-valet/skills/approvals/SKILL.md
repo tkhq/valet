@@ -50,7 +50,7 @@ Only that member can choose **Always allow for this team**, in the browser or fr
 
 Tell the person who asked that you are waiting for that member, and name them. To avoid the wait, the team can connect an account that the team owns.
 
-For GitHub, Slack, and Linear, a team session picks an account in this order: the asking member's own shared account, the team's own connection, another member's shared account (which asks that member, as above), then Valet's own app identity when the organization connected it. So these actions can run as the Valet app when nobody's account applies. A workflow `tool` step can pin `credential: "app"` or `credential: "user"`. Other services use only an account that someone connected.
+For Slack and Linear, a team session picks an account in this order: the asking member's own shared account, the team's own connection, another member's shared account (which asks that member, as above), then Valet's own app identity when the organization connected it. GitHub never uses another member's shared account: a team session uses the team's own GitHub connection, then the organization's GitHub App. So these actions can run as the Valet app when nobody's account applies. A workflow `tool` step can pin `credential: "app"` or `credential: "user"`. Other services use only an account that someone connected.
 
 ## Runs that cannot ask
 
@@ -71,8 +71,8 @@ When a refusal comes back, do not retry and do not ask in a message. Say what di
 
 A workflow run that an assistant starts on its own (`startedBy: "agent"`) never uses the workflow's saved grants. This stops a prompt from borrowing permissions that a person gave the workflow.
 
-- When the workflow's owner asks you in their own signed-in chat, the run counts as theirs, and saved grants apply.
-- When an event, a routine, a workflow step, a delegated session, or another person's message leads you to start a run, the run is agent-started. Its agent steps that need saved grants are refused.
+- When a person asks you in their own signed-in chat, the run counts as theirs, and saved grants apply. In a team workspace, that can be any member. In a personal workspace, only its owner can start a run; another person's request starts no run.
+- When an event, a routine, a workflow step, or a delegated session leads you to start a run, the run is agent-started. Its agent steps that need saved grants are refused.
 
 For an agent-started run, tell the owner to start the run from the workflow page or from their own chat, or to let its trigger start it.
 
