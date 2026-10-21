@@ -478,6 +478,24 @@ it("names every channel a line lists, though no event made it a place", async ()
   expect((await placesRead(api, "user")).channelNames).toMatchObject({ CPRIV: "secret-plans" });
 });
 
+// Review of PR #1012: a name from conversations.info must expire with the
+// five-minute answer, so a renamed channel shows its new name.
+it("reads a renamed channel's new name once the five-minute answer expires", async () => {
+  api = await boot();
+  const names = { C950: "alerts-prod" };
+  await connectSlack(api, {}, { names });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C950" }] });
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
+
+  names.C950 = "alerts-production";
+  // Inside five minutes the read keeps the answer it has.
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
+  const later = Date.now() + 6 * 60_000;
+  vi.spyOn(Date, "now").mockReturnValue(later);
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-production" });
+});
+
 it("names at most 20 unnamed channels for each read, and the rest on a later read", async () => {
   api = await boot();
   const ids = Array.from({ length: 25 }, (_, n) => `CQ${String(n).padStart(2, "0")}`);

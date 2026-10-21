@@ -4,7 +4,7 @@
  */
 import { Hono, type Context } from "hono";
 import { credentialSecret } from "@valet/engine";
-import { resolveChannelName } from "@valet/plugin-slack/actions";
+import { slackGet } from "@valet/plugin-slack/actions";
 import type { AppEnv } from "../env.js";
 import { mapBounded } from "../lib/bounded-map.js";
 import { getChannel, listChannels, type ChannelNames } from "../services/channels.js";
@@ -50,13 +50,31 @@ const LOOKUP_CONCURRENCY = 5;
 const lookupCache = new Map<string, { name: string | null; expiresAt: number }>();
 
 /**
+ * A channel's name from `conversations.info`, or null when Slack gives no
+ * name or the call fails. It reads Slack on every call: `lookupCache` is the
+ * only cache, so a renamed channel shows its new name when the entry expires.
+ */
+async function conversationName(token: string, channelId: string): Promise<string | null> {
+  try {
+    const res = await slackGet("conversations.info", token, { channel: channelId });
+    const body: unknown = res.ok ? await res.json() : null;
+    if (typeof body !== "object" || body === null || !("ok" in body) || body.ok !== true) return null;
+    const channel = "channel" in body ? body.channel : undefined;
+    const name = typeof channel === "object" && channel !== null && "name" in channel ? channel.name : undefined;
+    return typeof name === "string" && name !== "" ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Slack channel names from `conversations.info` with the org's bot
  * credential, one channel at a time. It names a channel that the bot's
  * channel list (`slackChannelNames`) leaves out: that list stops at the
  * picker's limit, and it holds only channels the bot has joined. One lookup
  * asks Slack about at most `LOOKUP_LIMIT` channels with no current answer.
- * An expired answer still names its channel until Slack answers again. No
- * credential leaves the ids.
+ * An expired answer still names its channel when the lookup has no room to
+ * ask about it again. No credential leaves the ids.
  */
 export function slackChannelLookup(c: Context<AppEnv>): ChannelNames {
   return async (channelIds) => {
@@ -72,7 +90,7 @@ export function slackChannelLookup(c: Context<AppEnv>): ChannelNames {
     if (ask.length === 0) return names;
     const token = credentialSecret(await orgSlackCredential(c.var.providers, orgId));
     if (!token) return names;
-    const found = await mapBounded(ask, LOOKUP_CONCURRENCY, (id) => resolveChannelName(token, id));
+    const found = await mapBounded(ask, LOOKUP_CONCURRENCY, (id) => conversationName(token, id));
     ask.forEach((id, index) => {
       const name = found[index] ?? null;
       setCapped(lookupCache, `${orgId}:${id}`, { name, expiresAt: now + NAMES_TTL_MS });
