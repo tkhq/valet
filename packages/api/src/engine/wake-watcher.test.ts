@@ -1179,6 +1179,39 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(derive).toHaveBeenCalledTimes(2);
   });
 
+  it("backs off exponentially to 15 minutes", async () => {
+    const h = harness();
+    let now = NOW;
+    await h.store.createWakeup(eventRow({ deadlineAt: NOW + 24 * HOUR, eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const derive = vi.fn(async () => ({ result: "error" as const, error: new Error("limit"), retryAfterMs: 60_000 }));
+    const w = h.watcher({ deriveEvent: derive, now: () => now });
+    await w.sweep(now);
+    let calls = 1;
+    for (const delay of [60_000, 120_000, 240_000, 480_000, 900_000, 900_000]) {
+      now += delay - 1;
+      await w.sweep(now);
+      expect(derive).toHaveBeenCalledTimes(calls);
+      now += 1;
+      await w.sweep(now);
+      expect(derive).toHaveBeenCalledTimes(++calls);
+    }
+  });
+
+  it("honors a provider reset longer than the exponential cap", async () => {
+    const h = harness();
+    let now = NOW;
+    await h.store.createWakeup(eventRow({ deadlineAt: NOW + 24 * HOUR, eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const derive = vi.fn(async () => ({ result: "error" as const, error: new Error("primary limit"), retryAfterMs: HOUR }));
+    const w = h.watcher({ deriveEvent: derive, now: () => now });
+    await w.sweep(now);
+    now += HOUR - 1;
+    await w.sweep(now);
+    expect(derive).toHaveBeenCalledTimes(1);
+    now++;
+    await w.sweep(now);
+    expect(derive).toHaveBeenCalledTimes(2);
+  });
+
   it("consumes permission-denied sources and logs error without retrying the next tick", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));

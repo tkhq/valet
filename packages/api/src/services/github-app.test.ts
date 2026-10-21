@@ -94,11 +94,28 @@ describe("github-app service", () => {
     const http = vi.fn(async (_input: string | URL | Request) => Response.json({ id: 77, suspended_at: null, events: ["status"], permissions: { statuses: "read" } }));
     const d = { credentials, env: {}, fetchImpl: http, apiUrl: "https://github.test" };
     const [coverage, grants] = await Promise.all([
-      githubAppRepositoryAccess(d, orgId, "acme/repo"), githubIngressConfig(d, orgId, "acme", "repo"),
+      githubAppRepositoryAccess(d, orgId, "acme/repo", 2_500), githubIngressConfig(d, orgId, "acme", "repo"),
     ]);
     expect(coverage).toBe(true);
     expect(grants?.events).toEqual(["status"]);
     expect(http.mock.calls.filter(([input]) => String(input).endsWith("/installation"))).toHaveLength(1);
+  });
+
+  it("uses the template path's five-second timeout and returns unknown for a transient failure", async () => {
+    await saveAppConfig({ credentials }, orgId, baseConfig);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const http = vi.fn(async () => new Response("{}", { status: 503 }));
+      expect(await githubAppRepositoryAccess({ credentials, env: {}, fetchImpl: http }, orgId, "acme/repo")).toBe("unknown");
+      expect(timeout).toHaveBeenCalledWith(5_000);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it("returns unknown rather than not-installed when the credential read fails", async () => {
+    const get = vi.spyOn(credentials, "get").mockRejectedValue(new Error("credential store unavailable"));
+    try {
+      expect(await githubAppRepositoryAccess({ credentials, env: {} }, orgId, "acme/repo")).toBe("unknown");
+    } finally { get.mockRestore(); }
   });
 
   it("reads granted settings and detects pending owner approval", async () => {
@@ -773,6 +790,17 @@ describe("github-app service", () => {
       expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("mint-1");
       expect(await mintInstallationToken(deps(), orgId, "acme", true)).toBe("mint-2");
       expect(calls).toBe(2);
+    });
+
+    it("shares one in-flight forced refresh per installation", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await seedInstallation();
+      fixture = startGithubFixture({ createInstallationToken: () => ({ body: { token: "refreshed", expires_at: new Date(Date.now() + 3600_000).toISOString() } }) });
+      const results = await Promise.all(Array.from({ length: 5 }, () => mintInstallationToken(deps(), orgId, "acme", true)));
+      expect(results).toEqual(Array.from({ length: 5 }, () => "refreshed"));
+      expect(fixture.calls).toHaveLength(1);
+      expect(await mintInstallationToken(deps(), orgId, "acme", true)).toBe("refreshed");
+      expect(fixture.calls).toHaveLength(2);
     });
 
     it("returns the cached token without re-minting while more than 5 minutes remain", async () => {

@@ -249,12 +249,13 @@ export async function checkArm(
     if (coverage === false) return { ok: false, text: R2(owner, repo) };
     if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
     let config = initialConfig;
+    const derivedChecks = req.on.some((clause) => clause.key === "github.pull_request.checks_completed");
     const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
       if (req.on.some((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key)) && !["read", "write", "admin"].includes(String(settings.permissions.pull_requests))) missing.push("permission pull_requests: read");
       for (const family of githubSourceFamilies(deps.plugins, req.on)) {
         if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
-        if (!settings.events.includes(family)) missing.push(`event ${family}`);
+        if (!settings.events.includes(family) && !(family === "status" && derivedChecks)) missing.push(`event ${family}`);
         const permissions = GITHUB_EVENT_PERMISSIONS[family];
         if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
           missing.push(`permission ${permissions.join(" or ")}: read`);
@@ -266,6 +267,9 @@ export async function checkArm(
     if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
     if (config) {
       const missing = missingSettings(config);
+      if (derivedChecks && !config.events.includes("status")) {
+        warning = `${warning ? `${warning} ` : ""}Waits can be late when a commit status finishes last. Add the Status event to the App.`;
+      }
       if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
     } else {
       warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
@@ -463,7 +467,8 @@ export function armDeps(
 
     async githubInstallationCovers(owner, repo) {
       if (!(await installationResolvesFor(appDeps, session.orgId, owner, { strictOwner: true })).ok) return false;
-      return githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`);
+      const access = await githubAppRepositoryAccess(appDeps, session.orgId, `${owner}/${repo}`, 2_500);
+      return access === "unknown" ? null : access;
     },
 
     githubIngressConfig(owner, repo, refresh) {

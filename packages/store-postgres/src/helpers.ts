@@ -952,8 +952,12 @@ function isWakeupCause(v: string): v is WakeupCause {
 export function rowToWakeup(row: WakeupRow): Wakeup {
   if (!isWakeupKind(row.kind)) throw new Error(`engine_wakeups.kind "${row.kind}" is not a known kind`);
   if (!isWakeupStatus(row.status)) throw new Error(`engine_wakeups.status "${row.status}" is not a known status`);
-  if (row.cause !== null && !isWakeupCause(row.cause)) {
-    throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
+  let cause: WakeupCause | undefined;
+  if (row.cause !== null) {
+    if (isWakeupCause(row.cause)) cause = row.cause;
+    // A terminal row from a newer writer must remain readable after rollback.
+    else if (["done", "cancelled", "expired", "lost"].includes(row.status)) cause = "fired";
+    else throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
   }
   return {
     id: row.id,
@@ -969,7 +973,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...(row.fire_at !== null ? { fireAt: row.fire_at } : {}),
     ...(row.deadline_at !== null ? { deadlineAt: row.deadline_at } : {}),
     ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
-    ...(row.cause !== null ? { cause: row.cause } : {}),
+    ...(cause !== undefined ? { cause } : {}),
     logOffset: row.log_offset,
     logTail: row.log_tail,
     eventCount: row.event_count,

@@ -112,7 +112,7 @@ describe("checkArm passes", () => {
 });
 
 describe("GitHub arm correctness", () => {
-  it.each(["check_run", "check_suite", "workflow_run", "status"])("refuses a derived wait missing event %s", async (family) => {
+  it.each(["check_run", "check_suite", "workflow_run"])("refuses a derived wait missing event %s", async (family) => {
     const config = { events: ["check_run", "check_suite", "workflow_run", "status"].filter((e) => e !== family), permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } };
     const result = await checkArm(deps({ githubIngressConfig: async () => config }), CTX, req());
     expect(result).toEqual({ ok: false, text: expect.stringContaining(`event ${family}`) });
@@ -131,6 +131,23 @@ describe("GitHub arm correctness", () => {
     const result = checkArm(deps({ githubInstallationCovers: () => blocked("coverage"), githubIngressConfig: () => blocked("config"), readGithub: () => blocked("read"), selfIds: async () => { started.push("self"); return []; } }), CTX, req(), { timeoutMs: 10 });
     await result;
     expect(started.sort()).toEqual(["config", "coverage", "read", "self"]);
+  });
+
+  it("warns instead of refusing checks_completed without the Status webhook event", async () => {
+    const config = vi.fn(async () => ({ events: ["check_run", "check_suite", "workflow_run"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } }));
+    const result = await checkArm(deps({ githubIngressConfig: config }), CTX, req());
+    expect(result).toMatchObject({ ok: true, warning: "Waits can be late when a commit status finishes last. Add the Status event to the App." });
+    expect(config).toHaveBeenCalledTimes(1);
+  });
+
+  it("still requires statuses read when the Status webhook event is absent", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run"], permissions: { checks: "read", actions: "read", pull_requests: "read" } }) }), CTX, req());
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("permission statuses: read") });
+  });
+
+  it("still refuses a direct status wait without the Status webhook event", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: [], permissions: { statuses: "read" } }) }), CTX, req({ on: [{ key: "github.status" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event status") });
   });
 
   it("refuses a missing read permission", async () => {

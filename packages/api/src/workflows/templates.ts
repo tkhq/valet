@@ -1348,7 +1348,9 @@ export async function installWorkflowTemplate(
     }
     for (const repository of repositories) {
       try {
-        if (await githubAppRepositoryAccess({ credentials: deps.credentials, ...deps.github }, owner.orgId, repository)) continue;
+        const access = await githubAppRepositoryAccess({ credentials: deps.credentials, ...deps.github }, owner.orgId, repository);
+        if (access === true) continue;
+        if (access === "unknown") return { ok: false, code: "not_connected", error: "Could not verify organization GitHub App repository access. Retry before installing this template." };
       } catch {
         return { ok: false, code: "not_connected", error: "Could not verify organization GitHub App repository access. Retry before installing this template." };
       }

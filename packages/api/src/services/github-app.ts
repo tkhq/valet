@@ -323,10 +323,11 @@ export async function githubAppRepositoryAccess(
   deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl">,
   orgId: string,
   repository: string,
-): Promise<boolean | null> {
+  timeoutMs = 5_000,
+): Promise<boolean | "unknown"> {
   const [owner, repo] = repository.split("/");
   if (!owner || !repo || repository.split("/").length !== 2) return false;
-  return (await githubRepositoryInstallation(deps, orgId, owner, repo)).covered;
+  return (await githubRepositoryInstallation(deps, orgId, owner, repo, false, timeoutMs)).covered;
 }
 
 /** Granted installation delivery configuration. A missing value means readiness is unknown. */
@@ -337,7 +338,7 @@ export interface GithubIngressConfig {
 }
 
 const INGRESS_CONFIG_TTL_MS = 60_000;
-interface GithubRepositoryConfig { covered: boolean | null; config: GithubIngressConfig | null }
+interface GithubRepositoryConfig { covered: boolean | "unknown"; config: GithubIngressConfig | null }
 const requestedConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<unknown> }>>();
 const ingressConfigs = new WeakMap<CredentialStore, Map<string, { until: number; value: Promise<GithubRepositoryConfig> }>>();
 
@@ -348,14 +349,14 @@ function permissionLevel(value: unknown): number {
 /** Coverage and granted settings share one repository read, including concurrent arm calls. */
 async function githubRepositoryInstallation(
   deps: Pick<GithubAppDeps, "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
-  orgId: string, owner: string, repo: string, refresh = false,
+  orgId: string, owner: string, repo: string, refresh = false, timeoutMs = 2_500,
 ): Promise<GithubRepositoryConfig> {
-  const unknown: GithubRepositoryConfig = { covered: null, config: null };
+  const unknown: GithubRepositoryConfig = { covered: "unknown", config: null };
   let app: GithubAppConfig | null;
   try { app = await loadAppConfig(deps, orgId); }
   catch { console.warn("[github-app] ingress configuration credential read failed"); return unknown; }
   if (!app) return { covered: false, config: null };
-  const key = `${orgId}:${app.appId}:${githubApiUrl(deps)}:${owner}/${repo}`;
+  const key = `${orgId}:${app.appId}:${githubApiUrl(deps)}:${owner}/${repo}:${timeoutMs}`;
   const now = (deps.now ?? Date.now)();
   let cache = ingressConfigs.get(deps.credentials);
   if (!cache) { cache = new Map(); ingressConfigs.set(deps.credentials, cache); }
@@ -369,7 +370,7 @@ async function githubRepositoryInstallation(
     } catch { console.warn("[github-app] ingress configuration read failed", { path }); return null; }
   };
   const value = (async (): Promise<GithubRepositoryConfig> => {
-    const installation = await read(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`, 2_500);
+    const installation = await read(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`, timeoutMs);
     if (installation?.status === 404) return { covered: false, config: null };
     const body = installation?.body;
     if (!installation || installation.status !== 200 || !isRecord(body) || typeof body.id !== "number" || !("suspended_at" in body)) {
@@ -989,6 +990,8 @@ function parseAccessTokenResponse(payload: unknown): ParsedAccessToken {
   return { token, expiresAtMs };
 }
 
+const forcedRefreshes = new WeakMap<CredentialStore, Map<string, Promise<string | null>>>();
+
 /** THE one cached installation-token minting path. Looks up the
  * non-suspended installation for `(orgId, accountLogin)` (case-insensitive);
  * returns `null` when there is none. Returns the cached token when it has
@@ -1034,27 +1037,41 @@ export async function mintInstallationToken(
     }
   }
 
-  const config = await loadAppConfig(deps, orgId);
-  if (!config) return null;
-  const jwt = mintAppJwt(config);
-
-  const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations/${row.installationId}/access_tokens`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "Valet-App",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`GitHub API POST /app/installations/${row.installationId}/access_tokens returned ${res.status}`);
+  let refreshes = forcedRefreshes.get(deps.credentials);
+  if (!refreshes) { refreshes = new Map(); forcedRefreshes.set(deps.credentials, refreshes); }
+  const refreshKey = `${orgId}:${row.installationId}:${githubApiUrl(deps)}`;
+  if (forceRefresh) {
+    const running = refreshes.get(refreshKey);
+    if (running) return running;
   }
-  const { token, expiresAtMs } = parseAccessTokenResponse(await res.json());
+  const mint = async (): Promise<string | null> => {
+    const config = await loadAppConfig(deps, orgId);
+    if (!config) return null;
+    const jwt = mintAppJwt(config);
 
-  await deps.db
-    .update(githubInstallations)
-    .set({ cachedToken: encryptSecret(token, deps.key), cachedTokenExpiresAt: expiresAtMs, updatedAt: nowMs })
-    .where(eq(githubInstallations.id, row.id));
+    const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations/${row.installationId}/access_tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "Valet-App",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`GitHub API POST /app/installations/${row.installationId}/access_tokens returned ${res.status}`);
+    }
+    const { token, expiresAtMs } = parseAccessTokenResponse(await res.json());
 
-  return token;
+    await deps.db
+      .update(githubInstallations)
+      .set({ cachedToken: encryptSecret(token, deps.key), cachedTokenExpiresAt: expiresAtMs, updatedAt: nowMs })
+      .where(eq(githubInstallations.id, row.id));
+
+    return token;
+  };
+  if (!forceRefresh) return mint();
+  const fresh = mint();
+  refreshes.set(refreshKey, fresh);
+  try { return await fresh; }
+  finally { if (refreshes.get(refreshKey) === fresh) refreshes.delete(refreshKey); }
 }

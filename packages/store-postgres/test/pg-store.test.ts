@@ -69,6 +69,14 @@ describe("PgSessionStore (PGlite)", () => {
   runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
 
+  it("maps future terminal causes to a generic cause instead of hiding the row", async () => {
+    const store = await factory();
+    await store.createWakeup({ id: "future", sessionId: "s", threadId: "t", kind: "event", status: "done", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, endedAt: 2 });
+    await db.query(`UPDATE engine_wakeups SET cause = 'future_cap' WHERE id = 'future'`);
+    expect(await store.getWakeup("future")).toMatchObject({ status: "done", cause: "fired" });
+    expect(await store.listWakeups("s")).toHaveLength(1);
+  });
+
   it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
     const store = await factory();
     const base = {

@@ -182,8 +182,9 @@ export class WakeWatcher {
   private lastPassAt: number | undefined;
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
+  /** Retry deadlines and exponential delays, retained until success or the idle reset. */
+  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number }>();
   /** Event waiters that ingest appended to since the last light pass read them. */
-  private readonly deriveCooldowns = new Map<string, number>();
   private readonly nudged = new Set<string>();
 
   constructor(private readonly deps: WakeWatcherDeps) {
@@ -293,7 +294,7 @@ export class WakeWatcher {
   }
 
   private async pass(now: number): Promise<void> {
-    for (const [key, until] of this.deriveCooldowns) if (until <= now) this.deriveCooldowns.delete(key);
+    for (const [key, retry] of this.deriveCooldowns) if (retry.until + 30 * 60_000 <= now) this.deriveCooldowns.delete(key);
     // INV-6 is measured before this pass ends or repairs anything, so the
     // repair cannot hide the violation it repairs (fix wave 3, M2).
     const stale = now - 2 * this.intervalMs;
@@ -485,7 +486,8 @@ export class WakeWatcher {
       if (this.stopping) return;
       const { latest, sources } = group;
       const cooldownKey = `${row.id}:${latest.derive}`;
-      if ((this.deriveCooldowns.get(cooldownKey) ?? 0) > this.clock()) return;
+      const previousRetry = this.deriveCooldowns.get(cooldownKey);
+      if ((previousRetry?.until ?? 0) > this.clock()) return;
       ran = true;
       let outcome: Awaited<ReturnType<EventWaiterDerive>>;
       try {
@@ -497,11 +499,15 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
-        if (outcome.retryAfterMs) this.deriveCooldowns.set(cooldownKey, this.clock() + outcome.retryAfterMs);
-        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "it retries next tick"}:`, outcome.error);
+        if (outcome.retryAfterMs && !outcome.consumeSource) {
+          const delayMs = Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs));
+          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs), delayMs });
+        } else this.deriveCooldowns.delete(cooldownKey);
+        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : outcome.retryAfterMs ? "retry delayed by backoff" : "it retries next tick"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
       }
+      this.deriveCooldowns.delete(cooldownKey);
       const at = this.clock();
       await this.deps.engineStore.removeEventMatches(row.id, sources, at, "source");
       const key = latest.derive;
