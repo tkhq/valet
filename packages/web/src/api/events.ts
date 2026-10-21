@@ -163,11 +163,11 @@ export function useEventSubscriptions(
  * The Presence reads (places, a place page) list the same rules, so a
  * listener added from a place page shows there at once. A line's Activity
  * and health strip read the line too, so an edit refreshes them. */
-function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
-  void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>): Promise<void> {
   void qc.invalidateQueries({ queryKey: LINE_ACTIVITY_PREFIX });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
   void qc.invalidateQueries({ queryKey: qkPresence.all });
+  return qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
 }
 
 export function useCreateEventSubscription() {
@@ -188,9 +188,10 @@ export function usePatchEventSubscription() {
     { id: string; body: PatchEventSubscriptionRequest }
   >({
     mutationFn: ({ id, body }) => api.patchEventSubscription(id, body),
-    onSuccess: () => {
-      invalidateSubscriptionReaders(qc);
-    },
+    // Pending lasts until the line list is read again, so the line page's
+    // inline form stays locked until it can read the saved line. An edit
+    // made before that would diff against a row the next refetch replaces.
+    onSuccess: () => invalidateSubscriptionReaders(qc),
   });
 }
 

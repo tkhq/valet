@@ -10,6 +10,7 @@ import {
   type Draft,
   draftFromLine,
   draftFromRoutine,
+  draftKey,
   draftThread,
   type EditorMode,
   hasCreatorScope,
@@ -193,6 +194,15 @@ describe("place condition (Part H step 11, Review Focus 4)", () => {
     draft = setService(draft, "slack");
     draft = toggleEvent(draft, "slack.app_mention", SERVICES);
     expect(draft.conditions).toEqual([]);
+  });
+
+  it("reads two copies of one mention line as the same draft, whatever their row ids", () => {
+    const sub = line("l1", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1" }, { field: "user", op: "eq", value: "U1" }],
+      target: { kind: "assistant", assistant: "user" },
+    });
+    expect(draftKey(draftFromLine(sub))).toBe(draftKey(draftFromLine(structuredClone(sub))));
   });
 
   it("never removes the creator scope", () => {

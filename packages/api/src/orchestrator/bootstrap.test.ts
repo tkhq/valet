@@ -5,7 +5,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { readFile, writeFile, type MemoryScope } from "../services/memory.js";
-import { ensureTodayJournal, todayJournalPath } from "./bootstrap.js";
+import { ensureTodayJournal, journalHasEntries, todayJournalPath } from "./bootstrap.js";
 
 let api: TestApi;
 
@@ -25,6 +25,21 @@ describe("todayJournalPath", () => {
     // 23:30 UTC on the 13th is still the 13th in UTC regardless of host TZ.
     const lateUtc = new Date("2026-07-13T23:30:00.000Z");
     expect(todayJournalPath(lateUtc)).toBe("journal/2026-07-13.md");
+  });
+});
+
+describe("journalHasEntries", () => {
+  it("reads the bootstrap heading alone as no entry", () => {
+    expect(journalHasEntries("# 2026-10-20\n")).toBe(false);
+    expect(journalHasEntries("\n  # 2026-10-20  \n   \n")).toBe(false);
+    expect(journalHasEntries("")).toBe(false);
+  });
+
+  it("reads any line under the heading as an entry, a heading included", () => {
+    expect(journalHasEntries("# 2026-10-20\n\n- Saved the short-answers preference.\n")).toBe(true);
+    expect(journalHasEntries("# 2026-10-20\n## 14:30 Fixed the Slack reply bug\n")).toBe(true);
+    expect(journalHasEntries("# 2026-10-20\n\n## Notes\n")).toBe(true);
+    expect(journalHasEntries("#tag without a heading space")).toBe(true);
   });
 });
 

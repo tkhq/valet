@@ -31,7 +31,7 @@ import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodS
 import { api } from "~/api/client";
 import { Button, FilterChips, Input, PageHeader, Select, TabBar, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
-import { formatUsdPrecise } from "~/lib/format-usage";
+import { formatTurns, formatUsdPrecise } from "~/lib/format-usage";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -202,7 +202,7 @@ function ItemList({
               {fmt(item.totalTokens)} tok
             </span>
             <span className={`tabular-nums text-muted shrink-0 sm:w-14 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
-              {item.turns} turns
+              {formatTurns(item.turns)}
             </span>
           </div>
         );
@@ -257,7 +257,7 @@ function UseCaseRow({
         <span className="tabular-nums text-muted sm:w-24 sm:text-right">
           {fmt(totalTokens)} tok
         </span>
-        <span className="tabular-nums text-muted sm:w-16 sm:text-right">{turns} turns</span>
+        <span className="tabular-nums text-muted sm:w-16 sm:text-right">{formatTurns(turns)}</span>
       </div>
       {expanded && (
         <ItemList active={active} period={period} scope={scope} teamId={teamId} useCase={useCase} />
@@ -547,7 +547,7 @@ export function UsagePage() {
             {/* Unpriced indicator */}
             {breakdown.unpricedTurns > 0 && (
               <div className="rounded border border-line bg-paper px-4 py-2 text-sm text-muted">
-                <span className="font-medium text-ink">{fmt(breakdown.unpricedTurns)} turns unpriced</span>
+                <span className="font-medium text-ink">{formatTurns(breakdown.unpricedTurns)} unpriced</span>
                 {" "}— these turns used custom or dev models with no list price. The cost shown is a floor, not a total.
               </div>
             )}
@@ -641,7 +641,7 @@ export function UsagePage() {
                 </div>
               )}
               {outcomesQ.data && outcomesQ.data.unpricedTurns > 0 && (
-                <p className="text-xs text-muted mt-2">{fmt(outcomesQ.data.unpricedTurns)} unpriced model turns make these spend estimates a floor.</p>
+                <p className="text-xs text-muted mt-2">{formatTurns(outcomesQ.data.unpricedTurns)} unpriced: these spend estimates are a floor.</p>
               )}
             </div>
 

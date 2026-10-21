@@ -9,6 +9,11 @@ export function formatTokens(n: number): string {
   return `${trimZero((n / 1_000_000_000).toFixed(1))}B`;
 }
 
+/** A turn count with its noun: "1 turn", "1,204 turns". */
+export function formatTurns(n: number): string {
+  return `${n.toLocaleString()} ${n === 1 ? "turn" : "turns"}`;
+}
+
 /** Dollar display tuned for LLM spend: sub-cent shows "<$0.01", under $10
  * keeps cents, larger amounts round to whole dollars. */
 export function formatUsd(n: number): string {

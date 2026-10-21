@@ -2,7 +2,9 @@
  * One section of the editor's form (docs/specs/2026-10-16-presence-hub-design.md
  * Part H step 2): the name in a fixed left column, the summary in words,
  * and `Change` or `Close`. An open section shows its body under the row.
- * The sheet holds which section is open, so one is open at a time.
+ * The sheet holds which section is open, so one is open at a time. On a
+ * line's or a routine's page every section stays open, so a row without
+ * `onToggle` offers no toggle.
  */
 import { useId, type ReactNode } from "react";
 import { Button } from "~/components/primitives";
@@ -26,7 +28,8 @@ export function Section({
   /** True while the summary reads a default the reader did not choose. */
   muted?: boolean;
   open: boolean;
-  onToggle: () => void;
+  /** Omitted for a section that stays open. */
+  onToggle?: () => void;
   /** True for a section with nothing to change: it shows no toggle. */
   fixed?: boolean;
   children?: ReactNode;
@@ -44,7 +47,7 @@ export function Section({
         <p className={cn("min-w-0 text-[15px] leading-relaxed [overflow-wrap:anywhere]", muted ? "text-muted" : "text-ink")}>
           {typeof summary === "string" ? <span className={muted ? "text-muted" : undefined}>{summary}</span> : summary}
         </p>
-        {fixed ? <span /> : (
+        {fixed || onToggle === undefined ? <span /> : (
           <Button
             type="button"
             variant="ghost"

@@ -882,6 +882,16 @@ export function cronInWords(cron: string): string {
   return fallback;
 }
 
+/**
+ * `<name>: ` before a routine's `<do>`. A routine that runs a workflow of
+ * the same name has no lead, so the name reads once: a template install
+ * names its routine after the workflow it installs.
+ */
+export function routineLead(routine: RoutineLike, workflows: WorkflowNames): string {
+  const runs = routine.detail.targetKind === "workflow" ? workflowName(workflows, routine.workflowId) : undefined;
+  return runs === routine.name ? "" : `${routine.name}: `;
+}
+
 /** The `<do>` of a routine (spec Part E step 1) as parts. */
 export function routineDoesParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   if (routine.detail.targetKind === "workflow") return workflowParts(workflows, routine.workflowId);
@@ -923,16 +933,32 @@ export function scheduleInWords(cron: string, timezone: string | undefined): str
   return zone === undefined ? words : `${words} (${zone})`;
 }
 
-/** A routine as parts of one sentence: `<schedule in words>, <name>: <do>.` */
+/** A routine as parts of one sentence: `<schedule in words>, <name>: <do>.` See `routineLead`. */
 export function routineSentenceParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
   return tidy([
-    text(`${scheduleInWords(routine.detail.cron, routine.detail.timezone)}, ${routine.name}: `),
+    text(`${scheduleInWords(routine.detail.cron, routine.detail.timezone)}, ${routineLead(routine, workflows)}`),
     ...routineDoesParts(routine, workflows, threads),
     text("."),
   ]);
 }
 
-/** A routine as one sentence: `<schedule in words>, <name>: <do>.` */
+/**
+ * A routine's roster sentence as parts: `<name>: <do>.`, with the pinned
+ * thread or the workflow as a token. The overview row leaves the schedule
+ * to its place column (Part B step 6). Without a lead (`routineLead`), the
+ * sentence starts at `<do>`: `Run <workflow>.`
+ */
+export function routineRowParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
+  const lead = routineLead(routine, workflows);
+  const parts = tidy([text(lead), ...routineDoesParts(routine, workflows, threads), text(".")]);
+  // A lead is the routine's own name and keeps the casing the person wrote
+  // ("iOS release check"). Only the leadless form starts with "run".
+  if (lead !== "") return parts;
+  const [first, ...rest] = parts;
+  return first?.kind === "text" ? [text(upperFirst(first.text)), ...rest] : parts;
+}
+
+/** A routine as one sentence: `<schedule in words>, <name>: <do>.` See `routineLead`. */
 export function routineSentence(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): string {
   return partsText(routineSentenceParts(routine, workflows, threads));
 }
@@ -1137,39 +1163,6 @@ export function activityPartsText(sentence: ActivitySentenceParts): string {
   return outcomes.length > 0 ? `${partsText(sentence.lead)} → ${outcomes}` : partsText(sentence.lead);
 }
 
-// ── How it works ────────────────────────────────────────────────────────
-
-/** Filter fields that name a branch. */
-const BRANCH_FIELDS: ReadonlySet<string> = new Set(["branch", "ref", "head_branch", "base_branch"]);
-/** Filter fields that name a label. */
-const LABEL_FIELDS: ReadonlySet<string> = new Set(["label", "labels"]);
-
-const NO_CONDITIONS = "No other conditions.";
-
-/**
- * What one key hears when no filter other than its place narrows it: a
- * Slack message hears any message, a GitHub push, pull request, or check
- * any branch, an issue any issue, a release any release. Other keys have
- * no default words.
- */
-function anyEventWords(key: string): string {
-  if (key === "slack.app_mention" || key === "slack.message" || key.startsWith("slack.message.")) return "Any message, in a thread or not.";
-  if (/^github\.(push|pull_request|pull_request_review|pull_request_review_comment|pull_request_review_thread|check_run|check_suite|workflow_run|status|create|delete)(\.|$)/.test(key)) {
-    return "Any branch, any author.";
-  }
-  if (/^github\.(issues|issue_comment)(\.|$)/.test(key)) return "Any issue.";
-  if (/^github\.release(\.|$)/.test(key)) return "Any release.";
-  if (/^linear\.(issue|comment)(\.|$)/.test(key)) return "Any issue, any author.";
-  return NO_CONDITIONS;
-}
-
-/** The default words every key shares, or `No other conditions.` when they differ. */
-function anyEvent(keys: readonly string[]): string {
-  const words = new Set(keys.map(anyEventWords));
-  const [only] = words;
-  return words.size === 1 && only !== undefined ? only : NO_CONDITIONS;
-}
-
 /** An op as a verb after its field: `starts with`, `contains`. */
 function opWords(op: EventSubscriptionFilterWire["op"]): string {
   switch (op) {
@@ -1177,126 +1170,6 @@ function opWords(op: EventSubscriptionFilterWire["op"]): string {
     case "contains": return "contains";
     case "regex": return "matches";
     default: return "is";
-  }
-}
-
-/** One filter that is not the place as a phrase after `Only`: `the main branch`, `from alice`. */
-function conditionInWords(filter: EventSubscriptionFilterWire, names: SentenceNames): string {
-  const values = filterEntries(filter, names).map((entry) => entry.label).join(" or ");
-  if (BRANCH_FIELDS.has(filter.field) && (filter.op === "eq" || filter.op === "in")) return `the ${values} branch`;
-  if (SENDER_FIELDS.includes(filter.field) || filter.field === "author" || filter.field === "actor") return `from ${values}`;
-  if (LABEL_FIELDS.has(filter.field)) return `with the label ${values}`;
-  return `when the ${fieldWords(filter.field)} ${opWords(filter.op)} ${values}`;
-}
-
-/**
- * How it works, **When**: the line's conditions in words (spec Part D step
- * 1.6). A line that names only a place reads what it hears there (`Any
- * branch, any author.`). Otherwise each condition reads after `Only` (`Only
- * the main branch.`). The place filters (`eq` or `in` on a place field;
- * another op is a condition), the creator scope the server adds,
- * and a followed Slack thread are not conditions here: the title says them.
- */
-export function whenExplanation(
-  filters: readonly EventSubscriptionFilterWire[],
-  keys: readonly string[],
-  names: SentenceNames = {},
-): string {
-  const conditions = filters.filter((f) => !isPlaceFilter(f) && !isCreatorScopeFilter(f) && f.field !== "thread_ts");
-  if (conditions.length === 0) return anyEvent(keys);
-  return `Only ${joinAnd(conditions.map((filter) => conditionInWords(filter, names)))}.`;
-}
-
-/** The name a line appears as. A line that sets only an avatar appears as Valet. */
-function appearsAs(appearance: Appearance | undefined): string {
-  return hasText(appearance?.displayName) ? appearance.displayName : "Valet";
-}
-
-/**
- * How it works, **Do**, as parts: what Valet does and as whom (`work on it
- * as Valet`, `reply as Ops Bot`), or `run <workflow>` for a workflow. Only
- * a custom display name reads as a person token; the default `Valet` is
- * plain text.
- */
-export function doParts(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): SentencePart[] {
-  const target = sub.target;
-  if (target.kind === "workflow") return workflowParts(workflows, target.workflowId);
-  const action = replies(sub) ? "reply" : "work on it";
-  const custom = target.appearance?.displayName;
-  return hasText(custom) ? [text(`${action} as `), { kind: "person", text: custom }] : [text(`${action} as Valet`)];
-}
-
-/**
- * How it works, **Do**: one sentence of behavior (spec Part D step 1.6).
- * `Valet reads the event and acts in the thread. It appears as Ops Bot.`,
- * `Valet reads the message and replies.`, or `Valet starts the <workflow>
- * workflow with the event as its input.` Where the reply goes belongs to
- * **Where** (`whereExplanation`).
- */
-export function doExplanation(sub: Pick<EventSubscriptionWire, "target" | "eventKeys">, workflows: WorkflowNames): string {
-  const target = sub.target;
-  if (target.kind === "workflow") {
-    const name = workflowName(workflows, target.workflowId);
-    return name === undefined
-      ? "Valet starts the workflow with the event as its input."
-      : `Valet starts the ${name} workflow with the event as its input.`;
-  }
-  const appears = `It appears as ${appearsAs(target.appearance)}.`;
-  return replies(sub)
-    ? `Valet reads the message and replies. ${appears}`
-    : `Valet reads the event and acts in the thread. ${appears}`;
-}
-
-/** How it works, **Where**, as parts: the thread phrase with the thread as a
- * token. `ownThread` is a routine's own thread: with it, `its own thread`
- * opens that thread. */
-export function whereParts(
-  policy: AssistantThreadPolicy,
-  subjectKind: SubjectKind | null,
-  threads: ThreadTitles,
-  ownThread?: WorkflowScheduleThreadRef | null,
-): SentencePart[] {
-  switch (policy.mode) {
-    case "new":
-      return [text("in a new thread each time")];
-    case "subject":
-      return [text(`in one thread per ${subjectKind ?? "place"}`)];
-    case "own":
-      return tidy([text("in "), ...routineThreadParts("its own thread", ownThread)]);
-    case "existing":
-      return [text("in "), ...pinnedThreadParts(threads, policy)];
-  }
-}
-
-/**
- * How it works, **Where**: the thread policy as behavior (spec Part D step
- * 1.6). A routine fires where an event arrives, so its words name a firing.
- * A mention line also replies in the conversation it was mentioned in, so
- * its words say that first.
- */
-export function whereExplanation(
-  policy: AssistantThreadPolicy,
-  subjectKind: SubjectKind | null,
-  ruleKind: RuleKind = "presence",
-  options: { mention?: boolean } = {},
-): string {
-  const policyWords = wherePolicyWords(policy, subjectKind, ruleKind);
-  return options.mention === true ? `Valet replies where it was mentioned. ${policyWords}` : policyWords;
-}
-
-function wherePolicyWords(policy: AssistantThreadPolicy, subjectKind: SubjectKind | null, ruleKind: RuleKind): string {
-  const each = ruleKind === "routine" ? "firing" : "event";
-  switch (policy.mode) {
-    case "new":
-      return `Every ${each} starts a fresh thread.`;
-    case "subject":
-      return `Each ${subjectKind ?? "place"} gets its own thread; every event for it lands there.`;
-    case "own":
-      return ruleKind === "routine"
-        ? "Every firing lands in this routine's own thread, so the history stays in one place."
-        : "Every event lands in this line's own thread, so the history stays in one place.";
-    case "existing":
-      return `Every ${each} lands in this one thread, so the history stays in one place.`;
   }
 }
 
@@ -1438,24 +1311,6 @@ export function tookInWords(ms: number): string {
 }
 
 // ── A routine's page ────────────────────────────────────────────────────
-
-/** How it works, **When**, for a routine: the zone its times read in. */
-export function scheduleExplanation(timezone: string | undefined): string {
-  const zone = scheduleZone(timezone);
-  return `The times are in ${zone ?? "UTC"}.`;
-}
-
-/** How it works, **Do**, for a routine, as parts: `work on its prompt`, or `run <workflow>`. */
-export function routineDoParts(routine: RoutineLike, workflows: WorkflowNames): SentencePart[] {
-  return routine.detail.targetKind === "workflow" ? workflowParts(workflows, routine.workflowId) : [text("work on its prompt")];
-}
-
-/** How it works, **Do**, for a routine: one sentence of behavior. */
-export function routineDoExplanation(routine: RoutineLike, workflows: WorkflowNames): string {
-  if (routine.detail.targetKind === "assistant") return "Valet reads the prompt and acts in the thread.";
-  const name = workflowName(workflows, routine.workflowId);
-  return name === undefined ? "Valet starts the workflow." : `Valet starts the ${name} workflow.`;
-}
 
 /**
  * One firing of a routine on its Activity (spec Part E step 2): `Fired →

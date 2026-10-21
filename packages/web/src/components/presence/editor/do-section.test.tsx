@@ -144,10 +144,21 @@ describe("DoSection", () => {
     expect((screen.getByLabelText("Workflow") as HTMLSelectElement).disabled).toBe(false);
   });
 
-  it("keeps what a stored line does fixed", () => {
+  it("shows what a stored line does as one fixed card, with how to change it inside the card", () => {
     const sub = line("l1", { eventKeys: ["github.check_run.completed"], target: { kind: "assistant", assistant: "user" } });
     render(<Harness initial={draftFromLine(sub)} mode={{ kind: "edit", line: sub }} />);
-    expect((screen.getByRole("radio", { name: "Run a workflow" }) as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText(/To change what Valet does, delete this line and make a new one/)).toBeTruthy();
+    expect(screen.queryByRole("radiogroup", { name: "Do" })).toBeNull();
+    const note = screen.getByText("This stays fixed. To change it, delete this line and make a new one.");
+    // The note sits in the card that names the choice, above the instructions, not floating over them.
+    expect(note.parentElement?.textContent).toContain("Work on it");
+    const instructions = screen.getByLabelText("Instructions (optional)");
+    expect(note.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(instructions.parentElement?.contains(note)).toBe(false);
+  });
+
+  it("gives the instructions six rows at least", () => {
+    const draft = setService(newDraft({ timezone: "UTC" }), "schedule");
+    render(<Harness initial={{ ...draft, doKind: "work" }} mode={{ kind: "create", preselected: { schedule: true } }} />);
+    expect((screen.getByLabelText("Instructions (required)") as HTMLTextAreaElement).rows).toBe(6);
   });
 });

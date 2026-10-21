@@ -117,7 +117,8 @@ export function SessionView({
   /** Enable message-level replies on an orchestrator chat surface. */
   enableReplies?: boolean;
 }) {
-  const [summaryOpen, setSummaryOpen] = useState(() => !panel && typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches);
+  // The summary is a popover over the transcript, so it opens only on request.
+  const [summaryOpen, setSummaryOpen] = useState(false);
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).

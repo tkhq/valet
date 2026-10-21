@@ -5,7 +5,7 @@
  * or Save. On a phone the sentence card is a sticky header above the
  * form, and the rest sits under the form.
  */
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { EventSubscriptionCollisionsWire, EventSubscriptionWire } from "@valet/api/wire";
 import { Button } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -108,8 +108,9 @@ export function SentenceCard({ title, sentence, className }: { title: string; se
   );
 }
 
-/** Everything in the side pane under the sentence card. */
-export function SidePaneRest(props: SidePaneProps) {
+/** Cancel and Create or Save, `Discard your changes?`, or Done after a
+ * save that reported overlaps. The sheet and the inline form both show it. */
+export function EditorFooter(props: SidePaneProps) {
   const reasonId = useId();
   const keepEditing = useRef<HTMLButtonElement>(null);
   const { collisions, review } = props;
@@ -124,67 +125,64 @@ export function SidePaneRest(props: SidePaneProps) {
   const committed = collisions?.committed === true;
   const blocking = collisions !== null && collisions !== undefined && !collisions.committed && collisions.report.blocking.length > 0;
   const stale = review?.stale !== undefined;
-  const anyway = props.saveLabel === "Create" ? "Create anyway" : props.saveLabel === "Turn on" ? "Turn on anyway" : "Save anyway";
+  const anyway = anywayLabel(props.saveLabel);
 
-  let footer: ReactNode;
   if (props.confirmingDiscard) {
-    footer = (
+    return (
       <div role="group" aria-label="Discard your changes?" className="flex flex-wrap items-center justify-end gap-2">
         <span className="mr-auto text-sm font-medium text-ink">Discard your changes?</span>
         <Button ref={keepEditing} type="button" variant="secondary" onClick={props.onKeepEditing}>Keep editing</Button>
         <Button type="button" variant="danger" onClick={props.onDiscard}>Discard</Button>
       </div>
     );
-  } else if (committed) {
-    footer = (
+  }
+  if (committed) {
+    return (
       <div className="flex justify-end">
         <Button type="button" onClick={props.onDone}>Done</Button>
       </div>
     );
-  } else {
-    footer = (
-      <div className="grid gap-1.5">
-        {!stale && props.blocker !== null && (
-          <p id={reasonId} className="text-right text-[13px] text-muted">{props.blocker}</p>
-        )}
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <span className="mr-auto text-[13px] text-muted">{props.editedAt !== undefined ? editedAgo(props.editedAt) : ""}</span>
-          <Button type="button" variant="secondary" onClick={props.onCancel} disabled={props.pending}>Cancel</Button>
-          {!stale && blocking && props.onSaveAnyway !== undefined && (
-            <Button type="button" variant="secondary" onClick={props.onSaveAnyway} disabled={props.pending || props.blocker !== null}>
-              {anyway}
-            </Button>
-          )}
-          {!stale && (
-            <Button
-              type="button"
-              onClick={props.onSave}
-              disabled={props.pending || props.blocker !== null}
-              aria-describedby={props.blocker !== null ? reasonId : undefined}
-            >
-              {props.saveLabel}
-            </Button>
-          )}
-        </div>
-      </div>
-    );
   }
+  return (
+    <div className="grid gap-1.5">
+      {!stale && props.blocker !== null && (
+        <p id={reasonId} className="text-right text-[13px] text-muted">{props.blocker}</p>
+      )}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="mr-auto text-[13px] text-muted">{props.editedAt !== undefined ? editedAgo(props.editedAt) : ""}</span>
+        <Button type="button" variant="secondary" onClick={props.onCancel} disabled={props.pending}>Cancel</Button>
+        {!stale && blocking && props.onSaveAnyway !== undefined && (
+          <Button type="button" variant="secondary" onClick={props.onSaveAnyway} disabled={props.pending || props.blocker !== null}>
+            {anyway}
+          </Button>
+        )}
+        {!stale && (
+          <Button
+            type="button"
+            onClick={props.onSave}
+            disabled={props.pending || props.blocker !== null}
+            aria-describedby={props.blocker !== null ? reasonId : undefined}
+          >
+            {props.saveLabel}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
 
+function anywayLabel(saveLabel: SidePaneProps["saveLabel"]): string {
+  return saveLabel === "Create" ? "Create anyway" : saveLabel === "Turn on" ? "Turn on anyway" : "Save anyway";
+}
+
+/** The review note, the warnings, the overlaps, and the error. The sheet
+ * and the inline form both show them above the footer. */
+export function EditorNotices(props: SidePaneProps) {
+  const { collisions, review } = props;
+  const committed = collisions?.committed === true;
+  const blocking = collisions !== null && collisions !== undefined && !collisions.committed && collisions.report.blocking.length > 0;
   return (
     <>
-      <div className="rounded-[10px] border border-line bg-paper px-5 py-[18px] text-sm leading-relaxed text-ink">
-        <p className="mb-2 text-xs text-muted">For example</p>
-        <ol className="grid gap-2">
-          {/* The list is always the same three steps in the same order, so the index is a stable key. */}
-          {props.steps.map((step, i) => (
-            <li key={i} className="grid grid-cols-[20px_minmax(0,1fr)] items-baseline gap-2.5">
-              <span aria-hidden="true" className="inline-grid h-5 w-5 place-items-center rounded-full bg-ink-wash text-[11px] text-muted">{i + 1}</span>
-              <span>{step}</span>
-            </li>
-          ))}
-        </ol>
-      </div>
-
       {review !== undefined && (
         <p role="note" className="border-l-2 border-accent-500 pl-3 text-[13px] text-ink">
           Proposed by the assistant.{" "}
@@ -219,16 +217,37 @@ export function SidePaneRest(props: SidePaneProps) {
           })}
           {blocking && (
             <p className="text-[13px] text-muted">
-              Not saved yet. Narrow the conditions so they stay apart, or select {anyway}. Then both lines run.
+              Not saved yet. Narrow the conditions so they stay apart, or select {anywayLabel(props.saveLabel)}. Then both lines run.
             </p>
           )}
           {committed && <p className="text-[13px] text-muted">Saved.</p>}
         </div>
       )}
 
-      <p className="text-xs text-muted">Uses this workspace's existing access. Saving grants nothing new.</p>
       {props.error !== null && <p role="alert" className="text-[13px] text-danger-500">{props.error}</p>}
-      <div className="mt-auto pt-2">{footer}</div>
+    </>
+  );
+}
+
+/** Everything in the side pane under the sentence card. */
+export function SidePaneRest(props: SidePaneProps) {
+  return (
+    <>
+      <div className="rounded-[10px] border border-line bg-paper px-5 py-[18px] text-sm leading-relaxed text-ink">
+        <p className="mb-2 text-xs text-muted">For example</p>
+        <ol className="grid gap-2">
+          {/* The list is always the same three steps in the same order, so the index is a stable key. */}
+          {props.steps.map((step, i) => (
+            <li key={i} className="grid grid-cols-[20px_minmax(0,1fr)] items-baseline gap-2.5">
+              <span aria-hidden="true" className="inline-grid h-5 w-5 place-items-center rounded-full bg-ink-wash text-[11px] text-muted">{i + 1}</span>
+              <span>{step}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+      <EditorNotices {...props} />
+      <p className="text-xs text-muted">Uses this workspace's existing access. Saving grants nothing new.</p>
+      <div className="mt-auto pt-2"><EditorFooter {...props} /></div>
     </>
   );
 }

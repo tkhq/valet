@@ -6,7 +6,7 @@ import { memoryStats } from "~/components/assistant/memory-card";
 import { TeamSlackSetupCard } from "~/components/events/team-slack-setup";
 import { Badge, ErrorRow, LoadingRow, cardClass, pageClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { formatTokens, formatUsd } from "~/lib/format-usage";
+import { formatTokens, formatTurns, formatUsd } from "~/lib/format-usage";
 import { WorkspaceCatchUp } from "./workspace-catch-up";
 import { cn } from "~/lib/cn";
 
@@ -61,7 +61,7 @@ function TeamUsageCard({ teamId }: { teamId: string }) {
             <span className="text-xs text-muted">this week</span>
           </div>
           <p className="text-xs text-muted">
-            {formatTokens(data.totalTokens)} tokens · {data.totalTurns} turns
+            {formatTokens(data.totalTokens)} tokens · {formatTurns(data.totalTurns)}
           </p>
         </div>
       )}

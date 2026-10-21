@@ -23,8 +23,9 @@
  */
 export interface WorkflowTemplateSchedule {
   /**
-   * Base schedule name. The host appends a per-install suffix, so two
-   * installs of one template stay apart in the schedules list.
+   * Base schedule name. A repeat install appends the workflow's install
+   * count, `<name> (2)`, so two installs of one template stay apart in the
+   * schedules list.
    */
   name: string;
   /** 5-field cron expression (minute hour day-of-month month day-of-week). */
@@ -75,8 +76,8 @@ export interface WorkflowTemplateEventFilter {
  */
 export interface WorkflowTemplateEventTrigger {
   /**
-   * Base name. The host appends a per-install suffix, the same way it does
-   * for a schedule, so two installs stay apart in the Triggers list.
+   * Base name. The host appends a per-install suffix, so two installs stay
+   * apart in the Triggers list.
    */
   name: string;
   /** Catalog event keys. A trailing ".*" wildcard is allowed. */
