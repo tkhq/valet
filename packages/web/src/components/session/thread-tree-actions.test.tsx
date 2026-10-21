@@ -328,6 +328,17 @@ describe("ThreadTree — thread context menu", () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
+  it("pins from the context menu, the only row control on a phone", async () => {
+    const user = userEvent.setup();
+    renderTree();
+
+    expect(screen.getByRole("button", { name: "Pin thread" }).className).toContain("max-md:hidden");
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: "Pin thread" }));
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    expect(await screen.findByRole("menuitem", { name: "Unpin thread" })).toBeTruthy();
+  });
+
   it("offers a session-wide Replace sandbox action", async () => {
     const user = userEvent.setup();
     renderTree();

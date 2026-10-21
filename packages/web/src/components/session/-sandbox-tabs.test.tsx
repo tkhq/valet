@@ -92,6 +92,21 @@ describe("SandboxTabs", () => {
     expect(root.className).not.toContain("flex-1");
   });
 
+  it("hides the strip on a phone on Chat only when the thread menu lists the views", () => {
+    const strip = (props: Partial<SandboxTabsProps>) => {
+      const { container, unmount } = renderTabs({ sessionId: "sess-1", profile: "headless", activeTab: "chat", onTabChange: () => {}, viewsInMenu: true, ...props });
+      const className = (container.firstElementChild?.firstElementChild as HTMLElement).className;
+      unmount();
+      return className;
+    };
+    expect(strip({})).toContain("max-sm:hidden");
+    // A header without the views in its menu (a child panel) keeps the strip.
+    expect(strip({ viewsInMenu: false })).not.toContain("max-sm:hidden");
+    // The Browser view keeps the strip: it is the way back to Chat.
+    expect(strip({ activeTab: "browser" })).not.toContain("max-sm:hidden");
+    expect(strip({ notice: "Shared with the team" })).not.toContain("max-sm:hidden");
+  });
+
   it("terminal tab: the root grows (flex-1) to host the iframe", () => {
     mintSandboxJwt.mockResolvedValue({ token: "tok-123", expiresAt: Date.now() + 60_000 });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));

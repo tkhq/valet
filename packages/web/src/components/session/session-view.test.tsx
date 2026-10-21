@@ -159,6 +159,18 @@ describe("SessionView header chrome", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("keeps the phone tab strip in a panel, whose header has no thread menu", async () => {
+    renderInRouter("sess-1", true);
+    const panelStrip = (await screen.findByRole("tab", { name: "Chat" })).closest(".border-b");
+    expect(panelStrip?.className).not.toContain("max-sm:hidden");
+  });
+
+  it("hides the phone tab strip on Chat when the thread menu lists the views", async () => {
+    renderInRouter("sess-1", false);
+    const strip = (await screen.findByRole("tab", { name: "Chat" })).closest(".border-b");
+    expect(strip?.className).toContain("max-sm:hidden");
+  });
+
   it("keeps focus on the selected sandbox tab across chat transitions", async () => {
     fullProfile = true;
     renderInRouter("sess-1", false);

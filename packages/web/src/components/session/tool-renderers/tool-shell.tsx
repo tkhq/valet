@@ -188,7 +188,7 @@ export function ToolShell({
             "relative w-full flex items-center gap-2 px-2.5 py-1.5",
             "text-left text-xs font-mono leading-none",
             "hover:bg-ink-wash",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
             "transition-colors",
           )}
           aria-expanded={expanded}
@@ -336,7 +336,7 @@ export function CopyButton({
       className={cn(
         "rounded p-1 text-muted/70 hover:text-[--fg] hover:bg-ink-wash",
         "opacity-0 group-hover/tool:opacity-100 focus-visible:opacity-100 transition-opacity",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40",
         copied && "text-success-600 dark:text-success-500 opacity-100",
         className,
       )}

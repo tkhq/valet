@@ -37,6 +37,11 @@ export interface SandboxTabsProps {
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
   notice?: string;
+  /**
+   * True when the header's thread menu lists the sandbox views. Only then
+   * may a phone hide the strip on Chat; a panel header has no such menu.
+   */
+  viewsInMenu?: boolean;
 }
 
 export function SandboxTabs({
@@ -46,6 +51,7 @@ export function SandboxTabs({
   onTabChange,
   sandbox,
   notice,
+  viewsInMenu = false,
 }: SandboxTabsProps) {
   // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
   // height so MessageList can use the remaining space.
@@ -53,7 +59,10 @@ export function SandboxTabs({
   const tabs = profile === "full" ? TABS : TABS.filter((tab) => tab.id === "chat" || tab.id === "browser");
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
-      <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
+      {/* When the header's thread menu lists the views, a phone shows no
+          view tabs on Chat; the strip returns to Chat from another view.
+          A team thread keeps the strip for its sharing notice. */}
+      <div className={cn("flex shrink-0 items-center border-b border-line px-3 sm:px-4", viewsInMenu && activeTab === "chat" && !notice && "max-sm:hidden")}>
         <TabBar label="Thread view" size="sm" className="flex-1 shadow-none" tabs={tabs} active={activeTab} onSelect={onTabChange} />
         {notice && <>
           <span role="status" title={notice} className="hidden lg:block max-w-[50%] truncate pl-3 text-xs text-muted">{notice}</span>

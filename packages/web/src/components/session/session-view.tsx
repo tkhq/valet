@@ -314,6 +314,7 @@ export function SessionView({
       threadId={effectiveThreadId}
       messages={stream.messages}
       summaryControl={summaryControl}
+      onOpenView={hideBrowser ? undefined : changeTab}
     />
   );
   const sandboxTabs = !hideBrowser && (
@@ -324,6 +325,7 @@ export function SessionView({
       onTabChange={changeTab}
       notice={scopeNotice}
       sandbox={stream.sandbox}
+      viewsInMenu={!panel}
     />
   );
 

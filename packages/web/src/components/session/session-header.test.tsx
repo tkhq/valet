@@ -218,6 +218,30 @@ beforeEach(() => {
   channelsData = undefined;
 });
 
+describe("SessionHeader — phone thread menu", () => {
+  it("opens the sandbox views from the menu, where a phone has no view tabs", async () => {
+    const onOpenView = vi.fn();
+    render(
+      <TooltipProvider>
+        <SessionHeader session={{ ...baseSession(), profile: "full" }} agentStatus="idle" conn="open" threadId="t1" onOpenView={onOpenView} />
+      </TooltipProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Open browser" }));
+    expect(onOpenView).toHaveBeenCalledWith("browser");
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    expect(await screen.findByRole("menuitem", { name: "Open terminal" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "Open VS Code" })).toBeTruthy();
+  });
+
+  it("lists no sandbox views when the thread has none", async () => {
+    renderHeader(undefined, "t1");
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await screen.findByRole("menuitem", { name: /copy transcript/i });
+    expect(screen.queryByRole("menuitem", { name: "Open browser" })).toBeNull();
+  });
+});
+
 describe("SessionHeader: background work", () => {
   it("does not show background work in the header", () => {
     renderHeader(undefined, "t1");

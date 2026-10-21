@@ -221,7 +221,7 @@ export function IntegrationRow({ plugin, search, onOpen, tools }: {
           // A modified click opens a new tab and pushes nothing here.
           if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) onOpen?.();
         }}
-        className="-mx-4 block px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
+        className="-mx-4 block px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss/40 touch-manipulation"
       >
         <CardHeading
           compact

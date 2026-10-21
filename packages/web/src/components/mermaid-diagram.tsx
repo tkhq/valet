@@ -97,7 +97,7 @@ export function MermaidDiagram({ source }: { source: string }) {
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-mono hover:text-accent-600 dark:hover:text-accent-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs font-mono hover:text-accent-600 dark:hover:text-accent-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
             aria-expanded={!collapsed}
             aria-controls={`mermaid-body-${reactId}`}
           >
@@ -129,7 +129,7 @@ export function MermaidDiagram({ source }: { source: string }) {
             ref={viewportRef}
             id={`mermaid-body-${reactId}`}
             data-max-height="384"
-            className="max-h-96 touch-none overflow-hidden bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40"
+            className="max-h-96 touch-none overflow-hidden bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-moss/40"
             role="region"
             tabIndex={0}
             aria-label="Mermaid diagram viewport"
