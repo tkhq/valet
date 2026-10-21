@@ -152,4 +152,34 @@ describe("Thread.contextUsage", () => {
     expect(atSettle).toHaveLength(1);
     expect(await atSettle[0]).toMatchObject({ model: "ctx", contextWindow: 50_000 });
   });
+
+  it("reads a thread's pinned model, not the session baseline, when its turn's settlement is announced", async () => {
+    const { faux, engine, providers, options } = setup("ctx-pin-small", { contextWindow: 50_000, maxTokens: 8_000 });
+    const big = registerFauxProvider({ provider: "ctx-pin-big", models: [{ id: "ctx-big", name: "ctx-big", contextWindow: 400_000, maxTokens: 8_000 }] });
+    cleanups.push(() => big.unregister());
+    const bigModel = big.getModel("ctx-big");
+    if (!bigModel) throw new Error("Missing fixture model");
+    big.setResponses([fauxAssistantMessage("answered on the pinned model")]);
+    faux.setResponses([]);
+    const session = await engine.createSession({
+      ...options, modelSpec: "small",
+      resolveModel: async (spec) => spec === "small" ? { model: options.model } : spec === "big" ? { model: bigModel } : null,
+    });
+    const thread = session.thread();
+    await thread.setModel("big");
+
+    // The turn's cleanup restores the session baseline before settlement is
+    // delivered, while the turn is still running. A read at that moment must
+    // report the thread's pin.
+    const atSettle: Array<Promise<Awaited<ReturnType<typeof thread.contextUsage>>>> = [];
+    cleanups.push(providers.stream.subscribe(
+      { sessionId: session.id, eventTypes: ["submission_settled"] },
+      () => { atSettle.push(thread.contextUsage()); },
+    ));
+    const receipt = await thread.submitPrompt("work on the pinned model", {});
+    expect((await thread.awaitResult(receipt.queueItemId)).outcome).toBe("completed");
+
+    expect(atSettle).toHaveLength(1);
+    expect(await atSettle[0]).toMatchObject({ model: "ctx-big", contextWindow: 400_000 });
+  });
 });

@@ -4632,7 +4632,11 @@ export class Thread {
 
   /** The model the next turn budgets against: the live turn model mid-turn, else the thread's effective spec. */
   private async budgetModel(): Promise<PiModel> {
-    if (this.runningItem) return this.agent.state.model;
+    // A turn publishes its model state at claim and clears it when settlement
+    // starts. The turn's cleanup restores the session's baseline model before
+    // `submission_settled` is delivered, so the live model counts only while
+    // the running item still owns that state.
+    if (this.runningItem && this.committedModelState?.queueItemId === this.runningItem.id) return this.agent.state.model;
     const spec = this.turnModelSpec();
     const resolver = this.session.options.resolveModel;
     // Resolve the spec on every read, as a turn does, so a re-pointed size

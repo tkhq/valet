@@ -180,9 +180,10 @@ summarizer prompt.
   for a model with no context window. Thread guests cannot read it. The web
   client refetches the reading on `turn_end`, `submission.settled`,
   `compaction_end`, and `model_switched`. A `turn_end` refetch can land
-  before the turn clears its one-off model; the engine clears it before it
-  announces settlement, so the `submission.settled` refetch reads the
-  thread's own model. The meter turns amber at 80%. Its popover names the
+  before the turn clears its one-off model. A read uses the live turn model
+  only while the running turn still owns its published model state, which
+  settlement clears before it announces `submission_settled`; so the
+  `submission.settled` refetch reads the thread's own model, pinned or not. The meter turns amber at 80%. Its popover names the
   token counts and the model, says whether automatic compaction is on, and
   has a Compact now button that sends `/compact`. The button waits while a
   turn runs.
