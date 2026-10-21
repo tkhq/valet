@@ -932,6 +932,10 @@ is not turn completion. Use an explicit engine turn-lifecycle hook, not a timeou
 to trigger cleanup. A missing cleanup event is an observable invariant failure.
 The base browser skill tells the agent to mark a page as deliverable when the user
 asks to finish on, leave open, show, or hand off that page.
+It also gives the steps to check a web UI the agent built: start the dev server as a
+background `bash` process on a fixed port, open it at `localhost`, capture the page,
+and read `dev.logs()`. It states the 1280 by 800 viewport limit, so the agent does not
+report a phone-width check that it cannot make.
 
 The host records cleanup before it finalizes the submission, including recovered settlements.
 If compute is absent, the host records cleanup only when provider inventory shows

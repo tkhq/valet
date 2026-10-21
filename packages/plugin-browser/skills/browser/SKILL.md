@@ -69,5 +69,19 @@ by the completed thread. Human tabs and another thread's tabs remain open.
 Screenshots returned by the browser tool become image evidence in the conversation.
 The viewer's continuous frames are temporary. They do not enter the model transcript.
 
+## Check a web UI you built
+
+The sandbox browser reaches servers in the same sandbox at `http://localhost:<port>`.
+Check a page you changed before you report that it works:
+
+1. Start the dev server with `bash`, `background: true`, `deadline_hours: 1`, and a reason. Give it a fixed port, for example `--port 5173 --strictPort`.
+2. Wait until the port answers. Run `curl -sf http://localhost:5173` in a short `bash` loop, for at most 60 seconds.
+3. Open the changed route with `browser.tabs.new({url})` and call `getAXStateAndScreenshot()`.
+4. Read `dev.logs()` for console errors and page errors. Fix them before you report.
+5. After each change, reload the tab and capture again. Compare the capture with the request, not with your memory of the code.
+
+The browser viewport is 1280 by 800 pixels. It cannot show a phone layout.
+If the request depends on a phone width, say that the check covered desktop only.
+
 If the runtime reports an unsupported capability, follow its corrective action.
 Do not bypass the browser broker with shell automation or direct debugging connections.
