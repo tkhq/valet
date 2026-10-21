@@ -224,12 +224,20 @@ const TURN_STREAM_MAX_RETRY_DELAY_MS = 30_000;
 const TURN_STREAM_TIMEOUT_MS = 600_000;
 
 /**
- * Turn-level retry defaults for transient provider errors (TKAI-319),
- * applied only to unattended sessions (orchestrator, workflow, child). The
- * last backoff entry repeats when maxAttempts exceeds the list.
+ * Turn-level retry defaults for transient provider errors (TKAI-319). An
+ * unattended turn (orchestrator, workflow, child, not a person's prompt)
+ * waits longer. A person's own prompt retries briefly, so a passing rate
+ * limit does not cost them a resend, and a long provider wait fails at once
+ * instead of holding the thread's queue. The last backoff entry repeats when
+ * maxAttempts exceeds the list. A provider hint ("try again in 2s") raises a
+ * wait up to the max hint; a longer hint ends the retries.
  */
 const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
 const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
+const UNATTENDED_TURN_RETRY_MAX_HINT_MS = 120_000;
+const INTERACTIVE_TURN_RETRY_ATTEMPTS = 2;
+const INTERACTIVE_TURN_RETRY_BACKOFF_MS = [2_000, 8_000];
+const INTERACTIVE_TURN_RETRY_MAX_HINT_MS = 20_000;
 
 /**
  * In-process background-drive registry: queue item ids whose turn is being
@@ -367,6 +375,34 @@ export function formatTransientRetryMessage(args: {
   return primary + detail;
 }
 
+
+const RETRY_HINT_UNIT_MS: Array<[RegExp, number]> = [
+  [/^(?:ms|milliseconds?)$/i, 1],
+  [/^(?:h|hours?)$/i, 3_600_000],
+  [/^(?:m|mins?|minutes?)$/i, 60_000],
+  [/^(?:s|secs?|seconds?)$/i, 1_000],
+];
+
+/**
+ * The wait a provider's error text asks for, in ms, or undefined when it
+ * names none. Reads "try again in 224ms", "try again in 1.722s",
+ * "try again in 6m0s", "retry after 3 seconds", and pi-ai's
+ * "Server requested 45s retry delay". Exported for tests.
+ */
+export function parseProviderRetryHintMs(errorMessage: string | undefined): number | undefined {
+  if (!errorMessage) return undefined;
+  const requested = /server requested (\d+(?:\.\d+)?)s retry delay/i.exec(errorMessage);
+  if (requested) return Math.ceil(Number(requested[1]) * 1000);
+  const unit = "ms|milliseconds?|hours?|h|minutes?|mins?|m|seconds?|secs?|s";
+  const phrase = new RegExp(`(?:try again|retry)(?: after| in)\\s*:?\\s*((?:\\d+(?:\\.\\d+)?\\s*(?:${unit})(?![a-z])\\s*)+)`, "i").exec(errorMessage);
+  if (!phrase) return undefined;
+  let total = 0;
+  for (const part of phrase[1].matchAll(new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${unit})(?![a-z])`, "gi"))) {
+    const scale = RETRY_HINT_UNIT_MS.find(([re]) => re.test(part[2]))?.[1] ?? 0;
+    total += Number(part[1]) * scale;
+  }
+  return total > 0 ? Math.ceil(total) : undefined;
+}
 
 /** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
 function delay(ms: number): Promise<void> {
@@ -4360,8 +4396,11 @@ export class Thread {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
     const unattended = !this.isUserPrompt() && (purpose === "orchestrator" || purpose === "workflow" || purpose === "child");
-    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
-    const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : INTERACTIVE_TURN_RETRY_ATTEMPTS);
+    const backoff = cfgd?.backoffMs?.length
+      ? cfgd.backoffMs
+      : unattended ? UNATTENDED_TURN_RETRY_BACKOFF_MS : INTERACTIVE_TURN_RETRY_BACKOFF_MS;
+    const maxHintMs = cfgd?.maxHintMs ?? (unattended ? UNATTENDED_TURN_RETRY_MAX_HINT_MS : INTERACTIVE_TURN_RETRY_MAX_HINT_MS);
     const resolveFallback = this.session.options.resolveFallbackModel;
     const attemptedProviderIds = new Set([this.agent.state.model.provider]);
     let sameProviderAttempts = 0;
@@ -4412,8 +4451,12 @@ export class Thread {
         );
       } else {
         if (!transient || sameProviderAttempts >= maxAttempts) return;
+        // A provider that asks for a longer wait than this turn allows gets
+        // no retry: the failed turn already shows its text, which says when.
+        const hintMs = parseProviderRetryHintMs(last.errorMessage);
+        if (hintMs !== undefined && hintMs > maxHintMs) return;
         sameProviderAttempts++;
-        const waitMs = backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0;
+        const waitMs = Math.max(backoff[Math.min(sameProviderAttempts - 1, backoff.length - 1)] ?? 0, hintMs ?? 0);
         this.emitError("turn_transient_retry", formatTransientRetryMessage({
           provider: this.agent.state.model.provider,
           errorMessage: last.errorMessage,
