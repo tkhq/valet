@@ -2331,8 +2331,10 @@ export interface SessionStore {
    * read that lists every running event waiter (INV-E6).
    */
   findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]>;
-  /** Bind an unbound branch waiter once. Preserve its buffer and replay keys. */
-  bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null>;
+  /** Record a branch PR closure and its note atomically, including during lookup. */
+  closeBranchEventWaiter(id: string, branch: string, pullRequest: string, digest: EventMatchDigest, updatedAt: number): Promise<Wakeup | null>;
+  /** Bind an open PR to an unbound branch identity. Reopened clears its closed record. */
+  bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number, reopened?: boolean): Promise<Wakeup | null>;
   /**
    * Appends `digest` to the event wakeup's `eventBuffer` and sets
    * `updatedAt`, in one statement. It appends only to a `running` event
@@ -2355,13 +2357,14 @@ export interface SessionStore {
   removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number, mode?: "delivered" | "source"): Promise<boolean>;
   /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
   countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
-  /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
+  /** CAS on status, and on the event buffer, match, count, and timestamp when `expected` is set. */
   transitionWakeup(
     id: string,
     from: readonly WakeupStatus[],
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    expected?: Wakeup,
   ): Promise<Wakeup | null>;
   /**
    * `transitionWakeup`, and when the CAS matches, the release of the row's

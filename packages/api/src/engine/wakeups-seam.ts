@@ -1,10 +1,11 @@
-import { recordWakeupEnded } from "@valet/engine";
+import { currentStateDigests, recordWakeupEnded } from "@valet/engine";
 import type {
   ArmEventRequest,
   ArmEventResult,
   ChannelOrigin,
   CredentialProvider,
   EventMatchSpec,
+  EventMatchDigest,
   HoldInput,
   Lease,
   Sandbox,
@@ -21,8 +22,6 @@ import type {
 import { newExecId, newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
 import { DEFAULT_JOB_LOG_MAX_BYTES } from "../providers/sandbox-backend.js";
 import type { ArmCheckResult } from "../events/waiter-arm.js";
-import type { EventWaiterDerive } from "../events/derive.js";
-import { derivedClausesAccept } from "../events/waiter-match.js";
 import { isSandboxGone } from "./wakeups-admin.js";
 
 /**
@@ -66,9 +65,8 @@ export interface WakeupsSeamDeps {
    */
   scratchBytes?: () => number | undefined;
   now?: () => number;
-  /** Evaluate plugin hooks after the checked waiter is stored. */
-  evaluateEvent?: EventWaiterDerive;
-  nudge?: (ids: string[]) => void;
+  evaluateKeys?: readonly string[];
+  nudge?: (ids: string[], work?: () => Promise<void>) => void;
   /**
    * Runs the `wait_for_event` arm checks (spec 2026-10-15, Part D1) for
    * this session. Absent for a workflow run: the seam then has no
@@ -394,39 +392,57 @@ export function buildWakeupsSeam(
         clauses: req.on,
         once: req.once,
         self: checked.self,
+        evaluateCurrent: req.evaluateCurrent !== false,
         ...(req.endOnClose !== undefined ? { endOnClose: req.endOnClose } : {}),
         ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
         ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
         const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+        let warning = checked.warning;
+        let retryWork: (() => Promise<void>) | undefined;
+        const enqueueEvaluation = async (row: Wakeup) => {
+          for (const digest of currentStateDigests(row, now(), deps.evaluateKeys ?? [])) await engineStore.appendEventMatch(row.id, digest, now());
+        };
         if (checked.resolveBranch) {
-          const branch = checked.primarySubject;
-          const pullRequest = await checked.resolveBranch();
-          if (branch && pullRequest) {
-            const repository = branch.split(":branch/")[0]!;
-            const bound = await engineStore.bindEventWaiter(result.wakeup.id, branch, pullRequest, repository, now());
-            if (bound) console.info("[event-waiters] bound branch", { waiterId: bound.id, branch, pullRequest });
+          const branch = checked.primarySubject!;
+          const resolveBranch = checked.resolveBranch;
+          const bind = async (pullRequest: string) => {
+            const bound = await engineStore.bindEventWaiter(result.wakeup.id, branch, pullRequest, branch.split(":branch/")[0]!, now());
+            if (bound) {
+              console.info("[event-waiters] bound branch", { waiterId: bound.id, branch, pullRequest });
+              await enqueueEvaluation(bound);
+            }
+          };
+          const noteClosed = async (digest: EventMatchDigest) => {
+            const pr = digest.subjects.find((subject) => subject.includes("#"));
+            if (pr) await engineStore.closeBranchEventWaiter(result.wakeup.id, branch, pr, digest, now());
+          };
+          const lookup = await resolveBranch();
+          if (lookup.closed) await noteClosed(lookup.closed);
+          if (lookup.pullRequest) await bind(lookup.pullRequest);
+          if (lookup.failed) {
+            warning = `${warning ? `${warning} ` : ""}The open PR lookup failed or timed out. The wait will retry three times. Check GitHub access if it stays unbound.`;
+            let remaining = 3;
+            const retry = async () => {
+              const row = await engineStore.getWakeup(result.wakeup.id);
+              if (!row || row.status !== "running" || row.eventMatch?.boundPullRequest) return;
+              const next = await resolveBranch();
+              remaining--;
+              if (next.closed) await noteClosed(next.closed);
+              if (next.pullRequest) await bind(next.pullRequest);
+              else if (next.failed && remaining > 0) deps.nudge?.([row.id], retry);
+              else if (next.failed) console.warn("[event-waiters] branch lookup retries ended", { waiterId: row.id });
+            };
+            retryWork = retry;
           }
           // A webhook can bind the row while the lookup runs.
           result.wakeup = await engineStore.getWakeup(result.wakeup.id) ?? result.wakeup;
         }
-        if (req.evaluateCurrent !== false && deps.evaluateEvent) {
-          for (const key of new Set(req.on.map((clause) => clause.key))) {
-            const source = { key, derive: key, dedupeKey: `arm:${key}`, subjects: result.wakeup.subjects ?? [],
-              summary: "Current subject state", occurredAt: new Date(now()).toISOString() };
-            try {
-              const outcome = await deps.evaluateEvent(result.wakeup, source, true);
-              if (outcome.result === "error") console.warn("[event-waiters] arm evaluation failed", { waiterId: result.wakeup.id, key }, outcome.error);
-              if (outcome.result === "event" && outcome.digest.status !== "pending" && derivedClausesAccept(match, key, outcome.digest)) {
-                if (await engineStore.appendEventMatch(result.wakeup.id, outcome.digest, now())) deps.nudge?.([result.wakeup.id]);
-              }
-            } catch (error) {
-              console.warn("[event-waiters] arm evaluation failed", { waiterId: result.wakeup.id, key }, error);
-            }
-          }
-        }
-        return { ...result, ...(checked.warning ? { warning: checked.warning } : {}) };
+        await enqueueEvaluation(result.wakeup);
+        // A live light pass starts immediately. Defer its nudge until the arm promise returns.
+        setImmediate(() => deps.nudge?.([result.wakeup.id], retryWork));
+        return { ...result, ...(warning ? { warning } : {}) };
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
         throw err;

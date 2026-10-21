@@ -758,6 +758,7 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate" | "deli
  */
 export function decideDeliveredWaiter(now: number, row: Wakeup): WakeupDecision | null {
   if (row.kind !== "event" || row.status !== "running" || row.eventMatch?.once !== true) return null;
+  if (row.eventBuffer?.some((digest) => digest.subjectClosed)) return null;
   const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
   return {
     to: "done",
@@ -795,12 +796,20 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
     const outcome = closed.status === "merged" ? `merged${closed.merge_commit_sha ? ` at ${closed.merge_commit_sha}` : ""}` : "closed";
     return {
       to: "done", cause: "subject_closed",
-      patch: { cause: "subject_closed", endedAt: now, eventBuffer: [] },
-      signals: [eventMatchedSignal(row, [closed], row.eventCount + 1, false), {
+      patch: { cause: "subject_closed", endedAt: now, eventBuffer: [], eventCount: row.eventCount + 1 },
+      signals: [eventMatchedSignal(row, [...ready.filter((d) => !d.subjectClosed), closed], row.eventCount + 1, false), {
         signalType: "event.ended", dispatchId: `wakeup:${row.id}:terminal`,
         attributes: { ...eventAttributes(row), cause: "subject_closed" },
         body: `The PR was ${outcome}. Later pushes to that branch will not be watched. Arm on the branch or on a new PR instead.`,
       }],
+    };
+  }
+
+  const branchNotes = ready.filter((digest) => digest.branchClosed);
+  if (branchNotes.length > 0) {
+    return { to: "running", patch: { eventCount: row.eventCount + 1, lastEmitAt: now },
+      signals: [eventMatchedSignal(row, branchNotes, row.eventCount + 1, false)],
+      deliveredKeys: branchNotes.map((digest) => digest.dedupeKey),
     };
   }
 

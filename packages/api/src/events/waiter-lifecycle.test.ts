@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { InMemorySessionStore, type ArmEventRequest, type NormalizedEvent, type PromptContent, type PromptOptions } from "@valet/engine";
+import { PGlite } from "@electric-sql/pglite";
+import { PgSessionStore, pgDbFromPglite, applyEngineMigrations } from "@valet/store-postgres";
+import { InMemorySessionStore, type SessionStore, type ArmEventRequest, type NormalizedEvent, type PromptContent, type PromptOptions } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher, type WakeWatcherSession } from "../engine/wake-watcher.js";
@@ -15,15 +17,14 @@ const CHECKS = "github.pull_request.checks_completed";
 const NOW = Date.parse("2026-10-20T00:00:00Z");
 const limits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
 
-async function harness() {
-  const store = new InMemorySessionStore();
+async function harness(store: SessionStore = new InMemorySessionStore()) {
   await store.saveSession({ id: "s", userId: "u", orgId: "org", owner: { type: "user", id: "u" }, workspace: "/",
     purpose: "interactive", status: "running", createdAt: NOW, updatedAt: NOW });
   const state = { pending: false, error: false, openPr: false, closed: false, merged: false, now: NOW };
   const http = vi.fn<typeof fetch>(async (input) => {
     if (state.error) throw new Error("fixture read failed");
     const path = new URL(String(input)).pathname;
-    if (path.endsWith("/pulls/42")) return Response.json({ head: { sha: SHA }, html_url: "https://github.com/acme/app/pull/42" });
+    if (/\/pulls\/\d+$/.test(path)) return Response.json({ head: { sha: SHA }, html_url: `https://github.com/acme/app/pull/${path.split("/").at(-1)}` });
     if (path.endsWith("/check-runs")) return Response.json({ total_count: 1, check_runs: [{ status: state.pending ? "in_progress" : "completed", conclusion: "success", completed_at: "2026-10-20T00:00:00Z" }] });
     if (path.endsWith("/status")) return Response.json({ statuses: [] });
     if (path.endsWith("/check-suites")) return Response.json({ check_suites: [] });
@@ -46,20 +47,22 @@ async function harness() {
     sessionMayReadSlackChannel: async () => false, readLinear: async () => false,
     followsSlackThread: async () => false, selfIds: async () => [],
   };
-  const seam = buildWakeupsSeam({ engineStore: store, limits, now: () => state.now, evaluateEvent: derive,
-    checkArm: (threadId, req) => checkArm(armDeps, { sessionId: "s", threadId, orgId: "org" }, req),
+  const seam = buildWakeupsSeam({ engineStore: store, limits, now: () => state.now, evaluateKeys: [CHECKS], nudge: (ids, work) => watcher.nudge(ids, work),
+    checkArm: (threadId, req) => checkArm(armDeps, { sessionId: "s", threadId, orgId: "org" }, req, { timeoutMs: 10 }),
   }, "s", () => undefined);
   const matchDeps: WaiterMatchDeps = { engineStore: store, plugins: [githubPlugin],
     sessionOrg: async () => ({ orgId: "org", ownerType: "user", ownerId: "u" }),
     slackStillVisible: async () => true, resolvePreviousStatus: async () => null, slackBotUserId: async () => undefined, now: () => state.now };
-  async function ingest(event: NormalizedEvent) {
-    await appendWaiterDigests(matchDeps, "github", await evaluateWaiterCandidates(matchDeps, "org", "github", event));
-    await watcher.sweep(state.now);
+  async function ingest(event: NormalizedEvent, flush = true, suppress = false) {
+    const candidates = await evaluateWaiterCandidates(matchDeps, "org", "github", event);
+    await appendWaiterDigests(matchDeps, "github", candidates, suppress ? new Map(candidates.map((c) => [c.waiter.id, "suppress" as const])) : undefined);
+    if (flush) await watcher.sweep(state.now);
   }
   async function arm(over: Partial<ArmEventRequest> = {}) {
     const result = await seam.armEvent!("t", { subject: "https://github.com/acme/app/pull/42", on: [{ key: CHECKS }], once: true,
       reason: "CI", maxHours: 6, ...over });
     if ("refused" in result) throw new Error(result.refused);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     return result.wakeup.id;
   }
   return { store, state, http, prompt, watcher, ingest, arm, seam, armDeps };
@@ -69,7 +72,7 @@ function event(type: "pull_request" | "check_run", action: string, options: { fo
   const payload = { repository: { full_name: "acme/app" }, action,
     ...(type === "pull_request" ? { pull_request: { number: options.number ?? 42, merged: options.merged ?? false, merge_commit_sha: MERGE,
       head: { ref: "feat/nested", sha: SHA, repo: { full_name: options.fork ? "fork/app" : "acme/app" } } } }
-      : { check_run: { head_sha: SHA, conclusion: action === "failure" ? "failure" : "success", pull_requests: [{ number: options.number ?? 42 }],
+      : { check_run: { head_sha: SHA, conclusion: action === "failure" ? "failure" : "success", pull_requests: [{ number: options.number ?? 42, head: { repo: { full_name: options.fork ? "fork/app" : "acme/app" } } }],
         ...(options.branch ? { check_suite: { head_branch: "feat/nested" } } : {}) } }),
   };
   const trigger = githubPlugin.triggers?.find((entry) => entry.id === `github.${type}`);
@@ -91,10 +94,23 @@ describe("event waiter arm state and PR lifecycle", () => {
   it("delivers completed checks at arm and terminates once mode", async () => {
     const h = await harness();
     const id = await h.arm();
-    expect((await h.store.getWakeup(id))?.eventBuffer?.[0]).toMatchObject({ key: CHECKS, status: "success", head_sha: SHA });
+    expect(h.http).not.toHaveBeenCalled();
+    expect((await h.store.getWakeup(id))?.eventBuffer?.[0]).toMatchObject({ derive: CHECKS, evaluateCurrent: true });
     await h.watcher.sweep(NOW);
     expect((await h.store.getWakeup(id))?.cause).toBe("fired");
     expect(signals(h)[0]?.body).toContain("checks_completed · success");
+  });
+
+  it("returns before a live watcher's current-state reads start", async () => {
+    const h = await harness();
+    h.watcher.start();
+    try {
+      const result = await h.seam.armEvent!("t", { subject: "https://github.com/acme/app/pull/42", on: [{ key: CHECKS }], once: true, reason: "CI", maxHours: 6 });
+      expect("wakeup" in result).toBe(true);
+      expect(h.http).not.toHaveBeenCalled();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally { await h.watcher.stop(); }
+    expect(h.http).toHaveBeenCalled();
   });
 
   it("keeps a pending wait armed and delivers a later webhook", async () => {
@@ -134,6 +150,7 @@ describe("event waiter arm state and PR lifecycle", () => {
     try {
       const id = await h.arm();
       expect((await h.store.getWakeup(id))?.status).toBe("running");
+      await h.watcher.sweep(NOW);
       expect(log).toHaveBeenCalled();
     } finally { log.mockRestore(); }
   });
@@ -185,13 +202,145 @@ describe("event waiter arm state and PR lifecycle", () => {
     expect(signals(h)).toHaveLength(2);
   });
 
-  it("ends a branch-bound waiter on close without merge", async () => {
+  it.each([undefined, false])("keeps branch identity through a second PR with endOnClose=%s", async (endOnClose) => {
     const h = await harness(); h.state.openPr = true; h.state.pending = true;
-    const id = await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested", once: false });
+    const id = await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested", once: false, endOnClose, minIntervalMs: 30_000 });
     await h.ingest(event("pull_request", "closed"));
+    expect(await h.store.getWakeup(id)).toMatchObject({ status: "running", eventMatch: { primarySubject: BRANCH } });
+    expect((await h.store.getWakeup(id))?.eventMatch?.boundPullRequest).toBeUndefined();
+    await h.ingest(event("pull_request", "opened", { number: 7 }));
+    expect((await h.store.getWakeup(id))?.eventMatch?.boundPullRequest).toBe("github:acme/app#7");
+    expect((await h.store.getWakeup(id))?.subjects).not.toContain(PR);
+    await h.ingest(event("check_run", "failure", { number: 42 }));
+    expect(signals(h)).toHaveLength(1);
+    expect(signals(h)[0]?.body).toContain("branch wait stays armed");
+    h.state.pending = false; h.state.now += 60_000;
+    await h.ingest(event("check_run", "success", { number: 7 }));
+    expect(signals(h)[1]?.body).toContain("All checks passed on acme/app#7");
+    await h.ingest(event("pull_request", "closed", { number: 42 }));
+    expect((await h.store.getWakeup(id))?.eventMatch?.boundPullRequest).toBe("github:acme/app#7");
+  });
+
+  it("flushes buffered matches before the close, despite the stream interval and subscription suppression", async () => {
+    const h = await harness();
+    const id = await h.arm({ once: false, evaluateCurrent: false, minIntervalMs: 3600_000,
+      on: [{ key: "github.check_run.completed" }] });
+    await h.ingest(event("check_run", "failure"));
+    await h.ingest(event("check_run", "success"));
+    expect(signals(h)).toHaveLength(1);
+    await h.ingest(event("pull_request", "closed", { merged: true }), true, true);
+    expect(signals(h).map((s) => s.signalType)).toEqual(["event.matched", "event.matched", "event.ended"]);
+    expect(JSON.parse(signals(h)[1]!.attributes!.digests!).map((d: { key: string }) => d.key))
+      .toEqual(["github.check_run.completed", "github.pull_request.closed"]);
+    expect(await h.store.getWakeup(id)).toMatchObject({ status: "done", eventCount: 2 });
+  });
+
+  it("resolves pending CI once before delivering the close last", async () => {
+    const h = await harness();
+    const id = await h.arm({ evaluateCurrent: false, once: false });
+    await h.ingest(event("check_run", "success"), false);
+    await h.ingest(event("pull_request", "closed", { merged: true }));
+    expect(JSON.parse(signals(h)[0]!.attributes!.digests!).map((d: { key: string }) => d.key)).toEqual([CHECKS, "github.pull_request.closed"]);
     expect((await h.store.getWakeup(id))?.cause).toBe("subject_closed");
-    expect(signals(h)[0]?.body).toContain("pull_request.closed · closed");
-    expect(signals(h)[1]?.body).toContain("PR was closed");
+  });
+
+  it.each(["opened", "reopened"])("evaluates completed CI after %s binds, not during ingest", async (action) => {
+    const h = await harness();
+    await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested" });
+    await h.ingest(event("pull_request", action), false);
+    expect(h.http).not.toHaveBeenCalled();
+    await h.watcher.eventPass(NOW);
+    expect(signals(h)[0]?.body).toContain("checks_completed · success");
+    expect(h.http.mock.calls.filter(([input]) => String(input).endsWith("/pulls/42"))).toHaveLength(2);
+  });
+
+  it("warns on a branch lookup timeout and retries through nudges after arm", async () => {
+    const h = await harness();
+    const lookup = vi.fn<NonNullable<ArmDeps["findGithubPullRequest"]>>()
+      .mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue(PR);
+    h.armDeps.findGithubPullRequest = lookup;
+    const result = await h.seam.armEvent!("t", { subject: "https://github.com/acme/app/tree/feat/nested", on: [{ key: CHECKS }], once: false, reason: "CI", maxHours: 6 });
+    if ("refused" in result) throw new Error(result.refused);
+    expect(result.warning).toContain("lookup failed or timed out");
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(h.http).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await h.watcher.eventPass(NOW);
+    expect(lookup).toHaveBeenCalledTimes(2);
+    expect((await h.store.getWakeup(result.wakeup.id))?.eventMatch?.boundPullRequest).toBe(PR);
+    expect(signals(h)[0]?.body).toContain("checks_completed · success");
+  });
+
+  it("bounds branch lookup retries to three after the failed arm lookup", async () => {
+    const h = await harness();
+    const lookup = vi.fn<NonNullable<ArmDeps["findGithubPullRequest"]>>().mockRejectedValue(new Error("fixture lookup failed"));
+    h.armDeps.findGithubPullRequest = lookup;
+    const id = await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested" });
+    for (let i = 0; i < 5; i++) await h.watcher.eventPass(NOW);
+    expect(lookup).toHaveBeenCalledTimes(4);
+    expect((await h.store.getWakeup(id))?.status).toBe("running");
+  });
+
+  it("retains a CI completion that arrives before the PR opens", async () => {
+    const h = await harness();
+    const id = await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested" });
+    await h.ingest(event("check_run", "success", { branch: true }));
+    const unbound = await h.store.getWakeup(id);
+    expect(unbound?.eventBuffer).toEqual([expect.objectContaining({ derive: CHECKS })]);
+    expect(h.http).not.toHaveBeenCalled();
+    await h.ingest(event("pull_request", "opened"));
+    expect((await h.store.getWakeup(id))?.cause).toBe("fired");
+    expect(signals(h)[0]?.body).toContain("checks_completed · success");
+  });
+
+  it("records a merge during the open-PR lookup and refuses the stale binding", async () => {
+    const h = await harness();
+    let release: (pr: string) => void = () => {};
+    let began: () => void = () => {};
+    const started = new Promise<void>((resolve) => { began = resolve; });
+    h.armDeps.findGithubPullRequest = () => { began(); return new Promise((resolve) => { release = resolve; }); };
+    const arm = h.arm({ subject: "https://github.com/acme/app/tree/feat/nested" });
+    await started;
+    await h.ingest(event("pull_request", "closed", { merged: true }), false);
+    release(PR);
+    const id = await arm;
+    await h.watcher.eventPass(NOW);
+    expect(await h.store.getWakeup(id)).toMatchObject({ status: "running", eventMatch: { closedPullRequests: [PR] } });
+    expect((await h.store.getWakeup(id))?.eventMatch?.boundPullRequest).toBeUndefined();
+    expect(signals(h)[0]?.body).toContain("pull_request.closed · merged");
+    expect(signals(h)[0]?.body).toContain(MERGE);
+    expect(signals(h)[0]?.body).toContain("branch wait stays armed");
+  });
+
+  it("rechecks the lookup candidate's state before binding", async () => {
+    const h = await harness(); h.state.openPr = true; h.state.closed = true; h.state.merged = true;
+    const id = await h.arm({ subject: "https://github.com/acme/app/tree/feat/nested" });
+    await h.watcher.eventPass(NOW);
+    expect((await h.store.getWakeup(id))?.eventMatch?.boundPullRequest).toBeUndefined();
+    expect(signals(h)[0]?.body).toContain("pull_request.closed · merged");
+  });
+
+  it.each(["memory", "pglite"])("re-decides a stale fired CAS after a merge on %s", async (backend) => {
+    const db = backend === "pglite" ? pgDbFromPglite(new PGlite()) : undefined;
+    if (db) await applyEngineMigrations(db);
+    try {
+      const h = await harness(db ? new PgSessionStore(db) : new InMemorySessionStore());
+      const id = await h.arm({ evaluateCurrent: false, on: [{ key: "github.check_run.completed" }] });
+      await h.ingest(event("check_run", "success"), false);
+      const original = h.store.transitionWakeup.bind(h.store);
+      const transition = vi.spyOn(h.store, "transitionWakeup").mockImplementationOnce(async (...args) => {
+        expect(args[3].cause).toBe("fired");
+        await h.ingest(event("pull_request", "closed", { merged: true }), false);
+        return original(...args);
+      });
+      await h.watcher.sweep(NOW);
+      expect(transition).toHaveBeenCalledTimes(2);
+      expect(await h.store.getWakeup(id)).toMatchObject({ status: "done", cause: "subject_closed", eventCount: 1 });
+      expect(signals(h).map((s) => s.signalType)).toEqual(["event.matched", "event.ended"]);
+      const digests: { key: string; merge_commit_sha?: string }[] = JSON.parse(signals(h)[0]!.attributes!.digests!);
+      expect(digests.map((d) => d.key)).toEqual(["github.check_run.completed", "github.pull_request.closed"]);
+      expect(digests[1]?.merge_commit_sha).toBe(MERGE);
+    } finally { await db?.close(); }
   });
 
   it("keeps the waiter running with end_on_close false", async () => {

@@ -494,7 +494,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let statusRef: ChildStatusReader | undefined;
   let wakeWatcherRef: WakeWatcher | undefined;
   const engineHost = new EngineHost({
-    nudgeEventWaiters: (ids) => wakeWatcherRef?.nudge(ids),
+    nudgeEventWaiters: (ids, work) => wakeWatcherRef?.nudge(ids, work),
     engineStore,
     sandboxProvider,
     eventStream,

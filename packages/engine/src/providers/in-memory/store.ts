@@ -383,20 +383,41 @@ export class InMemorySessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    expected?: Wakeup,
   ): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
     if (!w || !from.includes(w.status)) return null;
+    if (expected && (w.updatedAt !== expected.updatedAt || w.eventCount !== expected.eventCount ||
+        JSON.stringify(w.eventBuffer ?? []) !== JSON.stringify(expected.eventBuffer ?? []) ||
+        JSON.stringify(w.eventMatch) !== JSON.stringify(expected.eventMatch))) return null;
     const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
     this.wakeups.set(id, next);
     return copyWakeup(next);
   }
 
-  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null> {
+  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number, reopened = false): Promise<Wakeup | null> {
     const row = this.wakeups.get(id);
-    if (!row || row.kind !== "event" || row.status !== "running" || row.eventMatch?.primarySubject !== branch) return null;
+    if (!row || row.kind !== "event" || row.status !== "running" || row.eventMatch?.primarySubject !== branch || row.eventMatch.boundPullRequest !== undefined) return null;
+    if (!reopened && row.eventMatch.closedPullRequests?.includes(pullRequest)) return null;
     const next = copyWakeup({ ...row, updatedAt,
       subjects: [...new Set([pullRequest, ...(row.subjects ?? []), repository])],
-      eventMatch: { ...row.eventMatch, primarySubject: pullRequest },
+      eventMatch: { ...row.eventMatch, boundPullRequest: pullRequest, bindingGeneration: (row.eventMatch.bindingGeneration ?? 0) + 1,
+        ...(reopened ? { closedPullRequests: row.eventMatch.closedPullRequests?.filter((s) => s !== pullRequest) ?? [] } : {}),
+      },
+    });
+    this.wakeups.set(id, next);
+    return copyWakeup(next);
+  }
+
+  async closeBranchEventWaiter(id: string, branch: string, pullRequest: string, digest: EventMatchDigest, updatedAt: number): Promise<Wakeup | null> {
+    const row = this.wakeups.get(id);
+    const match = row?.eventMatch;
+    if (!row || row.status !== "running" || match?.primarySubject !== branch ||
+        (match.boundPullRequest && match.boundPullRequest !== pullRequest) || match.closedPullRequests?.includes(pullRequest)) return null;
+    const { boundPullRequest: _bound, ...unbound } = match;
+    const next = copyWakeup({ ...row, updatedAt, subjects: row.subjects?.filter((s) => s !== pullRequest),
+      eventMatch: { ...unbound, closedPullRequests: [...(match.closedPullRequests ?? []), pullRequest] },
+      eventBuffer: [...(row.eventBuffer ?? []), boundEventDigest(digest)],
     });
     this.wakeups.set(id, next);
     return copyWakeup(next);
@@ -419,11 +440,11 @@ export class InMemorySessionStore implements SessionStore {
     const buffer = w.eventBuffer ?? [];
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
     if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
-    if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
+    if (!bounded.subjectClosed && !bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
       console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    if (!bounded.subjectClosed && buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
     }

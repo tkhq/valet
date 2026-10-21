@@ -7,7 +7,7 @@
  * conformance suites (packages/api/src/workflows/pg-store.test.ts).
  */
 import { describe, expect, it } from "vitest";
-import { fromJsonbColumn, jsonbToParam, requiredJsonbColumn } from "../src/helpers.js";
+import { fromJsonbColumn, jsonbToParam, requiredJsonbColumn, parseEventMatchJson, parseEventBufferJson } from "../src/helpers.js";
 
 describe("jsonbToParam", () => {
   it("maps undefined to SQL NULL", () => {
@@ -52,5 +52,23 @@ describe("requiredJsonbColumn", () => {
 
   it("passes a top-level string through verbatim", () => {
     expect(requiredJsonbColumn<string>("123", "result")).toBe("123");
+  });
+});
+
+
+describe("event waiter field compatibility", () => {
+  it("reads existing match rows with the default close policy", () => {
+    const match = parseEventMatchJson(JSON.stringify({ clauses: [{ key: "github.issue_comment.created" }], once: false, self: [] }));
+    expect(match.endOnClose).toBeUndefined();
+    expect(match.endOnClose !== false).toBe(true);
+  });
+
+  it("reads optional match and digest fields and ignores unknown fields", () => {
+    expect(parseEventMatchJson(JSON.stringify({ clauses: [], once: false, self: [], primarySubject: "github:o/r:branch/x",
+      boundPullRequest: "github:o/r#1", endOnClose: false, evaluateCurrent: false, futureField: true })))
+      .toMatchObject({ boundPullRequest: "github:o/r#1", endOnClose: false, evaluateCurrent: false });
+    expect(parseEventBufferJson(JSON.stringify([{ key: "github.pull_request.closed", subjects: ["github:o/r#1"], summary: "closed",
+      occurredAt: "2026-10-20T00:00:00Z", dedupeKey: "d", subjectClosed: true, merge_commit_sha: "abc", futureField: true }])))
+      .toEqual([expect.objectContaining({ subjectClosed: true, merge_commit_sha: "abc" })]);
   });
 });

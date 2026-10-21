@@ -15,6 +15,7 @@ import {
   type CredentialProvider,
   type CredentialStore,
   type EventClause,
+  type EventMatchDigest,
   type SessionStore,
   type ValetPlugin,
 } from "@valet/engine";
@@ -95,7 +96,7 @@ export interface ArmContext {
  * names the subject that direct clauses need (spec Part C).
  */
 export type ArmCheckResult =
-  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string; warning?: string; resolveBranch?: () => Promise<string | null> }
+  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string; warning?: string; resolveBranch?: () => Promise<{ pullRequest: string | null; failed: boolean; closed?: EventMatchDigest }> }
   | { ok: false; text: string };
 
 const SERVICE_NAMES: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear" };
@@ -282,13 +283,13 @@ export async function checkArm(
       const sha = read.sha && /^[0-9a-f]{40}$/i.test(read.sha) ? read.sha : parsed.target.sha;
       subject = `github:${owner}/${repo}@${sha.toLowerCase()}`;
     }
-    if (read.state === "closed") {
+    if (read.state === "closed" && req.endOnClose !== false) {
       const outcome = read.merged ? `merged${read.mergeSha ? ` at ${read.mergeSha}` : ""}` : "closed";
       return { ok: false, text: `[wait_for_event] This PR is ${outcome}. Arm on the branch or on a new PR instead.` };
     }
     // GitHub shares number subjects between issues and PRs. Require the
     // implicit close event only after the read identifies a PR.
-    if (parsed.target.number !== undefined && read.pullRequest === true && config) {
+    if (parsed.target.number !== undefined && read.pullRequest === true && req.endOnClose !== false && config) {
       requirePullRequest = true;
       const refusal = await checkConfig();
       if (refusal) return { ok: false, text: refusal };
@@ -332,7 +333,21 @@ export async function checkArm(
   // request subject, and `derive` refuses a SHA that is not the head.
   if (parsed.service === "github" && parsed.target.branch !== undefined) {
     return { ok: true, subjects: [subject], primarySubject: subject, self: [...new Set(self)],
-      resolveBranch: () => bounded(() => deps.findGithubPullRequest?.(parsed.target) ?? Promise.resolve(null), ms, null),
+      resolveBranch: () => bounded(async (): Promise<{ pullRequest: string | null; failed: boolean; closed?: EventMatchDigest }> => {
+        const pullRequest = await deps.findGithubPullRequest?.(parsed.target) ?? null;
+        if (!pullRequest) return { pullRequest: null, failed: false };
+        const number = Number(pullRequest.split("#")[1]);
+        const state = await deps.readGithub({ owner: parsed.target.owner, repo: parsed.target.repo, number });
+        if (!state.readable) return { pullRequest: null, failed: true };
+        if (state.state !== "closed") return { pullRequest, failed: false };
+        const status = state.merged ? "merged" : "closed";
+        return { pullRequest: null, failed: false, closed: {
+          key: "github.pull_request.closed", status, branchClosed: true, subjects: [subject, pullRequest],
+          dedupeKey: `arm-close:${pullRequest}:${state.mergeSha ?? status}`, occurredAt: new Date().toISOString(),
+          summary: `The PR was ${status}. This branch wait stays armed for another PR.`,
+          ...(state.merged && state.mergeSha ? { merge_commit_sha: state.mergeSha } : {}),
+        } };
+      }, ms, { pullRequest: null, failed: true }),
       ...(warning ? { warning } : {}),
     };
   }
@@ -532,12 +547,12 @@ export function armDeps(
     async findGithubPullRequest(target) {
       if (target.branch === undefined) return null;
       const own = await token("github");
-      if (!own) return null;
+      if (!own) throw new Error("GitHub PR lookup needs a session credential. Check GitHub access in Settings.");
       const query = new URLSearchParams({ state: "open", head: `${target.owner}:${target.branch}`, per_page: "100" });
       const response = await github(`/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/pulls?${query}`, own.token);
       if (!response.ok) throw new Error("GitHub PR lookup failed. Retry the event wait.");
       const body: unknown = await response.json();
-      if (!Array.isArray(body)) return null;
+      if (!Array.isArray(body)) throw new Error("GitHub PR lookup returned invalid data. Retry the event wait.");
       for (const item of body) {
         const pull = asRecord(item);
         const head = asRecord(pull?.head);

@@ -196,13 +196,23 @@ describe("branch subjects", () => {
 
   it.each([
     ["pull_request", { pull_request: { head: { ref: "feat/nested", repo: { full_name: "acme/app" } } } }],
-    ["check_run", { check_run: { check_suite: { head_branch: "feat/nested" } } }],
+    ["check_run", { check_run: { check_suite: { head_branch: "feat/nested" }, pull_requests: [{ head: { repo: { full_name: "acme/app" } } }] } }],
     ["check_suite", { check_suite: { head_branch: "feat/nested" } }],
     ["workflow_run", { workflow_run: { head_branch: "feat/nested", head_repository: { full_name: "acme/app" } } }],
     ["push", { ref: "refs/heads/feat/nested" }],
   ])("adds the branch for %s", (type, payload) => {
     expect(githubEventSubjects(type, { repository: { full_name: "acme/app" }, ...payload }).subjects)
       .toContain("github:acme/app:branch/feat/nested");
+  });
+
+  it("rejects the mixed canonical URL form", () => {
+    expect(githubSubjects.fromUrl("github:o/r/tree/x")).toBeNull();
+  });
+
+  it.each([undefined, [{ head: { repo: { full_name: "fork/app" } } }]])("does not infer a check-run branch from a fork or unknown head", (pull_requests) => {
+    const payload = { repository: { full_name: "acme/app" },
+      check_run: { check_suite: { head_branch: "feat/nested" }, pull_requests } };
+    expect(githubEventSubjects("check_run", payload).subjects).not.toContain("github:acme/app:branch/feat/nested");
   });
 
   it("ignores a fork head on the same branch", () => {

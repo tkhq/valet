@@ -1192,6 +1192,29 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(h.wakeupEnded).toHaveBeenCalledWith("event", "deadline");
   });
 
+  it("keeps a close that arrives during an in-flight derive and sends it after CI", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }, false));
+    let release: () => void = () => {};
+    let started: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const deriveEvent = async (): Promise<RunDeriveResult> => {
+      started();
+      await gate;
+      return { result: "event", digest: derived };
+    };
+    const sweep = h.watcher({ deriveEvent }).sweep(NOW);
+    await began;
+    await h.store.appendEventMatch("wk_ev", digest(2, { key: "github.pull_request.closed", subjectClosed: true, status: "merged" }), NOW);
+    release();
+    await sweep;
+    const { content } = signalOf(h.prompt.mock.calls[0]);
+    if (typeof content === "string" || !("attributes" in content)) throw new Error("Expected signal attributes");
+    expect(JSON.parse(content.attributes!.digests!).map((d: { key: string }) => d.key)).toEqual([CHECKS, "github.pull_request.closed"]);
+    expect((await h.store.getWakeup("wk_ev"))?.cause).toBe("subject_closed");
+  });
+
   it("replaces a derive digest with the derived digest, then delivers it", async () => {
     const h = harness();
     const source = digest(1, { derive: CHECKS });

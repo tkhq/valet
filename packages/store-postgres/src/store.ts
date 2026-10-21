@@ -1554,20 +1554,44 @@ export class PgSessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    expected?: Wakeup,
   ): Promise<Wakeup | null> {
-    const r = await this.db.query(`${TRANSITION_SQL} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
+    const guard = expected ? ` AND updated_at = $18 AND event_count = $19
+      AND COALESCE(event_buffer, '[]')::jsonb = $20::jsonb AND match_json::jsonb IS NOT DISTINCT FROM $21::jsonb` : "";
+    const params = transitionParams(id, from, to, patch, updatedAt);
+    if (expected) params.push(expected.updatedAt, expected.eventCount, JSON.stringify(expected.eventBuffer ?? []), jsonOrNull(expected.eventMatch));
+    const r = await this.db.query(`${TRANSITION_SQL}${guard} RETURNING *`, params);
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
   }
 
-  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number): Promise<Wakeup | null> {
+  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number, reopened = false): Promise<Wakeup | null> {
     const result = await this.db.query(
       `UPDATE engine_wakeups SET
          subjects = ARRAY[$3::text] || array_remove(subjects, $3::text) || CASE WHEN $4 = ANY(subjects) THEN '{}'::text[] ELSE ARRAY[$4::text] END,
-         match_json = jsonb_set(match_json::jsonb, '{primarySubject}', to_jsonb($3::text))::text,
+         match_json = (jsonb_set(match_json::jsonb, '{boundPullRequest}', to_jsonb($3::text)) ||
+           jsonb_build_object('bindingGeneration', COALESCE((match_json::jsonb->>'bindingGeneration')::int, 0) + 1) ||
+           CASE WHEN $6 THEN jsonb_build_object('closedPullRequests',
+             COALESCE((SELECT jsonb_agg(e) FROM jsonb_array_elements(COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb)) e WHERE e <> to_jsonb($3::text)), '[]'::jsonb))
+           ELSE '{}'::jsonb END)::text,
          updated_at = $5
        WHERE id = $1 AND kind = 'event' AND status = 'running'
-         AND match_json::jsonb->>'primarySubject' = $2
-       RETURNING *`, [id, branch, pullRequest, repository, updatedAt],
+         AND match_json::jsonb->>'primarySubject' = $2 AND NOT match_json::jsonb ? 'boundPullRequest'
+         AND ($6 OR NOT COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) @> jsonb_build_array($3::text))
+       RETURNING *`, [id, branch, pullRequest, repository, updatedAt, reopened],
+    );
+    return result.rows[0] ? rowToWakeup(rawToWakeupRow(result.rows[0])) : null;
+  }
+
+  async closeBranchEventWaiter(id: string, branch: string, pullRequest: string, digest: EventMatchDigest, updatedAt: number): Promise<Wakeup | null> {
+    const result = await this.db.query(
+      `UPDATE engine_wakeups SET subjects = array_remove(subjects, $3::text),
+         match_json = ((match_json::jsonb - 'boundPullRequest') || jsonb_build_object('closedPullRequests',
+           COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) || jsonb_build_array($3::text)))::text,
+         event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($4::jsonb))::text, updated_at = $5
+       WHERE id = $1 AND kind = 'event' AND status = 'running' AND match_json::jsonb->>'primarySubject' = $2
+         AND (NOT match_json::jsonb ? 'boundPullRequest' OR match_json::jsonb->>'boundPullRequest' = $3)
+         AND NOT COALESCE(match_json::jsonb->'closedPullRequests', '[]'::jsonb) @> jsonb_build_array($3::text)
+       RETURNING *`, [id, branch, pullRequest, JSON.stringify(boundEventDigest(digest)), updatedAt],
     );
     return result.rows[0] ? rowToWakeup(rawToWakeupRow(result.rows[0])) : null;
   }
@@ -1599,8 +1623,8 @@ export class PgSessionStore implements SessionStore {
             SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
-            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
-            AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
+            AND ($2::jsonb->>'subjectClosed' = 'true' OR jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4)
+            AND ($2::jsonb->>'subjectClosed' = 'true' OR $2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
                              WHERE e->>'dedupeKey' = $2::jsonb->>'dedupeKey')

@@ -183,6 +183,7 @@ export class WakeWatcher {
   private stopping = false;
   /** Event waiters that ingest appended to since the last light pass read them. */
   private readonly nudged = new Set<string>();
+  private readonly eventWork = new Map<string, () => Promise<void>>();
 
   constructor(private readonly deps: WakeWatcherDeps) {
     this.intervalMs = deps.sweepIntervalMs ?? WAKE_WATCHER_INTERVAL_MS;
@@ -249,17 +250,19 @@ export class WakeWatcher {
    * (spec 2026-10-15, Part E step 6). The light pass reads only those rows
    * by id: no due-row scan, no probe, no lease work. It never overlaps a
    * full pass: a nudge during a pass runs one light pass after it. Before
-   * `start()` and after `stop()`, it does nothing.
+   * `start()`, work is queued until a pass runs. After `stop()`, no pass runs.
    */
-  nudge(wakeupIds: readonly string[]): void {
-    if (!this.timer) return;
-    for (const id of wakeupIds) this.nudged.add(id);
-    this.timer.runLight();
+  nudge(wakeupIds: readonly string[], work?: () => Promise<void>): void {
+    for (const id of wakeupIds) {
+      this.nudged.add(id);
+      if (work) this.eventWork.set(id, work);
+    }
+    this.timer?.runLight();
   }
 
   /**
    * The nudge's light pass: the nudged event waiters that are still
-   * running with a non-empty buffer, through the same event-row step as
+   * running with a non-empty buffer, after queued branch lookups run, through the same event-row step as
    * the full pass. A nudged id that this pass misses (a crash, a stop)
    * stays due, and the next full pass reads it.
    */
@@ -270,6 +273,9 @@ export class WakeWatcher {
     for (const id of ids) {
       if (this.stopping) return;
       try {
+        const work = this.eventWork.get(id);
+        this.eventWork.delete(id);
+        if (work) await work();
         const row = await this.deps.engineStore.getWakeup(id);
         if (row && row.kind === "event" && row.status === "running" && (row.eventBuffer ?? []).length > 0) rows.push(row);
       } catch (err) {
@@ -319,6 +325,9 @@ export class WakeWatcher {
       after = next;
     }
     await this.processEventRows(now, eventRows);
+    if (this.stopping) return;
+    // A scheduled full pass can replace the light pass. It must drain lookup work too.
+    await this.eventPass(this.clock());
     if (this.stopping) return;
     // Every pending or running row, not just the due ones: a pending timer
     // is not due until it fires (fix wave 2, M11).
@@ -438,13 +447,22 @@ export class WakeWatcher {
    * probe, lease, or kill.
    */
   private async decideEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
-    const decision = decideEventWaiter(now, row, this.decideOptions);
-    if (!decision) return;
-    if (decision.badRow) {
-      this.metrics.badRow("engine_wakeups");
-      console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const decision = decideEventWaiter(now, row, this.decideOptions);
+      if (!decision) return;
+      if (decision.badRow) {
+        this.metrics.badRow("engine_wakeups");
+        console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
+      }
+      if (await this.applyDecision(row, decision, null, progress)) return;
+      const current = await this.deps.engineStore.getWakeup(row.id);
+      if (!current || current.status !== "running") return;
+      const step = await this.deriveStep(current, concurrencyLimit(EVENT_DERIVE_CONCURRENCY));
+      if (!step.row) return;
+      row = step.row;
+      now = this.clock();
     }
-    await this.applyDecision(row, decision, null, progress);
+    this.nudge([row.id]);
   }
 
   /**
@@ -469,6 +487,8 @@ export class WakeWatcher {
    * decide on, or null when it is gone, and whether a derive call ran.
    */
   private async deriveStep(row: Wakeup, limit: ConcurrencyLimit): Promise<{ row: Wakeup | null; derived: boolean }> {
+    // A branch has no derivation target until binding. Keep its sources for that PR.
+    if (row.eventMatch?.primarySubject?.includes(":branch/") && !row.eventMatch.boundPullRequest) return { row, derived: false };
     const groups = deriveGroups(row.eventBuffer ?? []);
     if (groups.length === 0) return { row, derived: false };
     const deriveEvent = this.deps.deriveEvent;
@@ -483,7 +503,7 @@ export class WakeWatcher {
       const { latest, sources } = group;
       let outcome: Awaited<ReturnType<EventWaiterDerive>>;
       try {
-        outcome = await deriveEvent(row, latest);
+        outcome = latest.evaluateCurrent ? await deriveEvent(row, latest, true) : await deriveEvent(row, latest);
       } catch (error) {
         outcome = { result: "error", error };
       }
@@ -498,7 +518,7 @@ export class WakeWatcher {
       const at = this.clock();
       await this.deps.engineStore.removeEventMatches(row.id, sources, at, "source");
       const key = latest.derive;
-      if (outcome.result === "event" && key !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, key, outcome.digest)) {
+      if (outcome.result === "event" && outcome.digest.status !== "pending" && key !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, key, outcome.digest)) {
         await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
       }
     })));
@@ -541,7 +561,7 @@ export class WakeWatcher {
             at,
             decision.releaseLease,
           )
-        : await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, patch, at);
+        : await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, patch, at, row.kind === "event" && decision.to !== "running" ? row : undefined);
     if (!updated) return null;
     progress.pastCas = true;
 

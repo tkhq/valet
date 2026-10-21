@@ -297,7 +297,6 @@ export const waitForEventTool = defineTool({
     `One waiter admits at most ${EVENT_DELIVERED_MAX_KEYS} output digests. Create a new wait for more outputs. ` +
     "Set evaluate_current to false to skip the current-state check at arm time. " +
     "PR waits end when the PR closes or merges unless end_on_close is false. " +
-    "For a PR that does not exist yet, arm on the branch URL before you push; the wait binds to the PR when it opens. " +
     "Recipes: CI on a pull request: subject the PR URL, on " +
     '[{ "key": "github.check_run.completed", "status": ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, ' +
     '{ "key": "github.pull_request.checks_completed" }], once false. ' +
@@ -305,14 +304,15 @@ export const waitForEventTool = defineTool({
     'A Linear triage shift: subject the team triage URL, on [{ "key": "linear.issue.create", "status": ["triage"] }, ' +
     '{ "key": "linear.issue.update", "status": ["triage"], "from_status": ["backlog", "unstarted", "started", "completed", "canceled"] }], once false. ' +
     'A reply on a Linear issue: subject the issue URL, on [{ "key": "linear.comment.create" }]. ' +
+    'A PR that does not exist yet: subject the branch URL, on [{ "key": "github.pull_request.checks_completed" }]. ' +
     "Events by the person you act for, and your own GitHub or Linear actions, are skipped unless a clause sets include_self. " +
     "Valet's own Slack posts never arrive as events, so your own Slack message cannot trigger a wait. " +
     "To wait for a reply from the person you act for, in a channel or in your DM with them, subject the message permalink and set include_self: " +
     'on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
     "To watch something with no end, propose an event subscription instead.",
   parameters: Type.Object({
-    evaluate_current: Type.Optional(Type.Boolean()),
-    end_on_close: Type.Optional(Type.Boolean()),
+    evaluate_current: Type.Optional(Type.Boolean({ description: "Default true: check current derived state after arm and after branch binding." })),
+    end_on_close: Type.Optional(Type.Boolean({ description: "Default true: end PR waits on close or merge. Branch waits stay armed for another PR." })),
     subject: Type.String({ description: "A GitHub branch, pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
     on: Type.Array(clauseSchema, { description: "1 to 8 clauses. Any clause that matches wakes you." }),
     once: Type.Optional(Type.Boolean()),
@@ -337,7 +337,7 @@ export const waitForEventTool = defineTool({
     const clauses = validation.value.on.map(clauseText).join(", ");
     const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
     return {
-      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${subject.includes(":branch/") ? " The wait will bind when a PR opens." : ""}${result.warning ? `\nWarning: ${result.warning}` : ""}`,
+      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${subject.includes(":branch/") && !wakeup.eventMatch?.boundPullRequest && !result.warning ? " The wait will bind when a PR opens." : ""}${result.warning ? `\nWarning: ${result.warning}` : ""}`,
     };
   },
 });

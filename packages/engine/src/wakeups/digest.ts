@@ -2,7 +2,7 @@
 // Pure functions with no node imports, so the engine barrel stays
 // browser-safe.
 
-import { EVENT_DIGEST_TEXT_MAX_BYTES, type EventMatchDigest } from "./types.js";
+import { EVENT_DIGEST_TEXT_MAX_BYTES, type EventMatchDigest, type Wakeup } from "./types.js";
 
 function codePointBytes(codePoint: number): number {
   if (codePoint <= 0x7f) return 1;
@@ -51,7 +51,20 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
     const value = digest[field];
     if (value !== undefined) out[field] = stripNul(value);
   }
+  if (digest.evaluateCurrent === true) out.evaluateCurrent = true;
+  if (digest.branchClosed === true) out.branchClosed = true;
   if (digest.subjectClosed === true) out.subjectClosed = true;
   if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
   return out;
+}
+
+/** Persisted work for the normal watcher pass, including after a process restart. */
+export function currentStateDigests(row: Wakeup, now: number, keys: readonly string[]): EventMatchDigest[] {
+  if (!row.eventMatch || row.eventMatch.evaluateCurrent === false) return [];
+  const subject = row.eventMatch.boundPullRequest ?? row.eventMatch.primarySubject ?? row.subjects?.[0];
+  if (!subject || subject.includes(":branch/")) return [];
+  return [...new Set(row.eventMatch.clauses.map((clause) => clause.key))].filter((key) => keys.includes(key)).map((key) => ({
+    key, derive: key, evaluateCurrent: true, dedupeKey: `arm:${subject}:${row.eventMatch?.bindingGeneration ?? 0}:${key}`,
+    subjects: row.subjects ?? [], summary: "Current subject state", occurredAt: new Date(now).toISOString(),
+  }));
 }

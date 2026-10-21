@@ -85,7 +85,8 @@ function evaluateClause(
   const key = matchedKey(clause, event, derived);
   if (!key.ok) return { matched: false };
   if (key.derive !== undefined) return { matched: true, derive: key.derive };
-  if (spec.primarySubject !== undefined && !(event.subjects ?? []).includes(spec.primarySubject)) {
+  const primary = spec.boundPullRequest ?? spec.primarySubject;
+  if (primary !== undefined && !(event.subjects ?? []).includes(primary)) {
     return { matched: false };
   }
   return filtersAccept(clause, event, spec.self) ? { matched: true } : { matched: false };

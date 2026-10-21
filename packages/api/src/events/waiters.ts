@@ -11,7 +11,7 @@
  */
 import { eq } from "drizzle-orm";
 import {
-  boundEventDigest,
+  currentStateDigests,
   recordEventMatchFailed,
   type ChannelOrigin,
   recordEventWaiterMatch,
@@ -151,14 +151,27 @@ export async function evaluateWaiterCandidates(
       const pullRequest = subjects.find((subject) => /^github:[^/]+\/[^/#@]+#\d+$/.test(subject));
       if (pullRequest) {
         const repository = branch.split(":branch/")[0]!;
-        const bound = await deps.engineStore.bindEventWaiter(waiter.id, branch, pullRequest, repository, deps.now());
-        if (bound) console.info("[event-waiters] bound branch", { waiterId: waiter.id, branch, pullRequest });
+        const bound = await deps.engineStore.bindEventWaiter(waiter.id, branch, pullRequest, repository, deps.now(), event.key === "github.pull_request.reopened");
+        if (bound) {
+          console.info("[event-waiters] bound branch", { waiterId: waiter.id, branch, pullRequest });
+          for (const digest of currentStateDigests(bound, deps.now(), derived.filter((def) => def.evaluateOnArm).map((def) => def.key))) await deps.engineStore.appendEventMatch(bound.id, digest, deps.now());
+          deps.nudge?.([bound.id]);
+        }
         waiter = bound ?? await deps.engineStore.getWakeup(waiter.id) ?? waiter;
         spec = waiter.eventMatch ?? spec;
       }
     }
-    const prSubject = spec.primarySubject ?? waiter.subjects?.[0];
-    if (service === "github" && spec.endOnClose !== false && event.key === "github.pull_request.closed" &&
+    const prSubject = spec.boundPullRequest ?? spec.primarySubject ?? waiter.subjects?.[0];
+    if (service === "github" && branch?.includes(":branch/") && event.key === "github.pull_request.closed" && subjects.includes(branch)) {
+      const pullRequest = subjects.find((subject) => /^github:[^/]+\/[^/#@]+#\d+$/.test(subject));
+      if (pullRequest) {
+        const closed = await deps.engineStore.closeBranchEventWaiter(waiter.id, branch, pullRequest,
+          { ...toDigest(event), branchClosed: true, summary: `${event.summary}. This branch wait stays armed for another PR.` }, deps.now());
+        if (closed) deps.nudge?.([closed.id]);
+        return { waiter: closed ?? waiter, session, digests: [], accepted: false };
+      }
+    }
+    if (service === "github" && !branch?.includes(":branch/") && spec.endOnClose !== false && event.key === "github.pull_request.closed" &&
         prSubject && /^github:[^/]+\/[^/#@]+#\d+$/.test(prSubject) && subjects.includes(prSubject)) {
       return { waiter, session, digests: [{ ...toDigest(event), subjectClosed: true }], accepted: true };
     }
@@ -218,14 +231,13 @@ export async function appendWaiterDigests(
   const metrics = metricsOf(deps);
   const appended: string[] = [];
   for (const candidate of candidates) {
-    if (!candidate.accepted || decisions.get(candidate.waiter.id) === "suppress") continue;
+    if (!candidate.accepted) continue;
+    const suppressed = decisions.get(candidate.waiter.id) === "suppress";
     try {
       let any = false;
       for (const digest of candidate.digests) {
-        // A close replaces pending work with the final digest, even when the buffer is full.
-        const stored = digest.subjectClosed
-          ? await deps.engineStore.transitionWakeup(candidate.waiter.id, ["running"], "running", { eventBuffer: [boundEventDigest(digest)] }, deps.now())
-          : await deps.engineStore.appendEventMatch(candidate.waiter.id, digest, deps.now());
+        if (suppressed && !digest.subjectClosed) continue;
+        const stored = await deps.engineStore.appendEventMatch(candidate.waiter.id, digest, deps.now());
         if (stored) {
           any = true;
           if (digest.derive) result.sources++;

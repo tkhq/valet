@@ -281,6 +281,14 @@ describe("waitForEventTool", () => {
     expect(result.text).toContain("The wait will bind when a PR opens.");
   });
 
+  it("does not promise a later opening when the branch lookup failed", async () => {
+    const branch = "github:acme/lean-proofs:branch/feat/nested";
+    const armEvent = vi.fn(async () => ({ wakeup: eventWakeup({ subjects: [branch] }), warning: "The open PR lookup timed out. Check GitHub access." }));
+    const result = await waitForEventTool.execute({ ...VALID, subject: "https://github.com/acme/lean-proofs/tree/feat/nested" }, makeCtx({ armEvent }));
+    expect(result.text).toContain("Warning: The open PR lookup timed out");
+    expect(result.text).not.toContain("will bind when a PR opens");
+  });
+
   it("includes an ingress-readiness warning in the arm tool result", async () => {
     const warning = "GitHub App delivery readiness could not be checked.";
     const armEvent = vi.fn(async () => ({ wakeup: eventWakeup(), warning }));

@@ -48,6 +48,14 @@ export interface EventMatchSpec {
   primarySubject?: string;
   /** False keeps a PR waiter running after the PR closes. */
   endOnClose?: boolean;
+  /** Current PR for a branch identity. Cleared when that PR closes. */
+  boundPullRequest?: string;
+  /** Distinguishes current-state work for successive bindings, including reopen. */
+  bindingGeneration?: number;
+  /** Closed PRs cannot bind again until an explicit reopened event. */
+  closedPullRequests?: string[];
+  /** False skips current-state evaluation at arm and after binding. */
+  evaluateCurrent?: boolean;
   /**
    * Stream mode: the shortest gap between two `event.matched` signals (ms).
    * Absent means `WakeupLimits.watchMinIntervalMs`.
@@ -58,7 +66,7 @@ export interface EventMatchSpec {
 /** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
 export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
 
-/** The most digests an event waiter buffers. `appendEventMatch` refuses past it. */
+/** The normal buffer cap. An implicit close reserves one additional digest. */
 export const EVENT_BUFFER_MAX_DIGESTS = 200;
 
 /** Admission budget for delivered outputs. Exhaustion refuses new outputs, never evicts keys. */
@@ -75,6 +83,8 @@ export interface EventMatchDigest {
   merge_commit_sha?: string;
   /** An implicit PR close ends the waiter after this digest. */
   subjectClosed?: boolean;
+  /** A PR close note for a branch identity does not end its wait. */
+  branchClosed?: boolean;
   status?: string;
   previousStatus?: string;
   subjects: string[];
@@ -90,6 +100,8 @@ export interface EventMatchDigest {
   text?: string;
   /** The derived key the WakeWatcher must resolve before delivery. */
   derive?: string;
+  /** Resolve through the optional current-state hook, not a webhook source. */
+  evaluateCurrent?: boolean;
 }
 
 /** Lifecycle status of a wakeup. Terminal: done, cancelled, expired, lost. */

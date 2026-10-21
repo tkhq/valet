@@ -152,10 +152,11 @@ export interface EventWaiterDeriverDeps {
 export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDerive {
   const deadlineMs = deps.deadlineMs ?? EVENT_DERIVE_DEADLINE_MS;
   return async (row, digest, evaluateCurrent = false) => {
-    const subject = row.eventMatch?.primarySubject ?? row.subjects?.[0];
+    const subject = row.eventMatch?.boundPullRequest ?? row.eventMatch?.primarySubject ?? row.subjects?.[0];
     if (subject === undefined || digest.derive === undefined) {
       return { result: "error", error: new Error(`Waiter ${row.id} has no key, or digest ${digest.dedupeKey} has no derive key.`) };
     }
+    if (evaluateCurrent && !findDerived(deps.plugins, digest.derive)?.evaluateOnArm) return { result: "null" };
     const orgId = await deps.sessionOrg(row.sessionId);
     if (orgId === null) {
       return { result: "error", error: new Error(`The session ${row.sessionId} of waiter ${row.id} no longer exists.`) };

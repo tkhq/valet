@@ -120,9 +120,23 @@ describe("GitHub arm correctness", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("refuses a branch wait without pull_request readiness, even with close ending disabled", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }) }), CTX,
+      req({ subject: "https://github.com/acme/lean-proofs/tree/feat/x", endOnClose: false }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event pull_request") });
+  });
+
+  it.each([false, true])("allows a closed PR with merged=%s when end_on_close is false, without close readiness", async (merged) => {
+    const result = await checkArm(deps({
+      githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { issues: "read" } }),
+      readGithub: async () => ({ readable: true, pullRequest: true, state: "closed", merged, mergeSha: "a".repeat(40) }),
+    }), CTX, req({ endOnClose: false, on: [{ key: "github.issue_comment.created" }] }));
+    expect(result.ok).toBe(true);
+  });
+
   it("requires pull_request readiness even for a direct check-run clause", async () => {
     const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run"], permissions: { checks: "read" } }) }), CTX,
-      req({ on: [{ key: "github.check_run.completed" }], endOnClose: false }));
+      req({ on: [{ key: "github.check_run.completed" }] }));
     expect(result).toEqual({ ok: false, text: expect.stringContaining("event pull_request") });
   });
 

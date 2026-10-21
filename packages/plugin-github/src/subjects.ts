@@ -104,7 +104,12 @@ export function githubEventSubjects(eventType: string, payload: Record<string, u
       if (str(rec(workflow.head_repository)?.full_name)?.toLowerCase() === owners.ownerRepo) branch = str(workflow.head_branch);
     } else if (suite) {
       const headRepo = str(rec(suite.head_repository)?.full_name);
-      if (!headRepo || headRepo.toLowerCase() === owners.ownerRepo) branch = str(suite.head_branch);
+      const pulls = rec(payload.check_run)?.pull_requests;
+      const sameRepo = Array.isArray(pulls) && pulls.some((pull) =>
+        str(rec(rec(rec(pull)?.head)?.repo)?.full_name)?.toLowerCase() === owners.ownerRepo);
+      if (headRepo?.toLowerCase() === owners.ownerRepo || (!headRepo && eventType !== "check_run") || (!headRepo && sameRepo)) {
+        branch = str(suite.head_branch);
+      }
     } else if (eventType === "push" && str(payload.ref)?.startsWith("refs/heads/")) {
       branch = str(payload.ref)?.slice("refs/heads/".length);
     }
@@ -122,7 +127,7 @@ const URL_RE = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\/(pull|issues|commi
 
 function fromUrl(url: string): { subject: string; slackChannel?: string } | null {
   const branch = /^(?:https:\/\/github\.com\/|github:)([^/]+)\/([^/:]+)(?:\/tree\/|:branch\/)([^?#\s]+)$/.exec(url);
-  if (branch) {
+  if (branch && (url.startsWith("https://github.com/") ? url.includes("/tree/") : url.includes(":branch/"))) {
     let ref: string;
     try { ref = decodeURIComponent(branch[3]!); } catch { return null; }
     return { subject: `github:${branch[1]!.toLowerCase()}/${branch[2]!.toLowerCase()}:branch/${ref}` };

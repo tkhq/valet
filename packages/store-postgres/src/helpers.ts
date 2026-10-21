@@ -891,6 +891,13 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     throw new Error(`${field}.minIntervalMs is not a non-negative number`);
   }
   const endOnClose = optBoolean(parsed, "endOnClose", field);
+  const evaluateCurrent = optBoolean(parsed, "evaluateCurrent", field);
+  const boundPullRequest = optString(parsed, "boundPullRequest", field);
+  const closedPullRequests = optStringArray(parsed, "closedPullRequests", field);
+  const bindingGeneration = parsed.bindingGeneration;
+  if (bindingGeneration !== undefined && (typeof bindingGeneration !== "number" || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 0)) {
+    throw new Error(`${field}.bindingGeneration is not a non-negative integer`);
+  }
   const primarySubject = parsed.primarySubject;
   if (primarySubject !== undefined && typeof primarySubject !== "string") {
     throw new Error(`${field}.primarySubject is not a string`);
@@ -902,6 +909,10 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
     ...(primarySubject !== undefined ? { primarySubject } : {}),
     ...(endOnClose !== undefined ? { endOnClose } : {}),
+    ...(evaluateCurrent !== undefined ? { evaluateCurrent } : {}),
+    ...(boundPullRequest !== undefined ? { boundPullRequest } : {}),
+    ...(closedPullRequests !== undefined ? { closedPullRequests } : {}),
+    ...(bindingGeneration !== undefined ? { bindingGeneration } : {}),
   };
 }
 
@@ -917,6 +928,10 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
     occurredAt: reqString(v, "occurredAt", field),
     dedupeKey: reqString(v, "dedupeKey", field),
   };
+  const branchClosed = optBoolean(v, "branchClosed", field);
+  if (branchClosed !== undefined) out.branchClosed = branchClosed;
+  const evaluateCurrent = optBoolean(v, "evaluateCurrent", field);
+  if (evaluateCurrent !== undefined) out.evaluateCurrent = evaluateCurrent;
   const subjectClosed = optBoolean(v, "subjectClosed", field);
   if (subjectClosed !== undefined) out.subjectClosed = subjectClosed;
   for (const key of optional) {
