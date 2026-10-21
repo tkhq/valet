@@ -401,7 +401,8 @@ Pass criterion: all steps, in one run, from a clean start.
       do not count); while the reader has a change,
       the form keeps it. A move to another line's page starts a new form,
       so a change is never saved to a different line. The form is locked
-      while a save is in flight. After a save that stores the line with
+      while a save is in flight and until the line list is read again, so
+      a later refetch never replaces a newer edit. After a save that stores the line with
       overlaps, the form is frozen and leaving does not ask. Amended 2026-10-20: How it works was three
       read-only columns with an explanation each and a `Change` that opened
       the sheet on that section.
