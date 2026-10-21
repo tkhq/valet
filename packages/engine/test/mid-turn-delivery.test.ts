@@ -12,6 +12,7 @@ import {
   Type,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai/compat";
+import { TOOL_SCOPE_KEY } from "@valet/shared";
 import {
   canDeliverMidTurn,
   Engine,
@@ -111,10 +112,12 @@ describe("mid-turn delivery", () => {
       `assistant:${first.queueItemId}`,
     ]);
     expect((await h.userEntries())[1]?.queueItemId).toBe(second.queueItemId);
+    // The merged item's result is the turn that answered it.
+    expect(await h.thread.awaitResult(second.queueItemId)).toMatchObject({ outcome: "completed" });
     h.faux.unregister();
   });
 
-  it("delivers a message sent during the final answer, then continues the turn", async () => {
+  it("runs a message sent during the final answer as the next turn", async () => {
     const modelEntered = latch();
     const modelGate = latch();
     let seen: string[] = [];
@@ -129,9 +132,42 @@ describe("mid-turn delivery", () => {
     modelGate.open();
     await waitFor(() => h.settled(first.queueItemId));
 
+    await waitFor(() => h.settled(second.queueItemId));
+    // A boundary after a final answer delivers nothing: recovery would read
+    // that answer as the end of the turn. The message runs next instead.
     expect(seen).toEqual(["question one", "one more thing"]);
-    expect(await h.outcome(second.queueItemId)).toBe("merged");
+    expect(await h.outcome(second.queueItemId)).toBe("completed");
     expect(h.faux.state.callCount).toBe(2);
+    h.faux.unregister();
+  });
+
+  it("delivers an earlier item even when taking a later one fails", async () => {
+    const { tool, entered, release } = blockingTool();
+    let seen: string[] = [];
+    const h = await setup("mid-turn-partial", [
+      fauxAssistantMessage([fauxToolCall("block", {}, { id: "tc-1" })], { stopReason: "toolUse" }),
+      (context) => { seen = userTexts(context); return fauxAssistantMessage("saw the first"); },
+      fauxAssistantMessage("answered the second"),
+    ], [tool]);
+
+    const first = await h.thread.submitPrompt("run it", { author: PERSON });
+    await entered;
+    const b = await h.thread.submitPrompt("message b", { author: PERSON, queueMode: "inject" });
+    const c = await h.thread.submitPrompt("message c", { author: PERSON, queueMode: "inject" });
+    const settle = h.store.settleUnclaimed.bind(h.store);
+    let failed = false;
+    h.store.settleUnclaimed = async (...args: Parameters<typeof settle>) => {
+      if (args[2] === c.queueItemId && !failed) { failed = true; throw new Error("store unavailable"); }
+      return settle(...args);
+    };
+    release();
+    await waitFor(() => h.settled(c.queueItemId));
+
+    expect(seen).toEqual(["run it", "message b"]);
+    expect(await h.outcome(first.queueItemId)).toBe("completed");
+    expect(await h.outcome(b.queueItemId)).toBe("merged");
+    expect(await h.outcome(c.queueItemId)).toBe("completed");
+    expect(h.faux.state.callCount).toBe(3);
     h.faux.unregister();
   });
 
@@ -277,6 +313,8 @@ describe("canDeliverMidTurn", () => {
       author: undefined,
       content: { kind: "signal", signalType: "wakeup.timer", body: "now", origin: { channelType: "slack", threadKey: "slack:C1:1.2" } },
     }), base, "u1")).toBe(false);
+    // A narrower tool scope never runs under a wider turn.
+    expect(canDeliverMidTurn(item({ metadata: { [MID_TURN_DELIVERY_KEY]: true, [TOOL_SCOPE_KEY]: { tools: [], actions: [] } } }), base, "u1")).toBe(false);
     // Channel, model pin and role must match the running turn.
     expect(canDeliverMidTurn(item({ channel: { channelType: "slack", channelId: "C1" } }), base, "u1")).toBe(false);
     expect(canDeliverMidTurn(item({ model: "big" }), base, "u1")).toBe(false);

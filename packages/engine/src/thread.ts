@@ -5474,15 +5474,19 @@ export class Thread {
       // A stale fenced publication means a successor owns this submission.
       // abort() is best-effort while a tool is executing, so also end at the
       // turn boundary before the loop can start another provider request.
-      // A turn boundary also delivers queued `inject` items into the running
-      // turn. pi-agent-core reads steered messages right after this returns,
-      // so delivery happens only when the loop continues: not after an
-      // error, an abort, or an `end` decision.
+      // A turn boundary after a tool batch also delivers queued `inject`
+      // items into the running turn. pi-agent-core reads steered messages
+      // right after this returns, so delivery happens only when the loop
+      // continues: not after an error, an abort, or an `end` decision. It
+      // also skips a boundary after a final answer: a crash before the next
+      // response would leave that answer as the turn's last entry, recovery
+      // would read the turn as complete, and the delivered message would
+      // get no answer. Such items run as the next turn instead.
       finishTurn: async (turn) => {
         if (this.staleFenceDetected) return { action: "end" };
         const decision = this.chargeModelCall(turn.message);
         if (decision) return decision;
-        if (turn.message.stopReason !== "error" && turn.message.stopReason !== "aborted") {
+        if (turn.toolResults.length > 0 && turn.message.stopReason !== "error" && turn.message.stopReason !== "aborted") {
           await this.deliverQueuedIntoRunningTurn();
         }
         return undefined;
@@ -5557,14 +5561,15 @@ export class Thread {
     if (this.session.options.purpose === "workflow" || this.isUnattendedTurn()) return;
     // On the overheard-digest chain, like a cancel: a cancel either lands
     // first and the item is not delivered, or it finds the item settled.
-    const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running));
+    // An item is in `taken` once it settles `merged`, so a failure on a
+    // later item still delivers the earlier ones; nothing else would run them.
+    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }> = [];
+    const run = this.overheardCoalesceChain.then(() => this.takeMidTurnItems(running, taken));
     this.overheardCoalesceChain = run.then(() => null, () => null);
-    let taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>;
     try {
-      taken = await run;
+      await run;
     } catch (err) {
       this.emitError("mid_turn_delivery_failed", err instanceof Error ? err.message : String(err));
-      return;
     }
     for (const { text, attachments, sender } of taken) {
       this.agent.steer({ role: "user", content: userContentBlocks(text, attachments, sender), timestamp: Date.now() });
@@ -5580,7 +5585,8 @@ export class Thread {
    */
   private async takeMidTurnItems(
     running: QueueItem,
-  ): Promise<Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>> {
+    taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }>,
+  ): Promise<void> {
     const store = this.session.providers.store;
     const unsettled = await store.listUnsettledSubmissions(this.session.id);
     // A digest that lists an item already carries its text (see settleCanceled).
@@ -5591,26 +5597,30 @@ export class Thread {
     const queued = unsettled
       .filter((i) => i.threadId === this.id && i.status === "queued" && !i.supersededByItemId)
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    const taken: Array<{ text: string; attachments: MessageEntry["attachments"]; sender?: PromptAuthor }> = [];
-    for (const item of queued) {
-      if (digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId())) break;
-      const { text, attachments } = await this.appendUserEntry(item);
-      const settled = await store.settleUnclaimed(
-        this.session.id, this.id, item.id, { outcome: "merged" }, { onlyIfUnsuperseded: true },
-      );
-      if (!settled) {
-        this.emitError("mid_turn_delivery_conflict", `Queued message ${item.id} settled before it could join the running turn; it was not delivered.`);
-        break;
+    const before = taken.length;
+    try {
+      for (const item of queued) {
+        if (digested.has(item.id) || !canDeliverMidTurn(item, running, this.defaultActorId())) break;
+        const { text, attachments } = await this.appendUserEntry(item);
+        // `mergedIntoItemId` lets `awaitResult` on the item follow the turn
+        // that answers it.
+        const settled = await store.settleUnclaimed(
+          this.session.id, this.id, item.id, { outcome: "merged" }, { onlyIfUnsuperseded: true, mergedIntoItemId: running.id },
+        );
+        if (!settled) {
+          this.emitError("mid_turn_delivery_conflict", `Queued message ${item.id} settled before it could join the running turn; it was not delivered.`);
+          break;
+        }
+        taken.push({
+          text,
+          attachments,
+          ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
+        });
+        await this.emitSettled(item.id, { outcome: "merged" });
       }
-      await this.emitSettled(item.id, { outcome: "merged" });
-      taken.push({
-        text,
-        attachments,
-        ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
-      });
+    } finally {
+      if (taken.length > before) await this.emitQueueState();
     }
-    if (taken.length > 0) await this.emitQueueState();
-    return taken;
   }
 
   /** The actor of a turn whose item names no author (`buildToolContext`). */
@@ -6836,10 +6846,14 @@ export function userContentBlocks(
  *   with no author, such as a wake-up);
  * - a message sent with a token does not join a signed-in person's turn;
  * - both use the same channel, reply target, model pin and role;
+ * - both carry the same turn-scoped metadata (`TURN_SCOPED_METADATA_KEYS`):
+ *   the running item's tool scope, model-call limit, unattended flags and
+ *   sender appearance apply to the joined item, so they must already match;
  * - a signal has no channel origin, whose reply would route elsewhere.
  */
 export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultActorId: string): boolean {
   if (item.metadata?.[MID_TURN_DELIVERY_KEY] !== true) return false;
+  if (TURN_SCOPED_METADATA_KEYS.some((key) => JSON.stringify(item.metadata?.[key]) !== JSON.stringify(running.metadata?.[key]))) return false;
   if (isSignalContent(item.content) && item.content.origin !== undefined) return false;
   if (item.author?.externalSender || running.author?.externalSender) return false;
   if ((item.author?.id ?? defaultActorId) !== (running.author?.id ?? defaultActorId)) return false;
@@ -6848,6 +6862,17 @@ export function canDeliverMidTurn(item: QueueItem, running: QueueItem, defaultAc
   if (channelTargetKey(item.replyTarget) !== channelTargetKey(running.replyTarget)) return false;
   return (item.model === undefined || item.model === running.model) && item.role === running.role;
 }
+
+/** Item metadata that sets how its turn runs. A joined item runs under the running item's values. */
+const TURN_SCOPED_METADATA_KEYS = [
+  TOOL_SCOPE_KEY,
+  INHERIT_TOOL_SCOPE_KEY,
+  CONTINUATION_TOOL_SCOPE_KEY,
+  MODEL_CALL_LIMIT_KEY,
+  UNATTENDED_DELIVERY_KEY,
+  UNATTENDED_WORKFLOW_KEY,
+  "presence",
+] as const;
 
 function channelTargetKey(target: ChannelTarget | undefined): string {
   return target ? [target.channelType, target.channelId, target.threadId ?? ""].join("\u0000") : "";
