@@ -511,6 +511,38 @@ describe("EventDispatcher", () => {
     expect(row.status).toBe("delivered");
   });
 
+  it("delivers a person's plain channel message as attended, so its turn can ask", async () => {
+    // The approvals and event-subscriptions skills tell assistants that a
+    // person's Slack message, not only a mention, can open a card.
+    await seedMentionMember("team-y");
+    await seedDelivery({
+      target: { kind: "assistant" },
+      ownerType: "team",
+      ownerId: "team-y",
+      service: "slack",
+      eventKey: "slack.message",
+      eventKeys: ["slack.message"],
+      refs: { channel: "C1", user: "U9" },
+      summary: "Message in #deploys",
+      payload: { type: "message", channel: "C1", user: "U9", text: "can you redeploy?", ts: "1.3" },
+      actor: { externalId: "U9" },
+    });
+
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({
+      db: tdb.appDb,
+      workflowRunHost: fakeRunHost(),
+      workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToAssistant: deliver,
+      resolveChannelOrigin: (service) =>
+        service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.3" } : null,
+    });
+    await dispatcher.pollOnce();
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver.mock.calls[0][0].unattended).toBeUndefined();
+  });
+
   /**
    * Prompt templates on an orchestrator target (TKAI-491). The rendering is
    * the pure part (`prompt-template.test.ts`); these cover the wiring: which
