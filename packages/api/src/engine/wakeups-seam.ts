@@ -1,10 +1,11 @@
-import { recordWakeupEnded } from "@valet/engine";
+import { currentStateDigests, recordWakeupEnded } from "@valet/engine";
 import type {
   ArmEventRequest,
   ArmEventResult,
   ChannelOrigin,
   CredentialProvider,
   EventMatchSpec,
+  EventMatchDigest,
   HoldInput,
   Lease,
   Sandbox,
@@ -64,6 +65,8 @@ export interface WakeupsSeamDeps {
    */
   scratchBytes?: () => number | undefined;
   now?: () => number;
+  evaluateKeys?: readonly string[];
+  nudge?: (ids: string[]) => void;
   /**
    * Runs the `wait_for_event` arm checks (spec 2026-10-15, Part D1) for
    * this session. Absent for a workflow run: the seam then has no
@@ -389,12 +392,46 @@ export function buildWakeupsSeam(
         clauses: req.on,
         once: req.once,
         self: checked.self,
+        evaluateCurrent: req.evaluateCurrent !== false,
+        ...(req.endOnClose !== undefined ? { endOnClose: req.endOnClose } : {}),
         ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
         ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
         const result = await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
-        return { ...result, ...(checked.warning ? { warning: checked.warning } : {}) };
+        let warning = checked.warning;
+
+        const enqueueEvaluation = async (row: Wakeup) => {
+          for (const digest of currentStateDigests(row, now(), deps.evaluateKeys ?? [])) await engineStore.appendEventMatch(row.id, digest, now());
+        };
+        if (checked.resolveBranch) {
+          const branch = checked.primarySubject!;
+          const resolveBranch = checked.resolveBranch;
+          const bind = async (pullRequest: string) => {
+            const bound = await engineStore.bindEventWaiter(result.wakeup.id, branch, pullRequest, branch.split(":branch/")[0]!, now());
+            if (bound) {
+              console.info("[event-waiters] bound branch", { waiterId: bound.id, branch, pullRequest });
+              await enqueueEvaluation(bound);
+            }
+          };
+          const noteClosed = async (digest: EventMatchDigest) => {
+            const pr = digest.subjects.find((subject) => subject.includes("#"));
+            if (pr) await engineStore.closeBranchEventWaiter(result.wakeup.id, branch, pr, digest, now());
+          };
+          const lookup = await resolveBranch();
+          if (lookup.closed) await noteClosed(lookup.closed);
+          if (lookup.pullRequest) await bind(lookup.pullRequest);
+          const current = await engineStore.getWakeup(result.wakeup.id);
+          if (current && !current.eventMatch?.boundPullRequest) await engineStore.updateEventMatch(current.id,
+            { branchLookupAt: now() + (lookup.failed ? 30_000 : 600_000), branchLookupAttempt: lookup.failed ? 1 : 0 }, now(), current.eventRevision ?? 0);
+          if (lookup.failed) warning = `${warning ? `${warning} ` : ""}The open PR lookup failed or timed out. The wait retries with backoff until its deadline. Check GitHub access if it stays unbound.`;
+          // A webhook can bind the row while the lookup runs.
+          result.wakeup = await engineStore.getWakeup(result.wakeup.id) ?? result.wakeup;
+        }
+        await enqueueEvaluation(result.wakeup);
+        // A live light pass starts immediately. Defer its nudge until the arm promise returns.
+        setImmediate(() => deps.nudge?.([result.wakeup.id]));
+        return { ...result, ...(warning ? { warning } : {}) };
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
         throw err;

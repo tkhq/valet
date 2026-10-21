@@ -280,6 +280,11 @@ export function validateWaitForEvent(args: unknown, limits: WakeupLimits): Valid
   if (args.once !== undefined && typeof args.once !== "boolean") {
     return { ok: false, text: "[wait_for_event] Set once to true or false." };
   }
+  for (const name of ["evaluate_current", "end_on_close"]) {
+    if (args[name] !== undefined && typeof args[name] !== "boolean") {
+      return { ok: false, text: `[wait_for_event] Set ${name} to true or false.` };
+    }
+  }
   const once = args.once ?? true;
   const reason = trimmedOrEmpty(reasonRaw);
   if (reason.length < 1 || reason.length > 200) {
@@ -289,7 +294,10 @@ export function validateWaitForEvent(args: unknown, limits: WakeupLimits): Valid
   if (maxHours === undefined || !isHoursInRange(maxHours, limits.timerMaxHours)) {
     return { ok: false, text: `[wait_for_event] Set max_hours (1 to ${limits.timerMaxHours}).` };
   }
-  const value: ArmEventRequest = { subject, on: clauses, once, reason, maxHours };
+  const value: ArmEventRequest = { subject, on: clauses, once, reason, maxHours,
+    ...(typeof args.evaluate_current === "boolean" ? { evaluateCurrent: args.evaluate_current } : {}),
+    ...(typeof args.end_on_close === "boolean" ? { endOnClose: args.end_on_close } : {}),
+  };
   if (args.min_interval_seconds !== undefined) {
     if (once) {
       return {

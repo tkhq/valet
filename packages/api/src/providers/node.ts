@@ -1,3 +1,4 @@
+import { productionBranchLookup } from "../events/branch-lookup.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -492,7 +493,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let wakeWatcherRef: WakeWatcher | undefined;
   const engineHost = new EngineHost({
+    nudgeEventWaiters: (ids) => wakeWatcherRef?.nudge(ids),
     engineStore,
     sandboxProvider,
     eventStream,
@@ -617,6 +620,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     provider: sandboxProvider,
     limits: wakeupLimits,
+    lookupBranch: productionBranchLookup({ db, githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) } }),
+    evaluateKeys: plugins.flatMap((p) => p.derivedEvents?.filter((d) => d.evaluateOnArm).map((d) => d.key) ?? []),
     deriveEvent: productionEventWaiterDeriver({
       db,
       plugins,
@@ -628,6 +633,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       ? { jobLogDir: "/tmp/valet-jobs" }
       : {}),
   });
+
+  wakeWatcherRef = wakeWatcher;
 
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
   // security runner that stopped with work remaining; a stall cap alerts the

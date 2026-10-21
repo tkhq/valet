@@ -46,6 +46,19 @@ export interface EventMatchSpec {
    * the waiter counts.
    */
   primarySubject?: string;
+  /** False keeps a PR waiter running after the PR closes. */
+  endOnClose?: boolean;
+  /** Current PR for a branch identity. Cleared when that PR closes. */
+  boundPullRequest?: string;
+  /** Distinguishes current-state work for successive bindings, including reopen. */
+  bindingGeneration?: number;
+  /** Persisted open-PR lookup schedule, also recovers missed webhooks after restart. */
+  branchLookupAt?: number;
+  branchLookupAttempt?: number;
+  /** Closed PRs cannot bind again until an explicit reopened event. */
+  closedPullRequests?: string[];
+  /** False skips current-state evaluation at arm. Later branch bindings always evaluate. */
+  evaluateCurrent?: boolean;
   /**
    * Stream mode: the shortest gap between two `event.matched` signals (ms).
    * Absent means `WakeupLimits.watchMinIntervalMs`.
@@ -56,7 +69,7 @@ export interface EventMatchSpec {
 /** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
 export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
 
-/** The most digests an event waiter buffers. `appendEventMatch` refuses past it. */
+/** The normal buffer cap. Close notes and current-state work bypass this cap. */
 export const EVENT_BUFFER_MAX_DIGESTS = 200;
 
 /** Admission budget for delivered outputs. Exhaustion refuses new outputs, never evicts keys. */
@@ -70,6 +83,11 @@ export interface EventMatchDigest {
   key: string;
   /** The commit evaluated by a derived completion. */
   head_sha?: string;
+  merge_commit_sha?: string;
+  /** An implicit PR close ends the waiter after this digest. */
+  subjectClosed?: boolean;
+  /** A PR close note for a branch identity does not end its wait. */
+  branchClosed?: boolean;
   status?: string;
   previousStatus?: string;
   subjects: string[];
@@ -85,6 +103,8 @@ export interface EventMatchDigest {
   text?: string;
   /** The derived key the WakeWatcher must resolve before delivery. */
   derive?: string;
+  /** Resolve through the optional current-state hook, not a webhook source. */
+  evaluateCurrent?: boolean;
 }
 
 /** Lifecycle status of a wakeup. Terminal: done, cancelled, expired, lost. */
@@ -98,7 +118,8 @@ export type WakeupCause =
   | "pid_missing"
   | "sandbox_unavailable"
   | "rate"
-  | "fired";
+  | "fired"
+  | "subject_closed";
 
 export interface Wakeup {
   id: string;
@@ -144,6 +165,8 @@ export interface Wakeup {
   eventSeen?: string[];
   /** Consumed derivation sources, bounded independently of delivered keys. */
   eventSourceSeen?: string[];
+  /** Monotonic event-state CAS revision. Legacy rows start at zero. */
+  eventRevision?: number;
 }
 
 /** What kind of owner holds a lease open. */
@@ -257,6 +280,8 @@ export interface WakeupsListing {
  * the raw input, a URL or a subject; the host's arm checks parse it.
  */
 export interface ArmEventRequest {
+  evaluateCurrent?: boolean;
+  endOnClose?: boolean;
   subject: string;
   on: EventClause[];
   once: boolean;

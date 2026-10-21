@@ -69,6 +69,20 @@ describe("PgSessionStore (PGlite)", () => {
   runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
 
+  it("transitions an event with an unknown newer-pod digest field by revision", async () => {
+    const store = await factory();
+    await store.createWakeup({ id: "future", sessionId: "s", threadId: "t", kind: "event", status: "running", reason: "CI",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+      eventMatch: { clauses: [], once: true, self: [] },
+    });
+    await db.query(`UPDATE engine_wakeups SET event_revision = event_revision + 1, event_buffer = $1 WHERE id = 'future'`, [JSON.stringify([
+      { key: "github.check_run.completed", dedupeKey: "future-digest", subjects: [], summary: "Completed", occurredAt: "2026-10-20T00:00:00Z", futureField: { keep: true } },
+    ])]);
+    const row = await store.getWakeup("future");
+    expect(row?.eventBuffer?.[0]?.dedupeKey).toBe("future-digest");
+    expect(await store.transitionWakeup("future", ["running"], "done", { cause: "fired", eventBuffer: [] }, 2, row?.eventRevision ?? 0)).toMatchObject({ status: "done", eventRevision: 2 });
+  });
+
   it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
     const store = await factory();
     const base = {

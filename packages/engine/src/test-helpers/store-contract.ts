@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { EVENT_DELIVERED_MAX_KEYS } from "../index.js";
+import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS } from "../index.js";
 import type {
   DecisionGate,
   EventMatchDigest,
@@ -836,6 +836,112 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         const rows = await store.findEventWaiters(["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs@aaaa"]);
         expect(rows.map((r) => r.id)).toEqual(["wk_ev"]);
         expect(rows[0]?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
+      });
+
+      it("binds a branch once and preserves buffered and seen digests", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/nested";
+        await store.createWakeup(eventWaiter({ subjects: [branch],
+          eventMatch: { clauses: [{ key: "github.pull_request.checks_completed" }], once: false, self: [], primarySubject: branch, endOnClose: false },
+          eventBuffer: [digest({ merge_commit_sha: "b".repeat(40), subjectClosed: true })], eventSeen: ["seen"],
+        }));
+        const row = await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#42", "github:acme/lean-proofs", 30);
+        expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", branch]);
+        expect(row?.eventMatch?.primarySubject).toBe(branch);
+        expect(row?.eventMatch?.boundPullRequest).toBe("github:acme/lean-proofs#42");
+        expect(row?.eventMatch?.endOnClose).toBe(false);
+        expect(row?.eventBuffer).toEqual([digest({ merge_commit_sha: "b".repeat(40), subjectClosed: true })]);
+        expect(row?.eventSeen).toEqual(["seen"]);
+        expect(await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", "github:acme/lean-proofs", 31)).toBeNull();
+        expect((await store.findEventWaiters(["github:acme/lean-proofs#42"])).map((w) => w.id)).toEqual(["wk_ev"]);
+        expect(await store.closeBranchEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", digest({ branchClosed: true }), 32)).toBeNull();
+        expect((await store.closeBranchEventWaiter("wk_ev", branch, "github:acme/lean-proofs#42", digest({ branchClosed: true }), 33))?.eventMatch?.boundPullRequest).toBeUndefined();
+        expect((await store.bindEventWaiter("wk_ev", branch, "github:acme/lean-proofs#7", "github:acme/lean-proofs", 34))?.eventMatch?.boundPullRequest).toBe("github:acme/lean-proofs#7");
+      });
+
+      it("drops other-branch sources and coalesces unbound sources by SHA", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/x";
+        const repo = "github:acme/lean-proofs";
+        await store.createWakeup(eventWaiter({ subjects: [branch, repo],
+          eventMatch: { clauses: [], self: [], once: false, primarySubject: branch },
+        }));
+        await store.bindEventWaiter("wk_ev", branch, `${repo}#42`, repo, 30);
+        const unbound = await store.closeBranchEventWaiter("wk_ev", branch, `${repo}#42`, digest({ branchClosed: true }), 30);
+        expect(unbound?.subjects).toEqual([branch]);
+        for (let n = 0; n < 205; n++) {
+          expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", dedupeKey: `other-${n}`,
+            subjects: [repo, `${repo}:branch/other`, `${repo}@a`] }), 30)).toBe(false);
+        }
+        for (let n = 0; n < 205; n++) {
+          expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", dedupeKey: `own-${n}`,
+            subjects: [repo, branch, `${repo}@a`] }), 30)).toBe(true);
+        }
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1", "own-204"]);
+      });
+
+      it("transitions a newer-pod digest without comparing parsed JSON", async () => {
+        const future = { ...digest(), futureField: { version: 2 } };
+        await store.createWakeup(eventWaiter({ eventBuffer: [future] }));
+        const row = await store.getWakeup("wk_ev");
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row?.eventRevision ?? 0)).not.toBeNull();
+      });
+
+      it("admits current-state work beyond a full buffer and guards only on revision", async () => {
+        await store.createWakeup(eventWaiter({ eventBuffer: Array.from({ length: 200 }, (_, n) => digest({ dedupeKey: `d-${n}` })) }));
+        expect(await store.appendEventMatch("wk_ev", digest({ derive: "checks", evaluateCurrent: true, dedupeKey: "arm" }), 30)).toBe(true);
+        const row = await store.getWakeup("wk_ev");
+        expect(row?.eventBuffer).toHaveLength(201);
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, 0)).toBeNull();
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row?.eventRevision ?? 0)).not.toBeNull();
+      });
+
+      it("admits exactly one concurrent PR binding and rejects a stale unbind", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/race";
+        const repo = "github:acme/lean-proofs";
+        await store.createWakeup(eventWaiter({ subjects: [branch],
+          eventMatch: { clauses: [{ key: "github.pull_request.checks_completed" }], once: false, self: [], primarySubject: branch },
+        }));
+        const results = await Promise.all([42, 7].map((n) => store.bindEventWaiter("wk_ev", branch, `${repo}#${n}`, repo, 30)));
+        expect(results.filter(Boolean)).toHaveLength(1);
+        const winner = results.find((row) => row !== null)?.eventMatch?.boundPullRequest;
+        if (!winner) throw new Error("No binding won");
+        expect((await store.getWakeup("wk_ev"))?.eventMatch).toMatchObject({ primarySubject: branch, boundPullRequest: winner });
+        await store.closeBranchEventWaiter("wk_ev", branch, winner, digest({ branchClosed: true }), 31);
+        await store.bindEventWaiter("wk_ev", branch, `${repo}#99`, repo, 32);
+        expect(await store.closeBranchEventWaiter("wk_ev", branch, winner, digest({ branchClosed: true }), 33)).toBeNull();
+        expect((await store.getWakeup("wk_ev"))?.eventMatch?.boundPullRequest).toBe(`${repo}#99`);
+      });
+
+      it("refuses a recorded closed PR until reopened, then evaluates a new binding generation", async () => {
+        const branch = "github:acme/lean-proofs:branch/feat/x";
+        const repo = "github:acme/lean-proofs";
+        const pr = `${repo}#42`;
+        await store.createWakeup(eventWaiter({ subjects: [branch],
+          eventMatch: { clauses: [], once: false, self: [], primarySubject: branch },
+        }));
+        const note = digest({ branchClosed: true, status: "merged" });
+        expect(await store.closeBranchEventWaiter("wk_ev", branch, pr, note, 30)).not.toBeNull();
+        expect(await store.bindEventWaiter("wk_ev", branch, pr, repo, 30)).toBeNull();
+        const reopened = await store.bindEventWaiter("wk_ev", branch, pr, repo, 30, true);
+        expect(reopened?.eventMatch).toMatchObject({ boundPullRequest: pr, bindingGeneration: 1, closedPullRequests: [] });
+        await store.closeBranchEventWaiter("wk_ev", branch, pr, note, 30);
+        expect((await store.bindEventWaiter("wk_ev", branch, pr, repo, 30, true))?.eventMatch?.bindingGeneration).toBe(2);
+      });
+
+      it("rejects a stale terminal snapshot when a close arrives in the same millisecond", async () => {
+        const row = eventWaiter({ eventBuffer: [digest()], updatedAt: 30 });
+        await store.createWakeup(row);
+        await store.appendEventMatch(row.id, digest({ dedupeKey: "merge", subjectClosed: true }), 30);
+        expect(await store.transitionWakeup(row.id, ["running"], "done", { cause: "fired", eventBuffer: [] }, 30, row.eventRevision ?? 0)).toBeNull();
+        expect((await store.getWakeup(row.id))?.eventBuffer).toHaveLength(2);
+      });
+
+      it("reserves one final close digest beyond the buffer cap without discarding matches", async () => {
+        const buffered = Array.from({ length: EVENT_BUFFER_MAX_DIGESTS }, (_, i) => digest({ dedupeKey: `full-${i}` }));
+        await store.createWakeup(eventWaiter({ eventBuffer: buffered }));
+        const closed = digest({ key: "github.pull_request.closed", dedupeKey: "close", subjectClosed: true, status: "merged", merge_commit_sha: "b".repeat(40) });
+        expect(await store.appendEventMatch("wk_ev", closed, 30)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", closed, 31)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([...buffered, closed]);
       });
 
       it("findEventWaiters returns running event rows that share a subject", async () => {

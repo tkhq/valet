@@ -572,6 +572,10 @@ export function digestHeader(d: EventMatchDigest): string {
   const parts = [d.key];
   if (d.status !== undefined) parts.push(d.status);
   if (d.actor !== undefined) parts.push(`by ${d.actor}`);
+  if (d.subjectClosed || d.branchClosed) {
+    if (d.merge_commit_sha) parts.push(`merge ${d.merge_commit_sha}`);
+    if (d.branchClosed) parts.push("branch wait stays armed");
+  }
   return parts.join(" · ");
 }
 
@@ -590,6 +594,7 @@ export const EVENT_SIGNAL_MAX_BYTES = 64 * 1024;
 export function digestBlock(d: EventMatchDigest): string {
   const lines = [digestHeader(d), d.summary];
   if (d.url !== undefined) lines.push(d.url);
+  if (d.merge_commit_sha !== undefined) lines.push(`Merge commit: ${d.merge_commit_sha}`);
   if (d.text !== undefined && d.text !== "") lines.push(...d.text.split("\n").map((line) => `> ${line}`));
   return lines.join("\n");
 }
@@ -597,6 +602,7 @@ export function digestBlock(d: EventMatchDigest): string {
 /** One entry of the `digests` signal attribute: the digest without its text. */
 export interface EventDigestEntry {
   head_sha?: string;
+  merge_commit_sha?: string;
   key: string;
   status?: string;
   actor?: string;
@@ -608,6 +614,7 @@ function digestEntry(d: EventMatchDigest): EventDigestEntry {
   return {
     key: d.key,
     ...(d.head_sha !== undefined ? { head_sha: d.head_sha } : {}),
+    ...(d.merge_commit_sha !== undefined ? { merge_commit_sha: d.merge_commit_sha } : {}),
     ...(d.status !== undefined ? { status: d.status } : {}),
     ...(d.actor !== undefined ? { actor: d.actor } : {}),
     summary: d.summary,
@@ -755,6 +762,7 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate" | "deli
  */
 export function decideDeliveredWaiter(now: number, row: Wakeup): WakeupDecision | null {
   if (row.kind !== "event" || row.status !== "running" || row.eventMatch?.once !== true) return null;
+  if (row.eventBuffer?.some((digest) => digest.subjectClosed)) return null;
   const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
   return {
     to: "done",
@@ -787,14 +795,27 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
   if (match === undefined) return { to: "lost", patch: { endedAt: now }, signals: [], badRow: true };
   const ready = (row.eventBuffer ?? []).filter((d) => d.derive === undefined);
   const pastDeadline = row.deadlineAt !== undefined && row.deadlineAt <= now;
-
-  if (match.once && ready.length > 0) {
+  const closed = ready.find((digest) => digest.subjectClosed);
+  if (closed) {
+    const layout = layoutStreamSignal([...ready.filter((d) => !d.subjectClosed), closed], true);
+    const outcome = closed.status === "merged" ? `merged${closed.merge_commit_sha ? ` at ${closed.merge_commit_sha}` : ""}` : "closed";
     return {
-      to: "done",
-      cause: "fired",
-      // A terminal CAS may clear the buffer: appends to an ended row are refused.
-      patch: { cause: "fired", endedAt: now, eventBuffer: [] },
-      signals: [eventMatchedSignal(row, ready, row.eventCount + 1, true)],
+      to: "done", cause: "subject_closed",
+      patch: { cause: "subject_closed", endedAt: now, eventBuffer: [], eventCount: row.eventCount + 1 },
+      signals: [eventMatchedSignal(row, layout.full, row.eventCount + 1, false, { lines: layout.headers, count: ready.length - layout.full.length }), {
+        signalType: "event.ended", dispatchId: `wakeup:${row.id}:terminal`,
+        attributes: { ...eventAttributes(row), cause: "subject_closed" },
+        body: `The PR was ${outcome}. Later pushes to that branch will not be watched. Arm on the branch or on a new PR instead.`,
+      }],
+    };
+  }
+
+  const branchNotes = ready.filter((digest) => digest.branchClosed);
+  if (branchNotes.length > 0 && !pastDeadline) {
+    const layout = layoutStreamSignal(ready, true);
+    return { to: "running", patch: { eventCount: row.eventCount + 1 },
+      signals: [eventMatchedSignal(row, layout.full, row.eventCount + 1, false, { lines: layout.headers, count: ready.length - layout.full.length })],
+      deliveredKeys: ready.map((digest) => digest.dedupeKey),
     };
   }
 
@@ -815,6 +836,16 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
     }
     signals.push(eventEndedSignal(row, "deadline", hours, delivered));
     return { to: "expired", cause: "deadline", patch, signals };
+  }
+
+  if (match.once && ready.length > 0) {
+    return {
+      to: "done",
+      cause: "fired",
+      // A terminal CAS may clear the buffer: appends to an ended row are refused.
+      patch: { cause: "fired", endedAt: now, eventBuffer: [] },
+      signals: [eventMatchedSignal(row, ready, row.eventCount + 1, true)],
+    };
   }
 
   if (ready.length === 0) return null;

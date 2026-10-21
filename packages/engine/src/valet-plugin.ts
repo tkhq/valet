@@ -147,8 +147,8 @@ export interface DeriveContext {
 
 /**
  * A native plugin's declared derived event (spec Part B). Ingest never
- * calls `derive` — only the WakeWatcher does, for a match digest that a
- * clause on a derived key produced.
+ * calls `derive`. The WakeWatcher derives matched sources. Arm evaluates
+ * current state through the optional `evaluateOnArm` hook.
  */
 export interface DerivedEventDef {
   key: string;
@@ -156,6 +156,8 @@ export interface DerivedEventDef {
   /** Source event keys, globs allowed. */
   sources: string[];
   derive(ctx: DeriveContext, subject: string, source: NormalizedEvent): Promise<NormalizedEvent | null>;
+  /** Evaluate the current subject state after a waiter is stored. */
+  evaluateOnArm?(ctx: DeriveContext, subject: string): Promise<NormalizedEvent | null>;
 }
 
 /** A native plugin's subject helpers (spec Part A5, Part H). */

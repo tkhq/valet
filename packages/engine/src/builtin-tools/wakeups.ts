@@ -295,6 +295,8 @@ export const waitForEventTool = defineTool({
     "hibernate while you wait. Arm the wait before the action that triggers it, for example before `git push`. " +
     "`once` (default true) ends the wait at the first match; `once: false` streams every match until `max_hours`. " +
     `One waiter admits at most ${EVENT_DELIVERED_MAX_KEYS} output digests. Create a new wait for more outputs. ` +
+    "For PR subjects, set `evaluate_current: false` when you arm before a push. Later branch bindings always evaluate current state. " +
+    "PR waits end when the PR closes or merges unless end_on_close is false. " +
     "Recipes: CI on a pull request: subject the PR URL, on " +
     '[{ "key": "github.check_run.completed", "status": ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, ' +
     '{ "key": "github.pull_request.checks_completed" }], once false. ' +
@@ -302,13 +304,16 @@ export const waitForEventTool = defineTool({
     'A Linear triage shift: subject the team triage URL, on [{ "key": "linear.issue.create", "status": ["triage"] }, ' +
     '{ "key": "linear.issue.update", "status": ["triage"], "from_status": ["backlog", "unstarted", "started", "completed", "canceled"] }], once false. ' +
     'A reply on a Linear issue: subject the issue URL, on [{ "key": "linear.comment.create" }]. ' +
+    'A PR that does not exist yet: subject the branch URL, on [{ "key": "github.pull_request.checks_completed" }]. ' +
     "Events by the person you act for, and your own GitHub or Linear actions, are skipped unless a clause sets include_self. " +
     "Valet's own Slack posts never arrive as events, so your own Slack message cannot trigger a wait. " +
     "To wait for a reply from the person you act for, in a channel or in your DM with them, subject the message permalink and set include_self: " +
     'on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
     "To watch something with no end, propose an event subscription instead.",
   parameters: Type.Object({
-    subject: Type.String({ description: "A GitHub pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
+    evaluate_current: Type.Optional(Type.Boolean({ description: "Default true for PR subjects. Set false before a push. Later branch bindings always evaluate." })),
+    end_on_close: Type.Optional(Type.Boolean({ description: "Default true: end PR waits on close or merge. Branch waits stay armed for another PR." })),
+    subject: Type.String({ description: "A GitHub branch, pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
     on: Type.Array(clauseSchema, { description: "1 to 8 clauses. Any clause that matches wakes you." }),
     once: Type.Optional(Type.Boolean()),
     reason: Type.String({ description: "1 to 200 characters. It shows in wakeup_list and the signal." }),
@@ -332,7 +337,7 @@ export const waitForEventTool = defineTool({
     const clauses = validation.value.on.map(clauseText).join(", ");
     const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
     return {
-      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${result.warning ? `\nWarning: ${result.warning}` : ""}`,
+      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.${subject.includes(":branch/") && !wakeup.eventMatch?.boundPullRequest && !result.warning ? " The wait will bind when a PR opens." : ""}${result.warning ? `\nWarning: ${result.warning}` : ""}`,
     };
   },
 });

@@ -84,8 +84,12 @@ function evaluateClause(
 ): { matched: false } | { matched: true; derive?: string } {
   const key = matchedKey(clause, event, derived);
   if (!key.ok) return { matched: false };
-  if (key.derive !== undefined) return { matched: true, derive: key.derive };
-  if (spec.primarySubject !== undefined && !(event.subjects ?? []).includes(spec.primarySubject)) {
+  if (key.derive !== undefined) {
+    if (spec.primarySubject?.includes(":branch/") && !(event.subjects ?? []).includes(spec.primarySubject)) return { matched: false };
+    return { matched: true, derive: key.derive };
+  }
+  const primary = spec.boundPullRequest ?? spec.primarySubject;
+  if (primary !== undefined && !(event.subjects ?? []).includes(primary)) {
     return { matched: false };
   }
   return filtersAccept(clause, event, spec.self) ? { matched: true } : { matched: false };
@@ -209,6 +213,10 @@ export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDig
     dedupeKey: derive !== undefined ? `derive:${derive}:${event.dedupeKey}` : event.dedupeKey,
   };
   if (typeof event.refs.head_sha === "string") digest.head_sha = event.refs.head_sha;
+  const pull = asRecord(asRecord(event.payload)?.pull_request);
+  if (event.key === "github.pull_request.closed" && pull?.merged === true && typeof pull.merge_commit_sha === "string") {
+    digest.merge_commit_sha = pull.merge_commit_sha;
+  }
   if (event.status !== undefined) digest.status = event.status;
   if (event.previousStatus !== undefined) digest.previousStatus = event.previousStatus;
   if (event.actor?.login !== undefined) digest.actor = event.actor.login;

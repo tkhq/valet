@@ -15,6 +15,7 @@ import {
   type CredentialProvider,
   type CredentialStore,
   type EventClause,
+  type EventMatchDigest,
   type SessionStore,
   type ValetPlugin,
 } from "@valet/engine";
@@ -42,6 +43,7 @@ export interface GithubTarget {
   repo: string;
   number?: number;
   sha?: string;
+  branch?: string;
 }
 
 /** `conversations.info` for one channel, read with the session's Slack credential. */
@@ -68,7 +70,8 @@ export interface ArmDeps {
   /** The team id of the org's connected Slack workspace, or null. */
   slackTeamId(): Promise<string | null>;
   /** R3 for GitHub. `pullRequest` is set for a `#n` target. */
-  readGithub(target: GithubTarget): Promise<{ readable: boolean; pullRequest?: boolean; sha?: string }>;
+  readGithub(target: GithubTarget): Promise<{ readable: boolean; pullRequest?: boolean; sha?: string; state?: string; merged?: boolean; mergeSha?: string }>;
+  findGithubPullRequest?(target: GithubTarget): Promise<string | null>;
   /** R3 and R4 for Slack. */
   readSlackChannel(channelId: string): Promise<SlackChannelRead>;
   /** R3 for Slack: the session's channel visibility rule. */
@@ -93,7 +96,7 @@ export interface ArmContext {
  * names the subject that direct clauses need (spec Part C).
  */
 export type ArmCheckResult =
-  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string; warning?: string }
+  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string; warning?: string; resolveBranch?: () => Promise<{ pullRequest: string | null; failed: boolean; closed?: EventMatchDigest }> }
   | { ok: false; text: string };
 
 const SERVICE_NAMES: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear" };
@@ -113,7 +116,7 @@ const R4 = (channel: string) =>
 const R5 = (key: string, service: string) =>
   `[wait_for_event] ${key} is not an event key for ${service}. Call workflows.list_event_types for the keys.`;
 const R5_PULL_REQUEST = (key: string) =>
-  `[wait_for_event] ${key} needs a pull request subject. Pass the pull request URL.`;
+  `[wait_for_event] ${key} needs a pull request or branch subject. Pass the pull request or branch URL.`;
 const R6 = "[wait_for_event] This thread already receives replies from that Slack thread. No wait is needed.";
 const R7 = (service: string) =>
   `[wait_for_event] ${SERVICE_NAMES[service] ?? service} is not connected for this organization. Connect it in Settings, Integrations.`;
@@ -145,6 +148,8 @@ function parseSubject(plugins: readonly ValetPlugin[], input: string): ParsedSub
   if (!subject) return null;
   const service = subjectService(subject);
   if (service === "github") {
+    const branch = /^github:([^/]+)\/([^/:]+):branch\/(.+)$/.exec(subject);
+    if (branch) return { service, subject, target: { owner: branch[1]!.toLowerCase(), repo: branch[2]!.toLowerCase(), branch: branch[3]! } };
     const m = GITHUB_SUBJECT_RE.exec(subject);
     if (!m) return null;
     const owner = m[1]!.toLowerCase();
@@ -172,7 +177,7 @@ function clauseRefusal(plugins: ValetPlugin[], parsed: ParsedSubject, clauses: r
   for (const clause of clauses) {
     const known = catalog.some((entry) => entry.key === clause.key || keyMatches(clause.key, entry.key));
     if (!known) return R5(clause.key, parsed.service);
-    if (DERIVED_NEEDS_PULL_REQUEST.has(clause.key) && (parsed.service !== "github" || parsed.target.number === undefined)) {
+    if (DERIVED_NEEDS_PULL_REQUEST.has(clause.key) && (parsed.service !== "github" || parsed.target.number === undefined && parsed.target.branch === undefined)) {
       return R5_PULL_REQUEST(clause.key);
     }
   }
@@ -241,9 +246,12 @@ export async function checkArm(
     if (coverage === false) return { ok: false, text: R2(owner, repo) };
     if (coverage === null) warning = "GitHub App repository access could not be checked. Ask an org owner to verify installation access.";
     let config = await bounded(() => deps.githubIngressConfig(owner, repo), ms, null);
+    let requirePullRequest = parsed.target.branch !== undefined;
     const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
-      for (const family of githubSourceFamilies(deps.plugins, req.on)) {
+      const families = githubSourceFamilies(deps.plugins, req.on);
+      if (requirePullRequest) families.push("pull_request");
+      for (const family of families) {
         if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
         if (!settings.events.includes(family)) missing.push(`event ${family}`);
         const permissions = GITHUB_EVENT_PERMISSIONS[family];
@@ -253,14 +261,19 @@ export async function checkArm(
       }
       return [...new Set(missing)];
     };
-    // A just-approved installation must not receive a stale cached refusal.
-    if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
-    if (config) {
-      const missing = missingSettings(config);
-      if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
-    } else {
-      warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
-    }
+    const checkConfig = async (): Promise<string | null> => {
+      // A just-approved installation must not receive a stale cached refusal.
+      if (config && missingSettings(config).length) config = await bounded(() => deps.githubIngressConfig(owner, repo, true), ms, null);
+      if (config) {
+        const missing = missingSettings(config);
+        if (missing.length) return `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.`;
+      } else {
+        warning = `${warning ? `${warning} ` : ""}GitHub App event access could not be checked. Check the App's "Permissions & events" with an org owner.`;
+      }
+      return null;
+    };
+    const configRefusal = await checkConfig();
+    if (configRefusal) return { ok: false, text: configRefusal };
     const read = await bounded(() => deps.readGithub(parsed.target), ms, { readable: false });
     if (!read.readable && (parsed.target.sha === undefined || parsed.target.sha.length === 40)) return { ok: false, text: R3(subject) };
     if (parsed.target.sha !== undefined) {
@@ -269,6 +282,17 @@ export async function checkArm(
       }
       const sha = read.sha && /^[0-9a-f]{40}$/i.test(read.sha) ? read.sha : parsed.target.sha;
       subject = `github:${owner}/${repo}@${sha.toLowerCase()}`;
+    }
+    if (read.state === "closed" && req.endOnClose !== false) {
+      const outcome = read.merged ? `merged${read.mergeSha ? ` at ${read.mergeSha}` : ""}` : "closed";
+      return { ok: false, text: `[wait_for_event] This PR is ${outcome}. Arm on the branch or on a new PR instead.` };
+    }
+    // GitHub shares number subjects between issues and PRs. Require the
+    // implicit close event only after the read identifies a PR.
+    if (parsed.target.number !== undefined && read.pullRequest === true && req.endOnClose !== false && config) {
+      requirePullRequest = true;
+      const refusal = await checkConfig();
+      if (refusal) return { ok: false, text: refusal };
     }
     const needsPr = req.on.find((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key));
     if (needsPr && read.pullRequest === false) return { ok: false, text: R5_PULL_REQUEST(needsPr.key) };
@@ -307,6 +331,26 @@ export async function checkArm(
   // subjects (a commit status names no pull request), so the waiter is
   // indexed by the repository too. Direct clauses still need the pull
   // request subject, and `derive` refuses a SHA that is not the head.
+  if (parsed.service === "github" && parsed.target.branch !== undefined) {
+    return { ok: true, subjects: [subject], primarySubject: subject, self: [...new Set(self)],
+      resolveBranch: () => bounded(async (): Promise<{ pullRequest: string | null; failed: boolean; closed?: EventMatchDigest }> => {
+        const pullRequest = await deps.findGithubPullRequest?.(parsed.target) ?? null;
+        if (!pullRequest) return { pullRequest: null, failed: false };
+        const number = Number(pullRequest.split("#")[1]);
+        const state = await deps.readGithub({ owner: parsed.target.owner, repo: parsed.target.repo, number });
+        if (!state.readable) return { pullRequest: null, failed: true };
+        if (state.state !== "closed") return { pullRequest, failed: false };
+        const status = state.merged ? "merged" : "closed";
+        return { pullRequest: null, failed: false, closed: {
+          key: "github.pull_request.closed", status, branchClosed: true, subjects: [subject, pullRequest],
+          dedupeKey: `arm-close:${pullRequest}:${state.mergeSha ?? status}`, occurredAt: new Date().toISOString(),
+          summary: `The PR was ${status}. This branch wait stays armed for another PR.`,
+          ...(state.merged && state.mergeSha ? { merge_commit_sha: state.mergeSha } : {}),
+        } };
+      }, ms, { pullRequest: null, failed: true }),
+      ...(warning ? { warning } : {}),
+    };
+  }
   const derivedKeys = new Set(deps.plugins.flatMap((plugin) => (plugin.derivedEvents ?? []).map((def) => def.key)));
   if (parsed.service === "github" && parsed.target.number !== undefined && req.on.some((clause) => derivedKeys.has(clause.key))) {
     const repoSubject = `github:${parsed.target.owner}/${parsed.target.repo}`;
@@ -486,9 +530,38 @@ export function armDeps(
         return { readable: true, ...(typeof sha === "string" ? { sha } : {}) };
       }
       if (target.number === undefined) return { readable: true };
-      // GitHub numbers pull requests and issues in one sequence. An issue
-      // read of a pull request carries `pull_request`.
-      return { readable: true, pullRequest: asRecord((await jsonOf(res))?.pull_request) !== undefined };
+      const issue = await jsonOf(res);
+      const pullRequest = asRecord(issue?.pull_request) !== undefined;
+      if (!pullRequest) return { readable: true, pullRequest: false };
+      if (issue?.state !== "closed") return { readable: true, pullRequest: true };
+      const pullResponse = await github(`${base}/pulls/${target.number}`, own.token);
+      if (!pullResponse.ok) return { readable: false };
+      const pull = await jsonOf(pullResponse);
+      return { readable: true, pullRequest: true,
+        ...(typeof pull?.state === "string" ? { state: pull.state } : {}),
+        merged: pull?.merged === true,
+        ...(typeof pull?.merge_commit_sha === "string" ? { mergeSha: pull.merge_commit_sha } : {}),
+      };
+    },
+
+    async findGithubPullRequest(target) {
+      if (target.branch === undefined) return null;
+      const own = await token("github");
+      if (!own) throw new Error("GitHub PR lookup needs a session credential. Check GitHub access in Settings.");
+      const query = new URLSearchParams({ state: "open", head: `${target.owner}:${target.branch}`, per_page: "100" });
+      const response = await github(`/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/pulls?${query}`, own.token);
+      if (!response.ok) throw new Error("GitHub PR lookup failed. Retry the event wait.");
+      const body: unknown = await response.json();
+      if (!Array.isArray(body)) throw new Error("GitHub PR lookup returned invalid data. Retry the event wait.");
+      for (const item of body) {
+        const pull = asRecord(item);
+        const head = asRecord(pull?.head);
+        if (head?.ref === target.branch && typeof pull?.number === "number" &&
+            String(asRecord(head.repo)?.full_name).toLowerCase() === `${target.owner}/${target.repo}`) {
+          return `github:${target.owner}/${target.repo}#${pull.number}`;
+        }
+      }
+      return null;
     },
 
     async readSlackChannel(channelId) {

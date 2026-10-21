@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DeriveContext, EventMatchDigest, ValetPlugin } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { catalogForService, allCatalogEntries } from "./ingest.js";
 import { listEventTypes } from "../workflows/trigger-service.js";
-import { githubDeriveContext, runDerive } from "./derive.js";
+import { eventWaiterDeriver, githubDeriveContext, runDerive } from "./derive.js";
 
 // Spec: docs/specs/2026-10-15-event-wakeups-design.md, Part B, INV-E9,
 // Part J (`valet_event_waiter_derive_total`).
@@ -158,5 +158,17 @@ describe("derived keys in the catalog", () => {
   it("does not list a derived key for a plugin with no trigger for its service", () => {
     const orphan: ValetPlugin = { ...githubPlugin, triggers: [] };
     expect(allCatalogEntries([orphan]).some((e) => e.key === KEY)).toBe(false);
+  });
+});
+
+
+describe("current-state work admission", () => {
+  it("does not read the session org for a non-derived key", async () => {
+    const sessionOrg = vi.fn(async () => "org");
+    const derive = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg, contextFor: () => ({ orgId: "org", appToken: async () => null, fetch }) });
+    const row = { id: "w", sessionId: "s", threadId: "t", kind: "event" as const, status: "running" as const,
+      reason: "test", subjects: [PR_SUBJECT], logOffset: 0, logTail: "", eventCount: 0, createdAt: 0, updatedAt: 0 };
+    expect(await derive(row, digest({ derive: "github.issue_comment.created" }), true)).toEqual({ result: "null" });
+    expect(sessionOrg).not.toHaveBeenCalled();
   });
 });

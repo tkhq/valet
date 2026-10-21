@@ -24,7 +24,7 @@ function deps(over: Partial<ArmDeps> = {}): ArmDeps {
     plugins: PLUGINS,
     serviceConnected: async () => true,
     githubInstallationCovers: async () => true,
-    githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status", "push"], permissions: { checks: "read", actions: "read", statuses: "read", contents: "read" } }),
+    githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status", "push", "pull_request"], permissions: { checks: "read", actions: "read", statuses: "read", contents: "read", pull_requests: "read" } }),
     slackTeamId: async () => "T001",
     readGithub: async () => ({ readable: true, pullRequest: true }),
     readSlackChannel: async () => ({ ok: true, isPrivate: false, isMember: true, name: "general" }),
@@ -112,6 +112,34 @@ describe("checkArm passes", () => {
 });
 
 describe("GitHub arm correctness", () => {
+  it("keeps issue waits independent of pull_request readiness", async () => {
+    const result = await checkArm(deps({
+      githubIngressConfig: async () => ({ events: ["issues"], permissions: { issues: "read" } }),
+      readGithub: async () => ({ readable: true, pullRequest: false }),
+    }), CTX, req({ subject: "https://github.com/acme/lean-proofs/issues/7", on: [{ key: "github.issues.opened" }] }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("refuses a branch wait without pull_request readiness, even with close ending disabled", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }) }), CTX,
+      req({ subject: "https://github.com/acme/lean-proofs/tree/feat/x", endOnClose: false }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event pull_request") });
+  });
+
+  it.each([false, true])("allows a closed PR with merged=%s when end_on_close is false, without close readiness", async (merged) => {
+    const result = await checkArm(deps({
+      githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { issues: "read" } }),
+      readGithub: async () => ({ readable: true, pullRequest: true, state: "closed", merged, mergeSha: "a".repeat(40) }),
+    }), CTX, req({ endOnClose: false, on: [{ key: "github.issue_comment.created" }] }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("requires pull_request readiness even for a direct check-run clause", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run"], permissions: { checks: "read" } }) }), CTX,
+      req({ on: [{ key: "github.check_run.completed" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event pull_request") });
+  });
+
   it.each(["check_run", "check_suite", "workflow_run", "status"])("refuses a derived wait missing event %s", async (family) => {
     const config = { events: ["check_run", "check_suite", "workflow_run", "status"].filter((e) => e !== family), permissions: { checks: "read", actions: "read", statuses: "read" } };
     const result = await checkArm(deps({ githubIngressConfig: async () => config }), CTX, req());
@@ -141,7 +169,7 @@ describe("GitHub arm correctness", () => {
 
   it("refreshes a stale negative configuration before refusing", async () => {
     const config = vi.fn(async (_owner: string, _repo: string, refresh?: boolean) => refresh
-      ? { events: ["check_run", "check_suite", "workflow_run", "status"], permissions: { checks: "read", actions: "read", statuses: "read" } }
+      ? { events: ["check_run", "check_suite", "workflow_run", "status", "pull_request"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } }
       : { events: [], permissions: {} });
     const result = await checkArm(deps({ githubIngressConfig: config }), CTX, req());
     expect(result).toMatchObject({ ok: true });
@@ -170,7 +198,7 @@ describe("GitHub arm correctness", () => {
   });
 
   it("accepts either documented permission for issue comments", async () => {
-    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { pull_requests: "read" } }) }), CTX, req({ on: [{ key: "github.issue_comment.created" }] }));
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["issue_comment"], permissions: { pull_requests: "read" } }) }), CTX, req({ subject: "https://github.com/acme/lean-proofs", on: [{ key: "github.issue_comment.created" }] }));
     expect(result.ok).toBe(true);
   });
 
@@ -324,7 +352,7 @@ describe("checkArm refusals", () => {
     );
     expect(result).toEqual({
       ok: false,
-      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request subject. Pass the pull request URL.",
+      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request or branch subject. Pass the pull request or branch URL.",
     });
   });
 
@@ -336,7 +364,7 @@ describe("checkArm refusals", () => {
     );
     expect(result).toEqual({
       ok: false,
-      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request subject. Pass the pull request URL.",
+      text: "[wait_for_event] github.pull_request.checks_completed needs a pull request or branch subject. Pass the pull request or branch URL.",
     });
   });
 
@@ -487,6 +515,28 @@ describe("armDeps", () => {
     expect(await d.readGithub({ owner: "acme", repo: "lean-proofs", number: 42 })).toEqual({ readable: true, pullRequest: true });
     expect(await d.readGithub({ owner: "acme", repo: "other" })).toEqual({ readable: false });
     expect(fetchImpl).toHaveBeenCalledWith("https://gh.test/repos/acme/lean-proofs/issues/42", expect.anything());
+  });
+
+  it("reads the merge SHA when an issue read reports a closed PR", async () => {
+    const sha = "b".repeat(40);
+    const http = vi.fn<typeof fetch>(async (input) => String(input).endsWith("/issues/42")
+      ? Response.json({ state: "closed", pull_request: {} })
+      : Response.json({ state: "closed", merged: true, merge_commit_sha: sha }));
+    const d = armDeps(providers(), personal, credentials({ github: { accessToken: "gh" } }), { fetch: http });
+    expect(await d.readGithub({ owner: "acme", repo: "app", number: 42 })).toEqual({ readable: true, pullRequest: true, state: "closed", merged: true, mergeSha: sha });
+  });
+
+  it("finds an open same-repository PR and ignores fork heads", async () => {
+    const http = vi.fn<typeof fetch>(async () => Response.json([
+      { number: 7, head: { ref: "feat/nested", repo: { full_name: "fork/app" } } },
+      { number: 42, head: { ref: "feat/nested", repo: { full_name: "Acme/App" } } },
+    ]));
+    const d = armDeps(providers(), personal, credentials({ github: { accessToken: "gh" } }), { fetch: http, githubApiUrl: "https://gh.test" });
+    expect(await d.findGithubPullRequest?.({ owner: "acme", repo: "app", branch: "feat/nested" })).toBe("github:acme/app#42");
+    const request = new URL(String(http.mock.calls[0]?.[0]));
+    expect(request.searchParams.get("state")).toBe("open");
+    expect(request.searchParams.get("head")).toBe("acme:feat/nested");
+    expect(http.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer gh" });
   });
 
   it("readGithub preserves the canonical SHA returned for an abbreviated SHA", async () => {

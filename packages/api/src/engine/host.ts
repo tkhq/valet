@@ -411,6 +411,8 @@ export interface EngineHostOpts {
     fetchImpl?: typeof fetch;
     now?: () => number;
   };
+  /** Schedule event delivery. Branch lookups use the persisted watcher schedule. */
+  nudgeEventWaiters?: (ids: string[]) => void;
   /**
    * 1Password reference-credential resolver (1Password credential provider
    * plan, Task 2). When present, `buildCredentialResolver` additionally
@@ -2594,6 +2596,8 @@ export class EngineHost {
         {
           ...wakeupsSeamDeps(this.opts),
           scratchBytes: () => sessionScratchBytes(getSession),
+          evaluateKeys: (this.opts.plugins ?? []).flatMap((plugin) => plugin.derivedEvents?.filter((def) => def.evaluateOnArm).map((def) => def.key) ?? []),
+          nudge: (ids) => this.opts.nudgeEventWaiters?.(ids),
           ...(checkArm ? { checkArm } : {}),
         },
         sessionId,

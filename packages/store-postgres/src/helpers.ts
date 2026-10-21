@@ -757,6 +757,7 @@ export interface WakeupRow {
   event_seen: string | null;
   /** `event`: a bounded JSON array of consumed derivation source keys. */
   event_source_seen: string | null;
+  event_revision: number;
 }
 
 /**
@@ -814,6 +815,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
     event_seen: asStringOrNull(raw.event_seen, "event_seen"),
     event_source_seen: asStringOrNull(raw.event_source_seen, "event_source_seen"),
+    event_revision: toNum(raw.event_revision ?? 0, "event_revision"),
   };
 }
 
@@ -890,6 +892,21 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
   if (minIntervalMs !== undefined && (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)) {
     throw new Error(`${field}.minIntervalMs is not a non-negative number`);
   }
+  const endOnClose = optBoolean(parsed, "endOnClose", field);
+  const evaluateCurrent = optBoolean(parsed, "evaluateCurrent", field);
+  const boundPullRequest = optString(parsed, "boundPullRequest", field);
+  const closedPullRequests = optStringArray(parsed, "closedPullRequests", field);
+  const lookup: { branchLookupAt?: number; branchLookupAttempt?: number } = {};
+  for (const key of ["branchLookupAt", "branchLookupAttempt"] as const) {
+    const value = parsed[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${field}.${key} is not a non-negative integer`);
+    lookup[key] = value;
+  }
+  const bindingGeneration = parsed.bindingGeneration;
+  if (bindingGeneration !== undefined && (typeof bindingGeneration !== "number" || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 0)) {
+    throw new Error(`${field}.bindingGeneration is not a non-negative integer`);
+  }
   const primarySubject = parsed.primarySubject;
   if (primarySubject !== undefined && typeof primarySubject !== "string") {
     throw new Error(`${field}.primarySubject is not a string`);
@@ -900,6 +917,12 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     self: parsed.self,
     ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
     ...(primarySubject !== undefined ? { primarySubject } : {}),
+    ...(endOnClose !== undefined ? { endOnClose } : {}),
+    ...(evaluateCurrent !== undefined ? { evaluateCurrent } : {}),
+    ...(boundPullRequest !== undefined ? { boundPullRequest } : {}),
+    ...(closedPullRequests !== undefined ? { closedPullRequests } : {}),
+    ...(bindingGeneration !== undefined ? { bindingGeneration } : {}),
+    ...lookup,
   };
 }
 
@@ -907,7 +930,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
 function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
   if (!isRecord(v)) throw new Error(`${field} is not an object`);
   if (!isStringArray(v.subjects)) throw new Error(`${field}.subjects is not a string array`);
-  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha"] as const;
+  const optional = ["status", "previousStatus", "url", "actor", "text", "derive", "head_sha", "merge_commit_sha"] as const;
   const out: EventMatchDigest = {
     key: reqString(v, "key", field),
     subjects: v.subjects,
@@ -915,6 +938,12 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
     occurredAt: reqString(v, "occurredAt", field),
     dedupeKey: reqString(v, "dedupeKey", field),
   };
+  const branchClosed = optBoolean(v, "branchClosed", field);
+  if (branchClosed !== undefined) out.branchClosed = branchClosed;
+  const evaluateCurrent = optBoolean(v, "evaluateCurrent", field);
+  if (evaluateCurrent !== undefined) out.evaluateCurrent = evaluateCurrent;
+  const subjectClosed = optBoolean(v, "subjectClosed", field);
+  if (subjectClosed !== undefined) out.subjectClosed = subjectClosed;
   for (const key of optional) {
     const value = optString(v, key, field);
     if (value !== undefined) out[key] = value;
@@ -946,7 +975,7 @@ function isWakeupStatus(v: string): v is WakeupStatus {
 }
 
 function isWakeupCause(v: string): v is WakeupCause {
-  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired", "subject_closed"].includes(v);
 }
 
 export function rowToWakeup(row: WakeupRow): Wakeup {
@@ -973,6 +1002,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     logOffset: row.log_offset,
     logTail: row.log_tail,
     eventCount: row.event_count,
+    ...(row.event_revision > 0 ? { eventRevision: row.event_revision } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),

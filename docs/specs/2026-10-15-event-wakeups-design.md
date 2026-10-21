@@ -192,6 +192,7 @@ keeps its behavior.
 | GitHub | owner | `github:<owner>` |
 | GitHub | repository | `github:<owner>/<repo>` |
 | GitHub | pull request or issue | `github:<owner>/<repo>#<number>` |
+| GitHub | branch | `github:<owner>/<repo>:branch/<branch>` |
 | GitHub | commit | `github:<owner>/<repo>@<full sha>` |
 | Slack | workspace | `slack:<team>` |
 | Slack | channel | `slack:<team>/<channel>` |
@@ -468,6 +469,8 @@ wait_for_event({
   subject: string,         // URL or subject (A1, A5)
   on: Clause[],            // 1 to 8
   once?: boolean,          // default true
+  evaluate_current?: boolean, // default true
+  end_on_close?: boolean,     // default true
   reason: string,          // 1 to 200 characters
   max_hours: number,       // 1 to timerMaxHours
   min_interval_seconds?: number, // stream mode only; 30 to 3600
@@ -551,7 +554,7 @@ D1 errata (Task 11):
 - R3 for Linear needs the session's own Linear credential. The org's
   app-actor token (`grant = client_credentials`) does not count.
 - R5 also refuses `github.pull_request.checks_completed` unless the
-  subject is a pull request: `[wait_for_event] <key> needs a pull request
+  subject is a pull request or branch: `[wait_for_event] <key> needs a pull request
   subject. Pass the pull request URL.` An issue number gets the same text
   after R3's read.
 - R1 also refuses a GitHub owner alone (`github:acme`). The tool supports
@@ -760,6 +763,147 @@ An event waiter follows the rule for timers:
   timer bound keeps the child unsettled.
 - Event waiters on hidden threads are counted and never named.
 
+### F3. Current state at arm time
+
+A derived key MAY declare `evaluateOnArm(ctx, subject)`.
+After storage, arm queues persisted current-state work and nudges the WakeWatcher.
+The arm call returns before the WakeWatcher calls a named hook.
+PR subjects default to `evaluate_current: true`.
+Set `evaluate_current: false` when you arm before a push.
+This option skips evaluation at arm, not evaluation when a branch binds to a later PR.
+The hook reads the subject's current state.
+For `checks_completed`, the hook evaluates the current PR head through the normal deriver.
+A result that passes the derived clause's status filters enters the normal digest buffer.
+The WakeWatcher uses the same once and stream rules for this digest.
+A pending result, `null`, or an error leaves the waiter armed.
+Errors appear in the log.
+
+The hook returns the same output key as webhook derivation for the same completion.
+The buffer and lifetime seen keys therefore dedupe an arm result against a later webhook.
+This check evaluates provider state, not a history of earlier events.
+
+### F4. Branch subjects and PR binding
+
+A branch URL has the form `https://github.com/<owner>/<repo>/tree/<branch>`.
+Its subject is `github:<owner>/<repo>:branch/<branch>`.
+Owner and repository names use lower case.
+Branch names keep their case and can contain slashes.
+The parser treats the entire path after `/tree/` as a branch name.
+A file URL such as `/tree/<branch>/<path>` is ambiguous.
+Use the branch URL, not a file URL.
+The parser refuses the mixed form `github:<owner>/<repo>/tree/<branch>`.
+Branch subjects belong to the repository in Presence.
+
+Arm stores the branch waiter before it searches for an open PR on that head branch.
+The search uses the session's credential.
+Before binding a lookup result, arm reads that PR's current state within the same provider-call timeout.
+A closed result produces a close note and leaves the branch unbound.
+It accepts only a head repository that equals the subject's repository.
+An existing open PR binds the waiter at once.
+Current-state evaluation then uses that PR.
+A branch with no open PR stays armed.
+After a successful lookup finds no open PR, the tool states that the wait will bind when a PR opens.
+If the lookup fails or times out, the tool returns a warning instead.
+The arm lookup uses the existing provider-call timeout.
+The waiter stores `branchLookupAt` and `branchLookupAttempt` in its match spec.
+After a failed arm lookup, the next attempts wait 30 seconds, two minutes, and ten minutes.
+Later attempts use a ten-minute interval until the deadline.
+A successful empty arm lookup also schedules a lookup ten minutes later.
+The WakeWatcher claims the schedule with revision CAS before it starts a background lookup.
+Provider calls do not block the sweep. A process restart keeps the stored schedule.
+Background lookups use the session organization's GitHub App installation authorized at arm.
+Each lookup rechecks the candidate PR state before binding.
+A slow lookup that finishes after the deadline cannot bind the waiter.
+
+An `opened` or `reopened` event can bind an unbound branch waiter through its normalized branch subject.
+This binding runs before clause matching, including when no clause names the opening event.
+An atomic store write adds the PR subject. Branch waiters never add a repository index subject.
+It keeps the branch as `primarySubject` and stores the current PR in `boundPullRequest`.
+Only an unbound branch waiter accepts a binding.
+Repeated bindings leave the row unchanged.
+The log records each successful binding.
+Direct clauses then match the bound PR.
+Binding also queues the same current-state work and nudges the WakeWatcher.
+Derived sources must carry the exact branch subject, even when the waiter is bound.
+Other branches cannot add derivation work.
+While unbound, the store keeps at most the latest source for each SHA on this branch.
+Until binding, the WakeWatcher keeps derived sources buffered and makes no provider call.
+After binding, it derives those sources and evaluates current state.
+A binding generation keeps reopen evaluation separate from earlier consumed arm work.
+
+GitHub normalization adds branch subjects from PR heads, check suites, workflow runs, and push branch refs.
+Check runs use their check suite's head branch only with same-repository head confirmation.
+Check suites also require same-repository head confirmation or a same-repository PR head.
+Before a PR opens, `check_run.pull_requests` can be empty and its suite can omit the head repository.
+Such a check run adds no branch subject. The wait does not buffer that source.
+Post-bind current-state evaluation is the completion guarantee for this case.
+Current-state work bypasses the digest cap, including when a full buffer exists at binding.
+PR and workflow heads from another repository add no branch subject for the base repository.
+An opening event from a fork therefore cannot bind the waiter.
+Binding preserves buffered digests and lifetime seen keys.
+Later events use the existing digest dedupe rules.
+
+Branch binding requires the App's `pull_request` event and `pull_requests` read permission.
+PR-subject waits require these for implicit close handling unless `end_on_close` is false.
+The other readiness and visibility checks stay in force.
+The integer `event_revision` column defaults to zero. Optional match fields preserve existing rows.
+The added match fields remain optional for existing rows.
+
+### F5. PR closure
+
+A PR-subject waiter watches its PR's `github.pull_request.closed` event by default.
+`end_on_close: false` disables this implicit watch and permits arming on a closed or merged PR.
+Explicit clauses keep their normal behavior with this option.
+
+A branch-subject waiter keeps its branch identity when it binds to a PR.
+When that PR closes, the store clears its binding and removes PR and legacy repository index subjects.
+The branch waiter stays armed with either close setting.
+It delivers a final close note with the outcome and merge SHA when present.
+This note does not end a once-mode branch wait.
+An unbound branch waiter also records closes while an arm-time lookup is in flight.
+The bind operation refuses a recorded closed PR unless an explicit reopened event permits it.
+A later `opened` or `reopened` event can bind another PR from the same repository and branch.
+A close for an earlier PR cannot clear the new binding.
+The branch close note does not require a matching clause.
+It flushes all ready buffered matches in the same capped signal without resetting the stream interval.
+
+For a PR-subject waiter with implicit close handling, ingest appends a final close digest without removing buffered work.
+All close digests and branch-close notes bypass the normal digest cap. They remain deduped by their existing close keys.
+The close bypasses subscription suppression.
+The digest has status `merged` or `closed`.
+For a merged PR, it also carries `merge_commit_sha`.
+The WakeWatcher resolves pending derivation sources in its normal pass before the close decision.
+It sends one capped `event.matched` signal with ready buffered digests and the close digest last.
+Digests beyond the 64 KiB layout cap appear as headers or an overflow count.
+This delivery skips the stream interval and rate window, in once and stream modes.
+It increments and stores the signal count.
+It then sends `event.ended` with cause `subject_closed`.
+The ending message names the outcome and merge SHA when present.
+It states that later pushes to that branch will not be watched by this PR wait.
+A waiter that already ended stays ended after a reopen.
+A close event for another PR leaves the waiter unchanged.
+
+The final CI result has a defined race boundary.
+A pending or in-flight derive in the close pass can produce a ready digest before the close decision reads the row.
+If the read fails, times out, or returns pending, the close ends the waiter without that CI result.
+Every buffer or match write increments the integer event revision.
+A terminal event transition compares only this revision, not parsed or serialized JSON.
+Unknown digest fields cannot cause a permanent snapshot mismatch.
+A concurrent close increments the revision and makes a stale `fired` transition fail.
+After a lost CAS, the watcher waits at least one second before retrying on a scheduled pass.
+Repeated failures double this delay up to 30 seconds. No immediate nudge retries the CAS.
+Deadline decisions bypass this delay and take priority over ordinary once-mode firing.
+Redirected once-mode delivery rereads and retries its end after a concurrent write.
+No extra provider read or separate CI delivery runs after the waiter ends.
+The close path preserves all ready buffered digests that the decision reads.
+
+Unless `end_on_close` is false, arm refuses a PR that is already closed or merged.
+The refusal names the outcome and merge SHA when present.
+It tells the agent to arm on the branch or on a new PR instead.
+A branch whose earlier PR is closed stays armed for an open PR.
+Existing PR rows without `endOnClose` use the default close policy.
+The added match and digest fields are optional.
+
 ## Part G: Subscriptions
 
 *Depends on: Part A.*
@@ -805,9 +949,9 @@ deployment has a public URL:
 > This thread's link is <thread link>. Post it when you announce work in a
 > channel, so people can follow the thread.
 
-The tool description carries four recipes: CI (Scenario A), a Slack reply
-(Scenario B), a Linear triage shift (Scenario C), and a reply on a Linear
-issue. It states that standing, unbounded watching is a subscription, so an
+The tool description carries five recipes: CI (Scenario A), a Slack reply
+(Scenario B), a Linear triage shift (Scenario C), a reply on a Linear
+issue, and a PR that opens after a branch wait arms. It states that standing, unbounded watching is a subscription, so an
 agent asked to "always" watch something proposes one.
 
 ## Part J: Observability
@@ -855,9 +999,9 @@ hour, with the first-series pattern of the wakeups spec.
   the self check on its source event, because the agent's own push or CI
   run is the usual source. The derived event has no actor.
 - **INV-E9 A derive call runs only for a waiter that names the derived
-  key.** Mechanism: only the WakeWatcher calls `derive`, and only for a
-  digest marked `derive`. Vector: zero fixture API calls when no waiter
-  names the key.
+  key.** Mechanism: the WakeWatcher derives only digests marked `derive`.
+  Arm calls `evaluateOnArm` only for named derived keys.
+  Vector: zero fixture API calls when no waiter names the key.
 
 ## Testing
 
@@ -888,7 +1032,7 @@ A v1 implementation MUST NOT ship these under this spec.
 | Fork pull request subjects on check events | Needs one API call per event | GitHub normalizer enrichment |
 | Workflow `waitForEvent` node | Workflows have parked runs | The `signal` subscription target |
 | Per-event visibility re-checks for GitHub and Linear | One provider call per event | Run D1's R3 read in the matcher |
-| More than one subject per waiter | No scenario needs it | The `subjects` column is already an array |
+| More than one input subject per waiter | Each wait starts from one object | Branch binding adds internal index subjects |
 | Org-visible threads from subscriptions | Widens thread sharing (#869) to team threads, a policy decision | A `thread_share` option on the subscription target |
 | Fork a thread into a personal workspace | Needs a transcript-prefix copy and a fork record | A fork action on a message, in the web and as a Slack shortcut |
 
@@ -942,3 +1086,15 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
   (telling a person to invite a bot that is already a member) for a
   personal session whose own token cannot read a private channel the bot
   can.
+
+## Deployment compatibility for current-state and branch waits
+
+Deploy the schema repair and new readers before enabling new branch or current-state waits.
+Do not arm these waits while old ingest or deriver pods can process them.
+An old deriver consumes `evaluateCurrent` entries without calling the arm hook.
+An old ingest pod does not record branch `opened` or `closed` webhooks for these waits.
+A new pod's periodic lookup can recover an unbound wait when the PR remains open.
+It cannot replay a PR that opens and closes entirely on old pods.
+It also cannot reconstruct the final close digest for a bound wait whose close reached only an old pod.
+An old store writer does not increment `event_revision`. Remove old writers before relying on revision CAS.
+The #1009 cause-reader and auth reconciliation remains blocked on the separately authorized rebase.

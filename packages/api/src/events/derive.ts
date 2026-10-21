@@ -64,18 +64,22 @@ export async function runDerive(
   subject: string,
   ctx: DeriveContext,
   record: (key: string, result: EventDeriveResult) => void = recordEventDerive,
+  evaluateCurrent = false,
 ): Promise<RunDeriveResult> {
   const key = digest.derive;
   if (key === undefined) {
     return { result: "error", error: new Error(`runDerive needs a digest marked derive; digest ${digest.dedupeKey} has none.`) };
   }
   const def = findDerived(plugins, key);
+  if (evaluateCurrent && !def?.evaluateOnArm) return { result: "null" };
   if (!def) {
     record(key, "error");
     return { result: "error", error: new Error(`No plugin declares the derived event key ${key}.`) };
   }
   try {
-    const derived = await def.derive({ ...ctx, orgId }, subject, sourceEventFromDigest(digest));
+    const derived = evaluateCurrent
+      ? await def.evaluateOnArm?.({ ...ctx, orgId }, subject) ?? null
+      : await def.derive({ ...ctx, orgId }, subject, sourceEventFromDigest(digest));
     if (derived === null) {
       record(key, "null");
       return { result: "null" };
@@ -124,7 +128,7 @@ export function githubDeriveContext(
 export const EVENT_DERIVE_DEADLINE_MS = 20_000;
 
 /** Resolves one digest marked `derive` for a waiter row. The WakeWatcher's `deriveEvent` dep. */
-export type EventWaiterDerive = (row: Wakeup, digest: EventMatchDigest) => Promise<RunDeriveResult>;
+export type EventWaiterDerive = (row: Wakeup, digest: EventMatchDigest, evaluateCurrent?: boolean) => Promise<RunDeriveResult>;
 
 export interface EventWaiterDeriverDeps {
   plugins: ValetPlugin[];
@@ -147,11 +151,12 @@ export interface EventWaiterDeriverDeps {
  */
 export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDerive {
   const deadlineMs = deps.deadlineMs ?? EVENT_DERIVE_DEADLINE_MS;
-  return async (row, digest) => {
-    const subject = row.subjects?.[0];
+  return async (row, digest, evaluateCurrent = false) => {
+    const subject = row.eventMatch?.boundPullRequest ?? row.eventMatch?.primarySubject ?? row.subjects?.[0];
     if (subject === undefined || digest.derive === undefined) {
       return { result: "error", error: new Error(`Waiter ${row.id} has no key, or digest ${digest.dedupeKey} has no derive key.`) };
     }
+    if (evaluateCurrent && !findDerived(deps.plugins, digest.derive)?.evaluateOnArm) return { result: "null" };
     const orgId = await deps.sessionOrg(row.sessionId);
     if (orgId === null) {
       return { result: "error", error: new Error(`The session ${row.sessionId} of waiter ${row.id} no longer exists.`) };
@@ -167,7 +172,7 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
     });
     const ctx = deps.contextFor(orgId, digest.derive, subject, controller.signal);
     try {
-      return await Promise.race([runDerive(deps.plugins, orgId, digest, subject, ctx, deps.record), deadline]);
+      return await Promise.race([runDerive(deps.plugins, orgId, digest, subject, ctx, deps.record, evaluateCurrent), deadline]);
     } finally {
       clearTimeout(timer);
     }

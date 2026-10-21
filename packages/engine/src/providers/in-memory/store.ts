@@ -6,6 +6,7 @@ import type {
   DecisionGateEntry,
   DecisionGateRef,
   EventMatchDigest,
+  EventMatchSpec,
   Lease,
   LeaseReleaseCause,
   ListOpts,
@@ -335,7 +336,7 @@ export class InMemorySessionStore implements SessionStore {
     // together like the Postgres single statement.
     const w = this.wakeups.get(id);
     if (!w || !from.includes(w.status)) return null;
-    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
+    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt, eventRevision: (w.eventRevision ?? 0) + 1 });
     this.wakeups.set(id, next);
     const l = next.leaseId === undefined ? undefined : this.leases.get(next.leaseId);
     if (l && l.releasedAt === undefined) this.leases.set(l.id, { ...l, releasedAt: updatedAt, releaseCause });
@@ -367,7 +368,7 @@ export class InMemorySessionStore implements SessionStore {
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
           (w.status === "running" &&
             w.kind === "event" &&
-            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
+            ((w.eventMatch?.primarySubject?.includes(":branch/") && !w.eventMatch.boundPullRequest && (w.eventMatch.branchLookupAt ?? 0) <= now) || (w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -383,10 +384,48 @@ export class InMemorySessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    expectedRevision?: number,
   ): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
     if (!w || !from.includes(w.status)) return null;
-    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
+    if (expectedRevision !== undefined && (w.eventRevision ?? 0) !== expectedRevision) return null;
+    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt, eventRevision: (w.eventRevision ?? 0) + 1 });
+    this.wakeups.set(id, next);
+    return copyWakeup(next);
+  }
+
+  async updateEventMatch(id: string, patch: Partial<EventMatchSpec>, updatedAt: number, expectedRevision: number): Promise<Wakeup | null> {
+    const row = this.wakeups.get(id);
+    if (!row || row.kind !== "event" || row.status !== "running" || !row.eventMatch || (row.eventRevision ?? 0) !== expectedRevision) return null;
+    const next = copyWakeup({ ...row, updatedAt, eventRevision: expectedRevision + 1, eventMatch: { ...row.eventMatch, ...patch } });
+    this.wakeups.set(id, next);
+    return copyWakeup(next);
+  }
+
+  async bindEventWaiter(id: string, branch: string, pullRequest: string, repository: string, updatedAt: number, reopened = false): Promise<Wakeup | null> {
+    const row = this.wakeups.get(id);
+    if (!row || row.kind !== "event" || row.status !== "running" || row.eventMatch?.primarySubject !== branch || row.eventMatch.boundPullRequest !== undefined || (row.deadlineAt ?? Infinity) <= updatedAt) return null;
+    if (!reopened && row.eventMatch.closedPullRequests?.includes(pullRequest)) return null;
+    const next = copyWakeup({ ...row, updatedAt, eventRevision: (row.eventRevision ?? 0) + 1,
+      subjects: [...new Set([pullRequest, ...(row.subjects ?? []).filter((s) => s !== repository)])],
+      eventMatch: { ...row.eventMatch, boundPullRequest: pullRequest, bindingGeneration: (row.eventMatch.bindingGeneration ?? 0) + 1,
+        ...(reopened ? { closedPullRequests: row.eventMatch.closedPullRequests?.filter((s) => s !== pullRequest) ?? [] } : {}),
+      },
+    });
+    this.wakeups.set(id, next);
+    return copyWakeup(next);
+  }
+
+  async closeBranchEventWaiter(id: string, branch: string, pullRequest: string, digest: EventMatchDigest, updatedAt: number): Promise<Wakeup | null> {
+    const row = this.wakeups.get(id);
+    const match = row?.eventMatch;
+    if (!row || row.kind !== "event" || row.status !== "running" || match?.primarySubject !== branch ||
+        (match.boundPullRequest && match.boundPullRequest !== pullRequest) || match.closedPullRequests?.includes(pullRequest)) return null;
+    const { boundPullRequest: _bound, ...unbound } = match;
+    const next = copyWakeup({ ...row, updatedAt, eventRevision: (row.eventRevision ?? 0) + 1, subjects: row.subjects?.filter((s) => s !== pullRequest && s !== branch.split(":branch/")[0]),
+      eventMatch: { ...unbound, closedPullRequests: [...(match.closedPullRequests ?? []), pullRequest] },
+      eventBuffer: [...(row.eventBuffer ?? []).filter((d) => !(d.derive && d.evaluateCurrent)), boundEventDigest(digest)],
+    });
     this.wakeups.set(id, next);
     return copyWakeup(next);
   }
@@ -405,18 +444,22 @@ export class InMemorySessionStore implements SessionStore {
     const w = this.wakeups.get(id);
     if (!w || w.kind !== "event" || w.status !== "running") return false;
     const bounded = boundEventDigest(digest);
-    const buffer = w.eventBuffer ?? [];
+    const branch = w.eventMatch?.primarySubject;
+    if (bounded.derive && !bounded.evaluateCurrent && branch?.includes(":branch/") && !bounded.subjects.includes(branch)) return false;
+    const sha = bounded.subjects.find((s) => s.includes("@"));
+    const buffer = (w.eventBuffer ?? []).filter((d) => !(bounded.derive && !bounded.evaluateCurrent && sha &&
+      branch?.includes(":branch/") && !w.eventMatch?.boundPullRequest && d.derive && !d.evaluateCurrent && d.subjects.includes(sha)));
     if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
     if ((w.eventSeen ?? []).includes(bounded.dedupeKey) || (w.eventSourceSeen ?? []).includes(bounded.dedupeKey)) return false;
-    if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
+    if (!bounded.subjectClosed && !bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
       console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    if (!bounded.subjectClosed && !bounded.evaluateCurrent && buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
     }
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt }));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt, eventRevision: (w.eventRevision ?? 0) + 1 }));
     return true;
   }
 
@@ -429,7 +472,7 @@ export class InMemorySessionStore implements SessionStore {
     if (mode === "delivered" && keys.length > Math.max(EVENT_DELIVERED_MAX_KEYS, w.eventSeen?.length ?? 0)) return false;
     const seen = mode === "source" ? keys.slice(-EVENT_SOURCE_SEEN_MAX_KEYS) : keys;
     const eventBuffer = (w.eventBuffer ?? []).filter((d) => !removed.has(d.dedupeKey));
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, [field]: seen, updatedAt }));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, [field]: seen, updatedAt, eventRevision: (w.eventRevision ?? 0) + 1 }));
     return true;
   }
 
