@@ -119,10 +119,10 @@ export function githubDeriveContext(
 }
 
 /**
- * The longest time the WakeWatcher waits for one derive call. One derive
- * can make about 22 sequential requests of up to 5 s each, and a pass
- * handles its rows one at a time. Past this, the call is an `error`, so
- * the source digest stays for the next tick.
+ * The longest time the WakeWatcher waits for one derive call. GitHub bounds
+ * membership reads by request count, concurrency, and an eight-second budget.
+ * Completed membership pages survive retries. A call past this deadline is
+ * an error, so its source stays buffered for the next tick.
  */
 export const EVENT_DERIVE_DEADLINE_MS = 20_000;
 
@@ -177,6 +177,8 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
     // Resolve identity inside the overall deadline. Never use a rotating token as a key.
     const run = async (): Promise<RunDeriveResult> => {
       const installation = await ctx.rateLimitKey?.();
+      // Retired installations need no future lookup to release expired entries.
+      for (const [key, until] of installationCooldowns) if (until <= now()) installationCooldowns.delete(key);
       const checkCooldown = () => {
         if (!installation) return;
         const until = installationCooldowns.get(installation) ?? 0;

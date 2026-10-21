@@ -42,9 +42,23 @@ function sourceSha(source: NormalizedEvent, ownerRepo: string): string | undefin
   return subject ? subject.slice(prefix.length).toLowerCase() : undefined;
 }
 
-interface DeriveAuth { token: string; refreshed: boolean }
+/** Includes head/check/workflow/status reads and a possible token-refresh retry. */
+export const DERIVE_MAX_REQUESTS = 32;
+const JOB_REQUESTS_PER_DERIVE = 16;
+const JOB_READ_CONCURRENCY = 4;
+const JOB_READ_BUDGET_MS = 8_000;
+const JOB_CACHE_TTL_MS = 30 * 60_000;
+// One maximum workflow snapshot fits without evicting its own early pages.
+const JOB_CACHE_MAX_RUNS = 2048;
+class DeriveReadBudgetError extends Error {}
+interface DeriveAuth { token: string; refreshed: boolean; requests: number }
+interface JobMembership { checkId: number; attempt: number }
+interface JobCacheEntry { jobs: JobMembership[]; nextPage: number; complete: boolean; touchedAt: number; loading?: Promise<void> }
+const jobCache = new Map<string, JobCacheEntry>();
 
-async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string): Promise<unknown> {
+async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string, deadline?: number): Promise<unknown> {
+  if (auth.requests >= DERIVE_MAX_REQUESTS || (deadline !== undefined && Date.now() >= deadline)) throw new DeriveReadBudgetError("GitHub derive read budget reached. Retry the event wait or wait on github.check_run.completed.");
+  auth.requests++;
   const res = await ctx.fetch(`${resolveGithubApiUrl()}${path}`, {
     headers: {
       Authorization: `Bearer ${auth.token}`,
@@ -52,13 +66,13 @@ async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string): Prom
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "Valet/1.0",
     },
-    signal: AbortSignal.timeout(DERIVE_REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(Math.max(1, Math.min(DERIVE_REQUEST_TIMEOUT_MS, deadline === undefined ? DERIVE_REQUEST_TIMEOUT_MS : deadline - Date.now()))),
   });
   if (res.status === 401 && !res.headers.has("retry-after")) {
     if (!auth.refreshed) {
       auth.refreshed = true;
       const fresh = await ctx.appToken(true);
-      if (fresh) { auth.token = fresh; return getJson(ctx, auth, path); }
+      if (fresh) { auth.token = fresh; return getJson(ctx, auth, path, deadline); }
     }
     throw new DeriveRetryError(`GitHub GET ${path} rejected the installation token. Retry with a refreshed token.`, 1_000);
   }
@@ -132,6 +146,71 @@ function excludedWorkflow(run: Record<string, unknown>): boolean {
   return run.event === "schedule" || run.event === "workflow_dispatch";
 }
 
+/** GitHub job ids usually match check ids; reporter integrations can expose the check URL instead. */
+function jobCheckId(job: Record<string, unknown>): number | undefined {
+  if (typeof job.check_run_url === "string") {
+    try {
+      const tail = new URL(job.check_run_url).pathname.split("/").filter(Boolean).at(-1);
+      if (tail && /^\d+$/.test(tail) && Number.isSafeInteger(Number(tail))) return Number(tail);
+    } catch { /* An absent or malformed URL falls back to the job id. */ }
+  }
+  return typeof job.id === "number" ? job.id : undefined;
+}
+
+/** Bounded page workers retain completed pages across retries of immutable finished runs. */
+async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: string, runs: Record<string, unknown>[]): Promise<Map<number, { run: Record<string, unknown>; attempt: number }>> {
+  const now = Date.now();
+  for (const [key, entry] of jobCache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now) jobCache.delete(key);
+  const work = runs.map((run) => {
+    if (typeof run.id !== "number") throw new Error("GitHub returned a workflow without its run id. Retry the event wait.");
+    const key = JSON.stringify([ctx.orgId, resolveGithubApiUrl(), base, run.id, run.run_attempt ?? 1]);
+    const cached = run.status === "completed" ? jobCache.get(key) : undefined;
+    const entry: JobCacheEntry = cached ?? { jobs: [], nextPage: 1, complete: false, touchedAt: now };
+    entry.touchedAt = now;
+    if (run.status === "completed") {
+      jobCache.delete(key);
+      if (jobCache.size >= JOB_CACHE_MAX_RUNS) jobCache.delete(jobCache.keys().next().value ?? "");
+      jobCache.set(key, entry);
+    }
+    return { run, entry };
+  });
+  const queue = work.filter(({ entry }) => !entry.complete);
+  let remaining = Math.min(JOB_REQUESTS_PER_DERIVE, Math.max(0, DERIVE_MAX_REQUESTS - auth.requests - 4));
+  const deadline = now + JOB_READ_BUDGET_MS;
+  const worker = async () => {
+    while (queue.length > 0 && remaining > 0 && Date.now() < deadline) {
+      const item = queue.shift();
+      if (!item) break;
+      const { run, entry } = item;
+      if (!entry.loading) {
+        remaining--;
+        entry.loading = (async () => {
+          const body = rec(await getJson(ctx, auth, `${base}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${entry.nextPage}`, deadline));
+          if (!Array.isArray(body?.jobs)) throw new Error("GitHub did not return jobs. Retry the event wait.");
+          const page: JobMembership[] = body.jobs.map((value) => {
+            const job = rec(value);
+            const checkId = job ? jobCheckId(job) : undefined;
+            if (checkId === undefined || typeof job?.run_attempt !== "number") throw new Error("GitHub returned a job without its check id or run_attempt. Retry the event wait.");
+            return { checkId, attempt: job.run_attempt };
+          });
+          entry.jobs.push(...page);
+          entry.nextPage++;
+          entry.complete = page.length < 100 || (typeof body.total_count === "number" && entry.jobs.length >= body.total_count);
+        })();
+      }
+      try { await entry.loading; } catch (error) {
+        if (error instanceof DeriveReadBudgetError || Date.now() >= deadline) break;
+        throw error;
+      } finally { entry.loading = undefined; }
+      if (!entry.complete) queue.push(item);
+    }
+  };
+  await Promise.all(Array.from({ length: JOB_READ_CONCURRENCY }, worker));
+  const membership = new Map<number, { run: Record<string, unknown>; attempt: number }>();
+  for (const { run, entry } of work) for (const job of entry.jobs) membership.set(job.checkId, { run, attempt: job.attempt });
+  return membership;
+}
+
 /** Superseded runs and suites cannot change the latest attempt's result. */
 function latestBy<T extends Record<string, unknown>>(states: T[], identity: (state: T) => string | undefined, newer?: (left: T, right: T) => boolean): T[] {
   const latest = new Map<string, T>();
@@ -181,13 +260,13 @@ export function latestCompletedAt(runs: readonly { completedAt?: string }[], sta
 
 /**
  * `github.pull_request.checks_completed` (spec B1): each selected check run on the
- * pull request's head SHA is complete and each current suite with runs, PR-relevant workflow,
- * and latest commit status is terminal. `null` while that does not hold yet.
+ * pull request's head SHA and each latest commit status is terminal.
+ * Suite and workflow conclusions never determine the result.
  */
 export const checksCompleted: DerivedEventDef = {
   key: CHECKS_COMPLETED_KEY,
   description:
-    "Current check runs, suites with runs, PR-relevant workflow runs, and latest commit status contexts on a pull request's head commit finished. Status is failure when any of them failed, else success. Use it with wait_for_event only; subscriptions do not accept it.",
+    "Selected check runs and latest commit status contexts on a pull request's head commit finished. Status is failure when a selected check or status failed, else success. Suite and workflow conclusions do not determine the result. Use it with wait_for_event only; subscriptions do not accept it.",
   sources: [
     "github.check_run.completed",
     "github.check_suite.completed",
@@ -208,7 +287,7 @@ export const checksCompleted: DerivedEventDef = {
     if (!initialToken) {
       throw new Error(`No GitHub App installation token for ${pr.owner}. Install the Valet GitHub App on ${pr.owner} in Settings.`);
     }
-    const token: DeriveAuth = { token: initialToken, refreshed: false };
+    const token: DeriveAuth = { token: initialToken, refreshed: false, requests: 0 };
     const base = `/repos/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}`;
 
     // Step 1: an event for an old head says nothing about the current head.
@@ -230,21 +309,15 @@ export const checksCompleted: DerivedEventDef = {
     const allWorkflows = await readWorkflows();
     if (allWorkflows === null) return null;
     const selected = new Set(latestBy(allWorkflows, workflowKey));
-    const membership = new Map<number, { run: Record<string, unknown>; attempt: number }>();
-    if (allRuns.some((check) => isActions(check) && (check.status !== "completed" ||
-        !["success", "neutral", "skipped"].includes(String(check.conclusion))))) {
-      // filter=all carries every attempt. Job ids, not names or suite ids, are check-run ids.
-      for (const run of allWorkflows) {
-        if (typeof run.id !== "number") throw new Error("GitHub returned a workflow without its run id. Retry the event wait.");
-        const jobs = await listStates(ctx, token, `${base}/actions/runs/${run.id}/jobs?filter=all`, "jobs", () => false);
-        for (const job of jobs ?? []) {
-          if (typeof job.id !== "number" || typeof job.run_attempt !== "number") {
-            throw new Error("GitHub returned a job without its id or run_attempt. Retry the event wait.");
-          }
-          membership.set(job.id, { run, attempt: job.run_attempt });
-        }
-      }
-    }
+    const candidates = allWorkflows.filter((run) => !selected.has(run) || excludedWorkflow(run) ||
+      (typeof run.run_attempt === "number" && run.run_attempt > 1));
+    const safeSuites = new Set(allWorkflows.filter((run) => !candidates.includes(run)).map((run) => run.check_suite_id));
+    const needsMembership = allRuns.some((check) => isActions(check) &&
+      (check.status !== "completed" || !["success", "neutral", "skipped"].includes(String(check.conclusion))) &&
+      !safeSuites.has(rec(check.check_suite)?.id));
+    // Current attempt-1 jobs all participate. Only potentially droppable checks need classification.
+    // At the read budget, unmapped checks stay rather than using incomplete evidence to drop them.
+    const membership = await readJobMembership(ctx, token, base, needsMembership ? candidates : []);
     const actions = allRuns.filter((check) => {
       if (!isActions(check)) return false;
       const job = typeof check.id === "number" ? membership.get(check.id) : undefined;

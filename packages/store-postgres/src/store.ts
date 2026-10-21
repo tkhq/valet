@@ -333,6 +333,7 @@ function entryInsertParams(row: EntryInsertRow): unknown[] {
 }
 
 export class PgSessionStore implements SessionStore {
+  private readonly dueBadRowLogTimes = new Map<string, number>();
   constructor(private readonly db: PgDb) {}
 
   async saveSession(session: SessionData): Promise<void> {
@@ -1540,7 +1541,9 @@ export class PgSessionStore implements SessionStore {
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running'))${keyset}
+          OR (kind = 'event' AND status = 'running' AND
+              (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1 OR
+               octet_length(COALESCE(event_seen, '[]')) >= ${3 * EVENT_DELIVERED_MAX_KEYS + 1})))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
@@ -1548,7 +1551,7 @@ export class PgSessionStore implements SessionStore {
     // mapGoodRows skips, or an event that is not due, never ends pagination early.
     const last = r.rows[r.rows.length - 1];
     const next = r.rows.length < limit || !last ? null : { createdAt: toNum(last.created_at, "created_at"), id: asString(last.id, "id") };
-    const rows = mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)))
+    const rows = mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)), this.dueBadRowLogTimes)
       .filter((row) => row.kind !== "event" || (row.eventBuffer?.length ?? 0) > 0 ||
         (row.eventSeen?.length ?? 0) >= EVENT_DELIVERED_MAX_KEYS || (row.deadlineAt !== undefined && row.deadlineAt <= now));
     return { rows, next };
@@ -1580,6 +1583,7 @@ export class PgSessionStore implements SessionStore {
     const bounded = boundEventDigest(digest);
     // Both subqueries run against the locked UPDATE row. A concurrent append
     // cannot restore a source that this statement collapsed (INV-E4).
+    // Row-lock admission order is the sequence; timestamp text never rejects a new trigger.
     const sameGroup = `$2::jsonb ? 'derive' AND COALESCE(e->>'derive' = $2::jsonb->>'derive', false)
       AND COALESCE((SELECT subject FROM jsonb_array_elements_text(e->'subjects') AS s(subject)
                      WHERE subject ~ '@[0-9a-fA-F]+$' LIMIT 1), '') = $6`;
@@ -1607,8 +1611,6 @@ export class PgSessionStore implements SessionStore {
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
             AND jsonb_array_length(${retained("COALESCE(event_buffer, '[]')::jsonb")}) < $4
-            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
-                             WHERE (${sameGroup}) AND e->>'occurredAt' > $2::jsonb->>'occurredAt')
             AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e
@@ -1867,14 +1869,23 @@ async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
  * `valet.wakeups.bad_rows`, so one bad row never stops the whole sweep
  * (fix wave 2, M5). The count pages a human; the row stays for them.
  */
-function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T): T[] {
+const BAD_ROW_LOG_INTERVAL_MS = 5 * 60_000;
+
+function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T, logTimes?: Map<string, number>): T[] {
   const out: T[] = [];
   for (const raw of rows) {
     try {
       out.push(map(raw));
     } catch (err) {
       recordWakeupBadRow(table);
-      console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+      const key = `${table}:${JSON.stringify(raw.id)}`;
+      const now = Date.now();
+      if (logTimes) for (const [id, at] of logTimes) if (at + BAD_ROW_LOG_INTERVAL_MS <= now) logTimes.delete(id);
+      if (!logTimes?.has(key)) {
+        if (logTimes && logTimes.size >= 1024) logTimes.delete(logTimes.keys().next().value ?? "");
+        logTimes?.set(key, now);
+        console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+      }
     }
   }
   return out;

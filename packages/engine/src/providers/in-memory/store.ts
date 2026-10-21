@@ -413,7 +413,8 @@ export class InMemorySessionStore implements SessionStore {
     }
     const collapsed = bounded.derive === undefined ? [] : buffer.filter((source) =>
       source.derive === bounded.derive && eventSourceCommit(source) === eventSourceCommit(bounded));
-    if (collapsed.some((source) => source.occurredAt > bounded.occurredAt)) return false;
+    // Serialized admission order is the monotonic sequence. Every new source
+    // replaces the trigger, even when provider timestamps tie or arrive out of order.
     const retained = buffer.filter((source) => !collapsed.includes(source));
     if (retained.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();

@@ -331,10 +331,19 @@ subject.
    Every other event on the head SHA has its own workflow/event key.
    This includes `pull_request_review` and `pull_request_target` on that SHA.
    `/actions/runs?head_sha=` returns one row per run id, with its latest `run_attempt`.
-   If any Actions check is non-passing or pending, read `/actions/runs/{run_id}/jobs?filter=all` for every listed workflow run.
-   Read jobs serially and paginate each response within the safety limit.
-   The jobs response contains all attempts. Each job's `id` is its check-run id.
-   Map each job id to its run and `run_attempt`.
+   Read jobs only when a non-passing Actions check is unmapped or could be dropped.
+   Only superseded runs, schedule/dispatch runs, and runs with `run_attempt > 1` need membership reads.
+   Every job of a current attempt-1 run participates, so that run needs no jobs read.
+   Read `/actions/runs/{run_id}/jobs?filter=all` with four workers and an eight-second membership budget.
+   Each derive permits at most 32 GitHub requests, including at most 16 jobs pages.
+   Reserve four request slots for remaining status and head reads.
+   At the membership cap or deadline, keep unclassified checks conservatively.
+   Completed pages of finished runs are cached by org, repository, run id, and attempt.
+   The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
+   Retries resume unfinished pagination rather than starting again at page one.
+   The jobs response contains all attempts. Parse the final path segment of `check_run_url` for its check id.
+   Fall back to the job's `id` when that URL is absent or malformed.
+   Map each check id to its run and `run_attempt`.
    Drop an Actions check only when that mapping proves one of these conditions:
    - Its attempt is older than its run's latest attempt.
    - Its run is superseded under `(workflow_id, event)`.
@@ -397,7 +406,11 @@ deadline ends that wait.
 | Head-SHA `pull_request_target` in progress | `null` |
 | Labeled retrigger skips every job after synchronize failure, no other checks | `null` |
 | Same labeled retrigger, other selected checks succeeded | status `success` |
-| Jobs map an older failed attempt and a passed latest attempt of one run | status `success` |
+| Same-suite rerun, `filter=latest` exposes only the passed new attempt | status `success`, no jobs reads |
+| Defensive changed-suite snapshot, jobs map older failed and current passed attempts | status `success` |
+| 28 completed runs and 900 ms jobs latency | delivers before the 20-second deadline |
+| Matrix exceeds membership page budget | keeps unclassified checks, next call resumes cached pagination |
+| Mixed-precision completion arrives during an earlier derive returning `null` | new source stays, next pass delivers |
 | Non-Actions App: older suite failed `lint`, newer suite passed a different `test` | status `failure` |
 | Non-Actions App: same name across suites, latest completion passed | status `success` |
 | Distinct selected workflow/events share a job name | every workflow/event participates |
@@ -453,7 +466,9 @@ Each write method is one statement.
   `kind = "event"`.
   It refuses a `dedupeKey` in `event_buffer`, `event_seen`, or `event_source_seen`.
   Before applying the 200-digest cap, collapse sources for the same `(waiter, derive, commit)`.
-  Keep the latest `occurredAt`, or the latest admitted source when times are equal.
+  Keep the latest admitted source. Serialized admission order is its monotonic sequence.
+  Provider timestamps are metadata, not admission gates, even when precision differs or events arrive out of order.
+  A new trigger must survive removal of a source already being derived.
   Record replaced source keys only in bounded `event_source_seen`, never in delivered history.
   Different commits, derive keys, and direct matches remain separate.
   Collapse and append share the same atomic write, including the source replay update.
@@ -482,14 +497,19 @@ Each write method is one statement.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty, whose delivered-key budget is exhausted, or whose `deadlineAt` has passed.
-  The global SQL query selects active event candidates without parsing persisted text.
+  The global SQL query prefilters event candidates without parsing persisted text.
+  Select nonempty buffer text, expired deadlines, or seen text of at least `3 * 4096 + 1` bytes.
+  Even 4096 empty JSON string keys require that many bytes, so no capped row is excluded.
+  Small corrupt idle histories stay unread until the row otherwise becomes due.
   TypeScript applies the buffer, cap, and deadline predicates after per-row decoding.
   Invalid JSON, wrong shapes, and NUL-containing seen keys take the bad-row logging path.
   The cursor uses raw candidate rows, including corrupt rows and valid events that are not due.
   A page can have no returned rows and still have a next cursor.
-  This scan reads idle active event rows too, but does not derive or dispatch them.
+  Large below-cap histories can be false-positive candidates, but canonical empty idle rows are not loaded.
+  Due-row decode failures still count each time. Their log is limited to once per row per five minutes.
+  The log cache retains at most 1024 row ids per store instance.
   No schema change or count backfill is needed.
-  The query adds no PostgreSQL requirement over `dev-v2`; The supported PostgreSQL minimum for this code is 14, also compatible with 15 and 16.
+  The query adds no PostgreSQL requirement over `dev-v2`. The supported minimum is PostgreSQL 14.
   It uses neither `IS JSON` nor JSONB casts in the global due query.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
@@ -709,6 +729,7 @@ step that returns early for an event that no subscription matched.
    A response sets the deadline before another in-flight group starts its next read.
    Other installations remain independent. Success and `null` results never clear an installation deadline.
    The shared deadline lives in the API deriver. Restarting the API clears this transient throttle.
+   Each derive removes expired installation deadlines, including installations no longer requested.
    A 401 refreshes the cached installation token and retries the request once.
    Concurrent forced refreshes share one in-flight mint per installation.
    Repeated 401 responses keep the source with backoff starting at one second and doubling to 15 minutes.

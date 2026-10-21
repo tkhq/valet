@@ -62,27 +62,43 @@ function runDueScanSafetyTests(factory: () => Promise<PgSessionStore>, db: PgDb)
   it.each(["not json", "{}", "null", '"scalar"', '["\\u0000"]'])("isolates malformed event_seen %s during the global due scan", async (seen) => {
     const store = await factory();
     const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
-    await store.createWakeup({ ...base, id: "bad_event", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: `bad_${seen}`, kind: "event", status: "running", deadlineAt: 5 });
     await store.createWakeup({ ...base, id: "good_timer", kind: "timer", status: "pending", fireAt: 5 });
-    await db.query(`UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'bad_event'`, [seen]);
+    await db.query(`UPDATE engine_wakeups SET event_seen = $1 WHERE id = $2`, [seen, `bad_${seen}`]);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const due = await store.listDueWakeups(10, 10);
       expect(due.rows.map((row) => row.id)).toEqual(["good_timer"]);
-      expect(errors).toHaveBeenCalledWith(expect.stringContaining("bad_event"), expect.anything());
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("bad_"), expect.anything());
     } finally { errors.mockRestore(); }
   });
 
   it("advances through an empty candidate page to a healthy due timer", async () => {
     const store = await factory();
     const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
-    await store.createWakeup({ ...base, id: "idle_event", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: "large_idle_event", kind: "event", status: "running", deadlineAt: 1000, eventSeen: ["x".repeat(3 * 4096 + 1)] });
     await store.createWakeup({ ...base, id: "due_timer", kind: "timer", status: "pending", createdAt: 2, fireAt: 5 });
     const first = await store.listDueWakeups(10, 1);
     expect(first.rows).toEqual([]);
-    expect(first.next).toEqual({ createdAt: 1, id: "idle_event" });
+    expect(first.next).toEqual({ createdAt: 1, id: "large_idle_event" });
     expect((await store.listDueWakeups(10, 1, first.next ?? undefined)).rows.map((row) => row.id)).toEqual(["due_timer"]);
   });
+  it("does not decode small corrupt idle histories, and dedupes logs for due corrupt histories", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: "bad_idle", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: "due_timer", kind: "timer", status: "pending", fireAt: 5 });
+    await db.query("UPDATE engine_wakeups SET event_seen = 'invalid idle' WHERE id = 'bad_idle'");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.listDueWakeups(10, 10)).rows.map((row) => row.id)).toEqual(["due_timer"]);
+      expect(log).not.toHaveBeenCalled();
+      await store.listDueWakeups(1000, 10);
+      await store.listDueWakeups(1001, 10);
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
 }
 
 describe("PgSessionStore (PGlite)", () => {

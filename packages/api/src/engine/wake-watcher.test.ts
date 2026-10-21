@@ -1317,6 +1317,59 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect((await h.store.getWakeup("wk_second"))?.eventBuffer).toHaveLength(1);
   });
 
+  it("checks installation cooldown before minting or reading a token for another waiter", async () => {
+    const h = harness();
+    const appToken = vi.fn(async () => "token");
+    const request = vi.fn<typeof fetch>(async () => new Response("secondary rate limit", { status: 403 }));
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "org-1",
+      contextFor: (orgId) => ({ orgId, appToken, fetch: request, rateLimitKey: async () => "github:installation:token-test" }),
+    });
+    const source = digest(1, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
+    expect((await deriveEvent(eventRow(), source)).result).toBe("error");
+    expect((await deriveEvent(eventRow({ id: "second" }), { ...source, dedupeKey: "new-source" })).result).toBe("error");
+    expect(appToken).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, 2])("delivers 28 completed workflows at 900 ms jobs latency within the derive deadline (attempt %s)", async (attempt) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    let active = 0;
+    let peak = 0;
+    let jobs = 0;
+    const http: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname.endsWith("/pulls/42")) return Response.json({ head: { sha: "aaaa" } });
+      if (url.pathname.endsWith("/check-runs")) return Response.json({ check_runs: [{ id: 10, app: { id: 1, slug: "github-actions" }, check_suite: { id: 1 }, name: "test", status: "completed", conclusion: "failure" }] });
+      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: Array.from({ length: 28 }, (_, i) => ({ id: i + 1, workflow_id: i + 1, run_attempt: attempt, event: "pull_request", check_suite_id: i + 1, status: "completed" })) });
+      if (url.pathname.endsWith("/jobs")) {
+        jobs++; peak = Math.max(peak, ++active);
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        active--;
+        const id = Number(url.pathname.split("/").at(-2));
+        return Response.json({ jobs: [{ id: id * 10, run_attempt: attempt, check_run_url: `https://api.github.com/repos/acme/lean-proofs/check-runs/${id * 10}` }] });
+      }
+      if (url.pathname.endsWith("/status")) return Response.json({ statuses: [] });
+      throw new Error(`Unexpected read ${url.pathname}`);
+    };
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => `latency-${attempt}`,
+      contextFor: (orgId) => ({ orgId, appToken: async () => "token", fetch: http }),
+    });
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] })] }));
+    try {
+      let settled = false;
+      const sweep = h.watcher({ deriveEvent }).sweep(NOW).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(settled).toBe(true);
+      await sweep;
+      expect(jobs).toBe(attempt === 1 ? 0 : 16);
+      expect(peak).toBeLessThanOrEqual(4);
+      expect(h.prompt).toHaveBeenCalledTimes(1);
+      expect((await h.store.getWakeup("wk_ev"))?.status).toBe("done");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("retains rate-limited sources and retries only after the cooldown", async () => {
     const h = harness();
     let now = NOW;

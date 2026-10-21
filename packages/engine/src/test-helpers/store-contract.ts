@@ -986,15 +986,23 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
           store.appendEventMatch("wk_ev", { ...base, dedupeKey: "latest", occurredAt: "2026-10-20T00:00:00Z" }, 21),
           store.appendEventMatch("wk_ev", digest({ dedupeKey: "direct" }), 22),
         ]);
-        expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((entry) => entry.dedupeKey).sort()).toEqual(["direct", "latest"]);
+        const entries = (await store.getWakeup("wk_ev"))?.eventBuffer ?? [];
+        expect(entries).toHaveLength(2);
+        expect(entries.some((entry) => entry.dedupeKey === "direct")).toBe(true);
+        expect(entries.filter((entry) => entry.derive === "checks")).toHaveLength(1);
       });
 
-      it("does not replace a source with an older out-of-order event", async () => {
+      it.each([
+        ["2026-10-21T05:00:00Z", "2026-10-21T05:00:00.500Z"],
+        ["2026-10-21T05:00:00.500Z", "2026-10-21T05:00:00Z"],
+        ["2026-10-21T05:00:00Z", "2026-10-21T05:00:00.000Z"],
+      ])("admits a new source after %s at %s using admission order", async (first, second) => {
         await store.createWakeup(eventWaiter());
-        const latest = digest({ derive: "checks", dedupeKey: "latest", occurredAt: "2026-10-20T10:00:00Z" });
-        expect(await store.appendEventMatch("wk_ev", latest, 20)).toBe(true);
-        expect(await store.appendEventMatch("wk_ev", { ...latest, dedupeKey: "older", occurredAt: "2026-10-19T10:00:00Z" }, 21)).toBe(false);
-        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([latest]);
+        const initial = digest({ derive: "checks", dedupeKey: "first", occurredAt: first });
+        expect(await store.appendEventMatch("wk_ev", initial, 20)).toBe(true);
+        const next = { ...initial, dedupeKey: "second", occurredAt: second };
+        expect(await store.appendEventMatch("wk_ev", next, 21)).toBe(true);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([next]);
       });
 
       it("appendEventMatch refuses a digest past the 200-digest buffer cap", async () => {
