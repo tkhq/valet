@@ -193,10 +193,32 @@ describe("CheckpointList", () => {
   });
 
   it("ends a settled run's leftover intent with the run, not the page clock", () => {
-    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} checkpoints={[
+    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} settled checkpoints={[
       { nodeId: "wait", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 1_000 },
     ]} />);
     expect(screen.getAllByRole("listitem")[0].textContent).toContain("5.0s");
+  });
+
+  it("labels a step that never finished in a settled run Stopped, not Running", () => {
+    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} settled checkpoints={[
+      { nodeId: "hold", iteration: 0, status: "intent", startedAt: 1_000, createdAt: 1_000 },
+    ]} />);
+    const row = screen.getAllByRole("listitem")[0];
+    expect(row.textContent).toContain("Stopped");
+    expect(row.textContent).not.toContain("Running");
+    expect(row.textContent).not.toContain("so far");
+    expect(row.textContent).toContain("This step stopped with the run before it produced output.");
+    expect(row.querySelector("details")?.open).toBe(false);
+  });
+
+  it("counts a settled group's unfinished items as stopped", () => {
+    render(<CheckpointList now={86_400_000} timeline={{ start: 0, end: 6_000 }} settled checkpoints={[
+      { nodeId: "each", iteration: 0, status: "completed", startedAt: 1_000, createdAt: 2_000 },
+      { nodeId: "each", iteration: 1, status: "intent", startedAt: 1_000, createdAt: 1_000 },
+    ]} />);
+    const [group] = screen.getAllByRole("listitem");
+    expect(group.textContent).toContain("2 items · 1 completed · 1 stopped");
+    expect(group.textContent).not.toContain("Running");
   });
 
   it("times a running step from its first start, not from a rewritten intent", () => {
