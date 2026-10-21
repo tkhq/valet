@@ -4,7 +4,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { recordAttentionDeliveryFailure, recordAttentionDeliveryRejected, registerAttentionQueueMetrics } from "../observability/delivery-metrics.js";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { matchesGateOccurrence } from "@valet/workflow";
-import { attentionAudience, type AttentionDeps, type AttentionEvent } from "../orchestrator/attention.js";
+import { attentionRecipientAllowed, type AttentionChannelDeliverer, type AttentionDeps, type AttentionEvent } from "../orchestrator/attention.js";
 import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowCheckpoints, workflowRuns, workflowSignals } from "../schema/index.js";
 
 /** Gates can end before their read marker arrives. Read durable state independently. */
@@ -43,15 +43,11 @@ export const ATTENTION_BATCH_TIMEOUT_MS = 90_000;
 /** Trust producer-before-parking state only during this short enqueue window. */
 export const ATTENTION_IMMEDIATE_GATE_GRACE_MS = 5_000;
 const startedAt = new WeakMap<AppDb, number>();
-interface DrainRequest {
-  deps: AttentionDeps;
-  now: number;
-  immediateIds?: string[];
-  selectAll: boolean;
-}
 interface DrainState {
   promise: Promise<void>;
-  requested?: DrainRequest;
+  now: number;
+  immediateIds: Set<string>;
+  requested: boolean;
 }
 /** One bounded batch per transport. Requests during a batch schedule another selection. */
 const inFlight = new WeakMap<AppDb, Map<string, DrainState>>();
@@ -68,27 +64,25 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
   let running = inFlight.get(deps.db);
   if (!running) { running = new Map(); inFlight.set(deps.db, running); }
   await Promise.all((deps.channels ?? []).map(tier => {
-    const request: DrainRequest = { deps: { ...deps, channels: [tier] }, now, immediateIds, selectAll: immediateIds === undefined };
     const existing = running.get(tier.id);
     if (existing) {
-      const previous = existing.requested;
-      existing.requested = { ...request, now: Math.max(now, previous?.now ?? now),
-        selectAll: request.selectAll || previous?.selectAll === true,
-        immediateIds: [...new Set([...(previous?.immediateIds ?? []), ...(immediateIds ?? [])])],
-      };
+      existing.now = Math.max(now, existing.now);
+      for (const id of immediateIds ?? []) existing.immediateIds.add(id);
+      existing.requested = true;
       return existing.promise;
     }
     if (tier.enabled?.() !== false && tier.ready?.() === false && now - startedAt.get(deps.db)! < ATTENTION_STARTUP_GRACE_MS) return;
-    const state: DrainState = { promise: Promise.resolve() };
+    const state: DrainState = { promise: Promise.resolve(), now, immediateIds: new Set(immediateIds), requested: true };
     state.promise = (async () => {
-      let next: typeof request | undefined = request;
-      while (next) {
-        state.requested = undefined;
+      while (state.requested) {
+        state.requested = false;
+        const ids = state.immediateIds;
+        state.immediateIds = new Set();
         const controller = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
-            drainTier(next, controller.signal),
+            drainTier(deps, tier, state.now, ids, controller.signal),
             new Promise<void>(resolve => {
               timer = setTimeout(() => {
                 controller.abort();
@@ -98,8 +92,10 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
               }, ATTENTION_BATCH_TIMEOUT_MS);
             }),
           ]);
+        } catch (err) {
+          recordAttentionDeliveryFailure(false);
+          console.error(`[attention] ${tier.id} selection failed; retry the drain:`, err);
         } finally { clearTimeout(timer); }
-        next = state.requested;
       }
     })().finally(() => { running.delete(tier.id); });
     running.set(tier.id, state);
@@ -107,32 +103,30 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
   }));
 }
 
-async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest, signal: AbortSignal): Promise<void> {
-  const tier = deps.channels?.[0];
-  if (!tier) return;
+async function drainTier(deps: AttentionDeps, tier: AttentionChannelDeliverer, now: number, immediateIds: Set<string>, signal: AbortSignal): Promise<void> {
   const dueCondition = and(
     inArray(pendingChannelDeliveries.status, ["pending", "sending"]),
     lte(pendingChannelDeliveries.deliverAfter, now),
   );
   const due = await deps.db.select().from(pendingChannelDeliveries).where(and(
     dueCondition, eq(pendingChannelDeliveries.tierId, tier.id),
-    !selectAll && immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
   )).orderBy(asc(pendingChannelDeliveries.attempts), asc(pendingChannelDeliveries.deliverAfter)).limit(20);
   await mapBounded(due, 4, async job => {
     if (signal.aborted) return;
     const event = job.event;
+    let claimed: typeof pendingChannelDeliveries.$inferSelect | undefined;
     const claimedAt = Math.max(now, Date.now());
-    // Repeat the due predicate on the outer update to fence concurrent drains.
-    // A process crash leaves sending recoverable after the durable deadline.
-    const [claimed] = await deps.db.update(pendingChannelDeliveries).set({
-      status: "sending", sendingAt: claimedAt,
-      firstSendingAt: sql`coalesce(${pendingChannelDeliveries.firstSendingAt}, ${pendingChannelDeliveries.sendingAt}, ${claimedAt})`,
-      deliverAfter: claimedAt + ATTENTION_SENDING_TIMEOUT_MS,
-      attempts: sql`${pendingChannelDeliveries.attempts} + 1`, lastError: null,
-    }).where(and(eq(pendingChannelDeliveries.id, job.id), dueCondition)).returning();
-    if (!claimed || signal.aborted) return;
-    const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
     try {
+      // Repeat the due predicate on the outer update to fence concurrent drains.
+      // A process crash leaves sending recoverable after the durable deadline.
+      [claimed] = await deps.db.update(pendingChannelDeliveries).set({
+        status: "sending", sendingAt: claimedAt,
+        firstSendingAt: sql`coalesce(${pendingChannelDeliveries.firstSendingAt}, ${pendingChannelDeliveries.sendingAt}, ${claimedAt})`,
+        deliverAfter: claimedAt + ATTENTION_SENDING_TIMEOUT_MS,
+        attempts: sql`${pendingChannelDeliveries.attempts} + 1`, lastError: null,
+      }).where(and(eq(pendingChannelDeliveries.id, job.id), dueCondition)).returning();
+      if (!claimed || signal.aborted) return;
+      const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
       if (!event) {
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", lastError: null }).where(fence);
         console.error(`[attention] dropped job ${job.id}: its event is JSON null`);
@@ -142,61 +136,66 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest, s
       if (job.notificationId) {
         const [row] = await deps.db.select({ readAt: notifications.readAt }).from(notifications)
           .where(and(eq(notifications.id, job.notificationId), eq(notifications.userId, job.userId))).limit(1);
+        signal.throwIfAborted();
         handled ||= !row || row.readAt !== null;
       }
       // The exemption ends while a producer waits behind an active batch, not when that batch selected it.
       const age = Math.max(claimedAt, Date.now()) - job.createdAt;
-      const freshImmediate = immediateIds?.includes(job.id) && age >= 0 && age < ATTENTION_IMMEDIATE_GATE_GRACE_MS;
+      const freshImmediate = immediateIds.has(job.id) && age >= 0 && age < ATTENTION_IMMEDIATE_GATE_GRACE_MS;
       if (!handled && !freshImmediate && !await attentionGatePending(deps, event)) handled = true;
+      signal.throwIfAborted();
       const [preference] = await deps.db.select().from(userNotificationPreferences).where(and(
         eq(userNotificationPreferences.userId, job.userId), eq(userNotificationPreferences.kind, event.kind),
       )).limit(1);
+      signal.throwIfAborted();
       if (event.owner.type === "team" && preference?.teamDm !== true) handled = true;
-      if (!handled && tier.recipientEnabled && !await tier.recipientEnabled(job.userId)) handled = true;
+      if (!handled && tier.recipientEnabled && !await tier.recipientEnabled(job.userId, signal)) handled = true;
+      signal.throwIfAborted();
       // Local terminal state wins even while Slack audience checks are unavailable.
-      if (!handled && !(await attentionAudience({ ...deps, access: authorizationProviders.get(deps.db) }, event, true)).audience.includes(job.userId)) handled = true;
+      if (!handled && !await attentionRecipientAllowed({ ...deps, access: authorizationProviders.get(deps.db) }, event, job.userId, signal)) handled = true;
+      signal.throwIfAborted();
       if (handled) {
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence);
         return;
       }
-      if (signal.aborted) return;
       if (tier.ready?.() === false) throw new Error("Attention transport is not ready. Check channel startup and credentials.");
+      const attempt = { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt, signal };
       let refs;
       if (job.status === "sending" && tier.reconcile) {
-        try {
-          refs = await tier.reconcile(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
-        } catch (err) {
-          // A lookup failure must not cost a blocking approval notification.
-          console.error(`attention reconciliation ${job.id} failed; resending:`, err);
-        }
+        try { refs = await tier.reconcile(job.userId, event, attempt); }
+        catch (err) { signal.throwIfAborted(); console.error(`attention reconciliation ${job.id} failed; resending:`, err); }
       }
-      // The deliverer checks the current per-link notifyAttention setting.
+      signal.throwIfAborted();
       if (!refs) {
-        if (signal.aborted) return;
-        try {
-          refs = await tier.deliver(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
-        } catch (err) {
-          // A timed-out post may have landed. Restore its gate controls now when possible.
+        try { refs = await tier.deliver(job.userId, event, attempt); }
+        catch (err) {
+          // A timed-out post may have landed. Restore its controls when this batch still owns the send.
           if (signal.aborted || !isAttentionTimeout(err) || !tier.reconcile) throw err;
-          refs = await tier.reconcile(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
+          refs = await tier.reconcile(job.userId, event, attempt);
           if (!refs) throw err;
         }
       }
+      signal.throwIfAborted();
       await deps.db.update(pendingChannelDeliveries).set({ status: "sent", messageRefs: refs ?? [], event: sql`'null'::jsonb`, lastError: null }).where(fence);
     } catch (err) {
-      const rejections = attentionRejections(err);
-      if (rejections) {
-        const dropped = await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence).returning({ id: pendingChannelDeliveries.id });
-        if (dropped.length > 0) for (const rejection of rejections) recordAttentionDeliveryRejected(rejection.channel, rejection.reason);
-        return;
+      if (signal.aborted) return;
+      const rejections = claimed && attentionRejections(err);
+      if (!rejections) recordAttentionDeliveryFailure((claimed?.attempts ?? 0) > 1);
+      console.error(`attention job ${job.id} failed; retry or check recipient rejection:`, err);
+      if (!claimed) return;
+      const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
+      try {
+        if (rejections) {
+          const dropped = await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence).returning({ id: pendingChannelDeliveries.id });
+          if (dropped.length > 0) for (const rejection of rejections) recordAttentionDeliveryRejected(rejection.channel, rejection.reason);
+        } else {
+          const lastError = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
+          const retryDelay = Math.min(30 * 60_000, ATTENTION_SENDING_TIMEOUT_MS * 2 ** Math.min(claimed.attempts - 1, 4));
+          await deps.db.update(pendingChannelDeliveries).set({ lastError, deliverAfter: Math.max(claimedAt, Date.now()) + retryDelay }).where(fence);
+        }
+      } catch (failure) {
+        console.error(`attention retry bookkeeping ${job.id} failed; its durable claim remains recoverable:`, failure);
       }
-      const lastError = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
-      // Expected provider outages remain recoverable. Backoff prevents old
-      // failures from filling every batch, without discarding a blocking gate.
-      const retryDelay = Math.min(30 * 60_000, ATTENTION_SENDING_TIMEOUT_MS * 2 ** Math.min(claimed.attempts - 1, 4));
-      await deps.db.update(pendingChannelDeliveries).set({ lastError, deliverAfter: Math.max(claimedAt, Date.now()) + retryDelay }).where(fence);
-      recordAttentionDeliveryFailure(claimed.attempts > 1);
-      console.error(`attention delivery ${job.id} failed; retrying after its sending deadline:`, err);
     }
   });
 }

@@ -26,6 +26,7 @@ export class TelegramApi {
   ) {}
 
   private async call(method: string, body: Record<string, unknown>, signal?: AbortSignal, attention = false): Promise<unknown> {
+    signal?.throwIfAborted();
     const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -72,6 +73,7 @@ export class TelegramApi {
     chatId: number | string;
     html: string;
     attention?: boolean;
+    signal?: AbortSignal;
     replyMarkup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
   }): Promise<{ messageId: number }> {
     const result = (await this.call("sendMessage", {
@@ -79,7 +81,7 @@ export class TelegramApi {
       text: opts.html,
       parse_mode: "HTML",
       reply_markup: opts.replyMarkup,
-    }, opts.attention ? AbortSignal.timeout(10_000) : undefined, opts.attention)) as { message_id: number };
+    }, opts.attention ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(10_000)]) : opts.signal, opts.attention)) as { message_id: number };
     return { messageId: result.message_id };
   }
 
@@ -102,6 +104,8 @@ export class TelegramApi {
   }
 
   async editMessageText(opts: {
+    signal?: AbortSignal;
+    attention?: boolean;
     chatId: number | string;
     messageId: number;
     html: string;
@@ -110,13 +114,13 @@ export class TelegramApi {
     await this.call("editMessageText", {
       chat_id: opts.chatId, message_id: opts.messageId, text: opts.html, parse_mode: "HTML",
       reply_markup: opts.replyMarkup,
-    });
+    }, opts.attention ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(10_000)]) : opts.signal);
   }
 
-  async editMessageReplyMarkup(opts: { chatId: number | string; messageId: number }): Promise<void> {
+  async editMessageReplyMarkup(opts: { chatId: number | string; messageId: number; signal?: AbortSignal }): Promise<void> {
     await this.call("editMessageReplyMarkup", {
       chat_id: opts.chatId, message_id: opts.messageId, reply_markup: { inline_keyboard: [] },
-    });
+    }, opts.signal);
   }
 
   async answerCallbackQuery(opts: { callbackQueryId: string; text?: string }): Promise<void> {

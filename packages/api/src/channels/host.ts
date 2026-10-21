@@ -368,7 +368,7 @@ function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string, per
  * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
 export function hasOpenDirect(
   transport: ChannelTransport,
-): transport is ChannelTransport & { openDirectConversation(externalId: string, attention?: boolean): Promise<string> } {
+): transport is ChannelTransport & { openDirectConversation(externalId: string, attention?: boolean, signal?: AbortSignal): Promise<string> } {
   return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";
 }
 
@@ -1115,12 +1115,17 @@ export class ChannelHost {
   private async workspaceSenderForSession(
     sessionId: string,
     queueItemId?: string,
+    signal?: AbortSignal,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
+      signal?.throwIfAborted();
       const base = await assistantSessionSender(this.deps.db, sessionId);
+      signal?.throwIfAborted();
       const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
+      signal?.throwIfAborted();
       return mergeAppearance(base, readAppearance(item?.metadata?.presence));
     } catch (err) {
+      signal?.throwIfAborted();
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);
       return undefined;
@@ -1247,18 +1252,23 @@ export class ChannelHost {
       actions: DecisionAction[];
     },
     sessionId: string,
+    signal?: AbortSignal,
   ): Promise<GatePromptRef> {
     // The card carries the asking assistant's identity. In a channel with
     // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
+    signal?.throwIfAborted();
     const sourceGate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
-    const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId);
+    signal?.throwIfAborted();
+    const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId, signal);
+    signal?.throwIfAborted();
     // A channel reply cannot answer an open question (one with no options),
     // so the card says where the answer goes instead of showing no control.
     const body = prompt.actions.length > 0 ? prompt.body
       : [prompt.body, OPEN_QUESTION_NOTE].filter((part): part is string => part !== undefined).join("\n\n");
     const ref = await transport.sendGatePrompt(conversationKey, {
       ...prompt,
+      signal,
       ...(body !== undefined ? { body } : {}),
       ...(sender !== undefined ? { sender } : {}),
     });
@@ -1280,8 +1290,8 @@ export class ChannelHost {
     const settled = this.settledGates.get(prompt.gateId);
     const ended = this.endedGates.get(prompt.gateId);
     const attention = prompt.attentionDeliveryId !== undefined;
-    const settlement = settled ? this.deliverGateResolution(prompt.gateId, settled, attention)
-      : ended ? this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs, attention }) : undefined;
+    const settlement = settled ? this.deliverGateResolution(prompt.gateId, settled, attention, signal)
+      : ended ? this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs, attention, signal }) : undefined;
     if (attention) {
       // The card is confirmed. A settlement edit must not hold the durable delivery batch open.
       void settlement?.catch(err => console.error(`[channels] attention gate settlement failed for ${prompt.gateId}`, err));
@@ -1304,7 +1314,7 @@ export class ChannelHost {
   }
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
-  private async deliverGateResolution(gateId: string, resolution: DecisionResolution, attention = false): Promise<void> {
+  private async deliverGateResolution(gateId: string, resolution: DecisionResolution, attention = false, signal?: AbortSignal): Promise<void> {
     // Remember the resolution BEFORE the refs check: a prompt still in
     // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
     // backfill the edit when that send lands.
@@ -1322,7 +1332,7 @@ export class ChannelHost {
     await this.settleGatePrompts(gateId, label, {
       ...(resolution.actionId !== undefined ? { actionId: resolution.actionId } : {}),
       resolvedAtMs: resolution.resolvedAt,
-      ...(attention ? { attention: true } : {}),
+      ...(attention ? { attention: true, signal } : {}),
     });
   }
 
@@ -1339,7 +1349,7 @@ export class ChannelHost {
   private async settleGatePrompts(
     gateId: string,
     label: string,
-    outcome: { actionId?: string; resolvedAtMs?: number; attention?: boolean } = {},
+    outcome: { actionId?: string; resolvedAtMs?: number; attention?: boolean; signal?: AbortSignal } = {},
   ): Promise<void> {
     let allUpdated = true;
     for (const ref of this.gatePrompts.get(gateId) ?? []) {
@@ -1347,6 +1357,7 @@ export class ChannelHost {
       const transport = this.transports.get(channelType);
       if (transport) {
         try {
+          outcome.signal?.throwIfAborted();
           await transport.updateGatePrompt(ref, { ...outcome, label });
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
@@ -1677,6 +1688,7 @@ export class ChannelHost {
     orgId: string,
     userId: string,
     gateId: string,
+    signal?: AbortSignal,
   ): Promise<
     | { ok: true; owner: SessionOwnerLike; orgId: string }
     | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
@@ -1690,7 +1702,9 @@ export class ChannelHost {
     } catch {
       return { ok: false, reason: "workflow_session_malformed" };
     }
+    signal?.throwIfAborted();
     const run = await this.deps.workflowStore.getRun(parts.runId);
+    signal?.throwIfAborted();
     if (!run) return { ok: false, reason: "workflow_session_missing" };
     if (!run.owner) return { ok: false, reason: "workflow_session_deleted" };
     const rows = await this.deps.db
@@ -1698,12 +1712,14 @@ export class ChannelHost {
       .from(workflowDefinitions)
       .where(eq(workflowDefinitions.id, run.params.workflowId))
       .limit(1);
+    signal?.throwIfAborted();
     const workflowOrgId = rows[0]?.orgId;
     if (!workflowOrgId) return { ok: false, reason: "workflow_session_deleted" };
     if (workflowOrgId !== orgId) return { ok: false, reason: "workflow_session_cross_org" };
     if (!(await this.deps.engineStore.getSession(sessionId))) {
       return { ok: false, reason: "workflow_session_deleted" };
     }
+    signal?.throwIfAborted();
     const owner: SessionOwnerLike = {
       ownerType: run.owner.ownerType,
       ownerId: run.owner.ownerId,
@@ -1712,16 +1728,18 @@ export class ChannelHost {
     const authorized = owner.ownerType === "org"
       ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
+    signal?.throwIfAborted();
     if (!authorized) return { ok: false, reason: "unauthorized" };
     // A run from a private thread or a private Slack channel's event is that
     // audience's. A named account approver may answer only their pending gate.
     const gate = await this.deps.engineStore.getDecisionGate(sessionId, gateId);
+    signal?.throwIfAborted();
     const namedApprover = gate?.status === "pending" && gateApprover(gate)?.userId === userId;
     if (owner.ownerType === "team" && !namedApprover) {
       const access = { db: this.deps.db, engineCredentials: this.deps.engineCredentials, onePassword: this.deps.onePassword, engineStore: this.deps.engineStore };
       const viewer = { orgId: workflowOrgId, userId };
-      if (!(await runOriginVisible(access, viewer, { ownerType: "team", origin: run.params.origin, actorUserId: run.actorUserId }))
-        || !(await runEventVisible(access, viewer, run.params))) {
+      if (!(await runOriginVisible(access, viewer, { ownerType: "team", origin: run.params.origin, actorUserId: run.actorUserId }, signal))
+        || !(await runEventVisible(access, viewer, run.params, signal))) {
         return { ok: false, reason: "unauthorized" };
       }
     }
@@ -1940,10 +1958,12 @@ export class ChannelHost {
       id: channelTypeFilter ? `personal-${channelTypeFilter}` : "personal-dm", order: 1, grace: "when-web-active",
       enabled: () => !channelTypeFilter || !this.unconfiguredTransports.has(channelTypeFilter),
       ready: () => transports().length > 0,
-      recipientEnabled: async userId => {
+      recipientEnabled: async (userId, signal) => {
+        signal?.throwIfAborted();
         const types = channelTypeFilter ? [channelTypeFilter]
           : [...new Set(this.deps.plugins.flatMap(plugin => (plugin.transports ?? []).map(factory => factory.channelType)))];
         const links = await Promise.all(types.map(type => identityForUser(this.deps.db, type, userId)));
+        signal?.throwIfAborted();
         return links.some(link => link && link.notifyAttention !== false);
       },
       deliverTeam: async (event): Promise<void> => {
@@ -1967,16 +1987,21 @@ export class ChannelHost {
         });
       },
       reconcile: async (userId, event, attempt) => {
+        attempt.signal?.throwIfAborted();
         if (transports().length === 0) return undefined;
         const refs: AttentionDeliveryRef[] = [];
         for (const [channelType, transport] of transports()) {
+          attempt?.signal?.throwIfAborted();
           const link = await identityForUser(this.deps.db, channelType, userId);
+          attempt.signal?.throwIfAborted();
           if (!link || link.notifyAttention === false) continue;
           if (!transport.reconcileAttention) return undefined;
-          const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId, true) : `${channelType}:dm:${link.externalId}`;
-          const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt);
+          const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId, true, attempt?.signal) : `${channelType}:dm:${link.externalId}`;
+          attempt.signal?.throwIfAborted();
+          const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt, attempt.signal);
+          attempt.signal?.throwIfAborted();
           if (!ref) return undefined;
-          if (event.gate && ref.gateCard === true && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id)) {
+          if (event.gate && ref.gateCard === true && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id, attempt?.signal)) {
             this.gateActions.set(event.gate.id, event.gate.actions);
             this.recordGatePrompt(event.gate.id, ref, event.sessionId);
             try {
@@ -1994,8 +2019,10 @@ export class ChannelHost {
         return refs;
       },
       deliver: async (userId, event, attempt): Promise<AttentionDeliveryRef[]> => {
+        attempt?.signal?.throwIfAborted();
         if (attempt && transports().length === 0) {
           const link = channelTypeFilter ? await identityForUser(this.deps.db, channelTypeFilter, userId) : undefined;
+          attempt?.signal?.throwIfAborted();
           if (channelTypeFilter && (!link || link.notifyAttention === false)) return [];
           throw new Error("No attention transport is running. Retry after channel startup.");
         }
@@ -2003,16 +2030,19 @@ export class ChannelHost {
         const refs: AttentionDeliveryRef[] = [];
         const failures: unknown[] = [];
         for (const [channelType, transport] of transports()) {
+          attempt?.signal?.throwIfAborted();
           try {
             const link = await identityForUser(this.deps.db, channelType, userId);
+            attempt?.signal?.throwIfAborted();
             if (!link || link.notifyAttention === false) continue;
             // `${channelType}:dm:${externalId}` assumes the sender's id is also
             // the address to answer on, which holds for Telegram and not for
             // Slack: `U…` names a person, `D…` names the DM with them. Ask the
             // transport to open the conversation when it knows the difference.
             const conversationKey = hasOpenDirect(transport)
-              ? await transport.openDirectConversation(link.externalId, true)
+              ? await transport.openDirectConversation(link.externalId, true, attempt?.signal)
               : `${channelType}:dm:${link.externalId}`;
+            attempt?.signal?.throwIfAborted();
             // An approval event carries its gate, so the DM can be a real
             // prompt: the same buttons the channel-thread card gets, answered
             // through the same inbound `gate_callback` path. Buttons go only
@@ -2020,7 +2050,7 @@ export class ChannelHost {
             // can be broader than the resolver set (org admins for an
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
-            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id))) {
+            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id, attempt?.signal))) {
               const ref = await this.sendAndRecordGatePrompt(
                 transport,
                 conversationKey,
@@ -2033,6 +2063,7 @@ export class ChannelHost {
                   actions: event.gate.actions,
                 },
                 event.sessionId,
+                attempt?.signal,
               );
               refs.push({ ...ref, channelType });
               continue;
@@ -2040,15 +2071,18 @@ export class ChannelHost {
             // No gate, a recipient who cannot resolve it, or a lookup that
             // failed: fall through to the plain summary with the web link.
             const sender = event.sessionId
-              ? await this.workspaceSenderForSession(event.sessionId)
+              ? await this.workspaceSenderForSession(event.sessionId, undefined, attempt?.signal)
               : undefined;
+            attempt?.signal?.throwIfAborted();
             const ref = await transport.send(conversationKey, {
+              signal: attempt?.signal,
               attentionDeliveryId,
               markdown: this.attentionMarkdown(event),
               ...(sender !== undefined ? { sender } : {}),
             });
             refs.push({ ...ref, channelType });
           } catch (err) {
+            attempt?.signal?.throwIfAborted();
             console.error(`[channels] ${channelType}: attention delivery failed`, err);
             failures.push(err);
           }
@@ -2068,28 +2102,34 @@ export class ChannelHost {
    * plain summary, which carries the web link. Throwing here instead would
    * lose the whole notification for a run that is waiting on it.
    */
-  private async mayResolveGateOverDm(sessionId: string, userId: string, gateId: string): Promise<boolean> {
+  private async mayResolveGateOverDm(sessionId: string, userId: string, gateId: string, signal?: AbortSignal): Promise<boolean> {
     try {
       const rows = await this.deps.db
         .select()
         .from(agentSessions)
         .where(eq(agentSessions.id, sessionId))
         .limit(1);
+      signal?.throwIfAborted();
       const sessionRow = rows[0];
-      if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))) {
-        return true;
-      }
+      const allowed = sessionRow && await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId));
+      signal?.throwIfAborted();
+      if (allowed) return true;
       // A `wf:` id is authorized by its run, the same way the click path
       // authorizes it — a workflow session can also own an app row.
       if (!sessionId.startsWith("wf:")) return false;
+      const orgId = this.orgId ?? await this.deps.resolveOrgId();
+      signal?.throwIfAborted();
       const workflow = await this.authorizeWorkflowGate(
         sessionId,
-        this.orgId ?? (await this.deps.resolveOrgId()),
+        orgId,
         userId,
         gateId,
+        signal,
       );
+      signal?.throwIfAborted();
       return workflow.ok;
     } catch (err) {
+      signal?.throwIfAborted();
       console.error("[channels] gate DM authorization failed", err);
       return false;
     }

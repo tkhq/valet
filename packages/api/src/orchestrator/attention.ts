@@ -36,7 +36,7 @@ import { and, eq, isNull, like, sql } from "drizzle-orm";
 import type { DecisionAction, Principal, SendRef } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
-import { governingThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
+import { governingThreadKey, isPersonalThreadKey, privateThreadOwner, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadSlackChannels, threadVisibility } from "../services/thread-access.js";
 import { notifications, pendingChannelDeliveries, orgMembers, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 
 export type AttentionKind = "notification" | "question" | "escalation" | "approval" | "review";
@@ -107,6 +107,7 @@ export interface AttentionDeliveryAttempt {
   /** Opaque per-row provider token. Never the derived durable row id. */
   deliveryId: string;
   sendingAt: number;
+  signal?: AbortSignal;
 }
 
 /** A personal delivery tier. Web rows are tier zero. */
@@ -116,7 +117,7 @@ export interface AttentionChannelDeliverer {
   /** False while a configured transport is still starting. Do not claim jobs yet. */
   ready?(): boolean;
   /** Local link/preference check only. False drops the job before remote audience checks. */
-  recipientEnabled?(userId: string): Promise<boolean>;
+  recipientEnabled?(userId: string, signal?: AbortSignal): Promise<boolean>;
   /** Stable across restarts. Used in the durable delivery key. */
   id: string;
   order: number;
@@ -233,8 +234,8 @@ export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionK
     );
 }
 
-/** Reused at delivery time so a queued event cannot retain revoked access. */
-export async function attentionAudience(deps: AttentionDeps, event: AttentionEvent, retryUnknownAccess = false): Promise<{ audience: string[]; restricted: boolean }> {
+/** Enqueue-time audience resolution. Deferred delivery checks only its own recipient. */
+export async function attentionAudience(deps: AttentionDeps, event: AttentionEvent): Promise<{ audience: string[]; restricted: boolean }> {
   const membership = await fetchMembership(deps.db, event.owner);
   // A team thread only some members may see (a person's helper or workflow
   // editor thread, or a private Slack channel's) reaches only them: no team
@@ -247,15 +248,44 @@ export async function attentionAudience(deps: AttentionDeps, event: AttentionEve
   let audience = resolveAudience(event.owner, event.kind, membership);
   if (restricted) {
     const orgId = await orgOf(deps.db, event.owner);
-    if (retryUnknownAccess && privateThreadOwner(key) === undefined && (!deps.access || !orgId)) {
-      throw new Error("Attention access checks are unavailable. Restore the authorization providers, then retry the job.");
-    }
     const shown = await Promise.all(audience.map((userId) => deps.access && orgId
-      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId }, { retryUnknownAccess })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
+      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
       : Promise.resolve(privateThreadOwner(key) === userId)));
     audience = audience.filter((_, i) => shown[i]);
   }
   return { audience, restricted };
+}
+
+/** Check one queued recipient. Other members' remote lookups cannot delay this job. */
+export async function attentionRecipientAllowed(deps: AttentionDeps, event: AttentionEvent, userId: string, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  if (event.owner.type === "user") return event.owner.id === userId;
+  const orgId = await orgOf(deps.db, event.owner);
+  signal?.throwIfAborted();
+  const [member] = await deps.db.select({ role: orgMembers.role }).from(orgMembers)
+    .where(and(eq(orgMembers.orgId, orgId ?? ""), eq(orgMembers.userId, userId))).limit(1);
+  signal?.throwIfAborted();
+  if (!member) return false;
+  if (event.owner.type === "org") return member.role === "admin";
+  const [teamMember] = await deps.db.select({ role: teamMembers.role }).from(teamMembers)
+    .where(and(eq(teamMembers.teamId, event.owner.id), eq(teamMembers.userId, userId))).limit(1);
+  signal?.throwIfAborted();
+  if (!teamMember || ((event.kind === "escalation" || event.kind === "review") && teamMember.role !== "admin")) return false;
+  const key = await teamThreadKey(deps.db, event);
+  signal?.throwIfAborted();
+  if (key === undefined) return true;
+  // Helpers and editor conversations are personal even when their metadata names channels.
+  const owner = privateThreadOwner(key);
+  if (isPersonalThreadKey(key)) return owner === userId;
+  const channels = event.sessionId && event.threadId ? await threadSlackChannels(deps.db, event.sessionId, event.threadId) : [];
+  signal?.throwIfAborted();
+  if (!deps.access || !orgId) {
+    const shared = await isSharedTeamThread(deps.db, event.owner.id, key, channels);
+    signal?.throwIfAborted();
+    if (shared) return true;
+    throw new Error("Attention access checks are unavailable. Restore the authorization providers, then retry the job.");
+  }
+  return threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId }, { retryUnknownAccess: true, signal })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } });
 }
 
 /** Insert web rows and personal delivery jobs atomically. Shared posts stay immediate. */

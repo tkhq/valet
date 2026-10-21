@@ -864,14 +864,15 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       blocks,
       attentionDeliveryId: message.attentionDeliveryId,
+      signal: message.signal,
       ...slackIdentityOverride(message.sender),
     }, fallbackBlocks);
     return { conversationKey, channelId: target.channelId, messageId: res.ts };
   }
 
-  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number): Promise<(SendRef & { gateCard?: boolean }) | null> {
+  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null> {
     const target = this.mustParse(conversationKey);
-    const found = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt);
+    const found = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt, signal);
     return found ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, found.ts), channelId: target.channelId,
       messageId: found.ts, ...(found.gateCard ? { gateCard: true } : {}) } : null;
   }
@@ -958,6 +959,7 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       blocks,
       attentionDeliveryId: gate.attentionDeliveryId,
+      signal: gate.signal,
       attentionGateCard: true,
       ...slackIdentityOverride(gate.sender),
     });
@@ -992,6 +994,7 @@ export class SlackTransport implements ChannelTransport {
     // re-render link markup.
     await this.api.updateMessage({
       attention: resolution.attention,
+      signal: resolution.signal,
       channel: target.channelId,
       ts: ref.messageId,
       text,
@@ -1338,8 +1341,8 @@ export class SlackTransport implements ChannelTransport {
    * `Date.now()` and the string build is atomic within an event-loop turn.
    * The function performs no `await` between those two points.
    */
-  async openDirectConversation(slackUserId: string, attention = false): Promise<string> {
-    const channelId = await this.api.openConversation(slackUserId, attention);
+  async openDirectConversation(slackUserId: string, attention = false, signal?: AbortSignal): Promise<string> {
+    const channelId = await this.api.openConversation(slackUserId, attention, signal);
     // Slack ts format is "seconds.microseconds" (6 fractional digits).
     // The seconds come from wall clock; the microseconds come from a local
     // counter so distinct calls always mint distinct keys within a 10^6

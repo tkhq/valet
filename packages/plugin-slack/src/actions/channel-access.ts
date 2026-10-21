@@ -26,9 +26,9 @@ export async function checkPrivateChannelAccess(
   /** Treat a direct or group direct message like a private channel: only its
    * members pass. Shared owners always treat DMs as private, regardless of
    * this option. Personal callers can require a membership check too. */
-  opts: { directIsPrivate?: boolean; ownerType?: "user" | "team" | "org"; timeoutMs?: number } = {},
+  opts: { directIsPrivate?: boolean; ownerType?: "user" | "team" | "org"; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChannelAccessResult> {
-  const signal = opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined;
+  const signal = opts.timeoutMs ? AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(opts.timeoutMs)]) : opts.signal;
   // 1. Get channel info
   const infoRes = await slackGet('conversations.info', token, { channel: channelId }, undefined, signal);
   const infoData = (await infoRes.json()) as {

@@ -86,7 +86,7 @@ describe("personal attention outbox", () => {
     await db.insert(notifications).values({ id: "local-terminal", userId: "u", kind: event.kind, urgency: "normal", title: "Choose", createdAt: 1, readAt: condition === "read" ? 2 : null });
     await db.insert(userNotificationPreferences).values({ userId: "u", kind: event.kind, teamDm: condition !== "team-dm-off" });
     await db.insert(pendingChannelDeliveries).values({ id: "terminal-test", userId: "u", tierId: tier.id, event: gated, notificationId: "local-terminal", deliverAfter: 1 });
-    const lookup = vi.spyOn(attention, "attentionAudience").mockRejectedValue(new Error("Slack membership lookup failed"));
+    const lookup = vi.spyOn(attention, "attentionRecipientAllowed").mockRejectedValue(new Error("Slack membership lookup failed"));
     const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
     try {
       await drainAttentionDeliveries({ db, channels: [{ ...tier, recipientEnabled: async () => condition !== "link-off" }] });
@@ -351,6 +351,45 @@ describe("isolated delivery execution", () => {
     } finally { release(); vi.useRealTimers(); failure.mockRestore(); log.mockRestore(); }
   });
 
+  it("contains the second claim failure, retains re-drains, and never exceeds four sends", async () => {
+    await db.insert(pendingChannelDeliveries).values(Array.from({ length: 10 }, (_, n) => ({ id: `claim-failure-${n}`, userId: "u", tierId: tier.id, event, deliverAfter: 1 })));
+    await db.execute(sql`CREATE SEQUENCE attention_claim_count`);
+    await db.execute(sql`CREATE FUNCTION fail_second_attention_claim() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.status = 'sending' AND NEW.attempts = 1 AND nextval('attention_claim_count') = 2 THEN
+          RAISE EXCEPTION 'second claim failed';
+        END IF;
+        RETURN NEW;
+      END; $$ LANGUAGE plpgsql`);
+    await db.execute(sql`CREATE TRIGGER attention_claim_failure BEFORE UPDATE ON pending_channel_deliveries FOR EACH ROW EXECUTE FUNCTION fail_second_attention_claim()`);
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let active = 0; let peak = 0;
+    const send = vi.fn(async () => { active++; peak = Math.max(peak, active); await blocked; active--; });
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const work = drainAttentionDeliveries(deps);
+    let queued: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(4));
+      queued = drainAttentionDeliveries(deps);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(active).toBe(4);
+      expect(peak).toBe(4);
+      release();
+      await Promise.all([work, queued]);
+      expect(peak).toBe(4);
+      expect(send).toHaveBeenCalledTimes(10);
+      expect((await db.select().from(pendingChannelDeliveries)).every(row => row.status === "sent")).toBe(true);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("failed"), expect.any(Error));
+    } finally {
+      release(); await Promise.all([work, queued]); log.mockRestore();
+      await db.execute(sql`DROP TRIGGER attention_claim_failure ON pending_channel_deliveries`);
+      await db.execute(sql`DROP FUNCTION fail_second_attention_claim()`);
+      await db.execute(sql`DROP SEQUENCE attention_claim_count`);
+    }
+  });
+
   it("bounds concurrency and stamps leases when each row is claimed", async () => {
     await db.insert(pendingChannelDeliveries).values(Array.from({ length: 5 }, (_, n) => ({
       id: `claim-${n}`, userId: "u", tierId: tier.id, event, deliverAfter: 1,
@@ -532,6 +571,39 @@ describe("outbox authorization dependencies", () => {
       return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
     });
   }
+
+  it("keeps shared team notifications independent of remote authorization providers", async () => {
+    const { approval } = await privateApproval();
+    await db.insert(pendingChannelDeliveries).values({ id: "shared-team", userId: "u", tierId: tier.id, event: { ...approval, audienceKey: "web:default" }, deliverAfter: 1 });
+    await drainAttentionDeliveries({ db, channels: [tier] });
+    expect(await pending()).toMatchObject({ status: "sent" });
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it("delivers only this recipient even when another member's membership lookup is rate-limited", async () => {
+    const { access, approval } = await privateApproval();
+    for (const userId of ["other-1", "other-2", "other-3", "other-4"]) {
+      await db.insert(teamMembers).values({ teamId: "private-team", userId, role: "member" });
+      await db.insert(orgMembers).values({ orgId: "o", userId, role: "member" });
+      await db.insert(userIdentityLinks).values({ id: userId, provider: "slack", externalId: userId, userId, createdAt: 1 });
+    }
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      const body = url.pathname.endsWith("conversations.members")
+        ? url.searchParams.has("cursor") ? { ok: false, error: "ratelimited" }
+          : { ok: true, members: ["UMEMBER"], response_metadata: { next_cursor: "other-members" } }
+        : { ok: true, channel: { is_private: true } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+    try {
+      await db.insert(pendingChannelDeliveries).values({ id: "recipient-only", userId: "u", tierId: tier.id, event: approval, deliverAfter: 1 });
+      await drainAttentionDeliveries({ db, channels: [tier], access });
+      expect(await pending()).toMatchObject({ status: "sent", lastError: null });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(fetch.mock.calls.filter(([input]) => String(input).includes("conversations.members"))).toHaveLength(1);
+      expect(fetch.mock.calls.some(([input]) => String(input).includes("cursor="))).toBe(false);
+    } finally { fetch.mockRestore(); resetThreadAccessCache(); }
+  });
 
   it.each(["access-first", "access-last", "running-access"])("retains private-channel access when merging queued drains: %s", async order => {
     const { access, approval } = await privateApproval();

@@ -27,6 +27,18 @@ describe("TelegramTransport", () => {
     await fake.close();
   });
 
+  it.each(["summary", "gate", "settlement"])("does not begin an aborted attention %s request or fallback", async kind => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const signal = AbortSignal.abort(new Error("batch expired"));
+    try {
+      const call = kind === "summary" ? transport.send("telegram:dm:99", { markdown: "Summary", attentionDeliveryId: "job", signal })
+        : kind === "gate" ? transport.sendGatePrompt("telegram:dm:99", { gateId: "gate", title: "Approve", actions: [], attentionDeliveryId: "job", signal })
+        : transport.updateGatePrompt({ conversationKey: "telegram:dm:99", messageId: "1" }, { label: "Settled", attention: true, signal });
+      await expect(call).rejects.toThrow("batch expired");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { fetchMock.mockRestore(); }
+  });
+
   it("conversationKey codec round-trips", () => {
     expect(conversationKeyForChat(99)).toBe("telegram:dm:99");
     expect(chatIdFromConversationKey("telegram:dm:99")).toBe("99");

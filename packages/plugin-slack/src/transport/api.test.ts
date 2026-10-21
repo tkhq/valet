@@ -160,3 +160,51 @@ describe("definite attention rejections", () => {
     await expect(api.openConversation("U123", true)).rejects.not.toBeInstanceOf(ChannelDeliveryRejectedError);
   });
 });
+
+
+describe("attention batch cancellation", () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it.each(["post", "update", "open", "history"])("does not begin an aborted %s request", async method => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    const signal = AbortSignal.abort(new Error("batch expired"));
+    const api = new SlackApi("test");
+    const call = method === "post" ? api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job", signal })
+      : method === "update" ? api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true, signal })
+      : method === "open" ? api.openConversation("U123", true, signal)
+      : api.findAttentionMessage("D123", "job", 0, signal);
+    await expect(call).rejects.toThrow("batch expired");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["post", "update", "open", "history"])("aborts an in-flight %s fetch", async method => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchMock = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      requestSignal = init?.signal;
+      requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new SlackApi("test"); const signal = controller.signal;
+    const call = method === "post" ? api.postMessage({ channel: "D123", text: "Approval", attentionDeliveryId: "job", signal })
+      : method === "update" ? api.updateMessage({ channel: "D123", ts: "1", text: "Settled", attention: true, signal })
+      : method === "open" ? api.openConversation("U123", true, signal)
+      : api.findAttentionMessage("D123", "job", 0, signal);
+    controller.abort(new Error("batch expired"));
+    await expect(call).rejects.toThrow("batch expired");
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not request another history page after abort while reading its response", async () => {
+    const controller = new AbortController();
+    const response = jsonResponse(200, {});
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      controller.abort(new Error("batch expired"));
+      return { ok: true, messages: [], response_metadata: { next_cursor: "next" } };
+    });
+    const fetchMock = vi.fn().mockResolvedValue(response); vi.stubGlobal("fetch", fetchMock);
+    await expect(new SlackApi("test").findAttentionMessage("D123", "job", 0, controller.signal)).rejects.toThrow("batch expired");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});

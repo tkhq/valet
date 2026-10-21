@@ -62,13 +62,23 @@ Security handlers and workflow run drives wait for durable insertion, not person
 Each transport has one independent batch in flight per API database handle.
 Each batch runs at most four jobs concurrently and selects at most 20 jobs.
 A slow Slack batch cannot hold Telegram's next batch.
+The batch signal follows delivery, reconciliation, host preparation, gate settlement backfills, and provider HTTP requests.
+After each awaited preparation step, the host checks the signal before it starts another provider call.
+Provider clients check the signal before every post, update, history page, and retry, and pass it to fetch.
+A request sent before cancellation can still land. Recovery reconciles that ambiguous send.
+An abandoned worker cannot start another provider request after cancellation.
 Dispatcher shutdown does not await personal provider calls.
 Unfinished sends retain their durable leases for restart recovery.
 Configured transports get a 30-second startup grace from the first dispatcher drain.
 During that window, unready transports do not claim jobs or spend attempts.
 After the window, an unready transport records failed attempts and uses the normal recovery backoff.
 A failed startup therefore raises the recovery failure alert.
-A drain request during an active batch schedules another row selection after that batch.
+A drain request during an active batch sets one re-drain flag.
+Each batch reselects all due rows for its tier. Requests do not carry replacement dependencies or selection filters.
+Immediate IDs exist only to cover the short producer-before-parking window and are consumed per batch.
+The next selection retains IDs and the latest requested time even when one job fails.
+Claims, delivery failures, and retry bookkeeping errors stay inside each job handler.
+One failed claim cannot reject the bounded mapper or release the tier while its sibling workers remain active.
 The outbox retains authorization providers per database handle, independently of the queued requests.
 An access-less producer cannot remove these providers when its request merges with a dispatcher request.
 A later provider set retains the existing optional 1Password provider when the new set omits it.
@@ -85,6 +95,9 @@ Before sending a deferred job, the drain checks:
 2. The engine decision gate is pending, when the event carries one.
 3. The workflow checkpoint still holds the same unanswered approval, when the event references one.
 4. The recipient still belongs to the event's authorized audience.
+   Delivery checks membership and thread visibility only for this job's recipient.
+   Enqueue-time audience resolution still checks all recipients.
+   Another member's failed or rate-limited lookup cannot block this recipient.
    A definite denial drops the job.
    Slack errors such as `channel_not_found`, `not_in_channel`, and `is_archived` are definite denials.
    Unknown channel privacy or a failed membership lookup retries without sending.
@@ -121,7 +134,9 @@ The same statement moves its next deadline forward by two minutes from the claim
 The update repeats the due predicate to fence concurrent workers.
 Only the winning worker sends.
 Each completion also checks the attempt number, so a stale worker cannot overwrite recovery.
-Each tier batch has a 90-second backstop, shorter than its sending lease.
+Each tier batch retains one 90-second cancellation deadline, shorter than its sending lease.
+Storage reads do not accept cancellation, so the deadline still releases a worker blocked before HTTP preparation.
+The signal aborts every surviving worker before the tier can start another batch.
 A timeout logs the stalled batch and increments the recovery-failure counter.
 It releases the in-memory tier lock while claimed jobs remain recoverable.
 Abandoned workers cannot claim another row or start another provider call after the timeout.
@@ -191,11 +206,11 @@ Every retry repeats the read, gate, audience, and preference checks.
 Local read markers, terminal gates, team-DM preferences, and disabled identity links drop the job before remote audience checks.
 A remote Slack outage cannot keep a locally handled job active.
 
-Only attention Slack posts, DM opens, and delivery-time audience checks use a ten-second deadline.
+Only attention Slack posts, settlement edits, DM opens, and delivery-time audience checks use a ten-second deadline.
 That deadline includes rate-limit waits and response body reads.
 Reconciliation keeps its two-second per-history-request deadline.
 Shared Slack API callers, uploads, downloads, and connection requests retain their prior timeout behavior.
-Only attention Telegram messages and gate cards have a ten-second request timeout.
+Only attention Telegram messages, gate cards, and settlement text edits have a ten-second request timeout.
 Ordinary sends, photos, documents, and downloads retain their prior timeout behavior.
 Telegram long polls retain a 40-second bound and the caller's cancellation signal.
 

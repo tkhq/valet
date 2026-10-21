@@ -1,7 +1,9 @@
+import * as workspaceSender from "../services/workspace-sender.js";
+import * as identityLinks from "./identity-links.js";
 import * as attention from "../orchestrator/attention.js";
 import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
-import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { ATTENTION_BATCH_TIMEOUT_MS, drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { webPresence } from "../services/web-presence.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -3161,6 +3163,79 @@ describe("ChannelHost.attentionDeliverer", () => {
     }));
     await vi.waitFor(() => expect(fakeTransport.gateEdits).toHaveLength(1));
     expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
+  });
+
+  it.each([false, true])("does not post after a timed-out identity lookup resumes following opt-out recovery: gate=%s", async gate => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    if (gate) await seedUserSession("cancelled-preparation");
+    const channels = [host.attentionDeliverer("fake")];
+    const queued = event(gate ? { kind: "approval", sessionId: "cancelled-preparation", gate: { id: "cancelled-gate", actions: [] } } : {});
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "cancelled-preparation", userId: USER_ID, tierId: channels[0]!.id, event: queued, deliverAfter: 1 });
+    let release = () => {}; let started = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const prepared = new Promise<void>(resolve => { started = resolve; });
+    const readIdentity = identityLinks.identityForUser;
+    let lookups = 0;
+    const lookup = vi.spyOn(identityLinks, "identityForUser").mockImplementation(async (...args) => {
+      const link = await readIdentity(...args);
+      if (++lookups === 2) { started(); await blocked; }
+      return link;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const now = Date.now();
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, now, ["cancelled-preparation"]);
+    try {
+      await prepared;
+      await vi.advanceTimersByTimeAsync(ATTENTION_BATCH_TIMEOUT_MS);
+      await work;
+      await setNotifyAttention(testDb.appDb, "fake", USER_ID, false);
+      const [claimed] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "cancelled-preparation"));
+      await drainAttentionDeliveries({ db: testDb.appDb, channels }, claimed!.deliverAfter);
+      const [job] = await testDb.appDb.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "cancelled-preparation"));
+      expect(job).toMatchObject({ status: "dropped", event: null });
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(fakeTransport.gatePrompts).toHaveLength(0);
+    } finally { release(); await work; vi.useRealTimers(); lookup.mockRestore(); log.mockRestore(); }
+  });
+
+  it.each(["gate", "sender"])("checks batch cancellation after awaited %s preparation", async phase => {
+    const store = new PgSessionStore((await freshTestPgDb()).pgdb);
+    host = await buildHost({ engineStore: store });
+    await seedUserSession("blocked-card-prep");
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const channels = [host.attentionDeliverer("fake")];
+    const queued = event({ sessionId: "blocked-card-prep", ...(phase === "gate" ? { kind: "approval", gate: { id: "g", actions: [] } } : {}) });
+    await testDb.appDb.insert(pendingChannelDeliveries).values({ id: "blocked-card-prep", userId: USER_ID, tierId: channels[0]!.id, event: queued, deliverAfter: 1 });
+    let release = () => {}; let started = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const prepared = new Promise<void>(resolve => { started = resolve; });
+    const readGate = store.getDecisionGate.bind(store);
+    const readSender = workspaceSender.assistantSessionSender;
+    const gateLookup = vi.spyOn(store, "getDecisionGate").mockImplementation(async (...args) => {
+      const result = await readGate(...args);
+      if (phase === "gate") { started(); await blocked; }
+      return result;
+    });
+    const senderLookup = vi.spyOn(workspaceSender, "assistantSessionSender").mockImplementation(async (...args) => {
+      const result = await readSender(...args);
+      if (phase === "sender") { started(); await blocked; }
+      return result;
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const work = drainAttentionDeliveries({ db: testDb.appDb, channels }, Date.now(), ["blocked-card-prep"]);
+    try {
+      await prepared;
+      await vi.advanceTimersByTimeAsync(ATTENTION_BATCH_TIMEOUT_MS);
+      await work;
+      release(); await vi.advanceTimersByTimeAsync(1);
+      expect(fakeTransport.sent).toHaveLength(0);
+      expect(fakeTransport.gatePrompts).toHaveLength(0);
+    } finally { release(); await work; vi.useRealTimers(); gateLookup.mockRestore(); senderLookup.mockRestore(); log.mockRestore(); }
   });
 
   it.each(["hang", "reject"])("does not hold an attention batch open on a %s settlement edit", async mode => {

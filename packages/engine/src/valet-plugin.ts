@@ -347,6 +347,7 @@ export interface ChannelSenderIdentity {
 }
 
 export interface OutboundChannelMessage {
+  signal?: AbortSignal;
   /** Opaque per-row token for provider-side reconciliation. Never a gate or derived job id. */
   attentionDeliveryId?: string;
   markdown: string;
@@ -359,6 +360,7 @@ export type OutboundChannelAttachment =
   | { type: "file"; data: Uint8Array; mimeType: string; name: string; caption?: string };
 
 export interface ChannelGatePrompt {
+  signal?: AbortSignal;
   attentionDeliveryId?: string;
   gateId: string;
   title: string;
@@ -378,6 +380,7 @@ export interface ChannelGatePrompt {
 }
 
 export interface ChannelGateResolution {
+  signal?: AbortSignal;
   /** Settlement of an attention card uses the attention request deadline. */
   attention?: boolean;
   actionId?: string;
@@ -456,7 +459,7 @@ export interface ChannelTransport {
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Match an opaque attention token. gateCard identifies an interactive prompt, not a summary. */
-  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number): Promise<(SendRef & { gateCard?: boolean }) | null>;
+  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Send a notice visible only to one channel member. Failures must reject. */

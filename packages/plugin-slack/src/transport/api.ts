@@ -86,8 +86,10 @@ export class SlackApi {
     return this.cachedDirectoryKey;
   }
 
-  private async call(method: string, body: Record<string, unknown>, attention = false): Promise<SlackResponse> {
-    const res = await slackFetch(method, this.token, body, this.baseUrl, attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined);
+  private async call(method: string, body: Record<string, unknown>, attention = false, signal?: AbortSignal): Promise<SlackResponse> {
+    signal?.throwIfAborted();
+    const deadline = attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined;
+    const res = await slackFetch(method, this.token, body, this.baseUrl, signal && deadline ? AbortSignal.any([signal, deadline]) : signal ?? deadline);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
       if (attention && res.ok && ["user_not_found", "cannot_dm_bot", "channel_not_found"].includes(parsed.error ?? "")) {
@@ -133,6 +135,7 @@ export class SlackApi {
   }
 
   async postMessage(opts: {
+    signal?: AbortSignal;
     channel: string;
     text: string;
     attentionDeliveryId?: string;
@@ -159,14 +162,14 @@ export class SlackApi {
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
     if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
-    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined);
+    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined, opts.signal);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };
   }
 
   /** Bounded recent DM history. A miss or a lookup failure permits a resend. */
-  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<{ ts: string; gateCard?: boolean } | null> {
+  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<{ ts: string; gateCard?: boolean } | null> {
     let cursor: string | undefined;
     for (let page = 0; page < 5; page++) {
       // Recovery is best effort. Never sleep through Retry-After while an
@@ -174,7 +177,7 @@ export class SlackApi {
       const response = await slackGetOnce("conversations.history", this.token, {
         channel, oldest: String(Math.max(0, sendingAt - 60_000) / 1_000),
         limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}),
-      }, 2_000, this.baseUrl);
+      }, 2_000, this.baseUrl, signal);
       const res = rec(await response.json());
       if (!response.ok || res?.ok !== true) throw new SlackApiError("conversations.history", str(res?.error) ?? `http ${response.status}`);
       for (const raw of Array.isArray(res.messages) ? res.messages : []) {
@@ -194,6 +197,7 @@ export class SlackApi {
   }
 
   async updateMessage(opts: {
+    signal?: AbortSignal;
     attention?: boolean;
     channel: string;
     ts: string;
@@ -204,7 +208,7 @@ export class SlackApi {
     const body: Record<string, unknown> = { channel: opts.channel, ts: opts.ts, text: opts.text };
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.parse !== undefined) body.parse = opts.parse;
-    await this.call("chat.update", body, opts.attention === true);
+    await this.call("chat.update", body, opts.attention === true, opts.signal);
   }
 
   /**
@@ -248,8 +252,8 @@ export class SlackApi {
   }
 
   /** conversations.open with a user id → the IM channel id. */
-  async openConversation(userId: string, attention = false): Promise<string> {
-    const res = await this.call("conversations.open", { users: userId }, attention);
+  async openConversation(userId: string, attention = false, signal?: AbortSignal): Promise<string> {
+    const res = await this.call("conversations.open", { users: userId }, attention, signal);
     const channelId = str(rec(res.channel)?.id);
     if (!channelId) throw new SlackApiError("conversations.open", "response missing channel.id");
     return channelId;

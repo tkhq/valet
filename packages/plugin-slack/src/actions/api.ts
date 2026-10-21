@@ -22,6 +22,7 @@ export async function slackFetch(
   signal?: AbortSignal,
 ): Promise<Response> {
   for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
     const res = await fetch(`${baseUrl}/${method}`, {
       signal,
       method: 'POST',
@@ -70,6 +71,7 @@ export async function slackGet(
   const finalUrl = slackGetUrl(method, params, baseUrl);
 
   for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
     const res = await fetch(finalUrl, {
       signal,
       method: 'GET',
@@ -99,10 +101,12 @@ export async function slackGetOnce(
   params: Record<string, unknown>,
   timeoutMs: number,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
+  signal?.throwIfAborted();
   return fetch(slackGetUrl(method, params, baseUrl), {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
   });
 }
