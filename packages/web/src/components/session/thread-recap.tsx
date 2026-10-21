@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { X } from "lucide-react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { recapWindow, writtenByOtherPerson } from "@valet/shared";
 import type { ThreadRecapPoint, ThreadSummary } from "@valet/api/wire";
@@ -151,26 +151,43 @@ export function NewSinceDivider({ label }: { label: string }) {
 
 /**
  * The recap card above the composer. It leaves when the reader closes it or
- * sends a message, which ends the visit.
+ * sends a message, which ends the visit. While a question or approval card
+ * waits above the composer too, the recap shows its heading only, so the two
+ * cards do not crowd out the transcript; the heading opens it.
  */
-export function ThreadRecapDock({ recap }: { recap?: ThreadRecapView }) {
+export function ThreadRecapDock({ recap, collapsed = false }: { recap?: ThreadRecapView; collapsed?: boolean }) {
   const [closed, setClosed] = useState<string>();
+  const [opened, setOpened] = useState<string>();
   if (!recap?.points || closed === recap.key) return null;
+  const heading = recap.mode === "away" ? `While you were away · ${recap.people}` : "Where this stands";
+  const open = !collapsed || opened === recap.key;
   return (
     <section aria-label="Recap" data-testid="thread-recap" className="mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8">
       <div className="flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2">
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted">
-            {recap.mode === "away" ? `While you were away · ${recap.people}` : "Where this stands"}
-          </h3>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[13px] leading-5 marker:text-moss">
-            {recap.points.map((point, index) => (
-              <li key={index}>
-                {point.forReader && <span className="font-semibold">Waiting on you: </span>}
-                {point.text}
-              </li>
-            ))}
-          </ul>
+          {collapsed ? (
+            <button
+              type="button"
+              onClick={() => setOpened(open ? undefined : recap.key)}
+              aria-expanded={open}
+              className="flex w-full min-w-0 items-center gap-1 rounded text-left text-[11px] font-semibold uppercase tracking-wide text-muted hover:text-ink"
+            >
+              <span className="truncate">{heading}</span>
+              {open ? <ChevronUp className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+            </button>
+          ) : (
+            <h3 className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted">{heading}</h3>
+          )}
+          {open && (
+            <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[13px] leading-5 marker:text-moss">
+              {recap.points.map((point, index) => (
+                <li key={index}>
+                  {point.forReader && <span className="font-semibold">Waiting on you: </span>}
+                  {point.text}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         <button
           type="button"

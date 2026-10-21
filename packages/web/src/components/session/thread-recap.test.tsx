@@ -140,6 +140,16 @@ describe("ThreadRecapDock", () => {
     expect(screen.getByTestId("thread-recap")).toBeTruthy();
   });
 
+  it("shows the heading only beside a waiting question card, and opens on click", () => {
+    render(<ThreadRecapDock recap={recap} collapsed />);
+    const toggle = screen.getByRole("button", { name: /While you were away · Mate/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Mate sent the draft.")).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Mate sent the draft.")).toBeTruthy();
+  });
+
   it("renders nothing while the recap loads", () => {
     render(<ThreadRecapDock recap={{ ...recap, points: undefined }} />);
     expect(screen.queryByTestId("thread-recap")).toBeNull();

@@ -75,6 +75,7 @@ export function MessageList({
   newSince?: { anchorId: string; label: string };
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
@@ -110,8 +111,11 @@ export function MessageList({
     }
   }, [visible, scrollHeader.syncPosition]);
 
-  // A card that opens above the composer, such as the recap, makes the list
-  // shorter. A reader at the bottom stays at the bottom.
+  // A reader at the bottom stays at the bottom when the list gets shorter (a
+  // card opens above the composer) or its content grows without a new
+  // message (a running tool card expands, an image loads). Otherwise the next
+  // scroll event reads the gap as the reader scrolling away.
+  const hasContent = visible.length > 0;
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -121,8 +125,9 @@ export function MessageList({
       scrollHeader.syncPosition();
     });
     observer.observe(el);
+    if (contentRef.current) observer.observe(contentRef.current);
     return () => observer.disconnect();
-  }, [scrollHeader.syncPosition]);
+  }, [hasContent, scrollHeader.syncPosition]);
 
   function onScroll() {
     const el = containerRef.current;
@@ -188,7 +193,7 @@ export function MessageList({
             No messages yet — try sending a prompt below.
           </div>
         ) : (
-          <div className="shrink-0 space-y-2 py-4">
+          <div ref={contentRef} className="shrink-0 space-y-2 py-4">
             {groupWatchEvents(visible).map((item, i, items) => {
               if (item.kind === "watch") {
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;

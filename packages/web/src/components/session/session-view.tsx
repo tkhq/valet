@@ -384,7 +384,7 @@ export function SessionView({
           {/* Keyed by gate id: the question input's draft must not carry
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
-          <ThreadRecapDock recap={recap} />
+          <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
