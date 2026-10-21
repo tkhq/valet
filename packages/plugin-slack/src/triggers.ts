@@ -102,7 +102,9 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   const channel =
     str(p.channel) ?? str(channelRec?.id) ?? str(p.channel_id) ?? str(item?.channel);
   if (channel) refs.channel = channel;
-  const channelName = str(channelRec?.name);
+  // Lifecycle events carry `channel.name`. The host adds `channel_name` to a
+  // message event (`event-channel-name.ts`).
+  const channelName = str(channelRec?.name) ?? str(p.channel_name);
   if (channelName) refs.channel_name = channelName;
 
   const userRec = rec(p.user);
@@ -210,6 +212,11 @@ const triggerSpecs: TriggerSpec[] = [
             options: { source: "slack.channels" },
           },
           {
+            field: "channel_name",
+            path: "channel_name",
+            description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. A name condition is not a fixed channel list, so a mention line with one also needs any_channel",
+          },
+          {
             field: "user",
             path: "user",
             description: "Slack user id of the mentioner",
@@ -235,6 +242,11 @@ const triggerSpecs: TriggerSpec[] = [
             description: "Slack channel id (C…/D…)",
             options: { source: "slack.channels" },
           },
+          {
+            field: "channel_name",
+            path: "channel_name",
+            description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. Absent in a direct message",
+          },
           { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
           { field: "thread_ts", path: "thread_ts", description: "Parent message timestamp, to match replies in one thread" },
           {
@@ -254,6 +266,7 @@ const triggerSpecs: TriggerSpec[] = [
     description: "Third-party Slack bot or app message posted in a conversation the app can see",
     catalog: [{ key: "slack.bot_message", description: "When a third-party Slack bot or app posts a message", filters: [
       { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
+      { field: "channel_name", path: "channel_name", description: "Channel name without #, such as alerts-prod. Use prefix (alerts-) or regex to match every such channel, including new ones. Absent in a direct message" },
       { field: "channel_type", path: "channel_type", description: "Conversation type" },
       { field: "bot_id", path: "bot_id", description: "Slack bot id" },
       { field: "app_id", path: "app_id", description: "Slack app id" },

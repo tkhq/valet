@@ -148,8 +148,8 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     filters: Type.Optional(Type.Array(Type.Object({
       field: Type.String(), op: Type.Union([Type.Literal("eq"), Type.Literal("in"), Type.Literal("prefix"), Type.Literal("contains"), Type.Literal("regex")]),
       value: Type.Unknown(),
-    }))),
-    any_channel: Type.Optional(Type.Boolean()),
+    }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex." })),
+    any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
     follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
     delivery_policy: Type.Optional(Type.Union([
       Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),

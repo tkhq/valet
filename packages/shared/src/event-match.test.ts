@@ -14,7 +14,9 @@ describe("subscription match rules", () => {
 
   it("derives stored channel consent only from fixed channel filters", () => {
     for (const filter of [null, {}, { field: "user", op: "eq", value: "U1" },
-      { field: "channel", op: "in", value: [] }, { field: "channel", op: "prefix", value: "C" }]) {
+      { field: "channel", op: "in", value: [] }, { field: "channel", op: "prefix", value: "C" },
+      // A channel name also matches channels created later, so it is not a fixed scope.
+      { field: "channel_name", op: "eq", value: "alerts-prod" }, { field: "channel_name", op: "prefix", value: "alerts-" }]) {
       expect(hasChannelScopeFilter([filter])).toBe(false);
       expect(storedAnyChannel(["slack.*"], [filter])).toBe(true);
     }

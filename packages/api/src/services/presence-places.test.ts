@@ -46,6 +46,8 @@ describe("listenerPlaces", () => {
     expect(listenerPlaces(rule(["slack.app_mention"], []), "T1")).toEqual(["slack:T1"]);
     // A prefix filter reaches channels no id list names.
     expect(listenerPlaces(rule(["slack.message"], [{ field: "channel", op: "prefix", value: "C9" }]), "T1")).toEqual(["slack:T1"]);
+    // A channel name pattern also reaches channels created later.
+    expect(listenerPlaces(rule(["slack.bot_message"], [{ field: "channel_name", op: "prefix", value: "alerts-" }]), "T1")).toEqual(["slack:T1"]);
   });
 
   it("places a repository-wide GitHub listener at the repository, and a pull request listener at the pull request", () => {

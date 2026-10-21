@@ -929,7 +929,10 @@ export function saveBlocker(
       return "A mention line can only listen for mentions. Uncheck the other events or the mention.";
     }
     if (mention && !draft.anyChannel && !scoped) {
-      return "Add a channel, or choose Any channel.";
+      // A name condition also matches channels created later (`enforceMentionScope`).
+      return filters.some((f) => f.field === "channel_name")
+        ? "A channel name condition also matches new channels. Choose Any channel to keep it."
+        : "Add a channel, or choose Any channel.";
     }
     if (mention && !teamAssistantDraft(draft) && draft.conditions.some((row) => row.field === "user" && row.id !== draft.creatorScopeId)) {
       return "A personal mention line already listens for your own mentions. Remove the user condition.";

@@ -40,11 +40,11 @@ The tools and this skill use system words. Presence shows other words, so use th
   "name": "Release pipeline alerts",
   "event_keys": ["slack.bot_message"],
   "filters": [
-    { "field": "channel", "op": "in", "value": ["C0123ABCD", "C0456EFGH"] },
+    { "field": "channel_name", "op": "prefix", "value": "release-" },
     { "field": "bot_id", "op": "eq", "value": "B0789IJKL" }
   ],
   "system_prompt": "Summarize the failed release step in two lines and name the failing service. If the post is not a failure, end without a reply.",
-  "user_prompt_template": "New post in {{payload.channel}}:\n\n{{event.body}}"
+  "user_prompt_template": "New post in #{{payload.channel_name}}:\n\n{{event.body}}"
 }
 ```
 
@@ -52,11 +52,13 @@ The tools and this skill use system words. Presence shows other words, so use th
 
 A line runs a full assistant turn for every event that matches. A broad filter costs money, fills threads, and can reply where nobody expects it.
 
-- Filter on the fields that the selected event keys declare. Valet refuses a field that no selected key declares. For example, `slack.bot_message` declares `channel`, `channel_type`, `bot_id`, `app_id`, `user`, and `text`.
+- Filter on the fields that the selected event keys declare. Valet refuses a field that no selected key declares. For example, `slack.bot_message` declares `channel`, `channel_name`, `channel_type`, `bot_id`, `app_id`, `user`, and `text`.
 - Every key also accepts a `subject` filter on the place, with `eq` or `prefix` only. Subjects look like `github:acme/api`, `github:acme/api#12`, `slack:T001/C900`, and `linear:team/ENG`.
-- Use channel IDs, not names. Add `bot_id` or `app_id` to listen to one app only.
+- To listen in a fixed set of Slack channels, filter `channel` with `eq` or `in` and channel IDs. To cover every channel whose name follows a pattern, including channels created later, filter `channel_name` with `prefix` (such as `alerts-`) or `regex`. The name has no `#`. Do not tell a person that they need a fixed list of channel IDs: offer `channel_name` instead.
+- `slack.message`, `slack.bot_message`, and `slack.app_mention` declare `channel_name`. A direct message has no name, so a `channel_name` condition never matches one.
+- Add `bot_id` or `app_id` to listen to one app only.
 - The operators are `eq`, `in`, `prefix`, `contains`, and `regex`. Valet refuses a `regex` that is invalid or too slow.
-- A `slack.app_mention` line needs a channel filter (`eq` or `in`), or `any_channel: true` to listen in every channel the app can see.
+- A `slack.app_mention` line needs a channel filter (`eq` or `in`), or `any_channel: true` to listen in every channel the app can see. A `channel_name` condition is not a fixed channel list, so a mention line with one also needs `any_channel: true`.
 - A personal mention line fires only for its creator's own @-mentions. Valet adds a `user` filter for the creator's linked Slack account, and refuses the line until the creator links Slack in Integrations. To answer other people's mentions, put the line on a team assistant (see `audience` below).
 - Do not depend on the standing instruction to drop unwanted events. A filter costs nothing; an assistant turn that decides to stop still costs a full turn.
 

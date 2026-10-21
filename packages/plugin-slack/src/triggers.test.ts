@@ -218,6 +218,13 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.summary).toBe("message in C9 by U1");
   });
 
+  it("carries a message event's channel name into refs", () => {
+    const trigger = findTrigger("slack.message");
+    const event = { type: "message", channel: "C9", channel_name: "alerts-prod", user: "U1", text: "hi", ts: "1700.5" };
+    const normalized = trigger.toEvent({ eventType: "message", deliveryId: "Ev-m2", payload: event });
+    expect(normalized.refs).toMatchObject({ channel: "C9", channel_name: "alerts-prod" });
+  });
+
   it("normalizes channel_created with nested channel object refs", () => {
     const trigger = findTrigger("slack.channel");
     const event = {
@@ -308,12 +315,24 @@ describe("slackTriggerDefs catalog", () => {
     const entry = findTrigger("slack.message").catalog[0];
     expect(entry.filters.map((f) => `${f.field}:${f.path}`)).toEqual([
       "channel:channel",
+      "channel_name:channel_name",
       "channel_type:channel_type",
       "thread_ts:thread_ts",
       "user:user",
       "text:text",
     ]);
   });
+
+  it.each(["slack.message", "slack.bot_message", "slack.app_mention"])(
+    "lets a %s rule match channels by name with a prefix or regex",
+    (key) => {
+      const entry = slackTriggerDefs.flatMap((t) => t.catalog).find((e) => e.key === key);
+      const filter = entry?.filters.find((f) => f.field === "channel_name");
+      // The host adds the name at the payload root (`event-channel-name.ts`).
+      expect(filter?.path).toBe("channel_name");
+      expect(filter?.description).toMatch(/prefix \(alerts-\) or regex/);
+    },
+  );
 
   it("lets a slack.channel_created rule filter on the channel name", () => {
     const entry = findTrigger("slack.channel").catalog.find((e) => e.key === "slack.channel_created");
