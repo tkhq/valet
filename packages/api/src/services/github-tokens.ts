@@ -493,6 +493,15 @@ export async function resolveInstallationApiToken(
   return resolveSoleInstallationToken(deps, orgId, forceRefresh);
 }
 
+/** Rate-limit identity follows the same owner/sole fallback as installation tokens. No token is exposed. */
+export async function resolveInstallationRateLimitKey(deps: GitHubTokenDeps, orgId: string, owner?: string): Promise<string | null> {
+  await ensureInstallationsSynced(deps, orgId);
+  const rows = await deps.db.select({ installationId: githubInstallations.installationId, accountLogin: githubInstallations.accountLogin }).from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+  const selected = rows.find((row) => row.accountLogin.toLowerCase() === owner?.toLowerCase()) ?? (rows.length === 1 ? rows[0] : undefined);
+  return selected ? `github:installation:${selected.installationId}` : null;
+}
+
 /** Why an App installation would not answer a team `auto` read. */
 export type InstallationResolution =
   | { ok: true }

@@ -6,13 +6,14 @@
  * when a clause on a derived key matched one of its `sources`, and the
  * WakeWatcher calls `runDerive` for that digest before delivery. `runDerive`
  * is the one owner of the `valet_event_waiter_derive_total` counter: it
- * records exactly one result per call.
+ * records exactly one provider result per call. Context-resolution failures
+ * are recorded by the deriver before a plugin can run.
  */
 import { eq } from "drizzle-orm";
 import { DerivePermissionError, DeriveRetryError, recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
-import { resolveInstallationApiToken, type GitHubTokenDeps } from "../services/github-tokens.js";
+import { resolveInstallationApiToken, resolveInstallationRateLimitKey, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { toDigest } from "./waiter-match.js";
 
 export type RunDeriveResult =
@@ -110,9 +111,11 @@ export function githubDeriveContext(
   subject: string,
   tokenFor: GithubTokenFor,
   fetchImpl: typeof fetch = fetch,
+  rateLimitKeyFor?: (orgId: string, owner: string | undefined) => Promise<string | null>,
 ): DeriveContext {
   const owner = /^github:([^/#@\s]+)/.exec(subject)?.[1]?.toLowerCase();
-  return { orgId, appToken: (refresh) => refresh ? tokenFor(orgId, owner, true) : tokenFor(orgId, owner), fetch: fetchImpl };
+  return { orgId, appToken: (refresh) => refresh ? tokenFor(orgId, owner, true) : tokenFor(orgId, owner), fetch: fetchImpl,
+    ...(rateLimitKeyFor ? { rateLimitKey: () => rateLimitKeyFor(orgId, owner) } : {}) };
 }
 
 /**
@@ -136,6 +139,8 @@ export interface EventWaiterDeriverDeps {
   deadlineMs?: number;
   /** Overrides `recordEventDerive`. Tests only. */
   record?: (key: string, result: EventDeriveResult) => void;
+  /** Clock for installation-wide provider cooldowns. */
+  now?: () => number;
 }
 
 /**
@@ -143,13 +148,16 @@ export interface EventWaiterDeriverDeps {
  * 1). It bounds the whole call with one deadline: the deadline aborts the
  * context's requests, and a derive that ignores the abort still returns
  * `error` at the deadline. `runDerive` stays the one recorder of
- * `valet_event_waiter_derive_total`.
+ * `valet_event_waiter_derive_total` for provider outcomes.
  */
 export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDerive {
   const deadlineMs = deps.deadlineMs ?? EVENT_DERIVE_DEADLINE_MS;
+  const now = deps.now ?? Date.now;
+  const installationCooldowns = new Map<string, number>();
   return async (row, digest) => {
     const subject = row.subjects?.[0];
-    if (subject === undefined || digest.derive === undefined) {
+    const deriveKey = digest.derive;
+    if (subject === undefined || deriveKey === undefined) {
       return { result: "error", error: new Error(`Waiter ${row.id} has no key, or digest ${digest.dedupeKey} has no derive key.`) };
     }
     const orgId = await deps.sessionOrg(row.sessionId);
@@ -165,9 +173,31 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
         resolve({ result: "error", error });
       }, deadlineMs);
     });
-    const ctx = deps.contextFor(orgId, digest.derive, subject, controller.signal);
+    const ctx = deps.contextFor(orgId, deriveKey, subject, controller.signal);
+    // Resolve identity inside the overall deadline. Never use a rotating token as a key.
+    const run = async (): Promise<RunDeriveResult> => {
+      const installation = await ctx.rateLimitKey?.();
+      const checkCooldown = () => {
+        if (!installation) return;
+        const until = installationCooldowns.get(installation) ?? 0;
+        if (until > now()) throw new DeriveRetryError("The GitHub installation is rate limited. Retry after the cooldown.", until - now());
+        installationCooldowns.delete(installation);
+      };
+      const bounded: DeriveContext = installation ? { ...ctx,
+        appToken: async (refresh) => { checkCooldown(); return ctx.appToken(refresh); },
+        fetch: async (input, init) => { checkCooldown(); return ctx.fetch(input, init); },
+        rateLimited(retryAfterMs) {
+          installationCooldowns.set(installation, Math.max(installationCooldowns.get(installation) ?? 0, now() + retryAfterMs));
+          ctx.rateLimited?.(retryAfterMs);
+        },
+      } : ctx;
+      return runDerive(deps.plugins, orgId, digest, subject, bounded, deps.record);
+    };
     try {
-      return await Promise.race([runDerive(deps.plugins, orgId, digest, subject, ctx, deps.record), deadline]);
+      return await Promise.race([run().catch((error): RunDeriveResult => {
+        (deps.record ?? recordEventDerive)(deriveKey, "error");
+        return { result: "error", error };
+      }), deadline]);
     } finally {
       clearTimeout(timer);
     }
@@ -198,7 +228,7 @@ export function productionEventWaiterDeriver(deps: { db: AppDb; plugins: ValetPl
     },
     contextFor(orgId, key, subject, signal) {
       const bounded = abortableFetch(fetch, signal);
-      if (key.startsWith("github.")) return githubDeriveContext(orgId, subject, tokenFor, bounded);
+      if (key.startsWith("github.")) return githubDeriveContext(orgId, subject, tokenFor, bounded, (org, owner) => resolveInstallationRateLimitKey(deps.githubTokenDeps, org, owner));
       return { orgId, appToken: async () => null, fetch: bounded };
     },
   });

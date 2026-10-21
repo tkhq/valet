@@ -19,6 +19,7 @@ import {
   GitHubAuthError,
   installationResolvesFor,
   resolveGitHubToken,
+  resolveInstallationRateLimitKey,
   type GitHubTokenDeps,
 } from "./github-tokens.js";
 
@@ -585,6 +586,25 @@ describe("resolveGitHubToken", () => {
       await expect(
         resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" }, auth: "app" }),
       ).rejects.toBeInstanceOf(GitHubAuthError);
+    });
+  });
+
+  describe("installation-wide rate-limit identity", () => {
+    it("shares the actual installation id across owner aliases and sole fallback", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      expect(await resolveInstallationRateLimitKey(deps(), orgId, "ACME")).toBe("github:installation:999");
+      expect(await resolveInstallationRateLimitKey(deps(), orgId, "fallback-owner")).toBe("github:installation:999");
+      expect(await resolveInstallationRateLimitKey(deps(), orgId)).toBe("github:installation:999");
+    });
+    it("separates installations and excludes suspended and ambiguous choices", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await seedInstallation({ installationId: 2, accountLogin: "other" });
+      await seedInstallation({ installationId: 3, accountLogin: "suspended", suspended: true });
+      expect(await resolveInstallationRateLimitKey(deps(), orgId, "other")).toBe("github:installation:2");
+      expect(await resolveInstallationRateLimitKey(deps(), orgId, "suspended")).toBeNull();
+      expect(await resolveInstallationRateLimitKey(deps(), orgId)).toBeNull();
     });
   });
 

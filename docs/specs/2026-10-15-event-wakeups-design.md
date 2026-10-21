@@ -321,59 +321,44 @@ subject.
 
 1. Read the pull request. If the source event's SHA differs from the
    current head SHA, return `null`.
-2. Read check runs first, then workflow runs, suites, and latest status contexts.
-   Read all pages needed to select the current records.
+2. Read check runs, workflow runs, and latest status contexts across all visible pages.
+   Suites never contribute failure or pending state. A queued zero-run suite adds no work.
+   The derive does not need a suites API read.
 3. Select the latest workflow run per `(workflow_id, event)` across all pages.
    Run number, run id, and attempt number order the workflow runs.
-   A push run cannot supersede a PR run, or the reverse.
-   Only `schedule` and `workflow_dispatch` events are excluded by name.
-   Every other event on the head SHA counts under its own `(workflow_id, event)` key.
-   This includes `pull_request_review` and `pull_request_target` when GitHub reports them on that SHA.
-   Ignore `schedule` and `workflow_dispatch` workflow results and suites.
-   Ignore their check runs only when jobs metadata proves each check's membership.
-   A selected workflow that is pending still blocks completion before it creates checks.
-   A relevant push or PR deploy with a `waiting` check blocks completion.
-   When a pending Actions check appears, read workflow membership before deciding terminality.
-   If its suite belongs to a selected relevant workflow, return `null` immediately.
-   This case needs three requests: PR head, check runs, and workflow runs.
-   It makes no suite or status read, and reads no further check-run page.
-   An older pending job cannot block its newer workflow run.
-   Actions suites belong to workflow runs, not to the App as a whole.
-   Keep unmatched Actions checks and suites, including Checks-API reporter jobs.
-   Suite membership alone never proves that a check belongs to a workflow job.
-   For non-passing checks in superseded or excluded suites, read `/actions/runs/{id}/jobs?filter=all`.
-   A matching job name or `check_run_url` check id proves membership.
-   Keep reporter checks when no job matches, even when they share an ignored suite.
-   Read jobs only for affected suites with non-passing checks. Cache each run's jobs within the derive.
-   Read jobs serially and paginate them within the existing safety limit.
-   Passing checks and checks in current or unmapped suites add no jobs reads.
-   Fixtures cover reruns with both the same suite id and a changed suite id.
-   The approval-gated cli/cli example does not prove failed-job rerun suite behavior.
-   For other Apps, select the latest suite per App for suite terminality.
-   This suite selection never discards older suites' check runs.
-   Ignore selected suites with `latest_check_runs_count = 0`.
-   GitHub creates these suites for Apps that start no checks and workflows skipped by filters.
-   Each remaining selected suite must have status `completed`.
-   Drop only proven workflow jobs from superseded or excluded runs.
-   Select the latest remaining check per `(app.id, name)` within each workflow/event.
-   Non-Actions checks use `(app.id, name)` across all suites.
-   A distinct older check name still participates, even when its suite is older.
-   Finished checks use the latest `completed_at`, then id.
-   If completion times are missing, including pending jobs, compare ids.
-   Each selected check run and relevant workflow must have status `completed`.
-   A superseded cancelled job cannot change the selected result.
-   A labeled PR retrigger can replace an earlier synchronize run, even when the new run skips every job.
-   This matches latest-run semantics, not a historical failure latch.
-   If no selected checks or status contexts remain, return `null`.
-   With other successful selected checks, that state can return `success`.
-   If any latest status context is not `success`, `failure`, or `error`, return `null`.
+   Push and PR runs cannot supersede each other.
+   Only `schedule` and `workflow_dispatch` are excluded by event name.
+   Every other event on the head SHA has its own workflow/event key.
+   This includes `pull_request_review` and `pull_request_target` on that SHA.
+   `/actions/runs?head_sha=` returns one row per run id, with its latest `run_attempt`.
+   If any Actions check is non-passing or pending, read `/actions/runs/{run_id}/jobs?filter=all` for every listed workflow run.
+   Read jobs serially and paginate each response within the safety limit.
+   The jobs response contains all attempts. Each job's `id` is its check-run id.
+   Map each job id to its run and `run_attempt`.
+   Drop an Actions check only when that mapping proves one of these conditions:
+   - Its attempt is older than its run's latest attempt.
+   - Its run is superseded under `(workflow_id, event)`.
+   - Its run uses `schedule` or `workflow_dispatch`.
+   Keep every unmapped Actions check, including reporters in superseded, dispatch, or separate suites.
+   Neither suite ids, job names, nor suite conclusions prove check membership.
+   An all-green PR makes no jobs calls.
+   A pending check in the current suite of an active relevant workflow can return `null` after three reads.
+   This conservative early return never drops a check. Completion still requires check-based selection.
+   For non-Actions checks, select the latest check per `(app.id, name)` across all suites.
+   Finished checks use `completed_at`, then id. Missing completion times fall back to id.
+   Distinct older check names still participate.
+   Return `null` when any selected check has not completed.
+   A workflow awaiting approval without a check cannot establish pending state by itself.
+   A labeled retrigger that skips every job can supersede an earlier synchronize run's mapped jobs.
+   With no remaining checks or status contexts, return `null`.
+   With other successful selected checks, return `success`.
+   Return `null` when any latest status context is not `success`, `failure`, or `error`.
    Terminality is independent of the combined status result.
-4. Compute status `failure` when any selected conclusion is `failure`,
-   `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
+4. Compute `failure` from selected check-run conclusions of `failure`, `timed_out`, `cancelled`, `action_required`, or `startup_failure`.
    A latest status context of `failure` or `error` also gives `failure`.
-   Otherwise compute status `success`.
-   Re-read the pull request head immediately before returning the event.
-   If the head changed, return `null`.
+   Never compute failure from suite or workflow conclusions.
+   Otherwise compute `success`.
+   Re-read the pull request head before returning the event. If it changed, return `null`.
    Include the evaluated commit as `head_sha` in the event and delivered digest.
 5. The derived `dedupeKey` is
    `derived:checks_completed:<owner>/<repo>@<sha>:<status>:<latest>`.
@@ -382,8 +367,7 @@ subject.
    one. A CI re-run on the same SHA finishes later, so it gets a new key
    and the waiter is not blocked by the earlier run's seen key.
 
-Completion describes check runs, check suites, workflow runs, and latest status
-contexts visible at derivation time. GitHub can create new work after these
+Completion describes selected check runs and latest status contexts visible at derivation time. GitHub can create new work after these
 reads. The event does not guarantee that future checks will never appear.
 Consumers can compare `head_sha` with the current pull request head.
 
@@ -396,29 +380,28 @@ deadline ends that wait.
 |---|---|
 | Source SHA is an old head | `null` |
 | One check run `in_progress` | `null` |
-| One completed check and a selected queued suite with `latest_check_runs_count > 0` | `null` |
-| One completed check and a queued PR-triggered workflow | `null` |
+| One completed check and a queued suite without a pending check | status `success` |
+| One completed check and a queued workflow without a pending check | status `success` |
 | One completed check and a queued zero-run App suite | status `success` |
 | Actions suite with zero runs after workflow filters skip every job | ignored |
-| Selected push workflow with no checks, waiting for approval | `null` |
+| Selected push workflow with no checks, waiting for approval; another check passed | status `success` |
 | Current push or PR deploy has a `waiting` check | `null` |
 | Newer push passed, current PR run still running | `null` |
 | Current push failed, current PR run passed, same workflow | status `failure` |
 | Current PR failed, newer push passed, same workflow | status `failure` |
 | Newer scheduled or manual run, PR run still running | `null` |
 | Job metadata proves an old cancelled job is superseded, new job passed | status `success` |
-| Old Actions job proven superseded by a newer attempt, current attempt passed | status `success` |
 | Failed Checks-API reporter shares a superseded or dispatch suite | status `failure` |
 | Unmapped Actions reporter check failed or pending | status `failure` or `null` |
 | Head-SHA `pull_request_review` failed, `pull_request` passed | status `failure` |
 | Head-SHA `pull_request_target` in progress | `null` |
 | Labeled retrigger skips every job after synchronize failure, no other checks | `null` |
 | Same labeled retrigger, other selected checks succeeded | status `success` |
-| Same suite rerun: older failed job, newer same-name job passed | status `success` |
+| Jobs map an older failed attempt and a passed latest attempt of one run | status `success` |
 | Non-Actions App: older suite failed `lint`, newer suite passed a different `test` | status `failure` |
 | Non-Actions App: same name across suites, latest completion passed | status `success` |
 | Distinct selected workflow/events share a job name | every workflow/event participates |
-| Two independent Actions workflows share an App; one selected suite failed | status `failure` |
+| Two independent Actions workflows share an App; one selected check failed | status `failure` |
 | Head changes during the reads | `null` |
 | Combined failure with a pending latest status context | `null` |
 | Pending context on a later page | `null` |
@@ -469,7 +452,13 @@ Each write method is one statement.
   digest and sets `updatedAt`. It appends only to a `running` row with
   `kind = "event"`.
   It refuses a `dedupeKey` in `event_buffer`, `event_seen`, or `event_source_seen`.
-  It refuses when the buffer holds 200 digests.
+  Before applying the 200-digest cap, collapse sources for the same `(waiter, derive, commit)`.
+  Keep the latest `occurredAt`, or the latest admitted source when times are equal.
+  Record replaced source keys only in bounded `event_source_seen`, never in delivered history.
+  Different commits, derive keys, and direct matches remain separate.
+  Collapse and append share the same atomic write, including the source replay update.
+  One persistently failing group cannot fill the buffer and block direct matches or a new head.
+  Refuse when the retained buffer already holds 200 digests.
   It counts that refusal in `valet_event_waiter_buffer_full_total`.
   A waiter admits at most 4096 delivered output keys, including buffered outputs reserved for delivery.
   At this budget, append refuses new outputs without logging each event.
@@ -500,7 +489,7 @@ Each write method is one statement.
   A page can have no returned rows and still have a next cursor.
   This scan reads idle active event rows too, but does not derive or dispatch them.
   No schema change or count backfill is needed.
-  The query adds no PostgreSQL requirement over `dev-v2`; PostgreSQL 14 and 16 are compatible.
+  The query adds no PostgreSQL requirement over `dev-v2`; The supported PostgreSQL minimum for this code is 14, also compatible with 15 and 16.
   It uses neither `IS JSON` nor JSONB casts in the global due query.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
@@ -714,13 +703,20 @@ step that returns early for an event that no subscription matched.
    Permission-denied derivations log `error` and consume the source.
    Rate limits retain the source with exponential backoff, starting at 60 seconds and doubling to a 15-minute cap.
    A `Retry-After` header or exhausted primary `x-ratelimit-reset` deadline is a minimum, even beyond that cap.
-   A 403 response mentioning a secondary rate limit or abuse is also retryable.
+   Any error with `Retry-After`, HTTP 429, or a secondary-limit/abuse HTTP 403 sets an installation-wide cooldown.
+   Resolve its identity from the actual installation id, including the sole-installation fallback, not the repository or token.
+   Every group and waiter using that installation checks the deadline before deriving and before each provider request.
+   A response sets the deadline before another in-flight group starts its next read.
+   Other installations remain independent. Success and `null` results never clear an installation deadline.
+   The shared deadline lives in the API deriver. Restarting the API clears this transient throttle.
    A 401 refreshes the cached installation token and retries the request once.
    Concurrent forced refreshes share one in-flight mint per installation.
    Repeated 401 responses keep the source with backoff starting at one second and doubling to 15 minutes.
    Backoff is keyed by waiter, derive key, and source commit subject.
    A null or successful result for another commit cannot clear its retry deadline.
    Success or a permanent error resets only that group's backoff.
+   When a newly observed source commit arrives, re-derive stale groups immediately despite their generic backoff.
+   Removing a foreign group alone does not reset backoff. Installation cooldowns still apply.
    Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
    Every other derive error also retains the source with exponential backoff, starting at one second and capped at 15 minutes.
    This includes 5xx responses, timeouts, malformed payloads, and pagination safety limits.

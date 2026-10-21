@@ -29,7 +29,7 @@ import type {
   WriteFence,
 } from "../../types.js";
 import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
-import { boundEventDigest } from "../../wakeups/digest.js";
+import { eventSourceCommit, boundEventDigest } from "../../wakeups/digest.js";
 import { EVENT_BUFFER_MAX_DIGESTS, EVENT_DELIVERED_MAX_KEYS, EVENT_SOURCE_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -411,11 +411,16 @@ export class InMemorySessionStore implements SessionStore {
     if (!bounded.derive && (w.eventSeen?.length ?? 0) + buffer.filter((d) => !d.derive).length >= EVENT_DELIVERED_MAX_KEYS) {
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    const collapsed = bounded.derive === undefined ? [] : buffer.filter((source) =>
+      source.derive === bounded.derive && eventSourceCommit(source) === eventSourceCommit(bounded));
+    if (collapsed.some((source) => source.occurredAt > bounded.occurredAt)) return false;
+    const retained = buffer.filter((source) => !collapsed.includes(source));
+    if (retained.length >= EVENT_BUFFER_MAX_DIGESTS) {
       recordEventWaiterBufferFull();
       return false;
     }
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt }));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...retained, bounded],
+      ...(collapsed.length > 0 ? { eventSourceSeen: [...(w.eventSourceSeen ?? []), ...collapsed.map((source) => source.dedupeKey)].slice(-EVENT_SOURCE_SEEN_MAX_KEYS) } : {}), updatedAt }));
     return true;
   }
 

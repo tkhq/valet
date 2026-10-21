@@ -4,7 +4,7 @@ export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
 export { subjectService } from "./events/subjects.js";
-export { boundEventDigest, cutUtf8 } from "./wakeups/digest.js";
+export { boundEventDigest, cutUtf8, eventSourceCommit } from "./wakeups/digest.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
 // can type model handles and run side completions without their own pi-ai
 // dependency edge (which pnpm may peer-fork into a second instance with its

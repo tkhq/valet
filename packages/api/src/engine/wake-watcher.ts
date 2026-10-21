@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import {
   EVENT_DELIVERED_MAX_KEYS,
+  eventSourceCommit,
   recordLeaseNodeSeconds,
   recordLeaseOrphanReleased,
   recordLeasesActive,
@@ -184,6 +185,8 @@ export class WakeWatcher {
   private stopping = false;
   /** Retry deadlines and exponential delays, retained until success or the idle reset. */
   private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number }>();
+  /** Last observed source commit per waiter/derive, for prompt stale-group revalidation. */
+  private readonly deriveHeads = new Map<string, { commits: Set<string>; seenAt: number }>();
   /** Event waiters that ingest appended to since the last light pass read them. */
   private readonly nudged = new Set<string>();
 
@@ -295,6 +298,7 @@ export class WakeWatcher {
 
   private async pass(now: number): Promise<void> {
     for (const [key, retry] of this.deriveCooldowns) if (retry.until + 30 * 60_000 <= now) this.deriveCooldowns.delete(key);
+    for (const [key, head] of this.deriveHeads) if (head.seenAt + 30 * 60_000 <= now) this.deriveHeads.delete(key);
     // INV-6 is measured before this pass ends or repairs anything, so the
     // repair cannot hide the violation it repairs (fix wave 3, M2).
     const stale = now - 2 * this.intervalMs;
@@ -481,11 +485,28 @@ export class WakeWatcher {
       console.error(`WakeWatcher: event wakeup ${row.id} holds ${groups[0]?.latest.derive} digests, but this watcher has no derive step; they stay buffered.`);
       return { row, derived: false };
     }
+    const changed = new Set<string>();
+    const commits = new Map<string, Set<string>>();
+    for (const { latest } of groups) {
+      if (latest.derive === undefined) continue;
+      const seen = commits.get(latest.derive) ?? new Set<string>();
+      seen.add(eventSourceCommit(latest));
+      commits.set(latest.derive, seen);
+    }
+    for (const [key, current] of commits) {
+      const identity = JSON.stringify([row.id, key]);
+      const previous = this.deriveHeads.get(identity);
+      // Removing a foreign group is not a new head. Only a newly observed
+      // commit can bypass generic backoff; installation cooldowns stay intact.
+      if (previous && [...current].some((commit) => !previous.commits.has(commit))) changed.add(key);
+      this.deriveHeads.set(identity, { commits: current, seenAt: this.clock() });
+    }
     let ran = false;
     await Promise.all(groups.map((group) => limit(async () => {
       if (this.stopping) return;
       const { latest, sources } = group;
-      const cooldownKey = JSON.stringify([row.id, latest.derive, commitSubject(latest)]);
+      const cooldownKey = JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]);
+      if (latest.derive !== undefined && changed.has(latest.derive)) this.deriveCooldowns.delete(cooldownKey);
       const previousRetry = this.deriveCooldowns.get(cooldownKey);
       if ((previousRetry?.until ?? 0) > this.clock()) return;
       ran = true;
@@ -983,11 +1004,6 @@ function concurrencyLimit(max: number): ConcurrencyLimit {
   };
 }
 
-/** The commit subject (`<service>:<owner>/<repo>@<sha>`) of a digest, or "" when it has none. */
-function commitSubject(digest: EventMatchDigest): string {
-  return digest.subjects.find((subject) => /@[0-9a-f]+$/i.test(subject)) ?? "";
-}
-
 /**
  * The buffered derive digests grouped by derive key and source commit,
  * each with its latest digest and every source key of the group (spec
@@ -997,7 +1013,7 @@ function deriveGroups(buffer: readonly EventMatchDigest[]): Array<{ latest: Even
   const groups = new Map<string, { latest: EventMatchDigest; sources: string[] }>();
   for (const digest of buffer) {
     if (digest.derive === undefined) continue;
-    const key = `${digest.derive}\u0000${commitSubject(digest)}`;
+    const key = `${digest.derive}\u0000${eventSourceCommit(digest)}`;
     const group = groups.get(key);
     if (group) {
       group.latest = digest;

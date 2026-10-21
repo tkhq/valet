@@ -148,6 +148,10 @@ export interface DeriveContext {
   /** Org app credential for the plugin's service. Null when not connected. */
   appToken(forceRefresh?: boolean): Promise<string | null>;
   fetch: typeof fetch;
+  /** Stable installation identity, never a token. Shared across repositories and waiters. */
+  rateLimitKey?(): Promise<string | null>;
+  /** Report a provider rate limit before another group starts its next request. */
+  rateLimited?(retryAfterMs: number): void;
 }
 
 /**

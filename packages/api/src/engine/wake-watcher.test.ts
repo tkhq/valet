@@ -1193,7 +1193,7 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     const record = vi.fn();
     const deriveEvent = eventWaiterDeriver({
       plugins: [githubPlugin], sessionOrg: async () => "org-1",
-      contextFor: () => ({ orgId: "org-1", appToken: async () => "test-token", fetch: http }), record,
+      contextFor: () => ({ orgId: "org-1", appToken: async () => "test-token", fetch: http, rateLimitKey: async () => "github:installation:77" }), record, now: () => now,
     });
     try {
       const w = h.watcher({ deriveEvent, now: () => now });
@@ -1211,6 +1211,110 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
       await w.sweep(now);
       expect(checkReads).toHaveBeenCalledTimes(2);
     } finally { warn.mockRestore(); }
+  });
+
+  it("collapses persistent failures and rechecks stale commits immediately when a new head arrives", async () => {
+    const h = harness();
+    let now = NOW;
+    let current = "aaaa";
+    const source = (i: number, sha: string) => digest(i, { derive: CHECKS, subjects: [`github:acme/lean-proofs@${sha}`] });
+    await h.store.createWakeup(eventRow({}, false));
+    await h.store.appendEventMatch("wk_ev", source(1, current), now);
+    const derive = vi.fn(async (_row: Wakeup, d: EventMatchDigest): Promise<RunDeriveResult> =>
+      d.subjects.includes(`github:acme/lean-proofs@${current}`) ? { result: "error", error: new Error("GitHub 502") } : { result: "null" });
+    const w = h.watcher({ deriveEvent: derive, now: () => now });
+    await w.sweep(now);
+    for (let i = 2; i < 252; i++) {
+      expect(await h.store.appendEventMatch("wk_ev", source(i, current), ++now)).toBe(true);
+      await w.sweep(now);
+    }
+    expect(derive).toHaveBeenCalledTimes(1);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
+    expect(await h.store.appendEventMatch("wk_ev", digest(300), now)).toBe(true);
+    current = "bbbb";
+    expect(await h.store.appendEventMatch("wk_ev", source(301, current), now)).toBe(true);
+    await w.sweep(now);
+    expect(derive).toHaveBeenCalledTimes(3);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-301"]);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { status: 403, body: "rate limit", headers: { "Retry-After": "3600" } },
+    { status: 429, body: "too many requests", headers: {} },
+    { status: 403, body: "secondary rate limit", headers: {} },
+    { status: 503, body: "retry later", headers: { "Retry-After": "3600" } },
+    { status: 401, body: "retry later", headers: { "Retry-After": "3600" } },
+  ])("shares installation-wide cooldowns across groups, waiters, and repositories ($status $body)", async ({ status, body, headers }) => {
+    const h = harness();
+    let now = NOW;
+    let limited = true;
+    const source = (i: number, repo: string, sha: string) => digest(i, { derive: CHECKS, subjects: [`github:acme/${repo}@${sha}`] });
+    const request = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (limited) return new Response(body, { status, headers: headers["Retry-After"] ? { "Retry-After": headers["Retry-After"] } : {} });
+      if (url.pathname.endsWith("/pulls/42")) return Response.json({ head: { sha: "bbbb" } });
+      if (url.pathname.endsWith("/check-runs")) return Response.json({ check_runs: [] });
+      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [] });
+      if (url.pathname.endsWith("/status")) return Response.json({ statuses: [] });
+      throw new Error(`Unexpected GitHub read: ${url.pathname}`);
+    });
+    const deriveEvent = eventWaiterDeriver({
+      plugins: [githubPlugin], sessionOrg: async () => "org-1", now: () => now,
+      contextFor: (orgId, _key, subject) => ({ orgId, appToken: async () => "test-token", fetch: request,
+        rateLimitKey: async () => subject.includes("isolated") ? "github:installation:88" : "github:installation:77" }),
+    });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source(1, "lean-proofs", "aaaa")] }, false));
+    const w = h.watcher({ deriveEvent, now: () => now });
+    await w.sweep(now);
+    expect(request).toHaveBeenCalledTimes(1);
+    // A new SHA bypasses generic backoff, but not the shared installation deadline.
+    await h.store.appendEventMatch("wk_ev", source(2, "lean-proofs", "bbbb"), now);
+    await h.store.createWakeup(eventRow({ id: "wk_second", subjects: ["github:acme/second#42"], eventBuffer: [source(3, "second", "bbbb")] }, false));
+    now += 1;
+    await w.sweep(now);
+    expect(request).toHaveBeenCalledTimes(1);
+    await h.store.createWakeup(eventRow({ id: "wk_isolated", subjects: ["github:acme/isolated#42"], eventBuffer: [source(4, "isolated", "bbbb")] }, false));
+    limited = false;
+    await w.sweep(now);
+    expect(request).toHaveBeenCalledTimes(5); // Other installation reads head, checks, workflows, statuses.
+    now = NOW + ("Retry-After" in headers ? HOUR : 60_000) - 1;
+    await w.sweep(now);
+    expect(request).toHaveBeenCalledTimes(5);
+    now++;
+    await w.sweep(now);
+    expect(request.mock.calls.some(([input]) => String(input).includes("/repos/acme/second/pulls/42"))).toBe(true);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
+    expect((await h.store.getWakeup("wk_second"))?.eventBuffer).toEqual([]);
+  });
+
+  it("stops an in-flight group before its next request when another group hits an installation limit", async () => {
+    const h = harness();
+    let release = () => {};
+    const limited = new Promise<void>((resolve) => { release = resolve; });
+    let heads = 0;
+    const checkReads = vi.fn();
+    const http: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname.endsWith("/pulls/42")) {
+        if (++heads === 2) await limited;
+        return Response.json({ head: { sha: "aaaa" } });
+      }
+      checkReads();
+      return new Response("secondary rate limit", { status: 403 });
+    };
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "org-1",
+      contextFor: (orgId) => ({ orgId, appToken: async () => "token", fetch: http,
+        rateLimitKey: async () => "github:installation:77", rateLimited: release }),
+    });
+    const source = (i: number) => digest(i, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source(1)] }, false));
+    await h.store.createWakeup(eventRow({ id: "wk_second", eventBuffer: [source(2)] }, false));
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    expect(heads).toBe(2);
+    expect(checkReads).toHaveBeenCalledTimes(1);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
+    expect((await h.store.getWakeup("wk_second"))?.eventBuffer).toHaveLength(1);
   });
 
   it("retains rate-limited sources and retries only after the cooldown", async () => {
