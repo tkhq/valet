@@ -231,6 +231,14 @@ describe("Any channel and follow", () => {
     expect(saveBlocker(draft, CREATE, { connected: true })).toBe("Turn off Any channel or remove the channel condition.");
   });
 
+  it("asks for Any channel when a mention line names channels only by name", () => {
+    let draft = toggleEvent(newDraft({ timezone: "UTC" }), "slack.app_mention", SERVICES);
+    draft = addCondition({ ...draft, name: "x" }, { id: "c1", field: "channel_name", op: "prefix", value: "alerts-" });
+    expect(saveBlocker(draft, CREATE, { connected: true })).toBe("A channel name condition also matches new channels. Choose Any channel to keep it.");
+    // A name is not a fixed channel list, so Any channel stays on with it.
+    expect(saveBlocker({ ...draft, anyChannel: true }, CREATE, { connected: true })).toBeNull();
+  });
+
   it("follows only a mention, never a channel message", () => {
     const base = { ...newDraft({ preselected: { place: INCIDENTS }, timezone: "UTC" }), name: "x" };
     const mention = created(toggleEvent(base, "slack.app_mention", SERVICES));

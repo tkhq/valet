@@ -52,6 +52,15 @@ describe("event-subscriptions skill", () => {
     expect(new Set(listed)).toEqual(new Set(FILTER_OPS));
   });
 
+  it("lists exactly the fields slack.bot_message declares", () => {
+    const line = text.split("\n").find((entry) => entry.includes("For example, `slack.bot_message` declares"));
+    if (line === undefined) throw new Error("the skill names no slack.bot_message fields");
+    const listed = [...line.slice(line.indexOf("declares")).matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    const declared = bundledPlugins.flatMap((plugin) => plugin.triggers ?? []).flatMap((trigger) => trigger.catalog)
+      .find((entry) => entry.key === "slack.bot_message")?.filters.map((filter) => filter.field);
+    expect(listed).toEqual(declared);
+  });
+
   it("has an example to check", () => {
     // A broken extractor must not pass by finding nothing.
     expect(blocks.length).toBeGreaterThanOrEqual(1);

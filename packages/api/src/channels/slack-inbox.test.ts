@@ -950,6 +950,99 @@ describe("POST /api/channels/slack/webhook", () => {
 });
 
 
+describe("channel_name filters on Slack message events", () => {
+  /** Answers conversations.info from `names`; other Slack calls keep the suite's default. */
+  function serveChannelNames(names: Record<string, string>): string[] {
+    const asked: string[] = [];
+    const spy = vi.mocked(globalThis.fetch);
+    const fallback = spy.getMockImplementation();
+    if (!fallback) throw new Error("the suite's fetch spy is missing");
+    spy.mockImplementation((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "slack.com" && url.pathname === "/api/conversations.info") {
+        const id = url.searchParams.get("channel") ?? "";
+        asked.push(id);
+        const name = names[id];
+        return Promise.resolve(Response.json(name ? { ok: true, channel: { id, name } } : { ok: false, error: "ratelimited" }));
+      }
+      return fallback(input, init);
+    });
+    return asked;
+  }
+
+  function alertPost(channel: string): Record<string, unknown> {
+    return { ...botFormMessage(), channel, channel_type: "channel" };
+  }
+
+  async function storedPayload(a: TestApi, dedupeKey: string): Promise<Record<string, unknown> | undefined> {
+    const [row] = await a.providers.db.select().from(events)
+      .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, dedupeKey)));
+    return row?.payload as Record<string, unknown> | undefined;
+  }
+
+  async function inboxDrained(a: TestApi): Promise<boolean> {
+    return (await a.providers.db.select().from(slackWebhookInbox)).length === 0;
+  }
+
+  // Channel ids are unique to each case: the name cache lives for the process.
+  it("delivers a bot post in a channel whose name starts with the prefix, and skips other channels", async () => {
+    const asked = serveChannelNames({ C_NAME_A1: "alerts-prod", C_NAME_G1: "general" });
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.bot_message"], [{ field: "channel_name", op: "prefix", value: "alerts-" }]);
+
+    const hit = envelope(alertPost("C_NAME_A1"), "Ev-name-hit");
+    expect((await post(api.baseUrl, hit, sign(hit))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-name-hit"), { timeout: 5_000 }).toBe(1);
+    expect(await storedPayload(api, "Ev-name-hit")).toMatchObject({ channel: "C_NAME_A1", channel_name: "alerts-prod" });
+
+    const miss = envelope(alertPost("C_NAME_G1"), "Ev-name-miss");
+    expect((await post(api.baseUrl, miss, sign(miss))).status).toBe(200);
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
+    expect(await eventCount(api, "Ev-name-miss")).toBe(0);
+
+    // A second post in the same channel reads the name from the cache.
+    const again = envelope(alertPost("C_NAME_A1"), "Ev-name-again");
+    expect((await post(api.baseUrl, again, sign(again))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-name-again"), { timeout: 5_000 }).toBe(1);
+    expect(asked).toEqual(["C_NAME_A1", "C_NAME_G1"]);
+  });
+
+  it("stops matching a renamed channel as soon as its channel_rename arrives", async () => {
+    const asked = serveChannelNames({ C_NAME_R1: "alerts-billing" });
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.bot_message"], [{ field: "channel_name", op: "regex", value: "^alerts-" }]);
+
+    const before = envelope(alertPost("C_NAME_R1"), "Ev-rename-before");
+    expect((await post(api.baseUrl, before, sign(before))).status).toBe(200);
+    await expect.poll(() => deliveryCount(api!, "Ev-rename-before"), { timeout: 5_000 }).toBe(1);
+
+    const rename = envelope({ type: "channel_rename", channel: { id: "C_NAME_R1", name: "archive-billing", created: 1700000000 } }, "Ev-rename");
+    expect((await post(api.baseUrl, rename, sign(rename))).status).toBe(200);
+    await expect.poll(() => inboxDrained(api!), { timeout: 5_000 }).toBe(true);
+
+    const after = envelope(alertPost("C_NAME_R1"), "Ev-rename-after");
+    expect((await post(api.baseUrl, after, sign(after))).status).toBe(200);
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
+    expect(await eventCount(api, "Ev-rename-after")).toBe(0);
+    // The rename event carried the new name, so Slack was not asked again.
+    expect(asked).toEqual(["C_NAME_R1"]);
+  });
+
+  it("fails closed when Valet cannot read the channel name", async () => {
+    serveChannelNames({});
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.bot_message"], [{ field: "channel_name", op: "regex", value: ".*" }]);
+
+    const body = envelope(alertPost("C_NAME_DOWN"), "Ev-name-down");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
+    expect(await eventCount(api, "Ev-name-down")).toBe(0);
+  });
+});
+
 describe("Slack receipt diagnostics", () => {
   it("retains a terminal failed delivery without retrying it again", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });

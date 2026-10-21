@@ -20,7 +20,9 @@
  * 2. **Channel scope.** The filters must carry at least one `channel` filter
  *    (`eq` or `in`), unless the request sets the explicit `anyChannel` flag.
  *    `anyChannel` is not persisted: after this gate, a stored mention
- *    subscription with no channel filter IS the any-channel state.
+ *    subscription with no channel filter IS the any-channel state. A
+ *    `channel_name` filter is not a channel scope: a prefix or pattern also
+ *    matches channels created later, so it needs `anyChannel` too.
  *
  * Every writer reaches this through `validateSubscriptionWrite`
  * (`events/subscription-write.ts`), the one gate in front of every
@@ -163,6 +165,14 @@ export async function enforceMentionScope(
     };
   }
   if (!args.anyChannel && !hasChannelScope && args.storedAnyChannel !== true) {
+    if (args.filters.some((f) => f.field === "channel_name")) {
+      return {
+        ok: false,
+        error:
+          "A channel name condition also matches channels created later, so it is not a fixed channel list. " +
+          'Choose "Any channel" to keep the name condition, or select channels.',
+      };
+    }
     return {
       ok: false,
       error:

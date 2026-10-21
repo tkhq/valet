@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  CHANNEL_NAME_MAX_AGE_MS,
   cachedChannelName,
   clearChannelNameCache,
   rememberChannelName,
@@ -89,12 +90,90 @@ describe('channel name cache', () => {
   });
 
   it('keeps the cache bounded and drops the oldest entry', async () => {
-    for (let i = 0; i < 300; i++) rememberChannelName(TOKEN, `C${i}`, `chan-${i}`);
+    for (let i = 0; i < 1100; i++) rememberChannelName(TOKEN, `C${i}`, `chan-${i}`);
 
     expect(cachedChannelName(TOKEN, 'C0')).toBeUndefined();
-    expect(cachedChannelName(TOKEN, 'C299')).toBe('chan-299');
+    expect(cachedChannelName(TOKEN, 'C1099')).toBe('chan-1099');
 
     fetchMock.mockResolvedValue(jsonResponse(200, { ok: true, channel: { id: 'C0', name: 'chan-0' } }));
     expect(await resolveChannelName(TOKEN, 'C0')).toBe('chan-0');
+  });
+
+  it('reads Slack again once an entry is older than the max age, so a rename shows', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C5', name: 'alerts-old' } }))
+        .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C5', name: 'alerts-new' } }));
+
+      expect(await resolveChannelName(TOKEN, 'C5')).toBe('alerts-old');
+      vi.setSystemTime(Date.now() + CHANNEL_NAME_MAX_AGE_MS - 1);
+      expect(await resolveChannelName(TOKEN, 'C5')).toBe('alerts-old');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 1);
+      expect(cachedChannelName(TOKEN, 'C5')).toBeUndefined();
+      expect(await resolveChannelName(TOKEN, 'C5')).toBe('alerts-new');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('replaces a cached name at once when a rename is recorded', async () => {
+    rememberChannelName(TOKEN, 'C6', 'alerts-prod');
+    rememberChannelName(TOKEN, 'C6', 'archive-prod');
+
+    expect(await resolveChannelName(TOKEN, 'C6')).toBe('archive-prod');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sends one request with no retry when the caller sets a timeout', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 429, headers: { 'Retry-After': '30' } }));
+
+    expect(await resolveChannelName(TOKEN, 'C7', { timeoutMs: 1_000 })).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('shares one lookup between reads that arrive together', async () => {
+    let answer: (res: Response) => void = () => {};
+    fetchMock.mockReturnValue(new Promise<Response>((resolve) => { answer = resolve; }));
+
+    const first = resolveChannelName(TOKEN, 'C8', { timeoutMs: 1_000 });
+    const second = resolveChannelName(TOKEN, 'C8', { timeoutMs: 1_000 });
+    answer(jsonResponse(200, { ok: true, channel: { id: 'C8', name: 'alerts-eu' } }));
+
+    expect(await Promise.all([first, second])).toEqual(['alerts-eu', 'alerts-eu']);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not make a read with a timeout wait on a lookup that retries', async () => {
+    let answerUntimed: (res: Response) => void = () => {};
+    fetchMock
+      .mockReturnValueOnce(new Promise<Response>((resolve) => { answerUntimed = resolve; }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'C9', name: 'alerts-us' } }));
+
+    const untimed = resolveChannelName(TOKEN, 'C9');
+    expect(await resolveChannelName(TOKEN, 'C9', { timeoutMs: 1_000 })).toBe('alerts-us');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, timedInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(timedInit.signal).toBeInstanceOf(AbortSignal);
+
+    answerUntimed(jsonResponse(200, { ok: true, channel: { id: 'C9', name: 'alerts-us' } }));
+    expect(await untimed).toBe('alerts-us');
+  });
+
+  it('keeps a rename that arrives while a lookup waits', async () => {
+    let answer: (res: Response) => void = () => {};
+    fetchMock.mockReturnValue(new Promise<Response>((resolve) => { answer = resolve; }));
+
+    const lookup = resolveChannelName(TOKEN, 'C10', { timeoutMs: 1_000 });
+    rememberChannelName(TOKEN, 'C10', 'archive-prod');
+    answer(jsonResponse(200, { ok: true, channel: { id: 'C10', name: 'alerts-prod' } }));
+
+    expect(await lookup).toBe('archive-prod');
+    expect(cachedChannelName(TOKEN, 'C10')).toBe('archive-prod');
   });
 });

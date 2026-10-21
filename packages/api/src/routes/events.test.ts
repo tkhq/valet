@@ -14,6 +14,7 @@ import type { RunHost } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { storedAnyChannel } from "@valet/shared";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { ingestEvent } from "../events/ingest.js";
 import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
@@ -2452,6 +2453,22 @@ describe("mention scoping (slack.app_mention)", () => {
       filters: [{ field: "channel", op: "prefix", value: "C" }],
     });
     expect(res.status).toBe(400);
+  });
+
+  it("treats a channel_name condition as any channel, so a mention line with one needs anyChannel", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const named = [{ field: "channel_name", op: "prefix" as const, value: "alerts-" }];
+    const refused = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain('Choose "Any channel" to keep the name condition');
+
+    const accepted = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: named, anyChannel: true });
+    expect(accepted.status).toBe(201);
+    const body = (await accepted.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([...named, { field: "user", op: "eq", value: "U_LOCAL" }]);
+    // The stored row reads back as the any-channel state that Presence shows.
+    expect(storedAnyChannel(body.eventKeys, body.filters ?? [])).toBe(true);
   });
 
   it("accepts multiple channels via an in filter", async () => {

@@ -1481,7 +1481,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         Type.Boolean({
           description:
             "slack.app_mention only: listen in every channel the app can see, instead of a " +
-            "required channel filter.",
+            "required channel filter. A channel_name condition needs it too, because it also " +
+            "matches channels created later.",
         }),
       ),
     }),
@@ -1741,7 +1742,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         Type.Boolean({
           description:
             "slack.app_mention only: listen in every channel the app can see, instead of a " +
-            "required channel filter.",
+            "required channel filter. A channel_name condition needs it too, because it also " +
+            "matches channels created later.",
         }),
       ),
     }),
