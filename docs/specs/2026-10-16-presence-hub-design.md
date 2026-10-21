@@ -403,7 +403,8 @@ Pass criterion: all steps, in one run, from a clean start.
       so a change is never saved to a different line. The form is locked
       while a save is in flight and until the line list is read again, so
       a later refetch never replaces a newer edit. After a save that stores the line with
-      overlaps, the form is frozen and leaving does not ask. Amended 2026-10-20: How it works was three
+      overlaps, the form is frozen and leaving does not ask. Delete opens
+      Presence without asking, because the change has nothing to save into. Amended 2026-10-20: How it works was three
       read-only columns with an explanation each and a `Change` that opened
       the sheet on that section.
    7. **Activity**: one timeline, grouped by day, newest first, with chips

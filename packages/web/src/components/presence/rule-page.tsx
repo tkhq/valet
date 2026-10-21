@@ -308,7 +308,9 @@ function RuleBody({ sub, subs }: { sub: EventSubscriptionWire; subs: readonly Ev
           teams={teams}
           open={deleting}
           onOpenChange={setDeleting}
-          onDeleted={() => { void navigate({ to: "/presence" }); }}
+          // The line is gone, so the inline form's unsaved change has nothing
+          // to save into, and its leave guard must not hold the page.
+          onDeleted={() => { void navigate({ to: "/presence", ignoreBlocker: true }); }}
         />
       </div>
     </PresenceDetailPage>

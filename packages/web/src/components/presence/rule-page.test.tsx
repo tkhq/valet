@@ -25,7 +25,7 @@ import type { AssistantThreadPolicy } from "@valet/shared";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const navigate = vi.fn<(to: { to: string }) => Promise<void>>();
+const navigate = vi.fn<(to: { to: string; ignoreBlocker?: boolean }) => Promise<void>>();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => navigate,
@@ -535,7 +535,7 @@ describe("RulePage", () => {
     expect(within(dialog).getByText("Valet stops listening for this here. Its past activity stays.")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteEventSubscription).toHaveBeenCalledWith("R4"));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/presence", ignoreBlocker: true }));
   });
 
   it("names the team in a team line's Delete confirm and marks the line Team", async () => {
