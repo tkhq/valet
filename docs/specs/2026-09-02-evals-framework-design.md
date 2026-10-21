@@ -386,12 +386,13 @@ make eval EVAL_ARGS="--cases evals/cases/workflows --model openai/gpt-6-luna"
 The `workflow_definition` check finds the definitions the agent sent to
 `workflows.save_workflow` or `workflows.validate_definition` (the drafts).
 The final definition is the last one the case saved, else the last draft.
+A case asks for one workflow, so a run that saves more than one fails.
 Every definition must pass these rules:
 
-- The save validator: `validateDefinitionInput` with the bundled plugin
-  catalog (`@valet/api/eval-workflows`). The validator checks tool steps
-  against the real action schemas. There is no org, so the org's
-  approved-model list does not apply.
+- The product's save validator accepted it. A saved definition passed it,
+  and a draft passed it when its `save_workflow` or `validate_definition`
+  call succeeded. The check does not validate again, because only the
+  product knows the org's integrations and models.
 - Each stop step's outcome is `success` or `failure`.
 - Each `foreach` step has one inline body object and `maxItems`.
 - No agent step prompt tells its agent to get approval. This is the same
@@ -407,7 +408,8 @@ scheduler's `scheduleName` or `cron`), `run_date` (a `trigger.timestamp`
 read and no literal date), and `declared_inputs` (each `trigger.data`
 field has a `dataSchema` entry). A selector with a dot is an action id
 glob for tool steps and foreach tool bodies. A selector without a dot is
-a step type.
+a step type. A part that starts with `!` excludes what it names, so
+`sheets.*|!sheets.read_*` names every sheets action except the reads.
 
 For `order`, a step on an approval step's denial branch does not run
 after the approval. After an approval selector, every step that matches
@@ -423,8 +425,9 @@ its `"false"` edges and its edges without `fromOutput`.
 Only the final definition decides pass or fail. The check reports repair
 effort and initial correctness apart, as metrics: `drafts`, `rejections`
 (validator rejections across save, validate, and patch calls),
-`first_valid`, `first_correct` (the first full draft passes the validator
-and every rule), and `final_valid`. Two kinds of call are not scored as
+`first_valid` (the save validator accepted the first full draft),
+`first_correct` (it was also correct under every rule), and
+`final_valid`. Two kinds of call are not scored as
 first drafts:
 
 - A call to a tool that does not exist. A model can write
@@ -443,7 +446,10 @@ The cases:
   Google Sheet after a person approves the change, then the workflow
   reads the row back. The sheet write is medium risk, which policy allows
   without asking, so the case requires an approval step before a tool
-  step that writes, and a tool step that reads after it.
+  step that writes, and a tool step that reads after it. Every sheets
+  action except the reads (`read_*`, `get_*`, `list_*`) changes the
+  sheet, so none of them may run before the approval or sit in an agent
+  step's scope.
 - `workflow-scheduled-refresh`: a weekday schedule refreshes a JSON file
   in a GitHub repository. The case requires schedule input reads at
   `trigger.data.input` and the run date from `trigger.timestamp`.
@@ -492,9 +498,10 @@ drive, 3 runs per case. Runs: 2026-10-20 18:03 to 18:58 EDT, and the
 - One `claude-sonnet-4-6` onboarding run created the issues without a
   foreach step.
 - The saved run in each file replays with the same verdict under the
-  final rules (`saved`, and every matching write after the approval). A
-  file saves one run of three, so the other two keep the verdict from
-  the rules they ran with.
+  final rules: `saved`, every sheet change after the approval, one saved
+  workflow, and validity from the product's save results. A file saves
+  one run of three, so the other two keep the verdict from the rules
+  they ran with.
 - Batches that ended with `Connection error.` or `terminated` were run
   again alone, and only the clean batch is kept. The first
   `claude-sonnet-5-5` sales-tracker batch also logged a failed Docker
@@ -532,3 +539,26 @@ drafts.
   workflow (with pass@k, never single-run rows).
 - The workflow-authoring cases do not check the schedule's cron or the
   event trigger's filters. A workflow can pass with a wrong schedule.
+- The schedule and event cases do not require the schedule or the event
+  trigger at all. The product driver declines the approval card for
+  `workflows.create_schedule`, and a passing run can skip
+  `workflows.create_trigger`.
+- The `order` rule does not read edge `when` conditions or `if` steps.
+  With `onDeny: "skip"`, a write behind `when:
+  "nodes.gate.result.approved"`, or behind an `if` step on that value,
+  does not run after a denial. The rule still counts that path as a
+  denial path and fails the workflow.
+- The sales case does not require the proposal before the approval. A
+  workflow that asks for approval before it drafts the new values
+  passes.
+- `declared_inputs` skips a bare `{{trigger.data}}` read. A workflow that
+  passes the whole payload to a step and declares no `dataSchema`
+  passes.
+- The product driver answers every gate the decisions endpoint lists,
+  including gates that are already resolved. `metadata.decisions` can
+  hold more answers than the cards that opened, so read it as an upper
+  bound.
+- The baseline table mixes rule versions. Each file keeps one run of
+  three, and only that run is replayed under the current rules. Rerun
+  the suite before you quote the table as a measurement of the current
+  rules.

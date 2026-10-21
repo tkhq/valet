@@ -207,11 +207,13 @@ export type DeterministicCheck =
 /**
  * Workflow-authoring check. Scores the workflow definition the agent
  * drafted: the saved definition when the case saved one, else the last
- * definition the agent sent to the save validator. Every definition must
- * pass the save validator, give each stop step a `success` or `failure`
- * outcome, give each `foreach` step one inline body and `maxItems`, and
- * keep approval requests out of agent step prompts. The optional fields
- * add case-specific rules.
+ * definition the agent sent to the save validator. A case asks for one
+ * workflow, so saving more than one fails. Every definition must pass the
+ * product's save validator (a saved definition did; a draft did when its
+ * call succeeded), give each stop step a `success` or `failure` outcome,
+ * give each `foreach` step one inline body and `maxItems`, and keep
+ * approval requests out of agent step prompts. The optional fields add
+ * case-specific rules.
  *
  * The check also reports metrics: the drafts sent to the validator, the
  * validator rejections (repair effort), and whether the first full draft
@@ -222,7 +224,8 @@ export type DeterministicCheck =
  * Selectors name steps. A selector with a dot is an action id glob that
  * matches tool steps and `foreach` tool bodies (`sheets.write_*`). A
  * selector without a dot is a step type (`approval`). `|` separates
- * alternatives.
+ * alternatives. A part that starts with `!` excludes what it names:
+ * `sheets.*|!sheets.read_*` names every sheets action except the reads.
  */
 export interface WorkflowDefinitionCheck {
   type: "workflow_definition";

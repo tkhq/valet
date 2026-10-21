@@ -168,10 +168,52 @@ describe("workflow_definition", () => {
 
   it("treats the final definition as the first full draft when every draft is small", () => {
     const small = { version: "dag/v1", nodes: [{ id: "start", type: "trigger" }], edges: [] };
-    expect(firstFullDraft([{ definition: small, callIndex: 0, rejected: false }], leadWorkflow())).toEqual({
+    expect(firstFullDraft([{ definition: small, callIndex: 0, rejected: false }], leadWorkflow(), true)).toEqual({
       definition: leadWorkflow(),
+      valid: true,
       probes: 1,
     });
+  });
+
+  it("takes validity from the product's save results, not from a second validator", () => {
+    // The product refused the first draft, for example on an org rule the eval cannot see.
+    const refusedFirst = runDeterministicCheck(
+      CHECK,
+      trajectory([saveCall(0, leadWorkflow(), false), saveCall(1, leadWorkflow(), true)], {
+        savedWorkflows: [{ id: "wf_1", definition: leadWorkflow() }],
+      }),
+    );
+    expect(refusedFirst.metrics).toMatchObject({ first_valid: false, first_correct: false, final_valid: true });
+    // A product action outside the bundled plugins is valid once the product saved it.
+    const listStep = withNode(leadWorkflow(), "verify", { service: "workflows", action: "list_workflows", params: {} });
+    const saved = runDeterministicCheck(
+      CHECK,
+      trajectory([saveCall(0, listStep, true)], { savedWorkflows: [{ id: "wf_1", definition: listStep }] }),
+    );
+    expect(saved.pass).toBe(true);
+    expect(saved.metrics).toMatchObject({ first_valid: true, final_valid: true });
+  });
+
+  it("fails when the agent saved more than one workflow", () => {
+    const helper = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "done", type: "stop", outcome: "success" },
+      ],
+      edges: [{ from: "start", to: "done" }],
+    };
+    const r = runDeterministicCheck(
+      CHECK,
+      trajectory([saveCall(0, leadWorkflow(), true), saveCall(1, helper, true)], {
+        savedWorkflows: [
+          { id: "wf_1", definition: leadWorkflow() },
+          { id: "wf_2", definition: helper },
+        ],
+      }),
+    );
+    expect(r.pass).toBe(false);
+    expect(r.detail).toContain("the agent saved 2 workflows; the case asks for one");
   });
 
   it("fails a saved: true case when the save stored nothing", () => {
@@ -373,6 +415,37 @@ describe("workflow case files", () => {
       expect(c.drive).toBe("product");
       expect(c.checks.some((check) => check.type === "workflow_definition")).toBe(true);
     }
+  });
+
+  it("keep every sheet-changing action in the sales case behind the approval", async () => {
+    const cases = await loadCases(join(import.meta.dirname, "../../../evals/cases/workflows"));
+    const check = cases
+      .find((c) => c.id === "workflow-sales-tracker")
+      ?.checks.find((k): k is WorkflowDefinitionCheck => k.type === "workflow_definition");
+    if (check === undefined) throw new Error("the sales case has no workflow_definition check");
+    expect(workflowRuleFailures(leadWorkflow(), check)).toEqual([]);
+
+    const append = { id: "log", type: "tool", service: "google_workspace", action: "sheets.append_rows", params: {} };
+    const appendFirst = {
+      ...leadWorkflow(),
+      nodes: [...(leadWorkflow().nodes as Array<Record<string, unknown>>), append],
+      edges: [
+        { from: "start", to: "log" },
+        { from: "log", to: "propose" },
+        ...(leadWorkflow().edges as Array<Record<string, unknown>>).filter((edge) => edge.from !== "start"),
+      ],
+    };
+    expect(workflowRuleFailures(appendFirst, check).join("\n")).toContain('step "log" matches sheets.*');
+
+    const scoped = withNode(leadWorkflow(), "propose", {
+      type: "orchestrator",
+      model: undefined,
+      prompt: "Propose a lead update.",
+      toolScope: { actions: ["gmail.*", "sheets.read_spreadsheet", "sheets.append_rows"] },
+    });
+    expect(workflowRuleFailures(scoped, check)).toEqual([
+      'agent step "propose" can run sheets.append_rows; an approved action belongs in a tool step',
+    ]);
   });
 
   it("rejects connected outside the product drive", () => {

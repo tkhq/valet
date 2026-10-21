@@ -5,7 +5,9 @@
 #
 # The sheet write runs at medium risk, which policy allows without asking,
 # so the per-run approval needs an approval step before a tool step that
-# writes. The read-back is a tool step after the write.
+# writes. The read-back is a tool step after the write. Every sheets action
+# except the reads (read_*, get_*, list_*) changes the sheet, so none may
+# run before the approval or sit in an agent step's scope.
 id: workflow-sales-tracker
 description: Draft a lead tracker workflow that matches one email to a lead and applies an approved update.
 drive: product
@@ -32,5 +34,6 @@ checks:
   - type: workflow_definition
     saved: true
     declared_inputs: true
-    approved_actions: ["sheets.write_spreadsheet|sheets.batch_write"]
-    order: ["approval", "sheets.write_spreadsheet|sheets.batch_write", "sheets.read_spreadsheet"]
+    tool_steps: ["sheets.write_spreadsheet|sheets.batch_write"]
+    approved_actions: ["sheets.*|!sheets.read_*|!sheets.get_*|!sheets.list_*"]
+    order: ["approval", "sheets.*|!sheets.read_*|!sheets.get_*|!sheets.list_*", "sheets.read_spreadsheet"]

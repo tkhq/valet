@@ -5,7 +5,13 @@
  * is a definition the agent sent to the save validator through
  * `workflows.save_workflow` or `workflows.validate_definition`. The final
  * definition is the one the case saved (product drive records it in
- * `metadata.savedWorkflows`), else the last draft.
+ * `metadata.savedWorkflows`), else the last draft. A case asks for one
+ * workflow, so saving more than one fails.
+ *
+ * The product's save validator decides validity: a saved definition passed
+ * it, and a draft passed it when its call succeeded. The check does not
+ * validate again, because only the product knows the org's integrations
+ * and models.
  *
  * The check reports two measurements apart: initial correctness (the
  * first full draft already passes) and repair effort (validator rejections
@@ -19,7 +25,7 @@
  * accepts an action name, before the real draft. The check counts both
  * on their own.
  */
-import { approvalRequestWarning, validateWorkflowDraft } from "@valet/api/eval-workflows";
+import { approvalRequestWarning } from "@valet/api/eval-workflows";
 import { toolResultText } from "../trajectory.js";
 import type { CheckResult, Trajectory, TrajectoryToolCall, WorkflowDefinitionCheck } from "../types.js";
 
@@ -98,24 +104,27 @@ function nodeCount(definition: unknown): number {
 }
 
 /**
- * The first full draft and the probes before it. A full draft has at least
- * half as many steps as the final definition; a smaller draft before it is
- * a probe. When no draft is that large (the agent grew the workflow with
- * patches), the final definition is the first full one.
+ * The first full draft, whether the save validator accepted it, and the
+ * probes before it. A full draft has at least half as many steps as the
+ * final definition; a smaller draft before it is a probe. When no draft is
+ * that large (the agent grew the workflow with patches), the final
+ * definition is the first full one.
  */
-export function firstFullDraft(drafts: WorkflowDraft[], final: unknown): { definition: unknown; probes: number } {
+export function firstFullDraft(
+  drafts: WorkflowDraft[],
+  final: unknown,
+  finalValid: boolean,
+): { definition: unknown; valid: boolean; probes: number } {
   const size = nodeCount(final);
   const index = drafts.findIndex((draft) => nodeCount(draft.definition) * 2 >= size);
-  if (index === -1) return { definition: final, probes: drafts.length };
-  return { definition: drafts[index].definition, probes: index };
+  if (index === -1) return { definition: final, valid: finalValid, probes: drafts.length };
+  return { definition: drafts[index].definition, valid: !drafts[index].rejected, probes: index };
 }
 
-/** The most recently saved definition a product-drive case recorded. */
-function lastSavedDefinition(trajectory: Trajectory): unknown {
+/** The definitions a product-drive case saved: one per workflow, oldest update first. */
+function savedDefinitions(trajectory: Trajectory): unknown[] {
   const saved = trajectory.metadata?.savedWorkflows;
-  if (!Array.isArray(saved) || saved.length === 0) return undefined;
-  const last: unknown = saved[saved.length - 1];
-  return isRecord(last) ? last.definition : undefined;
+  return Array.isArray(saved) ? saved.filter(isRecord).map((row) => row.definition) : [];
 }
 
 // ── Selectors ────────────────────────────────────────────────────────────────
@@ -140,24 +149,40 @@ function stepUnits(node: Json): Json[] {
   return node.type === "foreach" && isRecord(node.body) ? [node, node.body] : [node];
 }
 
+/** A selector's parts: the ones that name steps, and the `!` parts that take steps out again. */
+function selectorParts(selector: string): { include: string[]; exclude: string[] } {
+  const parts = selector.split("|");
+  return {
+    include: parts.filter((part) => !part.startsWith("!")),
+    exclude: parts.filter((part) => part.startsWith("!")).map((part) => part.slice(1)),
+  };
+}
+
+/** True when one selector part names `unit`. */
+function partMatches(part: string, unit: Json): boolean {
+  if (!part.includes(".")) return unit.type === part;
+  const actionId = toolActionId(unit);
+  return actionId !== undefined && globMatches(part, actionId);
+}
+
 /**
  * True when `selector` names this step. A part with a dot is an action
  * glob for tool steps; a part without one is a step type. `|` separates
- * parts.
+ * parts. A part that starts with `!` excludes what it names, so
+ * `sheets.*|!sheets.read_*` names every sheets action except the reads.
  */
 export function selectorMatches(selector: string, node: Json): boolean {
-  return selector.split("|").some((part) =>
-    stepUnits(node).some((unit) => {
-      if (!part.includes(".")) return unit.type === part;
-      const actionId = toolActionId(unit);
-      return actionId !== undefined && globMatches(part, actionId);
-    }),
+  const { include, exclude } = selectorParts(selector);
+  return stepUnits(node).some(
+    (unit) => include.some((part) => partMatches(part, unit)) && !exclude.some((part) => partMatches(part, unit)),
   );
 }
 
 /** True when an agent step's `toolScope.actions` entry can run an action the selector names. */
 function scopeCovers(entry: string, selector: string): boolean {
-  return selector.split("|").some((part) => {
+  const { include, exclude } = selectorParts(selector);
+  if (exclude.some((part) => globMatches(part, entry))) return false;
+  return include.some((part) => {
     if (globMatches(part, entry)) return true;
     // `sheets.*` in a scope covers every `sheets.` action.
     return entry.endsWith(".*") && part.startsWith(entry.slice(0, -1));
@@ -369,12 +394,6 @@ export function workflowRuleFailures(definition: unknown, check: WorkflowDefinit
   return failures;
 }
 
-/** The validator's errors and the rule failures for one definition. */
-function score(definition: unknown, check: WorkflowDefinitionCheck): { errors: string[]; rules: string[] } {
-  const validation = validateWorkflowDraft(definition);
-  return { errors: validation.ok ? [] : validation.errors, rules: workflowRuleFailures(definition, check) };
-}
-
 function summarize(problems: string[]): string {
   const shown = problems.slice(0, 5).join("; ");
   return problems.length > 5 ? `${shown}; and ${problems.length - 5} more` : shown;
@@ -383,8 +402,10 @@ function summarize(problems: string[]): string {
 /** Run one `workflow_definition` check against a trajectory. */
 export function runWorkflowDefinitionCheck(check: WorkflowDefinitionCheck, trajectory: Trajectory): CheckResult {
   const drafts = workflowDrafts(trajectory);
-  const saved = lastSavedDefinition(trajectory);
-  const final = saved ?? drafts[drafts.length - 1]?.definition;
+  const savedRows = savedDefinitions(trajectory);
+  const saved = savedRows[savedRows.length - 1];
+  const lastDraft = drafts[drafts.length - 1];
+  const final = saved ?? lastDraft?.definition;
   const rejections = rejectionCount(trajectory);
   const unknownToolCalls = trajectory.toolCalls.filter(isUnknownTool).length;
   if (final === undefined) {
@@ -404,22 +425,23 @@ export function runWorkflowDefinitionCheck(check: WorkflowDefinitionCheck, traje
     };
   }
 
-  const finalScore = score(final, check);
-  const full = firstFullDraft(drafts, final);
-  const first = score(full.definition, check);
+  const finalValid = saved !== undefined || lastDraft?.rejected === false;
+  const finalRules = workflowRuleFailures(final, check);
+  const full = firstFullDraft(drafts, final, finalValid);
+  const firstRules = workflowRuleFailures(full.definition, check);
   const metrics = {
     drafts: drafts.length,
     probes: full.probes,
     rejections,
     unknown_tool_calls: unknownToolCalls,
-    first_valid: first.errors.length === 0,
-    first_correct: first.errors.length === 0 && first.rules.length === 0,
-    final_valid: finalScore.errors.length === 0,
+    first_valid: full.valid,
+    first_correct: full.valid && firstRules.length === 0,
+    final_valid: finalValid,
   };
   const firstLine =
     metrics.first_correct
       ? "first full draft correct"
-      : `first full draft: ${first.errors.length} validator error(s), ${first.rules.length} rule failure(s)`;
+      : `first full draft: ${full.valid ? "accepted" : "rejected"} by the save validator, ${firstRules.length} rule failure(s)`;
   const extras = [
     ...(full.probes > 0 ? [`${full.probes} probe(s)`] : []),
     ...(unknownToolCalls > 0 ? [`${unknownToolCalls} call(s) to a tool that does not exist`] : []),
@@ -429,11 +451,12 @@ export function runWorkflowDefinitionCheck(check: WorkflowDefinitionCheck, traje
   const problems = [
     // A save that returns an error stores nothing, so its draft does not count as saved.
     ...(check.saved === true && saved === undefined ? ["no workflow was saved"] : []),
-    ...finalScore.errors.map((error) => `validator: ${error}`),
-    ...finalScore.rules,
+    ...(savedRows.length > 1 ? [`the agent saved ${savedRows.length} workflows; the case asks for one`] : []),
+    ...(finalValid ? [] : ["the save validator rejected the last draft"]),
+    ...finalRules,
   ];
   if (problems.length > 0) {
     return { check, pass: false, detail: `the ${source} fails: ${summarize(problems)}. ${effort}.`, metrics };
   }
-  return { check, pass: true, detail: `the ${source} passes the validator and every rule. ${effort}.`, metrics };
+  return { check, pass: true, detail: `the ${source} passes the save validator and every rule. ${effort}.`, metrics };
 }
