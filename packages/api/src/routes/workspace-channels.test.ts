@@ -143,17 +143,18 @@ it("applies a private Slack thread's access to every route that addresses the th
   const statuses = async () => [
     (await fetch(`${api!.baseUrl}/api/threads/${thread.id}`)).status,
     (await fetch(`${base}/threads/${thread.id}/channel-activity`)).status,
+    (await fetch(`${api!.baseUrl}/api/threads/${thread.id}/context`)).status,
     (await fetch(`${base}/threads/${thread.id}`, { method: "PATCH", headers: json, body: JSON.stringify({ title: "Renamed" }) })).status,
     (await fetch(`${base}/threads/${thread.id}/resume`, { method: "POST" })).status,
     (await fetch(`${base}/threads`, { method: "POST", headers: json, body: JSON.stringify({ sourceThreadId: thread.id }) })).status,
   ];
   // Outside the channel, every path reads the thread as missing, and nothing is sent into it.
-  expect(await statuses()).toEqual([404, 404, 404, 404, 404]);
+  expect(await statuses()).toEqual([404, 404, 404, 404, 404, 404]);
   const send = await fetch(`${base}/messages`, { method: "POST", headers: json, body: JSON.stringify({ text: "hi", threadId: thread.id }) });
   expect(send.status).toBe(404);
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "UROUTES", userId: "local-user" });
-  const [read, activity, rename, resume, fork] = await statuses();
-  expect([read, activity, rename, resume]).toEqual([200, 200, 200, 200]);
+  const [read, activity, context, rename, resume, fork] = await statuses();
+  expect([read, activity, context, rename, resume]).toEqual([200, 200, 200, 200, 200]);
   expect(fork).toBeLessThan(300);
 });
 

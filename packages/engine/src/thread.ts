@@ -145,6 +145,7 @@ import type {
   SubmissionOutcome,
   SubmissionResult,
   SuspendedTurnState,
+  ThreadContextUsage,
   ThreadData,
   ToolContext,
   ToolDef,
@@ -4635,16 +4636,65 @@ export class Thread {
     // appended since are estimated with the cut-point budget's char ruler.
     // This runs before the turn's finally-block restores the baseline
     // prompt, so the fallback estimate sees the overlays the turn used.
-    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
-    // reach the LLM, so they must not count toward the context estimate.
-    const llmMessages = this.agent.state.messages.filter(
-      (m): m is Message =>
-        m.role === "user" || m.role === "assistant" || m.role === "toolResult",
-    );
     const estimated = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model), llmMessages,
+      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model),
+      this.agent.state.messages.filter(isLlmMessage),
     );
     return estimated >= usable;
+  }
+
+  /**
+   * How full the model context is, for display. It measures like
+   * `shouldCompactProactive`: the usage-anchored estimate of the next request
+   * against the usable budget of the thread's model. A thread that has not
+   * loaded its transcript is read from the store and stays unloaded.
+   * Undefined when the model reports no context window.
+   */
+  async contextUsage(): Promise<ThreadContextUsage | undefined> {
+    const cfg = this.session.options.compaction;
+    const model = await this.budgetModel();
+    const limit = usableTokens(model, cfg);
+    if (limit === 0) return undefined;
+    let messages: readonly AgentMessage[] = this.agent.state.messages;
+    if (this.transcriptPending) {
+      const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+      messages = snapshot
+        ? entriesToAgentMessages(snapshot.entries, model, {
+            attributeAuthors: this.attributeAuthors,
+            threadKey: this.key,
+            activeLeafEntryId: snapshot.thread.activeLeafEntryId,
+          })
+        : [];
+    }
+    const tokens = estimateLiveContextTokens(
+      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+      messages.filter(isLlmMessage),
+    );
+    return { tokens, limit, contextWindow: model.contextWindow, model: model.id, autoCompact: cfg?.enabled !== false };
+  }
+
+  /** The model the next turn budgets against: the live turn model mid-turn, else the thread's effective spec. */
+  private async budgetModel(): Promise<PiModel> {
+    // A turn publishes its model state at claim and clears it when settlement
+    // starts. The turn's cleanup restores the session's baseline model before
+    // `submission_settled` is delivered, so the live model counts only while
+    // the running item still owns that state.
+    if (this.runningItem && this.committedModelState?.queueItemId === this.runningItem.id) return this.agent.state.model;
+    const spec = this.turnModelSpec();
+    const resolver = this.session.options.resolveModel;
+    // Resolve the spec on every read, as a turn does, so a re-pointed size
+    // tier shows the model and limit that the next turn uses.
+    if (resolver) {
+      try {
+        const resolved = await resolver(spec);
+        if (resolved) return resolved.model;
+      } catch (err) {
+        if (err instanceof NoCredentialsError) return err.model;
+        // A display read must not fail on resolution. The next turn resolves
+        // the same spec and fails loud there (thread pinning spec, decision 3).
+      }
+    }
+    return this.effectiveModelLenient();
   }
 
   /** Tool results and model changes can exhaust the budget within one agent loop. */
@@ -4656,9 +4706,7 @@ export class Thread {
     const cfg = this.session.options.compaction;
     const budget = usableTokens(model, cfg);
     if (budget === 0) return undefined;
-    const messages = context.messages.filter(
-      (message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-    );
+    const messages = context.messages.filter(isLlmMessage);
     const prompt = () => this.modelSystemPrompt(this.agent.state.systemPrompt, model);
     const toolTokens = estimateTokens(JSON.stringify((context.tools ?? []).map((tool) => ({
       name: tool.name, description: tool.description, parameters: tool.parameters,
@@ -6764,6 +6812,11 @@ export function renderReplyContext(
     "",
     text,
   ].join("\n");
+}
+
+/** The roles `convertToLlm` sends. Custom agent message kinds never reach the model, so context estimates skip them. */
+function isLlmMessage(message: AgentMessage): message is Message {
+  return message.role === "user" || message.role === "assistant" || message.role === "toolResult";
 }
 
 export function entriesToAgentMessages(

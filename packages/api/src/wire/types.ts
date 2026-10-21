@@ -1040,6 +1040,26 @@ export interface ThreadAddress {
   guest?: { mode: ThreadShareMode; ownerName: string };
 }
 
+/** `GET /api/threads/:threadId/context` — how full the thread's model
+ * context is. The engine measures it like the proactive compaction check
+ * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn
+ * compacts first. `context` is null when the model reports no context
+ * window. */
+export interface ThreadContextResponse {
+  context: {
+    /** Estimated tokens the next model request sends. */
+    tokens: number;
+    /** Usable budget: the context window minus the output reserve. */
+    limit: number;
+    /** The model's full context window. */
+    contextWindow: number;
+    /** Id of the model the budget belongs to. */
+    model: string;
+    /** False when the session disables automatic compaction. */
+    autoCompact: boolean;
+  } | null;
+}
+
 /** A channel as a thread names it. */
 export interface ThreadChannel {
   /** `slack:C123` or `github:owner/repo#12`. */

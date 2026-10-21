@@ -224,6 +224,32 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
+  it("refreshes a thread's context reading after its turn, its settlement, its compaction, or a model switch", () => {
+    const { queryClient, unmount } = renderSocketHook("s1");
+    const reading = { context: { tokens: 1, limit: 10, contextWindow: 12, model: "m", autoCompact: true } };
+    queryClient.setQueryData(["thread-context", "s1", "t1"], reading);
+    queryClient.setQueryData(["thread-context", "s1", "t2"], reading);
+    const socket = FakeWebSocket.instances[0];
+    const invalidated = (threadId: string) => queryClient.getQueryState(["thread-context", "s1", threadId])?.isInvalidated;
+
+    for (const frame of [
+      { type: "turn_end", threadId: "t1", reason: "end_turn" },
+      { type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId: "q1", outcome: "completed" },
+      { type: "compaction_end", threadId: "t1" },
+      { type: "model_switched", threadId: "t1", fromModel: "a", toModel: "b", reason: "user" },
+    ]) {
+      queryClient.setQueryData(["thread-context", "s1", "t1"], reading);
+      act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, ...frame }) }));
+      expect(invalidated("t1")).toBe(true);
+      expect(invalidated("t2")).toBe(false);
+    }
+
+    // A session-level model switch changes every thread's budget.
+    act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 2, ts: 2, type: "model_switched", fromModel: "a", toModel: "b", reason: "user" }) }));
+    expect(invalidated("t2")).toBe(true);
+    unmount();
+  });
+
   it("updates cached activity without refetching loaded pages", () => {
     const { queryClient, unmount } = renderSocketHook("s1");
     queryClient.setQueryData<ListThreadsResponse>(["sessions", "s1", "threads"], {

@@ -43,6 +43,7 @@ import type {
   ListMessagesResponse,
   ListThreadsResponse,
   ThreadChannelActivity,
+  ThreadContextResponse,
   MarkThreadsReadRequest,
   Message,
   MessagePart,
@@ -544,6 +545,18 @@ export async function getThreadChannelActivity(c: Context<AppEnv>, sessionId: st
     return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   }
   const body: ThreadChannelActivity = await threadChannelActivity(c.var.providers.db, session.id, threadId);
+  return c.json(body);
+}
+
+/** How full one thread's model context is. Reading it never loads the transcript or wakes the sandbox. */
+messagesRouter.get("/:id/threads/:threadId/context", (c) => getThreadContext(c, c.req.param("id"), c.req.param("threadId")));
+
+export async function getThreadContext(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const thread = await visibleThread(c, result.session, result.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  const body: ThreadContextResponse = { context: (await thread.contextUsage()) ?? null };
   return c.json(body);
 }
 
