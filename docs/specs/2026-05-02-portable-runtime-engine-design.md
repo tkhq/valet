@@ -331,7 +331,7 @@ interface ThreadHandle {
   resume(): Promise<void>;
 }
 
-type QueueMode = 'followup' | 'steer' | 'collect';
+type QueueMode = 'followup' | 'inject' | 'steer' | 'collect';
 
 type PromptContent =
   | string
@@ -1170,6 +1170,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 **Queue modes** (per-thread, switchable at runtime):
 
 - **Followup** (default) — prompts queue in FIFO order. When the current prompt completes, the next one starts. If the thread is idle, the prompt executes immediately.
+- **Inject** (added 2026-10-21) — the prompt joins the running turn at its next step, the way a coding agent takes a message typed while it works. It is stored as a followup with the `MID_TURN_DELIVERY_KEY` metadata flag. When the model's response and its tool calls finish, `finishTurn` takes the leading run of queued items that may join (`canDeliverMidTurn`), in admission order. For each, it writes the user entry, settles the item `merged`, and steers it into pi-agent-core, which adds it before the next model request. An item joins only when it adds no authority and needs no other routing: same actor (an item with no author, such as a wake-up, stands for the session's default actor), no channel sender with no Valet account, a token-sent message never joins a signed-in person's turn, and the same channel, reply target, model pin and role. A signal with a channel origin, an unattended turn, and a workflow session take none. An item that cannot join, or that is still queued when the turn ends, runs as a followup. A cancel runs on the same chain as delivery, so either the cancel wins or the item is already settled.
 - **Steer** — the new prompt supersedes the in-flight prompt *and every queued item admitted before it* (all settle `superseded`), becoming the thread's new head. Superseded partial work remains in the thread history. See "Steer supersession is transactional" under Durable Execution.
 - **Collect** — prompts buffer for a configurable window (default 5 seconds). Buffered prompts are **durably admitted immediately** with status `collecting` (their `dispatchId` dedup applies at admission, so webhook retries are absorbed even mid-window). When the window closes, the engine creates one merged submission referencing the constituent ids and CAS-settles each constituent with outcome `merged` pointing at it; `awaitResult` on a constituent resolves with the merged item's result. `collecting` items are not claimable and do not block FIFO head-claim. A collect window whose deadline passed while the engine was down is flushed by reconciliation.
 
@@ -1184,6 +1185,7 @@ Each thread owns its own prompt queue. Threads execute independently and concurr
 **Pending decision semantics:** When a thread is blocked on a pending decision gate, it is considered busy but interruptible. Behavior by mode:
 
 - `followup` — new prompts queue behind the blocked turn.
+- `inject` — new prompts wait; they join the turn after the gate resolves and its tool call finishes.
 - `collect` — new prompts continue buffering and later queue behind the blocked turn.
 - `steer` — new prompt cancels the blocked turn and expires or withdraws the outstanding decision gate before starting immediately.
 
@@ -1231,7 +1233,7 @@ queued → running → terminalizing → settled
 - **running** — claimed by exactly one engine instance via a compare-and-set transition, recording an `attemptId`, `ownerId`, and lease. Two concurrent claims for the same submission must never both succeed. Only the oldest non-superseded unsettled submission of a thread is claimable (per-thread FIFO gating); `steer` supersedes the items ahead of it rather than jumping the queue.
 - **blocked_on_decision_gate** — the claimed turn is suspended on a pending gate. The claim is retained; the lease continues to renew while the process holding it is alive.
 - **terminalizing** — the terminal outcome has been decided and durably reserved, but post-settlement repairs (transcript rest-state, gate withdrawal, event emission) may still be in flight.
-- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge). The first terminal write wins; later attempts to settle differently are conflicts.
+- **settled** — terminal, with an outcome: `completed`, `failed`, `aborted`, `superseded` (replaced by a `steer` prompt), or `merged` (absorbed into a collect-window merge, or delivered into a running turn by `inject`). The first terminal write wins; later attempts to settle differently are conflicts.
 
 Durability parameters are per-submission with engine defaults: `maxAttempts` (default 10), `timeoutAt` (claim time + 1 hour, set by a claim with `attemptCount` 0, so time spent queued does not count), lease duration 30 seconds with heartbeat renewal.
 

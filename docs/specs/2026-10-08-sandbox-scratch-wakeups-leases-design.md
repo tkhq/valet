@@ -421,6 +421,14 @@ expired with `cause=rate`. The `watch.exited` body names the limit.
 All signals use `tagName: "wakeup"`. Attributes are flat strings. Every
 signal carries `wakeupId`, `kind`, and `reason`.
 
+Amended 2026-10-21: the watcher submits each signal with `queueMode:
+"inject"`. If the thread is running a turn, the signal joins that turn at
+its next step, after the current tool calls, the way a coding agent takes a
+finished background task mid-turn. It joins only a turn of the same actor
+on the same channel, and never with a channel origin
+(`canDeliverMidTurn`). Otherwise, or when the turn ends first, it runs
+after the turn as before.
+
 | Signal | When | Body | Extra attributes |
 |---|---|---|---|
 | `process.exited` | terminal `process` | last 4096 bytes of the log | `cause` (`exit` \| `deadline` \| `cancelled` \| `pid_missing` \| `sandbox_unavailable`), `exitCode` when `exit`, `durationSeconds`, `logPath` |
