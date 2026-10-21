@@ -36,7 +36,7 @@ import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { routeAttention, type AttentionEvent } from "../orchestrator/attention.js";
+import { routeAttention as enqueueAttention, type AttentionEvent } from "../orchestrator/attention.js";
 import { savedGatePrompts } from "./gate-prompts.js";
 import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
@@ -2832,7 +2832,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(job).toMatchObject({ status: "dropped", attempts: 1 });
   });
 
-  it("reconciles an approval whose gate ref was saved before the outbox acknowledgement", async () => {
+  it.each([false, true])("reconciles a confirmed card without resending when ref saving fails: %s", async saveFails => {
     host = await buildHost();
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     await testDb.appDb.insert(agentSessions).values({ id: "gate-session", workspace: "/", orgId: ORG_ID, userId: USER_ID, ownerType: "user", ownerId: USER_ID, createdAt: 1, updatedAt: 1 });
@@ -2841,16 +2841,40 @@ describe("ChannelHost.attentionDeliverer", () => {
     const channels = [host.attentionDeliverer("fake")];
     await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "gate" }));
     expect(fakeTransport.gatePrompts).toHaveLength(1);
-    const ref = { conversationKey: "fake:dm:77", messageId: "1" };
+    const ref = { conversationKey: "fake:dm:77", messageId: "1", gateId: "gate" };
     const reconcile = vi.fn(async () => ref);
+    if (saveFails) vi.spyOn(PgSessionStore.prototype, "saveDecisionGateRef").mockRejectedValueOnce(new Error("store unavailable"));
     Object.assign(fakeTransport, { reconcileAttention: reconcile });
-    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2 });
+    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2, event: event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] } }) });
     await drainAttentionDeliveries({ db: testDb.appDb, channels }, 2);
     expect(reconcile).toHaveBeenCalledOnce();
     expect(fakeTransport.gatePrompts).toHaveLength(1);
     const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
     expect(job).toMatchObject({ status: "sent", attempts: 2 });
     expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'gate'")).rows).toHaveLength(1);
+  });
+
+  it("does not register recovered summary messages as gate cards", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "other-session", workspace: "/", orgId: ORG_ID, userId: "other", ownerType: "user", ownerId: "other", createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("other-session", "thread", { id: "summary-gate", sessionId: "other-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "other-session", gate: { id: "summary-gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "summary" }));
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    const ref = { conversationKey: "fake:dm:77", messageId: "1" };
+    Object.assign(fakeTransport, { reconcileAttention: vi.fn(async () => ref) });
+    // Even if permissions expand after the summary send, it is not a gate card.
+    await testDb.appDb.update(agentSessions).set({ userId: USER_ID, ownerId: USER_ID }).where(eq(agentSessions.id, "other-session"));
+    // Restore the event to model a crash before the terminal acknowledgement.
+    const approval = event({ kind: "approval", sessionId: "other-session", gate: { id: "summary-gate", actions: [{ id: "approve", label: "Approve" }] } });
+    await testDb.appDb.update(pendingChannelDeliveries).set({ status: "sending", sendingAt: 1, deliverAfter: 2, event: approval });
+    await drainAttentionDeliveries({ db: testDb.appDb, channels }, 2);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(host.gateForRef(ref)).toBeNull();
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'summary-gate'")).rows).toHaveLength(0);
   });
 
   it("rechecks notifyAttention after the web grace period", async () => {
@@ -3153,3 +3177,9 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(host.gateForRef({ conversationKey: p?.conversationKey ?? "", messageId: p?.messageId ?? "" })).toBeNull();
   });
 });
+
+/** Flush detached sends only when this test needs their outcome. */
+async function routeAttention(...args: Parameters<typeof enqueueAttention>): Promise<void> {
+  await enqueueAttention(...args);
+  await drainAttentionDeliveries(args[0]);
+}

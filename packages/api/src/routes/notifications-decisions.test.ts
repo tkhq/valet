@@ -308,6 +308,11 @@ it("clears updates without suppressing a pending approval's DM fallback", async 
   if (!job || !approval) throw new Error("Expected a deferred approval");
   await drainAttentionDeliveries({ db, channels: [channel] }, job.deliverAfter);
   expect(deliver).toHaveBeenCalledOnce();
+  // Once its fallback is sent, bulk-read may clear the bell copy even while the gate is pending.
+  await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
+  const [sentCopy] = await db.select().from(notifications).where(eq(notifications.id, approval.id));
+  expect(sentCopy?.readAt).toBeTypeOf("number");
+  expect((await api.providers.engineStore.getDecisionGate("unread", "gate-unread"))?.status).toBe("pending");
   await db.execute(sql`UPDATE engine_decision_gates SET status='resolved' WHERE id='gate-unread'`);
   await fetch(`${api.baseUrl}/api/notifications/read-all`, { method: "POST" });
   const [cleared] = await db.select().from(notifications).where(eq(notifications.id, approval.id));

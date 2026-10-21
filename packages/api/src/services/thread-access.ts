@@ -418,7 +418,7 @@ export function requestViewer(orgId: string, principal: RequestPrincipal, userId
  * One instance per request or connection shares its credential and identity
  * lookups.
  */
-export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): ChannelVisibility {
+export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer, retryUnknownAccess = false): ChannelVisibility {
   let token: Promise<string | null> | undefined;
   let slackUserId: Promise<string | undefined> | undefined;
   const bot = () => (token ??= orgSlackCredential(deps, viewer.orgId).then(botToken));
@@ -429,7 +429,10 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
     if (isPrivate === false) return true;
     // A channel never classified, with Slack unable to answer, may be
     // private: it stays hidden until Slack says otherwise.
-    if (isPrivate === undefined) return false;
+    if (isPrivate === undefined) {
+      if (retryUnknownAccess) throw new Error("Slack channel privacy is unknown. Retry the attention delivery.");
+      return false;
+    }
     if (!viewer.userId) return false;
     slackUserId ??= identityForUser(deps.db, "slack", viewer.userId).then((link) => link?.externalId);
     // Without a linked Slack account nobody can vouch for membership.
@@ -439,8 +442,14 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer): Chann
     const cached = membershipCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.allowed;
     const token = await bot();
-    if (!token) return false;
+    if (!token) {
+      if (retryUnknownAccess) throw new Error("Slack membership cannot be checked without credentials. Restore the Slack integration.");
+      return false;
+    }
     const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true }).catch(() => null);
+    if (retryUnknownAccess && (!access || access.error?.startsWith("Slack API error"))) {
+      throw new Error("Slack membership lookup failed. Retry the attention delivery.");
+    }
     const allowed = access?.allowed === true;
     // A Slack error is not cached, so the next request asks again. "Not a
     // member" is an answer and is cached.
@@ -462,6 +471,8 @@ export function threadVisibility(
   session: { ownerType: string; id?: string },
   viewer: ThreadViewer,
   opts: {
+    /** Durable sends retry unknown access instead of treating it as a permanent denial. */
+    retryUnknownAccess?: boolean;
     /** The live engine thread for ids, when this process holds it. A child
      * then rechecks its parent's recorded channels on every call. */
     liveThread?: (sessionId: string, threadId: string) => ThreadRefObject | undefined;
@@ -469,7 +480,7 @@ export function threadVisibility(
   } = {},
 ): ThreadVisibility {
   if (session.ownerType !== "team") return async () => true;
-  const canSee = channelVisibility(deps, viewer);
+  const canSee = channelVisibility(deps, viewer, opts.retryUnknownAccess);
   const now = opts.now ?? Date.now;
   // The thread that started this child session: undefined until read, null for none.
   let parentIds: { sessionId: string; threadId: string } | null | undefined;

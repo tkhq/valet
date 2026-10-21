@@ -126,8 +126,8 @@ export function NotificationsPage() {
               /></label>{kind !== "review" && <label className="flex items-center gap-2 text-sm">Team DM copies<Switch checked={byKind.get(kind)?.teamDm ?? false} disabled={setPref.isPending} onCheckedChange={(teamDm) => setPref.mutate({ kind, web, teamDm })} aria-label={`${KIND_LABEL[kind]} team DM copies`} /></label>}
                 <label className="flex items-center gap-2 text-sm">DM delay
                   <Select size="sm" aria-label={`${KIND_LABEL[kind]} DM delay`}
-                    disabled={setPref.isPending}
-                    value={String(byKind.get(kind)?.channelGraceSeconds ?? (kind === "notification" ? 300 : 120))}
+                    disabled={setPref.isPending || !web}
+                    value={String(byKind.get(kind)?.channelGraceSeconds)}
                     onChange={e => setPref.mutate({ kind, web, channelGraceSeconds: Number(e.target.value) })}>
                     {[0, 60, 120, 300, 600].map(seconds => <option key={seconds} value={seconds}>{seconds === 0 ? "Immediate" : `${seconds / 60} min`}</option>)}
                     {byKind.get(kind)?.channelGraceSeconds !== undefined && ![0, 60, 120, 300, 600].includes(byKind.get(kind)?.channelGraceSeconds ?? 0) &&

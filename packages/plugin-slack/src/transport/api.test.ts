@@ -90,12 +90,19 @@ describe("attention reconciliation", () => {
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "1", metadata: { event_type: "other" } }], response_metadata: { next_cursor: "next" } }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [{ ts: "2", metadata: { event_type: "valet_attention", event_payload: { delivery_id: "job" } } }] }));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 120_000)).toBe("2");
+    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 120_000)).toEqual({ ts: "2" });
     const url = new URL(String(fetchMock.mock.calls[1]?.[0]));
     expect(url.searchParams.get("channel")).toBe("D123");
     expect(url.searchParams.get("cursor")).toBe("next");
     expect(url.searchParams.get("include_all_metadata")).toBe("true");
     expect(url.searchParams.get("oldest")).toBe("60");
+  });
+
+  it("identifies an actual gate prompt from its metadata", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [
+      { ts: "3", metadata: { event_type: "valet_attention", event_payload: { delivery_id: "job", gate_id: "gate" } } },
+    ] })));
+    expect(await new SlackApi("test").findAttentionMessage("D123", "job", 0)).toEqual({ ts: "3", gateId: "gate" });
   });
 
   it("does not sleep through a history rate limit", async () => {

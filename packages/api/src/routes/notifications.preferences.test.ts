@@ -118,7 +118,10 @@ describe("channel grace preferences", () => {
     expect((await put({ kind: "approval", web: false })).status).toBe(200);
     const body = await (await fetch(`${api.baseUrl}/api/notifications/preferences`)).json() as ListNotificationPreferencesResponse;
     expect(body.preferences.find(p => p.kind === "approval")?.channelGraceSeconds).toBe(0);
-    for (const channelGraceSeconds of [-1, 1.5, 86401, "120", null]) {
+    expect((await put({ kind: "approval", web: true, channelGraceSeconds: null })).status).toBe(200);
+    const reset = await (await fetch(`${api.baseUrl}/api/notifications/preferences`)).json() as ListNotificationPreferencesResponse;
+    expect(reset.preferences.find(p => p.kind === "approval")?.channelGraceSeconds).toBe(120);
+    for (const channelGraceSeconds of [-1, 1.5, 86401, "120"]) {
       expect((await put({ kind: "approval", web: true, channelGraceSeconds })).status).toBe(400);
     }
   });

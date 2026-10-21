@@ -29,7 +29,7 @@ export class TelegramApi {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(10_000),
     });
     const parsed = (await res.json()) as TgResponse;
     if (!parsed.ok) throw new TelegramApiError(method, parsed.description ?? `http ${res.status}`, parsed.error_code);
@@ -37,7 +37,7 @@ export class TelegramApi {
   }
 
   private async callMultipart(method: string, form: FormData): Promise<unknown> {
-    const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, { method: "POST", body: form });
+    const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, { method: "POST", body: form, signal: AbortSignal.timeout(10_000) });
     const parsed = (await res.json()) as TgResponse;
     if (!parsed.ok) throw new TelegramApiError(method, parsed.description ?? `http ${res.status}`, parsed.error_code);
     return parsed.result;
@@ -132,7 +132,7 @@ export class TelegramApi {
   }
 
   async downloadFile(filePath: string): Promise<Uint8Array> {
-    const res = await fetch(`${this.baseUrl}/file/bot${this.token}/${filePath}`);
+    const res = await fetch(`${this.baseUrl}/file/bot${this.token}/${filePath}`, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new TelegramApiError("downloadFile", `http ${res.status}`);
     return new Uint8Array(await res.arrayBuffer());
   }

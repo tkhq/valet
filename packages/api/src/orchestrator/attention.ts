@@ -112,6 +112,8 @@ export interface AttentionDeliveryAttempt {
 export interface AttentionChannelDeliverer {
   /** False when this channel is not configured. Startup is not a disabled channel. */
   enabled?(): boolean;
+  /** False while a configured transport is still starting. Do not claim jobs yet. */
+  ready?(): boolean;
   /** Stable across restarts. Used in the durable delivery key. */
   id: string;
   order: number;
@@ -229,7 +231,7 @@ export async function markAttentionNotificationsRead(db: AppDb, kind: AttentionK
 }
 
 /** Reused at delivery time so a queued event cannot retain revoked access. */
-export async function attentionAudience(deps: AttentionDeps, event: AttentionEvent): Promise<{ audience: string[]; restricted: boolean }> {
+export async function attentionAudience(deps: AttentionDeps, event: AttentionEvent, retryUnknownAccess = false): Promise<{ audience: string[]; restricted: boolean }> {
   const membership = await fetchMembership(deps.db, event.owner);
   // A team thread only some members may see (a person's helper or workflow
   // editor thread, or a private Slack channel's) reaches only them: no team
@@ -243,7 +245,7 @@ export async function attentionAudience(deps: AttentionDeps, event: AttentionEve
   if (restricted) {
     const orgId = await orgOf(deps.db, event.owner);
     const shown = await Promise.all(audience.map((userId) => deps.access && orgId
-      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
+      ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId }, { retryUnknownAccess })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
       : Promise.resolve(privateThreadOwner(key) === userId)));
     audience = audience.filter((_, i) => shown[i]);
   }
@@ -294,7 +296,8 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
     });
   }
   // Immediate delivery uses the same durable claim as a later dispatcher pass.
-  if (immediate.length > 0) await drainAttentionDeliveries(deps, now, immediate);
+  if (immediate.length > 0) void drainAttentionDeliveries(deps, now, immediate)
+    .catch(err => console.error("attention immediate drain failed:", err));
 }
 
 /** The key that decides who may see a team event's thread, or undefined for

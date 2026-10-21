@@ -445,8 +445,8 @@ export interface ChannelTransport {
   /** Normalize one raw update. `null` = not something we handle. */
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null;
   send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef>;
-  /** Find a prior attention send after an uncertain provider response. */
-  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number): Promise<SendRef | null>;
+  /** Find a prior attention send. A gateId identifies an actual interactive prompt, not a summary. */
+  reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number): Promise<(SendRef & { gateId?: string }) | null>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
   /** Send a notice visible only to one channel member. Failures must reject. */

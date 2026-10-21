@@ -96,9 +96,10 @@ describe("EventDispatcher", () => {
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe("delivered");
     await dispatcher.pollOnce();
-    expect(drainAttention).toHaveBeenCalledOnce();
-    finish();
+    expect(drainAttention).toHaveBeenCalledTimes(2);
+    // Shutdown must not wait for a blackholed personal delivery.
     await dispatcher.stop();
+    finish();
   });
 
   /** Seeds one event + subscription + due delivery; returns their ids. */

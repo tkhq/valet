@@ -1934,6 +1934,7 @@ export class ChannelHost {
     return {
       id: channelTypeFilter ? `personal-${channelTypeFilter}` : "personal-dm", order: 1, grace: "when-web-active",
       enabled: () => !channelTypeFilter || !this.unconfiguredTransports.has(channelTypeFilter),
+      ready: () => transports().length > 0,
       deliverTeam: async (event): Promise<void> => {
         if (event.owner.type !== "team" || (channelTypeFilter && channelTypeFilter !== "slack")) return;
         const transport = this.transports.get("slack");
@@ -1964,13 +1965,18 @@ export class ChannelHost {
           const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId) : `${channelType}:dm:${link.externalId}`;
           const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt);
           if (!ref) return undefined;
-          if (event.gate && event.sessionId) {
+          if (event.gate && ref.gateId === event.gate.id && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id)) {
             this.gateActions.set(event.gate.id, event.gate.actions);
             this.recordGatePrompt(event.gate.id, ref, event.sessionId);
-            const gate = await this.deps.engineStore.getDecisionGate(event.sessionId, event.gate.id);
-            if (gate) await this.deps.engineStore.saveDecisionGateRef(event.sessionId, gate.threadId, gate.id, {
-              channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
-            });
+            try {
+              const gate = await this.deps.engineStore.getDecisionGate(event.sessionId, event.gate.id);
+              if (gate) await this.deps.engineStore.saveDecisionGateRef(event.sessionId, gate.threadId, gate.id, {
+                channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+              });
+            } catch (err) {
+              // The provider confirmed the card. A failed ref save must not resend it.
+              console.error(`[channels] could not save the recovered callback reference for gate ${event.gate.id}; retry storage before restarting`, err);
+            }
           }
           refs.push({ ...ref, channelType });
         }

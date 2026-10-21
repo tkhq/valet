@@ -1,3 +1,4 @@
+import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 /**
  * Attention router (Phase 4 decision 19): the pure audience-resolution
  * matrix (`resolveAudience`, no DB) plus `routeAttention`'s DB-backed
@@ -10,12 +11,13 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   principalFromOwner,
   resolveAudience,
-  routeAttention,
+  routeAttention as enqueueAttention,
   type AttentionChannelDeliverer,
   type AttentionEvent,
 } from "./attention.js";
-import { notifications, orgMembers, slackChannelPrivacy, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
+import { notifications, pendingChannelDeliveries, orgMembers, slackChannelPrivacy, teamMembers, teams, userNotificationPreferences } from "../schema/index.js";
 import { linkIdentity } from "../channels/identity-links.js";
+import { webPresence } from "../services/web-presence.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 
 let api: TestApi | undefined;
@@ -346,4 +348,57 @@ describe("routeAttention (DB-backed)", () => {
     expect(rows).toHaveLength(1);
     expect(calls).toEqual(["local-user"]);
   });
+});
+
+/** Flush detached sends only when this test needs their outcome. */
+async function routeAttention(...args: Parameters<typeof enqueueAttention>): Promise<void> {
+  await enqueueAttention(...args);
+  await drainAttentionDeliveries(args[0]);
+}
+
+
+it.each(["outage", "denied"])("retries an unknown audience but drops a confirmed denial: %s", async state => {
+  api = await bootTestApi();
+  const { db } = api.providers;
+  await db.insert(teams).values({ id: "audience-team", orgId: "local-org", name: "Audience", createdAt: 1 });
+  await db.insert(teamMembers).values({ teamId: "audience-team", userId: "local-user", role: "admin" });
+  await db.insert(userNotificationPreferences).values({ userId: "local-user", kind: "approval", teamDm: true });
+  await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CRETRY", isPrivate: true, checkedAt: Date.now() });
+  await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+  await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "local-user" });
+  await db.execute(sql`INSERT INTO engine_decision_gates (id, session_id, thread_id, queue_item_id, resume_key, ordinal, type, status, title, body, actions, created_at, updated_at)
+    VALUES ('retry-gate', 's', 't', 'q', 'r', 0, 'tool_approval', 'pending', 'Approve', '', '[]', 1, 1)`);
+  let fail = false;
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname !== "slack.com") return realFetch(input, init);
+    if (fail && state === "outage") throw new Error("Slack unavailable");
+    const body = url.pathname.endsWith("conversations.members")
+      ? { ok: true, members: fail ? [] : ["UMEMBER"] } : { ok: true, channel: { is_private: true } };
+    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  });
+  const send = vi.fn(async () => {});
+  const deps = { db, access: api.providers, channels: [{ id: "dm", order: 1, grace: "when-web-active" as const, deliver: send }] };
+  webPresence(db).report("local-user", "tab", true);
+  try {
+    await routeAttention(deps, { kind: "approval", owner: { type: "team", id: "audience-team" }, title: "Approve", audienceKey: "slack:CRETRY", sessionId: "s", gate: { id: "retry-gate", actions: [] } });
+    const [job] = await db.select().from(pendingChannelDeliveries);
+    if (!job) throw new Error("Expected pending approval");
+    fail = true;
+    resetThreadAccessCache();
+    await drainAttentionDeliveries(deps, job.deliverAfter);
+    const [after] = await db.select().from(pendingChannelDeliveries);
+    expect(after?.status).toBe(state === "outage" ? "sending" : "dropped");
+    expect(send).not.toHaveBeenCalled();
+    if (state === "outage") {
+      fail = false;
+      resetThreadAccessCache();
+      await drainAttentionDeliveries(deps, after!.deliverAfter);
+      expect(send).toHaveBeenCalledOnce();
+    }
+  } finally {
+    vi.restoreAllMocks();
+    resetThreadAccessCache();
+  }
 });

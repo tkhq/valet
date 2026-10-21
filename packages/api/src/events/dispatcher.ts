@@ -306,7 +306,6 @@ export class EventDispatcher {
   private lastFailedTurnSweepAt = 0;
   private drainIngress?: () => Promise<void>;
   private ingressInFlight: Promise<void> | null = null;
-  private attentionInFlight: Promise<void> | null = null;
   private ingressWakeRequested = false;
 
   setIngressDrain(drain: () => Promise<void>): void { this.drainIngress = drain; }
@@ -329,7 +328,8 @@ export class EventDispatcher {
     this.timer = null;
     while (this.draining) await new Promise((r) => setTimeout(r, 25));
     await this.ingressInFlight;
-    await this.attentionInFlight;
+    // Attention sends hold durable leases. Shutdown leaves unfinished sends
+    // for recovery instead of waiting for an external provider.
   }
 
   /** In-process nudge from the ingest path. Arrow property so callers can pass it unbound. */
@@ -355,10 +355,10 @@ export class EventDispatcher {
           });
       }
       // A slow provider must not delay unrelated event deliveries.
-      if (this.deps.drainAttention && !this.attentionInFlight) {
-        this.attentionInFlight = this.deps.drainAttention()
-          .catch(err => console.error("attention outbox drain failed:", err))
-          .finally(() => { this.attentionInFlight = null; });
+      if (this.deps.drainAttention) {
+        // The outbox serializes each transport independently across ticks.
+        void this.deps.drainAttention()
+          .catch(err => console.error("attention outbox drain failed:", err));
       }
       const now = Date.now();
       // Atomic claim (see file doc comment): lease the due rows by moving

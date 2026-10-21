@@ -7,7 +7,7 @@
  * apps.connections.open, files.info, url_private downloads).
  */
 import { createHash } from "node:crypto";
-import { SLACK_API, slackFetch, slackGet, slackGetOnce } from "../actions/api.js";
+import { SLACK_API, SLACK_REQUEST_TIMEOUT_MS, slackFetch, slackGet, slackGetOnce } from "../actions/api.js";
 import { markdownToSlackMrkdwn } from "./format.js";
 
 export class SlackApiError extends Error {
@@ -111,6 +111,7 @@ export class SlackApi {
     const form = new URLSearchParams();
     for (const [key, value] of Object.entries(body)) form.set(key, String(value));
     const res = await fetch(`${this.baseUrl}/${method}`, {
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -132,6 +133,7 @@ export class SlackApi {
     channel: string;
     text: string;
     attentionDeliveryId?: string;
+    attentionGateId?: string;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
     /** Per-assistant display name override (`chat:write.customize` scope).
@@ -148,7 +150,7 @@ export class SlackApi {
       unfurl_links: false,
     };
     if (opts.attentionDeliveryId !== undefined) body.metadata = {
-      event_type: "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId },
+      event_type: "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId, ...(opts.attentionGateId ? { gate_id: opts.attentionGateId } : {}) },
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
@@ -161,7 +163,7 @@ export class SlackApi {
   }
 
   /** Bounded recent DM history. A miss or a lookup failure permits a resend. */
-  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<string | null> {
+  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<{ ts: string; gateId?: string } | null> {
     let cursor: string | undefined;
     for (let page = 0; page < 5; page++) {
       // Recovery is best effort. Never sleep through Retry-After while an
@@ -177,7 +179,10 @@ export class SlackApi {
         const metadata = rec(message?.metadata);
         if (metadata?.event_type === "valet_attention" && rec(metadata.event_payload)?.delivery_id === deliveryId) {
           const ts = str(message?.ts);
-          if (ts) return ts;
+          if (ts) {
+            const gateId = str(rec(metadata.event_payload)?.gate_id);
+            return { ts, ...(gateId ? { gateId } : {}) };
+          }
         }
       }
       cursor = str(rec(res.response_metadata)?.next_cursor);
@@ -259,6 +264,7 @@ export class SlackApi {
 
   async uploadToUrl(uploadUrl: string, data: Uint8Array, mimeType: string): Promise<void> {
     const res = await fetch(uploadUrl, {
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       body: new Blob([toArrayBuffer(data)], { type: mimeType }),
     });
@@ -508,7 +514,7 @@ export class SlackApi {
    * `maxBytes` via Content-Length and the actual body size; null when over.
    */
   async downloadFile(url: string, maxBytes: number): Promise<Uint8Array | null> {
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+    const res = await fetch(url, { signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS), headers: { Authorization: `Bearer ${this.token}` } });
     if (!res.ok) return null;
     const contentLength = res.headers.get("Content-Length");
     if (contentLength !== null && Number.parseInt(contentLength, 10) > maxBytes) return null;
@@ -522,6 +528,7 @@ export class SlackApi {
   /** POST apps.connections.open with the app-level (xapp) token → wss URL. */
   async connectionsOpen(appToken: string): Promise<string> {
     const res = await fetch(`${this.baseUrl}/apps.connections.open`, {
+      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       headers: { Authorization: `Bearer ${appToken}` },
     });

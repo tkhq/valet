@@ -394,18 +394,20 @@ CREATE TABLE "user_notification_preferences" (
 );
 --> statement-breakpoint
 CREATE TABLE "pending_channel_deliveries" (
-  "id" text PRIMARY KEY NOT NULL,
-  "user_id" text NOT NULL,
-  "tier_id" text NOT NULL,
-  "notification_id" text,
-  "event" jsonb NOT NULL,
-  "deliver_after" bigint NOT NULL,
-  "status" text NOT NULL DEFAULT 'pending',
-  "sending_at" bigint,
-  "attempts" integer NOT NULL DEFAULT 0,
-  "message_refs" jsonb,
-  "last_error" text
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"tier_id" text NOT NULL,
+	"notification_id" text,
+	"event" jsonb NOT NULL,
+	"deliver_after" bigint NOT NULL,
+	"status" text NOT NULL DEFAULT 'pending',
+	"sending_at" bigint,
+	"attempts" integer NOT NULL DEFAULT 0,
+	"message_refs" jsonb,
+	"last_error" text
 );
+--> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_terminal_payload" ON "pending_channel_deliveries" ("id") WHERE "status" IN ('sent', 'dropped') AND "event" <> 'null'::jsonb;
 --> statement-breakpoint
 CREATE INDEX "pending_channel_deliveries_due" ON "pending_channel_deliveries" ("deliver_after") WHERE "status" IN ('pending', 'sending');
 --> statement-breakpoint

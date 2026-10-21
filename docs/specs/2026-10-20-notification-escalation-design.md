@@ -35,7 +35,9 @@ Input remains recent for two minutes.
 A visibility change reports the tab's current state immediately.
 An idle tab reports inactive and stops active heartbeats.
 
-`POST /api/notifications/presence` requires authentication.
+`POST /api/notifications/presence` requires browser session authentication.
+Personal API keys and CLI tokens cannot report presence.
+Pointer movement and scrolling do not count as input.
 The server uses the authenticated user's identifier, never a client-supplied user identifier.
 Any active tab counts toward that user's presence.
 A heartbeat expires after 45 seconds.
@@ -55,7 +57,14 @@ Repeated producers cannot create another job for the same recipient and tier.
 Events without a dedupe key remain one-shot events.
 
 The existing event dispatcher drains due jobs every second.
-The router also drains immediately due jobs after their transaction commits.
+After the transaction commits, the router starts an immediate drain without awaiting it.
+Security handlers and workflow run drives wait for durable insertion, not personal provider calls.
+Each transport has one independent batch in flight per API database handle.
+Each batch runs at most four jobs concurrently and selects at most 20 jobs.
+A slow Slack batch cannot hold Telegram's next batch.
+Dispatcher shutdown does not await personal provider calls.
+Unfinished sends retain their durable leases for restart recovery.
+Configured transports that are still starting do not claim jobs or spend attempts.
 No in-process timeout owns a notification deadline.
 A restart picks up pending jobs and stale sending jobs from Postgres.
 An index over pending and sending deadlines bounds the due scan.
@@ -68,6 +77,8 @@ Before sending a deferred job, the drain checks:
 2. The engine decision gate is pending, when the event carries one.
 3. The workflow checkpoint still holds the same unanswered approval, when the event references one.
 4. The recipient still belongs to the event's authorized audience.
+   A definite denial drops the job.
+   Unknown channel privacy or a failed membership lookup retries without sending.
 5. The recipient still allows team DM copies, for team events.
 
 The channel deliverer checks the current identity link's `notifyAttention` setting before sending.
@@ -76,7 +87,7 @@ Approver-only events keep their explicit recipient.
 Org-admin audiences follow the same per-recipient presence policy as personal and team audiences.
 One recipient's read state does not suppress another recipient's job.
 The bell's bulk-read action clears updates and completed approval copies.
-It retains approval copies whose outbox event still references a pending gate.
+It retains approval copies only while a pending or sending job references a pending gate.
 Legacy copies without a fallback job remain clearable.
 Gate resolution and explicit per-row reads still mark approval notifications handled.
 
@@ -87,7 +98,7 @@ A later dispatcher pass always checks durable gate state.
 ## Delivery boundary
 
 A conditional update moves each due job to `sending` and records `sending_at`.
-The same statement moves its next deadline forward by two minutes.
+The same statement moves its next deadline forward by two minutes from the claim time, not the batch start.
 The update repeats the due predicate to fence concurrent workers.
 Only the winning worker sends.
 Each completion also checks the attempt number, so a stale worker cannot overwrite recovery.
@@ -111,7 +122,10 @@ Its reconciliation hook reads recent DM history with metadata included.
 The lookup checks at most five pages of 100 messages.
 Each history request has a two-second timeout and does not retry rate limits.
 Missing history permissions cause a resend, not a lost notification.
-Recovered approval refs restore the existing gate callback mapping.
+Approval metadata also records `event_payload.gate_id`.
+Reconciliation restores gate callbacks only for an actual gate card and a currently authorized recipient.
+A plain summary never becomes a gate card during recovery.
+A failed callback-ref save is logged but does not resend a confirmed message.
 Saving the same gate reference twice is idempotent.
 Transports without history reconciliation still recover by resending.
 
@@ -124,8 +138,16 @@ The failure counter labels recovery failures with `retry=true`.
 The provisioned attention recovery alert reports those failures for operator action.
 Every retry repeats the read, gate, audience, and preference checks.
 
-Completed job keys remain stored to prevent producer replay.
-This change adds no retention sweep.
+Slack Web API requests abort after ten seconds, including rate-limit waits and response body reads.
+Direct Slack upload and connection requests also have a ten-second timeout.
+Telegram sends have a ten-second request timeout.
+Telegram long polls retain a 40-second bound and the caller's cancellation signal.
+
+Completed job keys and confirmed refs remain stored to prevent producer replay.
+Terminal jobs replace the event payload with JSON null and clear their last error.
+The schema permits JSON null, not SQL NULL, for these tombstones.
+The event rail also scrubs up to 20 legacy terminal payloads per batch.
+A partial index bounds that cleanup without another timer.
 
 ## Preferences
 
@@ -136,8 +158,10 @@ Zero disables the grace.
 
 The existing preferences GET route returns the effective delay.
 The PUT route accepts an integer from zero through 86400 seconds.
+Null resets the delay to its default.
 Omitting the field preserves its value.
 The notification settings page offers immediate delivery and several short delays.
+The delay control uses the effective GET value and is disabled when web delivery is off.
 Preference edits affect new jobs only.
 Already queued jobs retain their original deadline.
 
@@ -147,3 +171,6 @@ Tests cover tab expiry, multiple tabs, heartbeat timing, hidden reports, and aut
 Routing tests cover active users, inactive users, disabled web delivery, custom grace, and ordered tiers.
 Outbox tests cover handled rows, terminal gates, pending gates, deduplication, concurrent claims, and restart recovery.
 Existing channel suites cover gate controls and current identity-link preferences.
+Regression tests cover nonblocking routing, independent transport batches, bounded concurrency, and claim-time leases.
+They cover startup deferral, session-only presence, terminal-payload cleanup, and transient audience failures.
+Recovery tests distinguish summaries from cards and tolerate failed callback-ref saves.

@@ -869,10 +869,11 @@ export class SlackTransport implements ChannelTransport {
     return { conversationKey, channelId: target.channelId, messageId: res.ts };
   }
 
-  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number): Promise<SendRef | null> {
+  async reconcileAttention(conversationKey: string, deliveryId: string, sendingAt: number): Promise<(SendRef & { gateId?: string }) | null> {
     const target = this.mustParse(conversationKey);
-    const ts = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt);
-    return ts ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, ts), channelId: target.channelId, messageId: ts } : null;
+    const found = await this.api.findAttentionMessage(target.channelId, deliveryId, sendingAt);
+    return found ? { conversationKey: conversationKeyFor(target.teamId, target.channelId, found.ts), channelId: target.channelId,
+      messageId: found.ts, ...(found.gateId ? { gateId: found.gateId } : {}) } : null;
   }
 
   async sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef> {
@@ -957,6 +958,7 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       blocks,
       attentionDeliveryId: gate.attentionDeliveryId,
+      attentionGateId: gate.gateId,
       ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:

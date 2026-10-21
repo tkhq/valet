@@ -1482,7 +1482,7 @@ describe("attention delivery metadata", () => {
     expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "plain-job" } });
     expect(plain.channelId).toBe("D-U1");
     const gate = await transport.sendGatePrompt(key, { gateId: "g", title: "Approve", actions: [], attentionDeliveryId: "gate-job" });
-    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "gate-job" } });
+    expect(lastCall("chat.postMessage").metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: "gate-job", gate_id: "g" } });
     expect(gate.channelId).toBe("D-U1");
   });
 });

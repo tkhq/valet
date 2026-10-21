@@ -21,7 +21,7 @@ export function useWebPresence(): void {
     };
     const input = () => { lastInputAt = Date.now(); report(); };
     const visibility = () => report(true);
-    const events = ["pointerdown", "pointermove", "keydown", "scroll", "touchstart"] as const;
+    const events = ["pointerdown", "keydown", "touchstart"] as const;
     for (const event of events) window.addEventListener(event, input, { passive: true });
     document.addEventListener("visibilitychange", visibility);
     const timer = window.setInterval(() => report(reportedActive), HEARTBEAT_MS);

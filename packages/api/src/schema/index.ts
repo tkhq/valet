@@ -700,7 +700,8 @@ export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
   userId: text("user_id").notNull(),
   tierId: text("tier_id").notNull(),
   notificationId: text("notification_id"),
-  event: jsonb("event").$type<import("../orchestrator/attention.js").AttentionEvent>().notNull(),
+  // Terminal dedupe tombstones use JSON null, not SQL NULL.
+  event: jsonb("event").$type<import("../orchestrator/attention.js").AttentionEvent | null>().notNull(),
   deliverAfter: bigint("deliver_after", { mode: "number" }).notNull(),
   status: text("status", { enum: ["pending", "sending", "sent", "dropped"] }).notNull().default("pending"),
   sendingAt: bigint("sending_at", { mode: "number" }),
@@ -708,6 +709,7 @@ export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
   messageRefs: jsonb("message_refs").$type<import("../orchestrator/attention.js").AttentionDeliveryRef[]>(),
   lastError: text("last_error"),
 }, (t) => [
+  index("pending_channel_deliveries_terminal_payload").on(t.id).where(sql`${t.status} IN ('sent', 'dropped') AND ${t.event} <> 'null'::jsonb`),
   index("pending_channel_deliveries_due").on(t.deliverAfter).where(sql`${t.status} IN ('pending', 'sending')`),
   index("pending_channel_deliveries_notification").on(t.notificationId).where(sql`${t.notificationId} IS NOT NULL`),
 ]);

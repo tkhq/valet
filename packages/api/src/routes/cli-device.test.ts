@@ -209,6 +209,26 @@ describe("valet login device sign-in", () => {
     expect(await testApi.providers.db.select().from(oauthAccessToken)).toEqual([]);
   });
 
+  it("allows only browser sessions to report web presence", async () => {
+    const { base, cookie } = await setup();
+    const cliToken = (await signIn(base, cookie).run).access_token;
+    const created = await fetch(`${base}/api/auth/api-key/create`, {
+      method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: JSON.stringify({ name: "presence-test" }),
+    });
+    const { key } = await created.json() as { key: string };
+    for (const token of [key, cliToken]) {
+      const response = await fetch(`${base}/api/notifications/presence`, {
+        method: "POST", headers: { "x-api-key": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ tabId: "script", active: true }),
+      });
+      expect(response.status).toBe(403);
+    }
+    const browser = await fetch(`${base}/api/notifications/presence`, {
+      method: "POST", headers: json(cookie, base), body: JSON.stringify({ tabId: "browser", active: true }),
+    });
+    expect(browser.status).toBe(200);
+  });
+
   it("does not let a CLI token approve a gate or change policy; a Settings key still can", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });

@@ -41,6 +41,7 @@ import type {
 export const notificationsRouter = new Hono<AppEnv>();
 
 notificationsRouter.post("/presence", async c => {
+  if (c.var.authVia !== "session") return c.json({ error: "Web presence requires a browser session. Sign in to Valet." }, 403);
   const body: unknown = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object" || !("tabId" in body) || !("active" in body)
     || typeof body.tabId !== "string" || body.tabId.length < 1 || body.tabId.length > 128 || typeof body.active !== "boolean") {
@@ -207,7 +208,7 @@ notificationsRouter.post("/read-all", async (c) => {
   // Completed or legacy approval copies must remain clearable. Only a
   // durable pending gate may retain a row that still has a channel fallback.
   const approvals = await db.select({ id: notifications.id, event: pendingChannelDeliveries.event }).from(notifications)
-    .leftJoin(pendingChannelDeliveries, eq(pendingChannelDeliveries.notificationId, notifications.id))
+    .leftJoin(pendingChannelDeliveries, and(eq(pendingChannelDeliveries.notificationId, notifications.id), inArray(pendingChannelDeliveries.status, ["pending", "sending"])))
     .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), eq(notifications.kind, "approval")));
   const seen = new Set<string>();
   const handled: string[] = [];
@@ -267,7 +268,7 @@ notificationsRouter.put("/preferences", async (c) => {
     return c.json({ error: "teamDm must be a boolean. Choose whether to receive team direct messages." }, 400);
   }
 
-  if (body.channelGraceSeconds !== undefined && (!Number.isInteger(body.channelGraceSeconds)
+  if (body.channelGraceSeconds !== undefined && body.channelGraceSeconds !== null && (!Number.isInteger(body.channelGraceSeconds)
     || body.channelGraceSeconds < 0 || body.channelGraceSeconds > 86_400)) {
     return c.json({ error: "channelGraceSeconds must be an integer from 0 to 86400. Choose a delay of at most one day." }, 400);
   }

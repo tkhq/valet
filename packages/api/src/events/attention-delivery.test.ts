@@ -3,7 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowRuns, workflowCheckpoints, workflowSignals } from "../schema/index.js";
-import { routeAttention, type AttentionChannelDeliverer, type AttentionEvent } from "../orchestrator/attention.js";
+import { routeAttention as enqueueAttention, type AttentionChannelDeliverer, type AttentionEvent } from "../orchestrator/attention.js";
 import { webPresence } from "../services/web-presence.js";
 import { ATTENTION_SENDING_TIMEOUT_MS, drainAttentionDeliveries } from "./attention-delivery.js";
 
@@ -177,7 +177,8 @@ describe("provider outage scheduling", () => {
       await drainAttentionDeliveries({ db, channels }, job.deliverAfter);
       const retry = await pending();
       expect(retry.status).toBe("sending");
-      expect(retry.deliverAfter - job.deliverAfter).toBe(delay);
+      expect(retry.deliverAfter - job.deliverAfter).toBeGreaterThanOrEqual(delay);
+      expect(retry.deliverAfter - job.deliverAfter).toBeLessThan(delay + 1_000);
     }
     expect(send).toHaveBeenCalledTimes(6);
   });
@@ -191,5 +192,117 @@ describe("provider outage scheduling", () => {
     expect(deliver.mock.calls).toHaveLength(20);
     const [fresh] = await db.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "fresh"));
     expect(fresh?.status).toBe("sent");
+  });
+});
+
+/** Flush detached sends only when this test needs their outcome. */
+async function routeAttention(...args: Parameters<typeof enqueueAttention>): Promise<void> {
+  await enqueueAttention(...args);
+  await drainAttentionDeliveries(args[0]);
+}
+
+
+describe("isolated delivery execution", () => {
+  it("returns after durable insertion while an immediate provider is blocked", async () => {
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn(() => blocked);
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    try {
+      await enqueueAttention(deps, event);
+      expect(await db.select().from(notifications)).toHaveLength(1);
+      expect(await db.select().from(pendingChannelDeliveries)).toHaveLength(1);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      expect((await pending()).status).toBe("sending");
+    } finally {
+      release();
+      await drainAttentionDeliveries(deps);
+    }
+  });
+
+  it("keeps a slow transport out of other transports' later batches", async () => {
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const slow = vi.fn(() => blocked);
+    const fast = vi.fn(async () => {});
+    const deps = { db, channels: [{ ...tier, id: "slack", deliver: slow }, { ...tier, id: "telegram", deliver: fast }] };
+    await db.insert(pendingChannelDeliveries).values([
+      { id: "slow", userId: "u", tierId: "slack", event, deliverAfter: 1 },
+      { id: "fast", userId: "u", tierId: "telegram", event, deliverAfter: 1 },
+    ]);
+    const first = drainAttentionDeliveries(deps);
+    let second: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(fast).toHaveBeenCalledOnce());
+      await vi.waitFor(async () => {
+        const [job] = await db.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "fast"));
+        expect(job?.status).toBe("sent");
+      });
+      await db.insert(pendingChannelDeliveries).values({ id: "later", userId: "u", tierId: "telegram", event, deliverAfter: 1 });
+      second = drainAttentionDeliveries(deps);
+      await vi.waitFor(() => expect(fast).toHaveBeenCalledTimes(2));
+      expect(slow).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      await Promise.all([first, second]);
+    }
+  });
+
+  it("bounds concurrency and stamps leases when each row is claimed", async () => {
+    await db.insert(pendingChannelDeliveries).values(Array.from({ length: 5 }, (_, n) => ({
+      id: `claim-${n}`, userId: "u", tierId: tier.id, event, deliverAfter: 1,
+    })));
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let active = 0;
+    let peak = 0;
+    const send = vi.fn(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await blocked;
+      active--;
+    });
+    const work = drainAttentionDeliveries({ db, channels: [{ ...tier, deliver: send }] }, 1_000);
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(4));
+      clock.mockReturnValue(500_000);
+      release();
+      await work;
+      expect(peak).toBe(4);
+      const jobs = await db.select().from(pendingChannelDeliveries);
+      const later = jobs.find(job => job.sendingAt === 500_000);
+      expect(later?.deliverAfter).toBe(500_000 + ATTENTION_SENDING_TIMEOUT_MS);
+    } finally {
+      release();
+      await work;
+      clock.mockRestore();
+    }
+  });
+
+  it("waits for channel startup without spending an attempt", async () => {
+    await db.insert(pendingChannelDeliveries).values({ id: "boot", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+    let ready = false;
+    const deps = { db, channels: [{ ...tier, ready: () => ready }] };
+    await drainAttentionDeliveries(deps);
+    expect(await pending()).toMatchObject({ status: "pending", attempts: 0 });
+    ready = true;
+    await drainAttentionDeliveries(deps);
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+
+  it("scrubs terminal payloads while preserving dedupe keys and provider refs", async () => {
+    const refs = [{ channelType: "slack", conversationKey: "dm", messageId: "1" }];
+    await db.insert(pendingChannelDeliveries).values([
+      { id: "old-sent", userId: "u", tierId: tier.id, event, deliverAfter: 1, status: "sent", messageRefs: refs },
+      { id: "old-dropped", userId: "u", tierId: tier.id, event, deliverAfter: 1, status: "dropped" },
+    ]);
+    await routeAttention({ db, channels: [{ ...tier, deliver: async () => refs }] }, event);
+    const jobs = await db.select().from(pendingChannelDeliveries);
+    expect(jobs).toHaveLength(3);
+    expect(jobs.every(job => job.event === null)).toBe(true);
+    expect(jobs.find(job => job.id === "old-sent")?.messageRefs).toEqual(refs);
+    await routeAttention({ db, channels: [tier] }, event);
+    expect(deliver).not.toHaveBeenCalled();
   });
 });
