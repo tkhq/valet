@@ -956,7 +956,10 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
   if (row.cause !== null) {
     if (isWakeupCause(row.cause)) cause = row.cause;
     // A terminal row from a newer writer must remain readable after rollback.
-    else if (["done", "cancelled", "expired", "lost"].includes(row.status)) cause = "fired";
+    else if (["done", "cancelled", "expired", "lost"].includes(row.status)) {
+      console.warn("store-postgres: mapped unknown terminal wakeup cause to fired", { id: row.id, cause: row.cause });
+      cause = "fired";
+    }
     else throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
   }
   return {

@@ -253,12 +253,14 @@ export async function checkArm(
     const missingSettings = (settings: GithubIngressConfig): string[] => {
       const missing: string[] = [];
       if (req.on.some((clause) => DERIVED_NEEDS_PULL_REQUEST.has(clause.key)) && !["read", "write", "admin"].includes(String(settings.permissions.pull_requests))) missing.push("permission pull_requests: read");
-      for (const family of githubSourceFamilies(deps.plugins, req.on)) {
-        if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
-        if (!settings.events.includes(family) && !(family === "status" && derivedChecks)) missing.push(`event ${family}`);
-        const permissions = GITHUB_EVENT_PERMISSIONS[family];
-        if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
-          missing.push(`permission ${permissions.join(" or ")}: read`);
+      for (const clause of req.on) {
+        for (const family of githubSourceFamilies(deps.plugins, [clause])) {
+          if (family === "ping") continue; // GitHub always sends ping, without an App subscription.
+          if (!settings.events.includes(family) && !(family === "status" && clause.key === "github.pull_request.checks_completed")) missing.push(`event ${family}`);
+          const permissions = GITHUB_EVENT_PERMISSIONS[family];
+          if (permissions && !permissions.some((p) => ["read", "write", "admin"].includes(String(settings.permissions[p])))) {
+            missing.push(`permission ${permissions.join(" or ")}: read`);
+          }
         }
       }
       return [...new Set(missing)];
@@ -268,7 +270,7 @@ export async function checkArm(
     if (config) {
       const missing = missingSettings(config);
       if (derivedChecks && !config.events.includes("status")) {
-        warning = `${warning ? `${warning} ` : ""}Waits can be late when a commit status finishes last. Add the Status event to the App.`;
+        warning = `${warning ? `${warning} ` : ""}If a commit status finishes last, the wait ends only after another check event arrives or the deadline passes. Add the Status event to the App.`;
       }
       if (missing.length) return { ok: false, text: `[wait_for_event] The GitHub App installation is missing ${missing.join(", ")}.${config.pendingApproval ? " Owner approval is pending." : ""} Update the App's "Permissions & events". Have an org owner approve the changes. Then wait again.` };
     } else {

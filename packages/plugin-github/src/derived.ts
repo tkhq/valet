@@ -125,6 +125,19 @@ function workflowKey(run: Record<string, unknown>): string | undefined {
   return typeof run.workflow_id === "number" && typeof run.event === "string" ? `${run.workflow_id}:${run.event}` : undefined;
 }
 
+/** Only these event types are unrelated to PR-head check completion. */
+function excludedWorkflow(run: Record<string, unknown>): boolean {
+  return run.event === "schedule" || run.event === "workflow_dispatch";
+}
+
+/** A suite is ignored only when workflow membership proves it is excluded or superseded. */
+function ignoredWorkflowSuites(all: Record<string, unknown>[]): Set<unknown> {
+  const selected = latestBy(all, workflowKey).filter((run) => !excludedWorkflow(run));
+  const current = new Set(selected.map((run) => run.check_suite_id));
+  return new Set(all.filter((run) => typeof run.check_suite_id === "number" && !current.has(run.check_suite_id))
+    .map((run) => run.check_suite_id));
+}
+
 /** Superseded runs and suites cannot change the latest attempt's result. */
 function latestBy<T extends Record<string, unknown>>(states: T[], identity: (state: T) => string | undefined, newer?: (left: T, right: T) => boolean): T[] {
   const latest = new Map<string, T>();
@@ -209,26 +222,28 @@ export const checksCompleted: DerivedEventDef = {
     const headSha = str(rec(pull?.head)?.sha)?.toLowerCase();
     if (headSha !== sha) return null;
 
-    // Workflow membership is needed to distinguish current push and PR checks.
+    // Workflow membership distinguishes superseded checks from current and unmapped reporter checks.
     // Pending current Actions checks stop after these three reads, before suites or statuses.
     let workflowRead: Promise<Record<string, unknown>[] | null> | undefined;
     const readWorkflows = () => workflowRead ??= listStates(ctx, token, `${base}/actions/runs?head_sha=${sha}`, "workflow_runs", () => false);
     const allRuns = await listCheckRuns(ctx, token, base, sha, async (check) => {
       const suiteId = rec(check.check_suite)?.id;
       if (typeof suiteId !== "number") return false;
-      const workflows = latestBy(await readWorkflows() ?? [], workflowKey);
-      return workflows.some((run) => run.check_suite_id === suiteId && (run.event === "pull_request" || run.event === "push"));
+      const all = await readWorkflows() ?? [];
+      const workflows = latestBy(all, workflowKey);
+      return !ignoredWorkflowSuites(all).has(suiteId) &&
+        (rec(check.app)?.slug === "github-actions" || workflows.some((run) => run.check_suite_id === suiteId && !excludedWorkflow(run)));
     });
     if (allRuns === null) return null;
     const allWorkflows = await readWorkflows();
     if (allWorkflows === null) return null;
     const latestWorkflows = latestBy(allWorkflows, workflowKey);
     const workflowSuites = new Set<unknown>(allWorkflows.map((run) => run.check_suite_id).filter((id) => typeof id === "number"));
-    const workflows = latestWorkflows.filter((run) => run.event === "pull_request" ||
-      (run.event === "push" && typeof run.check_suite_id === "number" && allRuns.some((check) => rec(check.check_suite)?.id === run.check_suite_id)));
+    const workflows = latestWorkflows.filter((run) => !excludedWorkflow(run));
+    const ignoredSuites = ignoredWorkflowSuites(allWorkflows);
     const currentActions = new Map(workflows.filter((run) => typeof run.check_suite_id === "number").map((run) => [run.check_suite_id, run]));
     const actionsCheck = (check: Record<string, unknown>) => rec(check.app)?.slug === "github-actions" || workflowSuites.has(rec(check.check_suite)?.id);
-    const currentChecks = allRuns.filter((check) => !actionsCheck(check) || currentActions.has(rec(check.check_suite)?.id));
+    const currentChecks = allRuns.filter((check) => !ignoredSuites.has(rec(check.check_suite)?.id));
     const checkKey = (check: Record<string, unknown>) => {
       const app = rec(check.app);
       if (typeof app?.id !== "number" || typeof check.name !== "string") return undefined;
@@ -240,14 +255,15 @@ export const checksCompleted: DerivedEventDef = {
 
     const allSuites = await listStates(ctx, token, `${base}/commits/${sha}/check-suites`, "check_suites", () => false);
     if (allSuites === null) return null;
-    // An unmatched Actions suite has no current workflow authority. This also
-    // excludes an old attempt's suite if a provider changes its suite id.
+    // Unmapped Actions suites can contain Checks-API reporter jobs. Keep them
+    // unless workflow membership proves the suite is superseded or excluded.
     const selectedSuites = latestBy(allSuites.filter((suite) =>
       rec(suite.app)?.slug !== "github-actions" && !workflowSuites.has(suite.id)), (suite) => {
       const app = rec(suite.app);
       return typeof app?.id === "number" ? String(app.id) : str(app?.slug);
     });
-    selectedSuites.push(...allSuites.filter((suite) => currentActions.has(suite.id)));
+    selectedSuites.push(...allSuites.filter((suite) =>
+      (rec(suite.app)?.slug === "github-actions" || workflowSuites.has(suite.id)) && !ignoredSuites.has(suite.id)));
     // Non-Actions suites do not supersede distinct check names in older suites.
     const runs = latestBy(currentChecks, checkKey, newerCheck);
     if (runs.some((run) => run.status !== "completed")) return null;

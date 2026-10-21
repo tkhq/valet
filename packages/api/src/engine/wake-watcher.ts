@@ -499,11 +499,11 @@ export class WakeWatcher {
         waiterId: row.id, sourceDedupeKey: latest.dedupeKey, key: latest.derive, result: outcome.result,
       });
       if (outcome.result === "error") {
-        if (outcome.retryAfterMs && !outcome.consumeSource) {
-          const delayMs = Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs));
-          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs), delayMs });
+        if (!outcome.consumeSource) {
+          const delayMs = Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs ?? 1_000));
+          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs });
         } else this.deriveCooldowns.delete(cooldownKey);
-        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : outcome.retryAfterMs ? "retry delayed by backoff" : "it retries next tick"}:`, outcome.error);
+        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "retry delayed by backoff"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");
         return;
       }

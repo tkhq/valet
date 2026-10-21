@@ -326,9 +326,11 @@ subject.
 3. Select the latest workflow run per `(workflow_id, event)` across all pages.
    Run number, run id, and attempt number order the workflow runs.
    A push run cannot supersede a PR run, or the reverse.
-   PR-relevant workflows are `pull_request` runs and `push` runs with check runs on this head SHA.
+   Only `schedule` and `workflow_dispatch` events are excluded by name.
+   Every other event on the head SHA counts under its own `(workflow_id, event)` key.
+   This includes `pull_request_review` and `pull_request_target` when GitHub reports them on that SHA.
    Ignore `schedule` and `workflow_dispatch` runs, including their checks and suites.
-   A push deploy without checks does not block completion.
+   A selected workflow that is pending still blocks completion before it creates checks.
    A relevant push or PR deploy with a `waiting` check blocks completion.
    When a pending Actions check appears, read workflow membership before deciding terminality.
    If its suite belongs to a selected relevant workflow, return `null` immediately.
@@ -336,11 +338,10 @@ subject.
    It makes no suite or status read, and reads no further check-run page.
    An older pending job cannot block its newer workflow run.
    Actions suites belong to workflow runs, not to the App as a whole.
-   Select Actions suites through selected workflow runs. Ignore unmatched Actions suites.
-   This rule prevents an unmatched older suite from overriding a later attempt.
-   Observed rerun attempts retain the workflow run id and suite id.
-   Both attempts of [cli/cli run 39445176252](https://github.com/cli/cli/actions/runs/39445176252) use suite `106890344698`.
-   The selection also tolerates a changed suite id without retaining the orphaned suite.
+   Keep unmatched Actions checks and suites, including Checks-API reporter jobs.
+   Drop them only when workflow membership proves they are superseded or belong to an excluded event.
+   Fixtures cover reruns with both the same suite id and a changed suite id.
+   The approval-gated cli/cli example does not prove failed-job rerun suite behavior.
    For other Apps, select the latest suite per App for suite terminality.
    This suite selection never discards older suites' check runs.
    Ignore selected suites with `latest_check_runs_count = 0`.
@@ -354,6 +355,10 @@ subject.
    If completion times are missing, including pending jobs, compare ids.
    Each selected check run and relevant workflow must have status `completed`.
    A superseded cancelled job cannot change the selected result.
+   A labeled PR retrigger can replace an earlier synchronize run, even when the new run skips every job.
+   This matches latest-run semantics, not a historical failure latch.
+   If no selected checks or status contexts remain, return `null`.
+   With other successful selected checks, that state can return `success`.
    If any latest status context is not `success`, `failure`, or `error`, return `null`.
    Terminality is independent of the combined status result.
 4. Compute status `failure` when any selected conclusion is `failure`,
@@ -388,18 +393,23 @@ deadline ends that wait.
 | One completed check and a queued PR-triggered workflow | `null` |
 | One completed check and a queued zero-run App suite | status `success` |
 | Actions suite with zero runs after workflow filters skip every job | ignored |
-| Push deploy with no checks, waiting for approval | ignored |
+| Selected push workflow with no checks, waiting for approval | `null` |
 | Current push or PR deploy has a `waiting` check | `null` |
 | Newer push passed, current PR run still running | `null` |
 | Current push failed, current PR run passed, same workflow | status `failure` |
 | Current PR failed, newer push passed, same workflow | status `failure` |
 | Newer scheduled or manual run, PR run still running | `null` |
 | Old cancelled job in a superseded Actions suite, new job passed | status `success` |
-| Old unmatched Actions suite failed, current attempt passed | status `success` |
+| Old Actions suite proven superseded by a newer attempt, current attempt passed | status `success` |
+| Unmapped Actions reporter check failed or pending | status `failure` or `null` |
+| Head-SHA `pull_request_review` failed, `pull_request` passed | status `failure` |
+| Head-SHA `pull_request_target` in progress | `null` |
+| Labeled retrigger skips every job after synchronize failure, no other checks | `null` |
+| Same labeled retrigger, other selected checks succeeded | status `success` |
 | Same suite rerun: older failed job, newer same-name job passed | status `success` |
 | Non-Actions App: older suite failed `lint`, newer suite passed a different `test` | status `failure` |
 | Non-Actions App: same name across suites, latest completion passed | status `success` |
-| Different selected Actions suites: latest job per App/name wins within a workflow/event | latest job's status |
+| Distinct selected workflow/events share a job name | every workflow/event participates |
 | Two independent Actions workflows share an App; one selected suite failed | status `failure` |
 | Head changes during the reads | `null` |
 | Combined failure with a pending latest status context | `null` |
@@ -482,13 +492,22 @@ Each write method is one statement.
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
 The replay risk is limited to waiters with more than 256 delivered keys.
 New pods never trim delivered keys.
+The signal card labels `output_cap` as "output limit reached".
 Drain old API pods before new pods write `output_cap` rows.
 Old parsers reject `output_cap` and can hide these waiters from list and history reads.
-This release maps unknown causes on terminal rows to `fired`, so future cause additions stay readable.
+This release maps unknown causes on terminal rows to `fired` and logs the id and original cause.
+Future cause additions stay readable.
 It still rejects unknown causes on active rows as invalid data.
 This parser change cannot repair already-running old pods.
 Before rollback to a release without tolerant parsing, stop new writers.
-Map persisted `output_cap` causes to `fired` before starting the old release.
+Map persisted terminal `output_cap` causes to `fired` before starting the old release:
+
+```sql
+UPDATE engine_wakeups SET cause='fired' WHERE cause='output_cap' AND status IN ('done','cancelled','expired','lost');
+```
+
+The chart uses `strategy: Recreate`, not a rolling update.
+For any manual overlapping deployment, stop old pods before new writers start.
 The original cause remains in terminal logs and metrics.
 Draining old watchers also preserves replay protection during rollout.
 Source removal on new pods writes only `event_source_seen` and leaves delivered keys unchanged.
@@ -579,9 +598,9 @@ D1 errata (Task 11):
   These families need read access to `checks`, `actions`, and `statuses`.
   Reading the PR head also needs `pull_requests`: read.
   For `checks_completed`, a missing `status` webhook event warns instead of refusing.
-  The warning says: "Waits can be late when a commit status finishes last. Add the Status event to the App."
+  The warning says: "If a commit status finishes last, the wait ends only after another check event arrives or the deadline passes. Add the Status event to the App."
   Statuses read permission remains mandatory because an unreadable context can still be pending or failed.
-  A direct `github.status` wait still requires the Status event.
+  A direct `github.status` clause still requires the Status event, even next to `checks_completed`.
   Other known missing events or permissions refuse the wait.
   The refusal names the missing setting.
   It directs the person to update the App's "Permissions & events".
@@ -689,7 +708,11 @@ step that returns early for an event that no subscription matched.
    A null or successful result for another commit cannot clear its retry deadline.
    Success or a permanent error resets only that group's backoff.
    Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
-   Other transient errors retain the source for retry.
+   Every other derive error also retains the source with exponential backoff, starting at one second and capped at 15 minutes.
+   This includes 5xx responses, timeouts, malformed payloads, and pagination safety limits.
+   Pagination-limit errors remain retryable because later snapshots or head changes can resolve them.
+   Consuming them would discard a completion source without a terminal or permission result.
+   Each attempt logs `error`. Repeated passes and nudges respect the same deadline.
    Source digests carry no receipt id, so these outcomes do not update receipts.
 
 Claims (`2026-10-16-delivery-threads-and-claims-design.md`, Part C)

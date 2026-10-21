@@ -136,8 +136,13 @@ describe("GitHub arm correctness", () => {
   it("warns instead of refusing checks_completed without the Status webhook event", async () => {
     const config = vi.fn(async () => ({ events: ["check_run", "check_suite", "workflow_run"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } }));
     const result = await checkArm(deps({ githubIngressConfig: config }), CTX, req());
-    expect(result).toMatchObject({ ok: true, warning: "Waits can be late when a commit status finishes last. Add the Status event to the App." });
+    expect(result).toMatchObject({ ok: true, warning: "If a commit status finishes last, the wait ends only after another check event arrives or the deadline passes. Add the Status event to the App." });
     expect(config).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires the Status event for a direct status clause alongside checks_completed", async () => {
+    const result = await checkArm(deps({ githubIngressConfig: async () => ({ events: ["check_run", "check_suite", "workflow_run"], permissions: { checks: "read", actions: "read", statuses: "read", pull_requests: "read" } }) }), CTX, req({ on: [{ key: "github.pull_request.checks_completed" }, { key: "github.status" }] }));
+    expect(result).toEqual({ ok: false, text: expect.stringContaining("event status") });
   });
 
   it("still requires statuses read when the Status webhook event is absent", async () => {

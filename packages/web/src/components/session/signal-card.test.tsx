@@ -241,6 +241,7 @@ describe("wakeup causes in words (fix wave 4, L3)", () => {
   it("names each cause in words", () => {
     expect(wakeupOutcome({ cause: "pid_missing" })).toEqual({ label: "process not found", tone: "danger" });
     expect(wakeupOutcome({ cause: "sandbox_unavailable" })).toEqual({ label: "sandbox stopped", tone: "danger" });
+    expect(wakeupOutcome({ cause: "output_cap" })).toEqual({ label: "output limit reached", tone: "danger" });
     expect(wakeupOutcome({ cause: "rate" })).toEqual({ label: "too many events", tone: "danger" });
     expect(wakeupOutcome({ cause: "deadline", exitCode: "137" })).toEqual({ label: "deadline reached · exit 137", tone: "danger" });
   });

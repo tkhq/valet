@@ -159,6 +159,7 @@ const CAUSE_LABEL: Record<string, string> = {
   pid_missing: "process not found",
   sandbox_unavailable: "sandbox stopped",
   rate: "too many events",
+  output_cap: "output limit reached",
   deadline: "deadline reached",
   cancelled: "cancelled",
   delivered: "arrived as a message",

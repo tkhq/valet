@@ -1262,6 +1262,43 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(derive).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["5xx", "timeout", "invalid payload", "too many pages"])("backs off every unconsumed %s derive error", async (failure) => {
+    const h = harness();
+    const head = "aaaa000000000000000000000000000000000001";
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS, subjects: ["github:acme/lean-proofs#42", `github:acme/lean-proofs@${head}`] })] }));
+    let now = NOW;
+    const attempts = vi.fn();
+    const http: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname.endsWith("/pulls/42")) { attempts(); return Response.json({ number: 42, head: { sha: head } }); }
+      if (url.pathname.endsWith("/check-runs")) {
+        if (failure === "5xx") return new Response("unavailable", { status: 503 });
+        if (failure === "timeout") throw new DOMException("Request timed out", "TimeoutError");
+        return Response.json({ total_count: 1, check_runs: [{ id: 1, name: "test", app: { id: 2, slug: "ci" }, check_suite: { id: 1 }, status: "completed", conclusion: "success" }] });
+      }
+      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [] });
+      if (url.pathname.endsWith("/check-suites")) return Response.json(failure === "invalid payload" ? {} : { check_suites: [] });
+      if (url.pathname.endsWith("/status")) return Response.json({ statuses: Array.from({ length: 100 }, () => ({ state: "success" })) });
+      throw new Error(`Unexpected read: ${url.pathname}`);
+    };
+    const record = vi.fn();
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "org-1", contextFor: () => ({ orgId: "org-1", appToken: async () => "test-token", fetch: http }), record });
+    const w = h.watcher({ deriveEvent, now: () => now });
+    await w.sweep(now);
+    let calls = 1;
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 900_000, 900_000]) {
+      await w.sweep(now); // A repeat pass at the same time must not probe again.
+      now += delay - 1;
+      await w.sweep(now);
+      expect(attempts).toHaveBeenCalledTimes(calls);
+      now++;
+      await w.sweep(now);
+      expect(attempts).toHaveBeenCalledTimes(++calls);
+    }
+    expect(record.mock.calls.every((call) => call[1] === "error")).toBe(true);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
+  });
+
   it("consumes permission-denied sources and logs error without retrying the next tick", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
