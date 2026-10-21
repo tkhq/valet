@@ -55,12 +55,14 @@ export function recapSinceLabel(since: number, now = Date.now()): string {
  * background tab leaves new messages for the recap. The reader's last read
  * time is kept when the thread opens, before that marking moves it.
  */
-export function useThreadRecap({ threadId, thread, messages, viewerId }: {
+export function useThreadRecap({ threadId, thread, messages, viewerId, working = false }: {
   threadId?: string;
   /** The open thread's list row: its `readAt` is the reader's last visit. */
   thread?: Pick<ThreadSummary, "id" | "sessionId" | "readAt">;
   messages: StreamMessage[];
   viewerId?: string;
+  /** True while Valet runs a turn in the thread. */
+  working?: boolean;
 }): ThreadRecapView | undefined {
   const pageVisible = usePageVisible();
   const [visit, setVisit] = useState<{ threadId: string; readAt?: number; count: number }>();
@@ -105,12 +107,21 @@ export function useThreadRecap({ threadId, thread, messages, viewerId }: {
   const span = useMemo(() => visit && visit.threadId === threadId && viewerId
     ? recapWindow(threadMessages, viewerId, visit.readAt)
     : null, [visit, threadId, viewerId, threadMessages]);
-  // Another person's new message makes a new recap; Valet's own messages do not.
-  const otherCount = span && viewerId ? span.messages.filter((message) => writtenByOtherPerson(message, viewerId)).length : 0;
+  // The recap covers the window up to its newest message. A new message
+  // refreshes it, but a turn that is still running refreshes it only when it
+  // ends: a reply to a teammate's request replaces "no answer yet", and a
+  // long turn costs one recap instead of one per message it adds.
+  const visitKey = visit ? `${visit.threadId}:${visit.readAt ?? "first"}:${visit.count}` : "";
+  const endId = span?.messages.at(-1)?.id;
+  const [settled, setSettled] = useState<{ visitKey: string; endId: string }>();
+  if (endId && (settled?.visitKey !== visitKey || (settled.endId !== endId && !working))) {
+    setSettled({ visitKey, endId });
+  }
+  const settledEnd = settled?.visitKey === visitKey ? settled.endId : undefined;
   const recapQ = useQuery({
-    queryKey: ["thread-recap", threadId, visit?.readAt ?? "first", visit?.count ?? 0, otherCount],
+    queryKey: ["thread-recap", threadId, visit?.readAt ?? "first", visit?.count ?? 0, settledEnd],
     queryFn: () => api.getThreadRecap(threadId ?? "", visit?.readAt),
-    enabled: Boolean(threadId && span?.worthRecap),
+    enabled: Boolean(threadId && span?.worthRecap && settledEnd),
     staleTime: Infinity,
     // A refreshed recap for the same visit replaces the shown one when it
     // arrives, instead of hiding the card meanwhile. Another thread's or
@@ -127,7 +138,7 @@ export function useThreadRecap({ threadId, thread, messages, viewerId }: {
   if (!span || !anchor || !visit) return undefined;
   const people = span.people.length > 2 ? `${span.people.slice(0, 2).join(", ")} and others` : span.people.join(" and ");
   return {
-    key: `${visit.threadId}:${visit.readAt ?? "first"}:${visit.count}`,
+    key: visitKey,
     anchorId: anchor.id,
     mode: span.mode,
     people,

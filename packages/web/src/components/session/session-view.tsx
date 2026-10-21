@@ -173,7 +173,6 @@ export function SessionView({
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
-  const recap = useThreadRecap({ threadId: effectiveThreadId, thread: helperThread, messages: stream.messages, viewerId: me.data?.id });
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
@@ -210,6 +209,7 @@ export function SessionView({
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
+  const recap = useThreadRecap({ threadId: effectiveThreadId, thread: helperThread, messages: stream.messages, viewerId: me.data?.id, working: agentBusy });
 
   const browserWatch = useBrowserWatch({
     sessionId,

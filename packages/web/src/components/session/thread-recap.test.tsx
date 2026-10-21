@@ -71,14 +71,20 @@ describe("useThreadRecap", () => {
     expect(markMutate).toHaveBeenCalledWith({ threadIds: ["t1"] });
   });
 
-  it("asks for a new recap when another person writes, not when Valet does", async () => {
+  it("refreshes the recap when Valet's turn ends, not while it runs", async () => {
     const thread = { id: "t1", sessionId: "s1", readAt: 5_000 };
-    const { rerender } = renderHook(({ list }) => useThreadRecap({ threadId: "t1", thread, messages: list, viewerId: reader.id }),
-      { wrapper, initialProps: { list: messages } });
+    const pending = [...messages, msg("m7", 14_000, "user", "add my leads to the list", mate)];
+    const { rerender } = renderHook(({ list, working }) => useThreadRecap({ threadId: "t1", thread, messages: list, viewerId: reader.id, working }),
+      { wrapper, initialProps: { list: pending, working: true } });
     await waitFor(() => expect(getThreadRecap).toHaveBeenCalledTimes(1));
-    rerender({ list: [...messages, msg("m7", 14_000, "assistant", "Still here.")] });
-    rerender({ list: [...messages, msg("m7", 14_000, "assistant", "Still here."), msg("m8", 15_000, "user", "quote due Monday", mate)] });
+    rerender({ list: [...pending, msg("m8", 15_000, "assistant", "Looking up the list.")], working: true });
+    rerender({ list: [...pending, msg("m8", 15_000, "assistant", "Looking up the list."), msg("m9", 16_000, "assistant", "Added 11 leads.")], working: true });
+    expect(getThreadRecap).toHaveBeenCalledTimes(1);
+    const settled = [...pending, msg("m8", 15_000, "assistant", "Looking up the list."), msg("m9", 16_000, "assistant", "Added 11 leads.")];
+    rerender({ list: settled, working: false });
     await waitFor(() => expect(getThreadRecap).toHaveBeenCalledTimes(2));
+    rerender({ list: [...settled, msg("m10", 17_000, "user", "thanks, send the quote too", mate)], working: false });
+    await waitFor(() => expect(getThreadRecap).toHaveBeenCalledTimes(3));
   });
 
   it("keeps the visit's read time after the thread is marked read", () => {
