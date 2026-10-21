@@ -209,7 +209,9 @@ accordingly.
 
 CI (`.github/workflows/docker-publish.yml`) publishes both deployable
 images to GHCR as public multi-arch (amd64 + arm64) manifests on every
-merge to `dev-v2` and on version tags:
+merge to `dev-v2` and on version tags. A `dev-v2` merge publishes only if it
+is still the branch head when its checks pass. If a newer merge landed during
+those checks, the newer merge publishes images that include both changes:
 
 - `ghcr.io/<owner>/valet-api` — the api with the web SPA baked in
 - `ghcr.io/<owner>/valet-sandbox` — the session sandbox pod image

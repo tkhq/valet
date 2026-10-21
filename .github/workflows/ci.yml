@@ -34,11 +34,39 @@ jobs:
       - name: Report
         run: test "${{ needs.checks.result }}" = "success"
 
-  # The aggregate check includes every required test shard and lint job.
-  # Keep the default success() condition so failed or cancelled CI cannot publish.
-  publish:
+  # A dev-v2 push publishes only while its commit is still the branch head.
+  # The publish workflows cancel an in-progress publish of the same ref, and
+  # an older commit whose tests finish later would otherwise cancel the newer
+  # commit's publish and leave the head with no images. If the read fails,
+  # this job fails and nothing publishes.
+  tip:
     needs: ci
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/dev-v2' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/valet/v')))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev-v2'
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.head.outputs.current }}
+    steps:
+      - name: Compare with the branch head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${GITHUB_REF_NAME}" --jq .object.sha)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${GITHUB_SHA} is no longer the head of ${GITHUB_REF_NAME} (${head}). The publish is skipped; the newer commit publishes its own images."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The aggregate check includes every required test shard and lint job.
+  # `tip` is skipped for tags and manual runs, so the default success()
+  # condition would skip them too. The explicit `!cancelled()` and
+  # `needs.ci.result == 'success'` keep failed or cancelled CI from publishing.
+  publish:
+    needs: [ci, tip]
+    if: ${{ !cancelled() && needs.ci.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/valet/v') || (github.ref == 'refs/heads/dev-v2' && needs.tip.outputs.current == 'true')))) }}
     permissions:
       contents: read
       packages: write
@@ -46,8 +74,8 @@ jobs:
     secrets: inherit
 
   publish-cli:
-    needs: ci
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/dev-v2' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/valet/v')))
+    needs: [ci, tip]
+    if: ${{ !cancelled() && needs.ci.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/valet/v') || (github.ref == 'refs/heads/dev-v2' && needs.tip.outputs.current == 'true')))) }}
     permissions:
       contents: write
     uses: ./.github/workflows/release-cli.yml
