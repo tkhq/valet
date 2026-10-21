@@ -48,6 +48,27 @@ Use `engine` for volume (deterministic checks, model comparison at scale).
 Use `product` for fidelity (the trajectory a user's session would produce).
 A production-behavior claim needs a product-drive case.
 
+The product driver also does these things for each case:
+
+- It saves the run's model as the person's default model before the
+  assistant session exists, so `--model` reaches the assistant. Before
+  2026-10-20 every product case ran on the host fallback tier `s`, and
+  `--model` changed only the trajectory label.
+- It answers each decision card, because nobody watches an eval run. An
+  `ask_question` card gets a fixed typed answer that leaves the choice to
+  the agent. Every other card (`allow_permissions`, a policy approval)
+  gets its declining action, such as "Not now" or "Deny". The answers go
+  into `metadata.decisions`.
+- It seeds placeholder connections for the action services a case lists
+  in `connected:` (`@valet/api/eval-connections`). The catalog then shows
+  their action schemas, as it does for a person who connected them. A
+  call that reaches the real service fails on authentication. A
+  placeholder cannot list the actions of an MCP integration such as
+  Linear, because the live server lists them. The driver refuses such a
+  service.
+- It records every saved workflow definition in
+  `metadata.savedWorkflows`, for the `workflow_definition` check.
+
 ## The case format
 
 Cases are YAML files in `evals/cases/`, one case per file, loaded and
@@ -160,7 +181,14 @@ Deterministic checks (`checks/deterministic.ts`) are pure functions:
 `all_terminal`, `no_errors`, `max_turns` (optional `per_submission`
 scope), `max_tokens`, `max_cost`, `max_duration`, and `verify_command`
 (builder cases, below). Compaction-elided tool results are reported as
-elision, not as a behavior mismatch.
+elision, not as a behavior mismatch. `workflow_definition` scores a
+drafted workflow (see "The workflow-authoring suite").
+
+A check result can carry `metrics`, measurements that it reports whether
+it passes or fails. The scorecard prints them under the case row. A
+multi-run entry keeps one set per run in `sampling.metricsPerRun`, and the
+scorecard prints the count of runs for a boolean and the mean for a
+number.
 
 LLM-as-judge checks (`checks/judge.ts`): `judge_output`,
 `judge_trajectory`, and `judge_equivalence` (needs a baseline). The judge
@@ -340,6 +368,160 @@ Empirical results from tuning (2026-09-03, single runs):
   work ran beside the suite. Re-run a lone `sandbox_unavailable` row
   before reading it as behavior.
 
+## The workflow-authoring suite
+
+`evals/cases/workflows/` holds product-drive cases that ask the assistant
+to build and save a workflow without running it. The suite measures the
+`workflows` skill and the model defaults, so a change to either is
+compared on the same briefs instead of judged from one trial. Like the
+hard and long suites, the directory is outside the default `make eval`
+load. Each case runs 3 times (`runs: 3`). Run one model per call, and
+run the calls one after another; two at once dropped model connections:
+
+```bash
+make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-sonnet-5-5"
+make eval EVAL_ARGS="--cases evals/cases/workflows --model openai/gpt-6-luna"
+```
+
+The `workflow_definition` check finds the definitions the agent sent to
+`workflows.save_workflow` or `workflows.validate_definition` (the drafts).
+The final definition is the last one the case saved, else the last draft.
+A case asks for one workflow, so a run that saves more than one fails.
+Every definition must pass these rules:
+
+- The product's save validator accepted it. A saved definition passed it,
+  and a draft passed it when its `save_workflow` or `validate_definition`
+  call succeeded. The check does not validate again, because only the
+  product knows the org's integrations and models.
+- Each stop step's outcome is `success` or `failure`.
+- Each `foreach` step has one inline body object and `maxItems`.
+- No agent step prompt tells its agent to get approval. This is the same
+  heuristic that `preview_workflow` warns with.
+
+A case adds rules with optional fields: `foreach` (a foreach step must
+exist), `tool_steps`, `approved_actions` (in a tool step and in no agent
+step's `toolScope.actions`; an agent step without `toolScope.actions` can
+run every action, so it fails the rule), `order` (steps occur in this
+order on one path), `schedule_input` (some read is under
+`trigger.data.input`, and every other `trigger.data` read is the
+scheduler's `scheduleName` or `cron`), `run_date` (a `trigger.timestamp`
+read and no literal date), and `declared_inputs` (each `trigger.data`
+field has a `dataSchema` entry). A selector with a dot is an action id
+glob for tool steps and foreach tool bodies. A selector without a dot is
+a step type. A part that starts with `!` excludes what it names, so
+`sheets.*|!sheets.read_*` names every sheets action except the reads.
+
+For `order`, a step on an approval step's denial branch does not run
+after the approval. After an approval selector, every step that matches
+the next selector must run after an approval: a second write before the
+approval fails the rule. Other steps can also run earlier, such as a read
+that finds the row before the write. `saved: true` fails a case that
+stored no workflow, because a save that returns an error stores nothing.
+Bracket reads such as `trigger["data"]["input"]` count the same as
+dotted reads. A denial fails the approval step, except with
+`onDeny: "skip"`. Then the step completes with approved false and runs
+its `"false"` edges and its edges without `fromOutput`.
+
+Only the final definition decides pass or fail. The check reports repair
+effort and initial correctness apart, as metrics: `drafts`, `rejections`
+(validator rejections across save, validate, and patch calls),
+`first_valid` (the save validator accepted the first full draft),
+`first_correct` (it was also correct under every rule), and
+`final_valid`. Two kinds of call are not scored as
+first drafts:
+
+- A call to a tool that does not exist. A model can write
+  `workflows__validate_definition` after the pinned
+  `workflows__get_workflow`, and the agent loop answers "Tool ... not
+  found" before any action runs. The call is not a draft and not a
+  rejection. `unknown_tool_calls` counts it.
+- A probe: a small draft that checks one detail, such as whether the
+  validator accepts an action name. The first full draft is the first
+  draft with at least half as many steps as the final definition.
+  `probes` counts the smaller drafts before it.
+
+The cases:
+
+- `workflow-sales-tracker`: one email updates one existing lead in a
+  Google Sheet after a person approves the change, then the workflow
+  reads the row back. The sheet write is medium risk, which policy allows
+  without asking, so the case requires an approval step before a tool
+  step that writes, and a tool step that reads after it. Every sheets
+  action except the reads (`read_*`, `get_*`, `list_*`) changes the
+  sheet, so none of them may run before the approval or sit in an agent
+  step's scope.
+- `workflow-scheduled-refresh`: a weekday schedule refreshes a JSON file
+  in a GitHub repository. The case requires schedule input reads at
+  `trigger.data.input` and the run date from `trigger.timestamp`.
+- `workflow-onboarding-linear`: a Linear project, its milestones, and a
+  role-dependent number of issues. The case requires a foreach step and
+  declared inputs. Linear is an MCP integration, so a scratch stack lists
+  no Linear actions, and the case does not require Linear tool steps.
+- `workflow-bot-alert-triage`: bot messages in two Slack channels start
+  the workflow, and a high alert opens a GitHub issue in a tool step.
+
+Dev's org tier map sends `s` to `openai/gpt-6-luna` and `m` to
+`anthropic/claude-sonnet-5-5`. The baselines name concrete models, not
+tiers. `openai/gpt-6-luna` is not measured yet, because the eval machine
+has no OpenAI key.
+
+Current baselines. Base: `da0c13c2a` (dev-v2 with #993 and #1000). Product
+drive, 3 runs per case. Runs: 2026-10-20 18:03 to 18:58 EDT, and the
+`claude-sonnet-5-5` sales-tracker case on 2026-10-21.
+
+| Case | Model | Final correct | First full draft correct | Rejections per run | Unknown-tool calls per run | Cost per run |
+|---|---|---|---|---|---|---|
+| sales-tracker | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.7 | $0.40 |
+| sales-tracker | claude-sonnet-4-6 | 3/3 | 2/3 | 0.3 | 0.0 | $0.51 |
+| sales-tracker | claude-haiku-4-5 | 3/3 | 1/3 | 1.0 | 0.0 | $0.12 |
+| scheduled-refresh | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.7 | $0.29 |
+| scheduled-refresh | claude-sonnet-4-6 | 3/3 | 3/3 | 0.0 | 0.0 | $0.55 |
+| scheduled-refresh | claude-haiku-4-5 | 0/3 | 0/3 | 1.0 | 0.0 | $0.09 |
+| onboarding-linear | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.3 | $0.27 |
+| onboarding-linear | claude-sonnet-4-6 | 2/3 | 2/3 | 0.0 | 0.0 | $0.37 |
+| onboarding-linear | claude-haiku-4-5 | 3/3 | 1/3 | 1.0 | 0.0 | $0.10 |
+| bot-alert-triage | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.0 | $0.29 |
+| bot-alert-triage | claude-sonnet-4-6 | 3/3 | 3/3 | 0.0 | 0.0 | $0.53 |
+| bot-alert-triage | claude-haiku-4-5 | 3/3 | 1/3 | 0.7 | 0.0 | $0.12 |
+| all | claude-sonnet-5-5 | 12/12 | 12/12 | 0.00 | 0.42 | $0.31 |
+| all | claude-sonnet-4-6 | 11/12 | 10/12 | 0.08 | 0.00 | $0.49 |
+| all | claude-haiku-4-5 | 9/12 | 3/12 | 0.92 | 0.00 | $0.11 |
+
+- No first draft uses the stop outcome `completed` any more.
+- `claude-sonnet-5-5` drafted every workflow correctly the first time. Its
+  only wasted calls go to `workflows__validate_definition`, a tool that
+  does not exist.
+- `claude-haiku-4-5` still reads schedule input at `trigger.data.<field>`
+  in every scheduled-refresh run. Its other first-draft errors are
+  template pipes such as `| length` and `| truncate`, which the template
+  parser rejects.
+- One `claude-sonnet-4-6` onboarding run created the issues without a
+  foreach step.
+- The saved run in each file replays with the same verdict under the
+  final rules: `saved`, every sheet change after the approval, one saved
+  workflow, and validity from the product's save results. A file saves
+  one run of three, so the other two keep the verdict from the rules
+  they ran with.
+- Batches that ended with `Connection error.` or `terminated` were run
+  again alone, and only the clean batch is kept. The first
+  `claude-sonnet-5-5` sales-tracker batch also logged a failed Docker
+  sandbox start, so it was run again on 2026-10-21.
+
+Before #993, for comparison. Base `8498af1cb`, 2026-10-20 13:00 EDT, 3 runs
+per case, first-draft metric before probes and unknown-tool calls were
+counted apart (neither occurred in the saved runs):
+
+| Model | Final correct | First draft correct | Rejections per run | Cost per run |
+|---|---|---|---|---|
+| claude-haiku-4-5 | 6/12 | 0/12 | 1.2 | $0.09 |
+| claude-sonnet-4-6 | 9/12 | 0/12 | 1.2 | $0.52 |
+
+Every first draft then used the stop outcome `completed` from the old
+skill example.
+
+A rerun follows once #997 merges, because its design warnings can change
+drafts.
+
 ## Known limitations
 
 - `mem_*` tools in engine-drive sessions are Map-backed stand-ins;
@@ -355,3 +537,28 @@ Empirical results from tuning (2026-09-03, single runs):
   as noise and the pass@3 cells and aggregate gaps as signal.
 - CI wiring is a follow-up: stabilize the suite first, then add a
   workflow (with pass@k, never single-run rows).
+- The workflow-authoring cases do not check the schedule's cron or the
+  event trigger's filters. A workflow can pass with a wrong schedule.
+- The schedule and event cases do not require the schedule or the event
+  trigger at all. The product driver declines the approval card for
+  `workflows.create_schedule`, and a passing run can skip
+  `workflows.create_trigger`.
+- The `order` rule does not read edge `when` conditions or `if` steps.
+  With `onDeny: "skip"`, a write behind `when:
+  "nodes.gate.result.approved"`, or behind an `if` step on that value,
+  does not run after a denial. The rule still counts that path as a
+  denial path and fails the workflow.
+- The sales case does not require the proposal before the approval. A
+  workflow that asks for approval before it drafts the new values
+  passes.
+- `declared_inputs` skips a bare `{{trigger.data}}` read. A workflow that
+  passes the whole payload to a step and declares no `dataSchema`
+  passes.
+- The product driver answers every gate the decisions endpoint lists,
+  including gates that are already resolved. `metadata.decisions` can
+  hold more answers than the cards that opened, so read it as an upper
+  bound.
+- The baseline table mixes rule versions. Each file keeps one run of
+  three, and only that run is replayed under the current rules. Rerun
+  the suite before you quote the table as a measurement of the current
+  rules.

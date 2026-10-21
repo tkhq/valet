@@ -204,6 +204,44 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
         ...(timeoutS !== undefined ? { timeout_s: timeoutS } : {}),
       };
     }
+    case "workflow_definition": {
+      const optBoolean = (key: string): boolean | undefined => {
+        const v = raw[key];
+        if (v === undefined || v === null) return undefined;
+        if (typeof v !== "boolean") throw new CaseValidationError(source, `\`${at}.${key}\` must be a boolean`);
+        return v;
+      };
+      const optSelectors = (key: string): string[] | undefined => {
+        const v = raw[key];
+        if (v === undefined || v === null) return undefined;
+        if (!Array.isArray(v) || v.length === 0 || v.some((x) => typeof x !== "string" || x.length === 0)) {
+          throw new CaseValidationError(source, `\`${at}.${key}\` must be a non-empty array of step selectors`);
+        }
+        return v as string[];
+      };
+      const foreach = optBoolean("foreach");
+      const scheduleInput = optBoolean("schedule_input");
+      const runDate = optBoolean("run_date");
+      const declaredInputs = optBoolean("declared_inputs");
+      const saved = optBoolean("saved");
+      const toolSteps = optSelectors("tool_steps");
+      const approvedActions = optSelectors("approved_actions");
+      const order = optSelectors("order");
+      if (order !== undefined && order.length < 2) {
+        throw new CaseValidationError(source, `\`${at}.order\` needs at least two selectors`);
+      }
+      return {
+        type,
+        ...(foreach !== undefined ? { foreach } : {}),
+        ...(toolSteps !== undefined ? { tool_steps: toolSteps } : {}),
+        ...(approvedActions !== undefined ? { approved_actions: approvedActions } : {}),
+        ...(order !== undefined ? { order } : {}),
+        ...(scheduleInput !== undefined ? { schedule_input: scheduleInput } : {}),
+        ...(runDate !== undefined ? { run_date: runDate } : {}),
+        ...(declaredInputs !== undefined ? { declared_inputs: declaredInputs } : {}),
+        ...(saved !== undefined ? { saved } : {}),
+      };
+    }
     case "judge_output":
     case "judge_trajectory": {
       const threshold = optNumber("threshold");
@@ -313,6 +351,10 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
       }
     }
   }
+  const connected = optionalStringArray(raw, "connected", source);
+  if (connected !== undefined && drive !== "product") {
+    throw new CaseValidationError(source, "`connected` needs `drive: product` (it seeds the booted api's credentials)");
+  }
   const profile = optionalString(raw, "profile", source);
   if (profile !== undefined && !(PROFILES as readonly string[]).includes(profile)) {
     throw new CaseValidationError(source, `\`profile\` must be one of: ${PROFILES.join(", ")}`);
@@ -374,6 +416,7 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];
   if (mockTools !== undefined) evalCase.mock_tools = mockTools;
   if (requiredCredentials !== undefined) evalCase.required_credentials = requiredCredentials;
+  if (connected !== undefined) evalCase.connected = connected;
   return evalCase;
 }
 

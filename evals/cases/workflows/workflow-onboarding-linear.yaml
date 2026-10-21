@@ -1,0 +1,32 @@
+# Workflow authoring: new-hire onboarding in Linear. A project, then its
+# milestones, then a role-dependent number of issues: a list of unknown
+# size, which the workflows skill puts in a foreach step with one inline
+# body and maxItems.
+#
+# Linear is an MCP integration. Without a live token the catalog lists no
+# Linear actions, so the case does not require Linear tool steps, and the
+# validator accepts any linear.* action name.
+id: workflow-onboarding-linear
+description: Draft a manual-start workflow that creates a Linear project, its milestones, and its issues.
+drive: product
+session_type: orchestrator
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Build a workflow that sets up onboarding in Linear for a new hire. I
+      start it by hand with the person's name, role, start date, and the
+      Linear team key. It creates a Linear project named "Onboarding:
+      <name>", then the project's milestones (Week 1, Week 2, Month 1), then
+      the onboarding issues for each milestone, drafted for the role. The
+      number of issues depends on the role. Linear is not connected yet; I
+      will connect it before the first run. Save the workflow, but do not
+      run it.
+timeout_ms: 600000
+checks:
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    saved: true
+    foreach: true
+    declared_inputs: true

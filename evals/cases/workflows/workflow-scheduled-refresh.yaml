@@ -1,0 +1,30 @@
+# Workflow authoring: a scheduled data refresh that commits a file to a
+# repository twice a day on weekdays. Scores the two schedule traps in the
+# workflows skill: schedule input arrives at trigger.data.input, and the
+# run date comes from trigger.timestamp, never from a date in a prompt.
+id: workflow-scheduled-refresh
+description: Draft a weekday schedule workflow that refreshes a JSON file in a GitHub repository.
+drive: product
+session_type: orchestrator
+connected: [github]
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Build a workflow that refreshes data/fx-rates.json in the GitHub
+      repository acme/metrics-dashboard. A schedule runs it at 9:00 and
+      17:00 New York time on weekdays, and the schedule passes the base
+      currency and the list of currency symbols as its input. Each run
+      fetches the latest rates for those symbols from
+      https://api.frankfurter.app/latest, writes them to data/fx-rates.json,
+      and commits the file to the main branch with a commit message that
+      names the run date. Save the workflow and set up its schedule, but do
+      not run it.
+timeout_ms: 600000
+checks:
+  - type: tool_not_called
+    tool: workflows.start_run
+  - type: workflow_definition
+    saved: true
+    schedule_input: true
+    run_date: true

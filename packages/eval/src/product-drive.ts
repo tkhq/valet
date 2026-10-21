@@ -23,7 +23,9 @@ import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { createApp } from "@valet/api/app";
 import { buildNodeProviders } from "@valet/api/providers-node";
+import { connectEvalPlaceholders } from "@valet/api/eval-connections";
 import { listChildSessions } from "@valet/api/eval-flagged";
+import { listSavedWorkflows } from "@valet/api/eval-workflows";
 import type { SessionEntry } from "@valet/engine";
 import { interpolateTurnContent, type CaseOutcome, type CaseRunResult } from "./runner.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
@@ -33,10 +35,46 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const POLL_MS = 150;
 /** Extra settle-wait after the last submission, for straggler child signals. */
 const QUIESCENCE_MS = 1_000;
+/**
+ * The typed answer to an `ask_question` card. Nobody watches an eval run,
+ * so the harness answers like a person who leaves the choice to the agent.
+ */
+export const EVAL_QUESTION_ANSWER = "I am not available to choose. Use your best judgment and list what you assumed.";
+/** Action ids that decline a decision card, in order of preference. */
+const DECLINE_ACTION_IDS = ["cancel", "deny", "reject", "decline"];
+
+/** One decision card the harness answered during a product case. */
+export interface EvalDecision {
+  type: string;
+  title: string;
+  /** The action id or typed answer the harness sent. */
+  answer: string;
+}
+
+interface PendingGate {
+  id: string;
+  type: string;
+  title: string;
+  actions: Array<{ id: string; style?: string }>;
+}
+
+/**
+ * How the harness answers a decision card: a typed answer for a question,
+ * else the action that declines it ("Not now", "Deny"). A declined card
+ * changes nothing, so the case measures what the agent built before it.
+ */
+export function evalGateAnswer(gate: PendingGate): { actionId: string } | { value: string } {
+  if (gate.type === "question") return { value: EVAL_QUESTION_ANSWER };
+  const decline =
+    DECLINE_ACTION_IDS.map((id) => gate.actions.find((action) => action.id === id)).find((action) => action !== undefined) ??
+    gate.actions.find((action) => action.style !== "primary");
+  if (decline !== undefined) return { actionId: decline.id };
+  return { value: "No." };
+}
 
 export interface ProductDriveOptions {
-  /** Model spec for the run. The orchestrator's own model resolution still
-   * applies; this is recorded on the trajectory for comparison keys. */
+  /** Model spec for the run. The driver saves it as the person's default
+   * model before the assistant session exists, so the assistant runs on it. */
   model: string;
   timeoutMs?: number;
   /** API key for the booted api's engine host. Default: process env. */
@@ -93,7 +131,9 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
   });
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  const placeholderEnv: string[] = [];
   const shutdown = async (): Promise<void> => {
+    for (const name of placeholderEnv) delete process.env[name];
     try {
       await providers.engineHost.destroyAll();
     } catch {
@@ -106,6 +146,29 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
   };
 
   try {
+    // The assistant's model comes from the person's default model, so set
+    // it before the session exists. Without this, every product case runs
+    // on the host fallback tier and `--model` changes only the label.
+    const modelRes = await fetch(`${baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultModel: opts.model }),
+    });
+    if (!modelRes.ok) {
+      throw new Error(`set default model ${opts.model} failed: ${modelRes.status} ${await modelRes.text()}`);
+    }
+    const me = (await modelRes.json()) as { id: string; orgId: string };
+    if (evalCase.connected !== undefined && evalCase.connected.length > 0) {
+      const connected = await connectEvalPlaceholders({
+        credentials: providers.engineCredentials,
+        userId: me.id,
+        orgId: me.orgId,
+        services: evalCase.connected,
+        env: process.env,
+      });
+      placeholderEnv.push(...connected.envNames);
+    }
+
     // ── The real orchestrator session, through the front door.
     const ensureRes = await fetch(`${baseUrl}/api/workspaces/user/runtime`, { method: "POST" });
     if (!ensureRes.ok) {
@@ -120,6 +183,30 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
     let error: string | undefined;
     let threadId: string | undefined;
     let lastOutput: string | undefined;
+    const decisions: EvalDecision[] = [];
+
+    // A decision card (ask_question, allow_permissions, a policy approval)
+    // holds the tool call open until a person answers it. Answer each one
+    // so the turn can end instead of running to the case timeout.
+    const answerDecisions = async (): Promise<void> => {
+      const decisionsUrl = `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions`;
+      const res = await fetch(decisionsUrl);
+      if (!res.ok) return;
+      const { gates } = (await res.json()) as { gates: PendingGate[] };
+      for (const gate of gates) {
+        const answer = evalGateAnswer(gate);
+        // A gate id carries the tool arguments, so it must be encoded.
+        const resolved = await fetch(`${decisionsUrl}/${encodeURIComponent(gate.id)}/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(answer),
+        });
+        if (!resolved.ok) {
+          throw new Error(`answer decision ${gate.id} failed: ${resolved.status} ${await resolved.text()}`);
+        }
+        decisions.push({ type: gate.type, title: gate.title, answer: "actionId" in answer ? answer.actionId : answer.value });
+      }
+    };
 
     const lastAssistantText = async (): Promise<string | undefined> => {
       if (threadId === undefined) return undefined;
@@ -147,6 +234,7 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
           }
           return true;
         }
+        if (item?.status === "blocked_on_decision_gate") await answerDecisions();
         await sleep(POLL_MS);
       }
     };
@@ -234,13 +322,29 @@ export async function runProductCase(evalCase: EvalCase, opts: ProductDriveOptio
       childTrajectories.push(trajectory);
     }
 
+    // Workflow-authoring checks score what the case saved, including edits
+    // that only a patch made.
+    const savedWorkflows = await listSavedWorkflows(providers.db);
+    // The models the assistant's replies name, so a run shows what it ran
+    // on, not only the label it was asked for.
+    const assistantModels = [
+      ...new Set(
+        entries.flatMap((e) => (e.type === "message" && e.role === "assistant" && e.model !== undefined ? [e.model] : [])),
+      ),
+    ];
     const trajectory = extractTrajectory({
       caseId: evalCase.id,
       prompt: evalCase.turns[0].content,
       model: opts.model,
       durationMs,
       entries,
-      metadata: { drive: "product", sessionId },
+      metadata: {
+        drive: "product",
+        sessionId,
+        assistantModels,
+        ...(decisions.length > 0 ? { decisions } : {}),
+        ...(savedWorkflows.length > 0 ? { savedWorkflows } : {}),
+      },
       children: childTrajectories,
     });
 
