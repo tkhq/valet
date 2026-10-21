@@ -38,3 +38,14 @@ export function recordDeliveryDestination(reason: DeliveryDestinationMetricReaso
 export function destinationMetricReason(destination: Destination): DeliveryDestinationMetricReason {
   return destination.kind === "skip" ? "claim_skip" : destination.reason;
 }
+
+
+let attentionFailureCounter: Counter | undefined;
+
+/** Alert on failed recovery attempts. Do not discard an unanswered approval. */
+export function recordAttentionDeliveryFailure(retry: boolean): void {
+  attentionFailureCounter ??= metrics.getMeter("@valet/api").createCounter("valet_attention_delivery_failures", {
+    description: "Failed personal attention delivery attempts; retry=true when recovery also fails",
+  });
+  attentionFailureCounter.add(1, { retry: String(retry) });
+}

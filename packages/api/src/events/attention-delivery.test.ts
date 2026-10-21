@@ -165,3 +165,31 @@ describe("workflow gate recheck", () => {
     expect(jobs[0]?.deliverAfter).toBe(jobs[1]?.deliverAfter);
   });
 });
+
+
+describe("provider outage scheduling", () => {
+  it("backs off repeated failures without losing a pending job", async () => {
+    const send = vi.fn(async () => { throw new Error("provider unavailable"); });
+    const channels = [{ ...tier, deliver: send }];
+    await routeAttention({ db, channels }, { ...event, kind: "approval" });
+    for (const delay of [240_000, 480_000, 960_000, 1_800_000, 1_800_000]) {
+      const job = await pending();
+      await drainAttentionDeliveries({ db, channels }, job.deliverAfter);
+      const retry = await pending();
+      expect(retry.status).toBe("sending");
+      expect(retry.deliverAfter - job.deliverAfter).toBe(delay);
+    }
+    expect(send).toHaveBeenCalledTimes(6);
+  });
+
+  it("serves new approvals ahead of a backlog of failed jobs", async () => {
+    await db.insert(pendingChannelDeliveries).values(Array.from({ length: 25 }, (_, n) => ({
+      id: `old-${n}`, userId: "u", tierId: tier.id, event, status: "sending" as const, attempts: 10, sendingAt: 0, deliverAfter: 1,
+    })));
+    await db.insert(pendingChannelDeliveries).values({ id: "fresh", userId: "u", tierId: tier.id, event: { ...event, title: "Fresh approval", kind: "approval" }, deliverAfter: 2 });
+    await drainAttentionDeliveries({ db, channels: [tier] }, 3);
+    expect(deliver.mock.calls).toHaveLength(20);
+    const [fresh] = await db.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "fresh"));
+    expect(fresh?.status).toBe("sent");
+  });
+});

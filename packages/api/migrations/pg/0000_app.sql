@@ -409,6 +409,8 @@ CREATE TABLE "pending_channel_deliveries" (
 --> statement-breakpoint
 CREATE INDEX "pending_channel_deliveries_due" ON "pending_channel_deliveries" ("deliver_after") WHERE "status" IN ('pending', 'sending');
 --> statement-breakpoint
+CREATE INDEX "pending_channel_deliveries_notification" ON "pending_channel_deliveries" ("notification_id") WHERE "notification_id" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE "event_drop_log" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

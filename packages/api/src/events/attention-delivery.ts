@@ -1,10 +1,11 @@
+import { recordAttentionDeliveryFailure } from "../observability/delivery-metrics.js";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { matchesGateOccurrence } from "@valet/workflow";
 import { attentionAudience, type AttentionDeps, type AttentionEvent } from "../orchestrator/attention.js";
 import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowCheckpoints, workflowRuns, workflowSignals } from "../schema/index.js";
 
 /** Gates can end before their read marker arrives. Read durable state independently. */
-async function attentionGatePending(deps: AttentionDeps, event: AttentionEvent): Promise<boolean> {
+export async function attentionGatePending(deps: AttentionDeps, event: AttentionEvent): Promise<boolean> {
   if (event.gate) {
     if (!event.sessionId) return false;
     const rows = await deps.db.select({ status: sql<string>`status` }).from(sql`engine_decision_gates`)
@@ -43,7 +44,7 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
   const due = await deps.db.select().from(pendingChannelDeliveries).where(and(
     dueCondition, inArray(pendingChannelDeliveries.tierId, tierIds),
     immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
-  )).orderBy(asc(pendingChannelDeliveries.deliverAfter)).limit(20);
+  )).orderBy(asc(pendingChannelDeliveries.attempts), asc(pendingChannelDeliveries.deliverAfter)).limit(20);
   for (const job of due) {
     const tier = deps.channels?.find(channel => channel.id === job.tierId);
     if (!tier) continue;
@@ -87,7 +88,11 @@ export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.n
       await deps.db.update(pendingChannelDeliveries).set({ status: "sent", messageRefs: refs ?? [] }).where(fence);
     } catch (err) {
       const lastError = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
-      await deps.db.update(pendingChannelDeliveries).set({ lastError }).where(fence);
+      // Expected provider outages remain recoverable. Backoff prevents old
+      // failures from filling every batch, without discarding a blocking gate.
+      const retryDelay = Math.min(30 * 60_000, ATTENTION_SENDING_TIMEOUT_MS * 2 ** Math.min(claimed.attempts - 1, 4));
+      await deps.db.update(pendingChannelDeliveries).set({ lastError, deliverAfter: now + retryDelay }).where(fence);
+      recordAttentionDeliveryFailure(claimed.attempts > 1);
       console.error(`attention delivery ${job.id} failed; retrying after its sending deadline:`, err);
     }
   }

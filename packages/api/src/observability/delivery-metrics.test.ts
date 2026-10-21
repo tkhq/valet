@@ -22,12 +22,14 @@ describe("delivery destination metrics", () => {
     metrics.setGlobalMeterProvider(provider);
     // Load a fresh module after this test installs its recordable provider.
     vi.resetModules();
-    const { recordDeliveryDestination, destinationMetricReason } = await import("./delivery-metrics.js");
+    const { recordDeliveryDestination, destinationMetricReason, recordAttentionDeliveryFailure } = await import("./delivery-metrics.js");
 
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
     recordDeliveryDestination(destinationMetricReason({ kind: "skip", reason: "claimed by thread thr-1" }));
     recordDeliveryDestination("pin_unavailable");
+    recordAttentionDeliveryFailure(false);
+    recordAttentionDeliveryFailure(true);
     await provider.forceFlush();
 
     const metric = exporter
@@ -38,6 +40,11 @@ describe("delivery destination metrics", () => {
     if (!metric || metric.dataPointType !== DataPointType.SUM) throw new Error("expected a counter metric");
     const byReason = Object.fromEntries(metric.dataPoints.map((point) => [String(point.attributes.reason), point.value]));
     expect(byReason).toEqual({ policy_own: 2, claim_skip: 1, pin_unavailable: 1 });
+
+    const attention = exporter.getMetrics().flatMap(resource => resource.scopeMetrics).flatMap(scope => scope.metrics)
+      .find(candidate => candidate.descriptor.name === "valet_attention_delivery_failures");
+    if (!attention || attention.dataPointType !== DataPointType.SUM) throw new Error("expected an attention failure counter");
+    expect(Object.fromEntries(attention.dataPoints.map(point => [String(point.attributes.retry), point.value]))).toEqual({ false: 1, true: 1 });
 
     await provider.shutdown();
   });

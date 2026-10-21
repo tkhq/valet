@@ -404,6 +404,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sending_at bigint, attempts integer NOT NULL DEFAULT 0, message_refs jsonb, last_error text
   )` },
   { describe: "due personal attention", probe: { kind: "index", index: "pending_channel_deliveries_due" }, sql: 'CREATE INDEX pending_channel_deliveries_due ON pending_channel_deliveries (deliver_after) WHERE status IN (\'pending\', \'sending\')' },
+  { describe: "attention notification lookup", probe: { kind: "index", index: "pending_channel_deliveries_notification" }, sql: 'CREATE INDEX pending_channel_deliveries_notification ON pending_channel_deliveries (notification_id) WHERE notification_id IS NOT NULL' },
   { describe: "workflow step start times", probe: { kind: "column", table: "workflow_checkpoints", column: "started_at" }, sql: 'ALTER TABLE "workflow_checkpoints" ADD COLUMN "started_at" bigint' },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (

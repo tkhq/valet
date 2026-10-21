@@ -98,6 +98,16 @@ describe("attention reconciliation", () => {
     expect(url.searchParams.get("oldest")).toBe("60");
   });
 
+  it("does not sleep through a history rate limit", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+      status: 429, headers: { "Content-Type": "application/json", "Retry-After": "120" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new SlackApi("test").findAttentionMessage("D123", "job", 0)).rejects.toThrow("ratelimited");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1].signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("returns a miss and throws lookup errors so the outbox can resend", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse(200, { ok: true, messages: [] }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: "missing_scope" }));

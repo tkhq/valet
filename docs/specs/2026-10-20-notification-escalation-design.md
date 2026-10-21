@@ -59,6 +59,7 @@ The router also drains immediately due jobs after their transaction commits.
 No in-process timeout owns a notification deadline.
 A restart picks up pending jobs and stale sending jobs from Postgres.
 An index over pending and sending deadlines bounds the due scan.
+A notification index supports approval-copy lookups during bulk-read.
 The app migration and schema repairs both create the outbox and preference column.
 
 Before sending a deferred job, the drain checks:
@@ -74,7 +75,9 @@ Gate buttons and their authorization checks use the existing channel path.
 Approver-only events keep their explicit recipient.
 Org-admin audiences follow the same per-recipient presence policy as personal and team audiences.
 One recipient's read state does not suppress another recipient's job.
-The bell's bulk-read action clears updates, not its separate approval inbox.
+The bell's bulk-read action clears updates and completed approval copies.
+It retains approval copies whose outbox event still references a pending gate.
+Legacy copies without a fallback job remain clearable.
 Gate resolution and explicit per-row reads still mark approval notifications handled.
 
 The immediate producer can run before a workflow finishes parking.
@@ -106,13 +109,19 @@ Slack sends plain attention DMs and approval cards with message metadata:
 `event_type: valet_attention` and `event_payload.delivery_id` equal to the durable job identifier.
 Its reconciliation hook reads recent DM history with metadata included.
 The lookup checks at most five pages of 100 messages.
+Each history request has a two-second timeout and does not retry rate limits.
 Missing history permissions cause a resend, not a lost notification.
 Recovered approval refs restore the existing gate callback mapping.
 Saving the same gate reference twice is idempotent.
 Transports without history reconciliation still recover by resending.
 
 A provider failure retains `sending` and its error for the next recovery attempt.
-There is no retry limit for an unhandled notification.
+Failed sends use exponential backoff from two minutes to 30 minutes.
+Fresh deliveries sort ahead of retrying jobs.
+There is no retry limit or age cutoff for an unhandled notification.
+This preserves blocking approvals across long channel outages.
+The failure counter labels recovery failures with `retry=true`.
+The provisioned attention recovery alert reports those failures for operator action.
 Every retry repeats the read, gate, audience, and preference checks.
 
 Completed job keys remain stored to prevent producer replay.

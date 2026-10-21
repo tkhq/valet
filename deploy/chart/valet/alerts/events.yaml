@@ -39,3 +39,35 @@ groups:
           summary: A rule or schedule pins a thread that is archived, deleted, or outside its owner's workspace.
           description: Find the dead-lettered delivery or the disabled schedule in the event log. Ask the owner to pick another thread for the rule in Presence.
         labels: { severity: critical }
+
+      # Do not expire blocking approvals to hide a provider outage.
+      - uid: valet-attention-delivery-recovery-failed
+        title: Valet personal notification recovery is failing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 1800, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: '(sum(increase(valet_attention_delivery_failures_total{retry="true"}[30m])) or vector(0)) + (sum(valet_attention_delivery_failures_total{retry="true"} unless valet_attention_delivery_failures_total{retry="true"} offset 30m) or vector(0)) > 0'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              expression: A
+              type: threshold
+              refId: C
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+                  type: query
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: Personal attention delivery failed again during recovery.
+          description: Inspect pending_channel_deliveries.last_error and the channel startup logs. Restore bot credentials or ask the user to reconnect the channel. Pending approvals keep retrying until handled.
+        labels: { severity: warning }

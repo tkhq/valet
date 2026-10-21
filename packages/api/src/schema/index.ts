@@ -707,7 +707,10 @@ export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
   attempts: integer("attempts").notNull().default(0),
   messageRefs: jsonb("message_refs").$type<import("../orchestrator/attention.js").AttentionDeliveryRef[]>(),
   lastError: text("last_error"),
-}, (t) => [index("pending_channel_deliveries_due").on(t.deliverAfter).where(sql`${t.status} IN ('pending', 'sending')`)]);
+}, (t) => [
+  index("pending_channel_deliveries_due").on(t.deliverAfter).where(sql`${t.status} IN ('pending', 'sending')`),
+  index("pending_channel_deliveries_notification").on(t.notificationId).where(sql`${t.notificationId} IS NOT NULL`),
+]);
 
 // ─── Event drop log ──────────────────────────────────────────────────────────
 //

@@ -1,3 +1,4 @@
+import { attentionGatePending } from "../events/attention-delivery.js";
 import { webPresence } from "../services/web-presence.js";
 import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
 /**
@@ -20,10 +21,10 @@ import { defaultChannelGraceSeconds } from "../orchestrator/attention.js";
  */
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { Hono } from "hono";
-import { and, desc, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { NotFoundError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
-import { agentSessions, workflowRuns, workflowDefinitions, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
+import { agentSessions, workflowRuns, workflowDefinitions, pendingChannelDeliveries, notifications, userNotificationPreferences, type NotificationRow } from "../schema/index.js";
 import { canResolveSessionGate, gateApprover } from "../services/session-access.js";
 import { engineGateToWire } from "../engine/bridge.js";
 import type { WorkflowRunOrigin } from "@valet/workflow";
@@ -202,6 +203,23 @@ notificationsRouter.post("/read-all", async (c) => {
     // The bell's Updates list excludes approvals. Clearing it must not suppress
     // a pending decision's personal-channel fallback.
     .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), ne(notifications.kind, "approval")));
+
+  // Completed or legacy approval copies must remain clearable. Only a
+  // durable pending gate may retain a row that still has a channel fallback.
+  const approvals = await db.select({ id: notifications.id, event: pendingChannelDeliveries.event }).from(notifications)
+    .leftJoin(pendingChannelDeliveries, eq(pendingChannelDeliveries.notificationId, notifications.id))
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), eq(notifications.kind, "approval")));
+  const seen = new Set<string>();
+  const handled: string[] = [];
+  for (const approval of approvals) {
+    if (seen.has(approval.id)) continue;
+    seen.add(approval.id);
+    const event = approval.event;
+    if (event && (event.gate || event.workflowGate) && await attentionGatePending({ db }, event)) continue;
+    handled.push(approval.id);
+  }
+  if (handled.length > 0) await db.update(notifications).set({ readAt: Date.now() })
+    .where(and(eq(notifications.userId, userId), inArray(notifications.id, handled), isNull(notifications.readAt)));
 
   return c.json({ ok: true });
 });

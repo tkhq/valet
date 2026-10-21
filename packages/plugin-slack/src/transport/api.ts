@@ -7,7 +7,7 @@
  * apps.connections.open, files.info, url_private downloads).
  */
 import { createHash } from "node:crypto";
-import { SLACK_API, slackFetch, slackGet } from "../actions/api.js";
+import { SLACK_API, slackFetch, slackGet, slackGetOnce } from "../actions/api.js";
 import { markdownToSlackMrkdwn } from "./format.js";
 
 export class SlackApiError extends Error {
@@ -164,10 +164,14 @@ export class SlackApi {
   async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<string | null> {
     let cursor: string | undefined;
     for (let page = 0; page < 5; page++) {
-      const res = await this.get("conversations.history", {
+      // Recovery is best effort. Never sleep through Retry-After while an
+      // approval's fallback waits behind this history lookup.
+      const response = await slackGetOnce("conversations.history", this.token, {
         channel, oldest: String(Math.max(0, sendingAt - 60_000) / 1_000),
         limit: 100, include_all_metadata: true, ...(cursor ? { cursor } : {}),
-      });
+      }, 2_000, this.baseUrl);
+      const res = rec(await response.json());
+      if (!response.ok || res?.ok !== true) throw new SlackApiError("conversations.history", str(res?.error) ?? `http ${response.status}`);
       for (const raw of Array.isArray(res.messages) ? res.messages : []) {
         const message = rec(raw);
         const metadata = rec(message?.metadata);
