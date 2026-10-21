@@ -69,6 +69,20 @@ describe("PgSessionStore (PGlite)", () => {
   runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
 
+  it.each(["not json", "{}", "null", '"scalar"'])("isolates malformed event_seen %s during the global due scan", async (seen) => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };
+    await store.createWakeup({ ...base, id: "bad_event", kind: "event", status: "running", deadlineAt: 1000 });
+    await store.createWakeup({ ...base, id: "good_timer", kind: "timer", status: "pending", fireAt: 5 });
+    await db.query(`UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'bad_event'`, [seen]);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const due = await store.listDueWakeups(10, 10);
+      expect(due.rows.map((row) => row.id)).toEqual(["good_timer"]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("bad_event"), expect.anything());
+    } finally { errors.mockRestore(); }
+  });
+
   it("maps future terminal causes to a generic cause instead of hiding the row", async () => {
     const store = await factory();
     await store.createWakeup({ id: "future", sessionId: "s", threadId: "t", kind: "event", status: "done", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, endedAt: 2 });

@@ -20,6 +20,7 @@ import type {
   WakeupCause,
   WakeupKind,
 } from "@valet/engine";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { eventWaiterDeriver, type RunDeriveResult } from "../events/derive.js";
 import { WakeWatcher, type WakeWatcherDeps, type WakeWatcherSession } from "./wake-watcher.js";
 
@@ -1161,6 +1162,55 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
       expect(logs).toHaveBeenCalledTimes(1);
       expect(h.wakeupEnded).toHaveBeenCalledExactlyOnceWith("event", "output_cap");
     } finally { logs.mockRestore(); }
+  });
+
+  it("keeps the head commit's Retry-After deadline when another commit derives null", async () => {
+    const h = harness();
+    const head = "aaaa000000000000000000000000000000000001";
+    const other = "bbbb000000000000000000000000000000000002";
+    const source = (n: number, sha: string) => digest(n, {
+      derive: CHECKS, subjects: ["github:acme/lean-proofs#42", `github:acme/lean-proofs@${sha}`],
+    });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source(1, head), source(2, other)] }));
+    let now = NOW;
+    let releaseOther = () => {};
+    const headLimited = new Promise<void>((resolve) => { releaseOther = resolve; });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => { releaseOther(); });
+    const checkReads = vi.fn();
+    let pullReads = 0;
+    const http: typeof fetch = async (input) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.pathname.endsWith("/pulls/42")) {
+        if (++pullReads === 2) await headLimited; // Complete null only after the head's cooldown is stored.
+        return Response.json({ number: 42, head: { sha: head } });
+      }
+      if (url.pathname.endsWith(`/commits/${head}/check-runs`)) {
+        checkReads();
+        return Response.json({ message: "rate limited" }, { status: 429, headers: { "Retry-After": "3600" } });
+      }
+      throw new Error(`Unexpected GitHub read: ${url.pathname}`);
+    };
+    const record = vi.fn();
+    const deriveEvent = eventWaiterDeriver({
+      plugins: [githubPlugin], sessionOrg: async () => "org-1",
+      contextFor: () => ({ orgId: "org-1", appToken: async () => "test-token", fetch: http }), record,
+    });
+    try {
+      const w = h.watcher({ deriveEvent, now: () => now });
+      await w.sweep(now);
+      expect(record).toHaveBeenCalledWith(CHECKS, "error");
+      expect(record).toHaveBeenCalledWith(CHECKS, "null");
+      expect(checkReads).toHaveBeenCalledTimes(1);
+      expect((await h.store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1"]);
+      now += 10_000;
+      await w.sweep(now);
+      now = NOW + HOUR - 1;
+      await w.sweep(now);
+      expect(checkReads).toHaveBeenCalledTimes(1);
+      now++;
+      await w.sweep(now);
+      expect(checkReads).toHaveBeenCalledTimes(2);
+    } finally { warn.mockRestore(); }
   });
 
   it("retains rate-limited sources and retries only after the cooldown", async () => {

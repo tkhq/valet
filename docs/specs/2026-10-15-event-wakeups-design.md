@@ -475,6 +475,9 @@ Each write method is one statement.
   It returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty, whose delivered-key budget is exhausted, or whose `deadlineAt` has passed.
+  The SQL cap predicate validates `event_seen` as a JSON array before casting it.
+  Invalid JSON or a non-array value selects the row for bad-row logging and isolation.
+  One invalid value cannot abort the due scan for other wakeups.
 
 During a rolling deploy, an old pod can still trim `event_seen` to 256 keys.
 The replay risk is limited to waiters with more than 256 delivered keys.
@@ -682,7 +685,9 @@ step that returns early for an event that no subscription matched.
    A 401 refreshes the cached installation token and retries the request once.
    Concurrent forced refreshes share one in-flight mint per installation.
    Repeated 401 responses keep the source with backoff starting at one second and doubling to 15 minutes.
-   Success or a permanent error resets the backoff.
+   Backoff is keyed by waiter, derive key, and source commit subject.
+   A null or successful result for another commit cannot clear its retry deadline.
+   Success or a permanent error resets only that group's backoff.
    Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
    Other transient errors retain the source for retry.
    Source digests carry no receipt id, so these outcomes do not update receipts.

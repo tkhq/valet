@@ -485,7 +485,7 @@ export class WakeWatcher {
     await Promise.all(groups.map((group) => limit(async () => {
       if (this.stopping) return;
       const { latest, sources } = group;
-      const cooldownKey = `${row.id}:${latest.derive}`;
+      const cooldownKey = JSON.stringify([row.id, latest.derive, commitSubject(latest)]);
       const previousRetry = this.deriveCooldowns.get(cooldownKey);
       if ((previousRetry?.until ?? 0) > this.clock()) return;
       ran = true;
