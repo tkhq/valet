@@ -102,6 +102,7 @@ export function CheckpointList({
   modelChanges = [],
   onExplainFailure,
   timeline,
+  settled = false,
   now = Date.now(),
 }: {
   checkpoints: CheckpointLike[];
@@ -117,6 +118,8 @@ export function CheckpointList({
   nodeOrder?: string[];
   /** Draws each step's timing bar against the whole run. */
   timeline?: RunTimeline;
+  /** The run settled, so a step that never finished stopped with it. */
+  settled?: boolean;
   /** The current time, for steps still running. */
   now?: number;
 }) {
@@ -144,6 +147,7 @@ export function CheckpointList({
     number: (order.get(cp.nodeId) ?? index) + 1,
     promoted: cp.nodeId === promotedNodeId,
     waiting: cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting",
+    stopped: settled && cp.status === "intent",
     onExplainFailure,
     timeline,
     now: clock,
@@ -174,10 +178,14 @@ function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }
   now: number;
 }) {
   const first = rowProps(items[0], index);
-  const statuses = items.map((cp): NodeRunStatus => rowProps(cp, index).waiting ? "waiting" : toRunStatus(cp.status));
+  // An item that never finished in a settled run stopped; it shows as ⊘ and is counted apart.
+  const stopped = items.filter((cp) => rowProps(cp, index).stopped).length;
+  const statuses = items.map((cp): NodeRunStatus => rowProps(cp, index).stopped ? "skipped"
+    : rowProps(cp, index).waiting ? "waiting" : toRunStatus(cp.status));
   const counts = new Map<NodeRunStatus, number>();
   for (const status of statuses) counts.set(status, (counts.get(status) ?? 0) + 1);
-  const overall: NodeRunStatus = counts.has("failed") ? "failed" : counts.has("waiting") ? "waiting"
+  const skipped = (counts.get("skipped") ?? 0) - stopped;
+  const overall: NodeRunStatus = counts.has("failed") ? "failed" : stopped > 0 ? "skipped" : counts.has("waiting") ? "waiting"
     : counts.has("running") ? "running" : counts.has("pending") ? "pending"
     : counts.has("succeeded") ? "succeeded" : "skipped";
   const spans = items.flatMap((cp) => stepSpan(cp, now) ?? []);
@@ -199,8 +207,10 @@ function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }
   // A denied item records as completed, so count it apart, as a single row shows it.
   const denied = items.filter((cp) => deniedResult(cp.result)).length;
   const summary = [
-    ...(["succeeded", "failed", "running", "waiting", "skipped", "pending"] as const)
+    ...(["succeeded", "failed", "running", "waiting", "pending"] as const)
       .flatMap((status) => counts.has(status) ? [`${counts.get(status)} ${LABEL[status].toLowerCase()}`] : []),
+    ...(skipped > 0 ? [`${skipped} ${LABEL.skipped.toLowerCase()}`] : []),
+    ...(stopped > 0 ? [`${stopped} stopped`] : []),
     ...(denied > 0 ? [`${denied} denied`] : []),
     ...(reused > 0 ? [`${reused} reused`] : []),
   ].join(" · ");
@@ -220,7 +230,7 @@ function ItemGroup({ items, rowProps, index, modelChange, costs, timeline, now }
           </span>
           {span && <StepDuration span={span} running={overall === "running" || overall === "waiting"} />}
           {total && <StepCost cost={total} />}
-          <span className={`text-xs ${overall === "succeeded" ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[overall]}`}>{LABEL[overall]}</span>
+          <span className={`text-xs ${overall === "succeeded" ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[overall]}`}>{overall === "skipped" && stopped > 0 ? "Stopped" : LABEL[overall]}</span>
         </summary>
         <ol className="divide-y divide-line border-t border-line">
           {items.map((cp) => <CheckpointRow key={`${cp.nodeId}:${cp.iteration}`} {...rowProps(cp, index)} item />)}
@@ -261,13 +271,15 @@ function StepDuration({ span, running }: { span: { start: number; end: number };
   );
 }
 
-function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting, onExplainFailure, timeline, now, item = false }: {
+function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting, stopped = false, onExplainFailure, timeline, now, item = false }: {
   checkpoint: CheckpointLike;
   cost?: WorkflowStepCost;
   modelChange?: WorkflowModelChange;
   number: number;
   promoted: boolean;
   waiting: boolean;
+  /** The step never finished, and the run settled: it stopped with the run. */
+  stopped?: boolean;
   onExplainFailure?: (nodeId: string, iteration: number) => void;
   timeline?: RunTimeline;
   now: number;
@@ -275,10 +287,12 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
   item?: boolean;
 }) {
   const [showLogs, setShowLogs] = useState(false);
-  const status = waiting ? "waiting" : toRunStatus(checkpoint.status);
+  // A stopped step shows the skipped glyph and colors, labeled Stopped.
+  const status: NodeRunStatus = stopped ? "skipped" : waiting ? "waiting" : toRunStatus(checkpoint.status);
+  const active = status === "running" || status === "waiting";
   const denied = deniedResult(checkpoint.result);
   const output = formatRunOutput(checkpoint.result);
-  const open = (status === "failed" && !promoted) || status === "running" || waiting || Boolean(denied);
+  const open = (status === "failed" && !promoted) || active || Boolean(denied);
   const span = stepSpan(checkpoint, now);
 
   return (
@@ -298,12 +312,12 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
           </span>
           {!item && checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Item {checkpoint.iteration + 1}</span>}
           {checkpoint.reused && <span className="shrink-0 text-xs text-muted" title="This retry reused the step's result from the earlier run.">Reused</span>}
-          {span && <StepDuration span={span} running={status === "running" || waiting} />}
+          {span && <StepDuration span={span} running={active} />}
           {cost && <StepCost cost={cost} />}
           {/* On a phone the ✓ alone says Completed, so that label gives the
               name its room. A denied step also shows ✓, so it and every
               other state keep their label. */}
-          <span className={`text-xs ${status === "succeeded" && !denied ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
+          <span className={`text-xs ${status === "succeeded" && !denied ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[status]}`}>{denied ? "Denied" : stopped ? "Stopped" : LABEL[status]}</span>
         </summary>
         <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
           {(checkpoint.threadId || checkpoint.sessionId || checkpoint.childRunId) && (
@@ -325,7 +339,7 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
           {showLogs && checkpoint.sessionId && checkpoint.threadId && checkpoint.queueItemId && (
             <StepLogs key={`${checkpoint.sessionId}:${checkpoint.threadId}:${checkpoint.queueItemId}`}
               sessionId={checkpoint.sessionId} threadId={checkpoint.threadId} queueItemId={checkpoint.queueItemId}
-              active={status === "running" || waiting} />
+              active={active} />
           )}
           {denied ? (
             <p className="break-words text-xs text-danger-500">Denied by {denied.resolvedBy ?? "policy"}</p>
@@ -338,7 +352,7 @@ function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waitin
               <pre className="max-h-96 overflow-auto rounded bg-[--bg] p-3 font-mono text-xs text-ink">{output.text}</pre>
             </>
           ) : (
-            <p className="text-xs text-muted">{status === "running" || waiting ? "This step has not produced output yet." : "No output recorded for this step."}</p>
+            <p className="text-xs text-muted">{active ? "This step has not produced output yet." : stopped ? "This step stopped with the run before it produced output." : "No output recorded for this step."}</p>
           )}
         </div>
       </details>
