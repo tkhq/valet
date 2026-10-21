@@ -10,11 +10,13 @@ import { CONTROL_SIZE, type ControlSize } from "./control.js";
 // The surface that every text field and native select shares: border, colors,
 // and focus ring. Each control sets its own width, because a select often sits
 // inline in a row of filters.
+// Focus is the theme's moss border plus a soft 2px wash, the same at every
+// width. A field matches :focus-visible on a click or tap too, so a heavier
+// ring reads as a highlight the person did not ask for.
 const FIELD_BASE =
   "rounded border bg-[--bg] text-[--fg] placeholder:text-muted caret-moss selection:bg-moss-wash selection:text-ink " +
-  "border-[--border] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 " +
-  "focus-visible:border-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed " +
-  "max-sm:hover:border-muted max-sm:focus-visible:border-moss max-sm:focus-visible:ring-4 max-sm:focus-visible:ring-moss-wash motion-reduce:transition-none";
+  "border-[--border] focus-visible:outline-none focus-visible:border-moss focus-visible:ring-2 focus-visible:ring-moss-wash " +
+  "transition-colors disabled:opacity-50 disabled:cursor-not-allowed max-sm:hover:border-muted motion-reduce:transition-none";
 
 // A field takes its height and text size from the shared control scale.
 const FIELD_SIZE: Record<ControlSize, string> = {

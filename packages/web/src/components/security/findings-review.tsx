@@ -474,7 +474,7 @@ export function FindingsReview({
           aria-label="Findings"
           tabIndex={0}
           onKeyDown={handleListKeyDown}
-          className={cn("min-w-0 xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line md:overflow-y-auto md:max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400", mobileDetail && selected && "hidden md:block")}
+          className={cn("min-w-0 xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line md:overflow-y-auto md:max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-moss", mobileDetail && selected && "hidden md:block")}
         >
           {query.isPending ? (
             <div className="px-3 py-4 text-xs text-muted">

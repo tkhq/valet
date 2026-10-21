@@ -23,6 +23,9 @@
 
   body {
     @apply bg-[--bg] text-[--fg] font-sans antialiased;
+    /* Mobile browsers paint a gray box over a tapped control. Controls
+       show their own pressed and focus states, so the box only adds noise. */
+    -webkit-tap-highlight-color: transparent;
     /* Ids, URLs, hashes and emails arrive as one unbroken word. Break one
        only when it would overflow its line, so normal text is unchanged.
        Flex items and `whitespace-nowrap` text still need their own rule. */

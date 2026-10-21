@@ -21,7 +21,7 @@ export function CompactionDivider({ message }: { message: StreamMessage }) {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="group flex w-full items-center gap-2 text-[11px] text-muted hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 rounded"
+        className="group flex w-full items-center gap-2 text-[11px] text-muted hover:text-[--fg] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40 rounded"
       >
         <span className="h-px flex-1 bg-[--border]" aria-hidden />
         <FoldVertical className="h-3 w-3 shrink-0" aria-hidden />

@@ -391,7 +391,7 @@ function WorkflowEditorPane({
             aria-label="Workflow name"
             placeholder="Untitled workflow"
             readOnly={mirrored}
-            className="min-h-11 sm:min-h-0 w-full min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
+            className="min-h-11 sm:min-h-0 w-full min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-moss/40 read-only:hover:border-transparent"
           />
         </div>
         <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
