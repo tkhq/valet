@@ -2778,6 +2778,11 @@ export interface CreateSessionOptions {
     maxAttempts?: number;
     /** Backoff before each retry, in ms; the last entry repeats. */
     backoffMs?: number[];
+    /**
+     * The longest provider-requested wait ("try again in 6s") a retry honors,
+     * in ms. A longer hint ends the retries.
+     */
+    maxHintMs?: number;
   };
   /**
    * Session-default sampling knobs, forwarded to pi-ai per turn as
