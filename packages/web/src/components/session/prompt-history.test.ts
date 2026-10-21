@@ -65,9 +65,16 @@ describe("stepHistory", () => {
 
   it("never replaces typed text and leaves Down alone outside a recall", () => {
     expect(stepHistory(history, { index: null, text: "draft" }, "older", at(0))).toBeUndefined();
-    expect(stepHistory(history, { index: 2, text: "three, edited" }, "older", at(0))).toBeUndefined();
+    // The draft store drops the index on an edit.
+    expect(stepHistory(history, { index: null, text: "three, edited" }, "older", at(0))).toBeUndefined();
     expect(stepHistory(history, { index: null, text: "" }, "newer", at(0))).toBeUndefined();
     expect(stepHistory([], { index: null, text: "" }, "older", at(0))).toBeUndefined();
+  });
+
+  it("keeps stepping from a recall whose row a refetch rewrote or dropped", () => {
+    expect(stepHistory(["first", "/skill:review"], { index: 1, text: "/review" }, "older", at(0))).toEqual({ index: 0, text: "first" });
+    expect(stepHistory(["first"], { index: 1, text: "again" }, "older", at(0))).toEqual({ index: 0, text: "first" });
+    expect(stepHistory(["first"], { index: 1, text: "again" }, "newer", at(5))).toEqual({ index: null, text: "" });
   });
 
   it("leaves a selection to the browser", () => {

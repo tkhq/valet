@@ -832,6 +832,24 @@ describe("Composer beside the Ask Valet dock", () => {
     return { page: inputs()[0]!, dock: inputs().at(-1)!, inputs, rerender: (page = withPage, thread = pageThread) => view.rerender(tree(page, thread)) };
   }
 
+  it("ends a recall in both composers when either one edits the shared draft", () => {
+    streamMessagesRef.current = [
+      { id: "m1", sessionId: "orchestrator:user-1", threadId: "same", role: "user", content: "first prompt", parts: [], createdAt: 1, author: { id: "user-1", interactive: true } },
+      { id: "m2", sessionId: "orchestrator:user-1", threadId: "same", role: "user", content: "continue", parts: [], createdAt: 2, author: { id: "user-1", interactive: true } },
+    ];
+    const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "same", dockThread: "same" });
+    fireEvent.keyDown(page, { key: "ArrowUp" });
+    expect(dock.value).toBe("continue");
+
+    // The dock's edit is a fresh draft that happens to match the recall.
+    fireEvent.change(dock, { target: { value: "" } });
+    fireEvent.change(dock, { target: { value: "continue" } });
+    fireEvent.keyDown(page, { key: "ArrowUp" });
+    expect(page.value).toBe("continue");
+    fireEvent.keyDown(page, { key: "ArrowDown" });
+    expect(page.value).toBe("continue");
+  });
+
   it("leaves a page focus request to the page's composer", async () => {
     const { page } = renderPageAndDock();
     act(() => useComposerPrefillStore.getState().requestFocus());
@@ -1246,6 +1264,20 @@ describe("Composer prompt recall", () => {
     fireEvent.change(box, { target: { value: "continue" } });
     fireEvent.keyDown(box, { key: "ArrowUp" });
     expect(box.value).toBe("continue");
+  });
+
+  it("keeps a recall when a refetch rewrites its row as the skill command", () => {
+    streamMessagesRef.current = [sent("m1", "first prompt"), sent("m2", "/review")];
+    const { rerenderComposer } = renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("/review");
+
+    streamMessagesRef.current = [sent("m1", "first prompt"), { ...sent("m2", "Review the change."), skill: { name: "review" } }];
+    rerenderComposer();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("first prompt");
   });
 
   it("sends a recalled prompt as a new message", async () => {

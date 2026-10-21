@@ -147,7 +147,7 @@ export function Composer({
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
   const key = draftKey(sessionId, threadId);
-  const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
+  const { text, images, files, imageErrors, fileErrors, recall } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const localSubmissionLock = useRef(false);
   const submitting = submissionLock ?? localSubmissionLock;
@@ -172,9 +172,9 @@ export function Composer({
   }, []);
   useAutosizeTextarea(inputRef, text);
   // Up and Down step through the person's earlier prompts in this thread
-  // (`stepHistory`). The index belongs to the draft slot it was recalled in.
+  // (`stepHistory`). The recalled index lives in the draft slot, which the
+  // Ask Valet dock shares, so typing or sending in either composer ends it.
   const history = usePromptHistory(sessionId, threadId);
-  const recalled = useRef<{ key: string; index: number | null }>({ key: "", index: null });
   const caretToEnd = useRef(false);
   useLayoutEffect(() => {
     const field = inputRef.current;
@@ -279,8 +279,10 @@ export function Composer({
   const [dismissed, setDismissed] = useState(false);
   // A recalled prompt reads as already written: its slash command opens no
   // popup, so Up and Down keep stepping and Enter sends it, until an edit.
-  const recalledIndex = recalled.current.key === key ? recalled.current.index : null;
-  const showingRecall = recalledIndex !== null && history[recalledIndex] === text;
+  // The slot keeps the recall when a refetch rewrites the history row, such
+  // as an optimistic `/review` that persists as `/skill:review`.
+  const recalledIndex = recall ?? null;
+  const showingRecall = recalledIndex !== null;
   const popupOpen = !dismissed && !showingRecall && popupItems.length > 0;
   const noticeOpen = !dismissed && !showingRecall && !popupOpen && argNotice !== undefined;
   // Reset selection and dismissed flag when the query changes (user typed new chars).
@@ -602,8 +604,6 @@ export function Composer({
   }
 
   async function submit() {
-    // A sent recall is no longer a recall; the next Up starts from the newest prompt.
-    recalled.current = { key, index: null };
     if (submitting.current || send.isPending || !threadId || uploadsPending) return;
     // A send uses this composer even when its text came from a prefill.
     lastUsedComposer = identity.current;
@@ -850,9 +850,8 @@ export function Composer({
       );
       if (step) {
         e.preventDefault();
-        recalled.current = { key, index: step.index };
         caretToEnd.current = true;
-        setText(step.text);
+        useComposerDraftStore.getState().recallText(key, step.index, step.text);
         return;
       }
     }
@@ -1055,9 +1054,8 @@ export function Composer({
             ref={inputRef}
             value={text}
             onChange={(e) => {
-              // Typing ends a recall: text that matches an earlier prompt by
-              // hand is the person's draft, and Up must not replace it.
-              recalled.current = { key, index: null };
+              // Typing ends a recall (`setText`): text that matches an earlier
+              // prompt by hand is the person's draft, and Up must not replace it.
               setText(e.target.value);
             }}
             onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}

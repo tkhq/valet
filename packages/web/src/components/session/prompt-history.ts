@@ -46,7 +46,11 @@ function typedText(message: StreamMessage): string {
   return message.content.trim();
 }
 
-/** Where the composer stands in the history: the recalled index, or null for the person's own draft. */
+/**
+ * Where the composer stands in the history: the recalled index, or null for
+ * the person's own draft. The index is set only while the composer shows the
+ * recalled prompt unchanged; the draft store drops it on any edit.
+ */
 export interface HistoryStep {
   index: number | null;
   text: string;
@@ -69,16 +73,17 @@ export function stepHistory(
   caret: { start: number; end: number },
 ): HistoryStep | undefined {
   if (caret.start !== caret.end) return undefined;
-  const recalled = current.index !== null && history[current.index] === current.text;
+  // A refetch can drop a repeated row and shorten the history under a recall.
+  const at = current.index === null ? null : Math.min(current.index, history.length);
   if (direction === "older") {
-    if (!(current.text === "" || recalled)) return undefined;
+    if (!(current.text === "" || at !== null)) return undefined;
     if (current.text.lastIndexOf("\n", caret.start - 1) !== -1) return undefined;
-    const index = recalled && current.index !== null ? current.index - 1 : history.length - 1;
+    const index = at !== null ? at - 1 : history.length - 1;
     return index >= 0 ? { index, text: history[index] } : undefined;
   }
-  if (!recalled || current.index === null) return undefined;
+  if (at === null) return undefined;
   if (current.text.indexOf("\n", caret.start) !== -1) return undefined;
-  const index = current.index + 1;
+  const index = at + 1;
   return index < history.length ? { index, text: history[index] } : { index: null, text: "" };
 }
 
