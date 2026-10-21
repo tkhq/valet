@@ -133,8 +133,8 @@ export interface AttentionDeps {
   db: AppDb;
   channels?: AttentionChannelDeliverer[];
   /** Credential access for a private Slack channel's membership check. Without
-   * it, a thread from a channel stored as private reaches no member's inbox;
-   * the channel itself still shows its gate. */
+   * it, producers omit restricted channel audiences; durable drains retry
+   * instead of treating missing authorization providers as a permanent denial. */
   access?: Pick<Providers, "engineCredentials"> & { onePassword?: Providers["onePassword"] };
 }
 
@@ -247,6 +247,9 @@ export async function attentionAudience(deps: AttentionDeps, event: AttentionEve
   let audience = resolveAudience(event.owner, event.kind, membership);
   if (restricted) {
     const orgId = await orgOf(deps.db, event.owner);
+    if (retryUnknownAccess && privateThreadOwner(key) === undefined && (!deps.access || !orgId)) {
+      throw new Error("Attention access checks are unavailable. Restore the authorization providers, then retry the job.");
+    }
     const shown = await Promise.all(audience.map((userId) => deps.access && orgId
       ? threadVisibility({ db: deps.db, ...deps.access }, { ownerType: "team" }, { orgId, userId }, { retryUnknownAccess })({ key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: channels } })
       : Promise.resolve(privateThreadOwner(key) === userId)));

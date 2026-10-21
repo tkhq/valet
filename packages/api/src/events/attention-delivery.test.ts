@@ -1,12 +1,13 @@
-import { ChannelDeliveryRejectedError } from "@valet/engine";
+import { ChannelDeliveryRejectedError, InMemoryCredentialStore } from "@valet/engine";
 import * as attention from "../orchestrator/attention.js";
 import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowRuns, workflowCheckpoints, workflowSignals } from "../schema/index.js";
+import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowRuns, workflowCheckpoints, workflowSignals, teams, teamMembers, orgMembers, slackChannelPrivacy, userIdentityLinks } from "../schema/index.js";
 import { routeAttention as enqueueAttention, type AttentionChannelDeliverer, type AttentionEvent } from "../orchestrator/attention.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import { webPresence } from "../services/web-presence.js";
 import { ATTENTION_BATCH_TIMEOUT_MS, ATTENTION_IMMEDIATE_GATE_GRACE_MS, ATTENTION_SENDING_TIMEOUT_MS, ATTENTION_STARTUP_GRACE_MS, drainAttentionDeliveries } from "./attention-delivery.js";
 
@@ -18,6 +19,7 @@ const tier: AttentionChannelDeliverer = { id: "dm", order: 1, grace: "when-web-a
 beforeEach(async () => {
   db = (await freshTestPgDb()).appDb;
   deliver.mockClear();
+  resetThreadAccessCache();
 });
 
 async function pending() {
@@ -502,5 +504,91 @@ describe("isolated delivery execution", () => {
       expect(jobs.find(job => job.id === "valid")?.status).toBe("sent");
       expect(log).toHaveBeenCalledWith(expect.stringContaining("corrupt"));
     } finally { log.mockRestore(); }
+  });
+});
+
+
+describe("outbox authorization dependencies", () => {
+  async function privateApproval() {
+    const engineCredentials = new InMemoryCredentialStore();
+    await engineCredentials.save({ type: "org", id: "o" }, "slack", { type: "oauth2", accessToken: "test-bot" });
+    await db.insert(teams).values({ id: "private-team", orgId: "o", name: "Private", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "private-team", userId: "u", role: "admin" });
+    await db.insert(orgMembers).values({ orgId: "o", userId: "u", role: "admin" });
+    await db.insert(userIdentityLinks).values({ id: "slack-u", provider: "slack", externalId: "UMEMBER", userId: "u", createdAt: 1 });
+    await db.insert(slackChannelPrivacy).values({ orgId: "o", channelId: "CPRIVATE", isPrivate: true, checkedAt: Date.now() });
+    await db.insert(userNotificationPreferences).values({ userId: "u", kind: "approval", web: false, teamDm: true });
+    await db.execute(sql`INSERT INTO engine_decision_gates (id, session_id, thread_id, queue_item_id, resume_key, ordinal, type, status, title, body, actions, created_at, updated_at)
+      VALUES ('private-gate', 's', 't', 'q', 'resume', 0, 'tool_approval', 'pending', 'Approve', '', '[]', 1, 1)`);
+    const approval: AttentionEvent = { kind: "approval", owner: { type: "team", id: "private-team" }, title: "Private approval", audienceKey: "slack:CPRIVATE:1.1", sessionId: "s", gate: { id: "private-gate", actions: [] } };
+    return { access: { engineCredentials }, approval };
+  }
+
+  function slackMembership(allowed = true) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: allowed ? ["UMEMBER"] : [] }
+        : { ok: true, channel: { is_private: true } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+  }
+
+  it.each(["access-first", "access-last", "running-access"])("retains private-channel access when merging queued drains: %s", async order => {
+    const { access, approval } = await privateApproval();
+    const fetch = slackMembership();
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn(async (_userId: string, delivered: AttentionEvent) => { if (delivered.title === "Blocking") await blocked; });
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    await db.insert(pendingChannelDeliveries).values({ id: "blocking", userId: "u", tierId: tier.id, event: { ...event, title: "Blocking" }, deliverAfter: 1 });
+    const first = drainAttentionDeliveries({ ...deps, ...(order === "running-access" ? { access } : {}) });
+    let full: Promise<void> | undefined;
+    let immediate: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      await db.insert(pendingChannelDeliveries).values([
+        { id: "private", userId: "u", tierId: tier.id, event: approval, deliverAfter: 1 },
+        { id: "security", userId: "u", tierId: tier.id, event, deliverAfter: 1 },
+      ]);
+      const fullDeps = { ...deps, ...(order === "running-access" ? {} : { access }) };
+      if (order === "access-last") {
+        immediate = drainAttentionDeliveries(deps, Date.now(), ["security"]);
+        full = drainAttentionDeliveries(fullDeps);
+      } else {
+        full = drainAttentionDeliveries(fullDeps);
+        immediate = drainAttentionDeliveries(deps, Date.now(), ["security"]);
+      }
+      release();
+      await Promise.all([first, full, immediate]);
+      const jobs = await db.select().from(pendingChannelDeliveries);
+      expect(jobs.find(job => job.id === "private")).toMatchObject({ status: "sent", lastError: null });
+      expect(jobs.every(job => job.status === "sent")).toBe(true);
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(fetch.mock.calls.some(([input]) => String(input).includes("conversations.members"))).toBe(true);
+      // The providers also survive after the merged batch completes, not just during its merge.
+      resetThreadAccessCache();
+      await db.insert(pendingChannelDeliveries).values({ id: "later-private", userId: "u", tierId: tier.id, event: approval, deliverAfter: 1 });
+      await drainAttentionDeliveries(deps);
+      expect(send).toHaveBeenCalledTimes(4);
+    } finally { release(); await Promise.all([first, full, immediate]); fetch.mockRestore(); resetThreadAccessCache(); }
+  });
+
+  it.each([true, false])("retries missing private-thread authorization, then rechecks real access: allowed=%s", async allowed => {
+    const { access, approval } = await privateApproval();
+    const fetch = slackMembership(allowed);
+    const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    try {
+      const deps = { db, channels: [tier] };
+      await db.insert(pendingChannelDeliveries).values({ id: "private", userId: "u", tierId: tier.id, event: approval, deliverAfter: 1 });
+      await drainAttentionDeliveries(deps);
+      const job = await pending();
+      expect(job).toMatchObject({ status: "sending", attempts: 1, event: approval, lastError: expect.stringContaining("access checks are unavailable") });
+      expect(failure).toHaveBeenCalledWith(false);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      await drainAttentionDeliveries({ ...deps, access }, job.deliverAfter);
+      expect(await pending()).toMatchObject({ status: allowed ? "sent" : "dropped", attempts: 2, event: null, lastError: null });
+      expect(deliver).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    } finally { fetch.mockRestore(); failure.mockRestore(); resetThreadAccessCache(); }
   });
 });

@@ -69,6 +69,10 @@ During that window, unready transports do not claim jobs or spend attempts.
 After the window, an unready transport records failed attempts and uses the normal recovery backoff.
 A failed startup therefore raises the recovery failure alert.
 A drain request during an active batch schedules another row selection after that batch.
+The outbox retains authorization providers per database handle, independently of the queued requests.
+An access-less producer cannot remove these providers when its request merges with a dispatcher request.
+A later provider set retains the existing optional 1Password provider when the new set omits it.
+These are live provider references, not cached membership or authorization results.
 No in-process timeout owns a notification deadline.
 A restart picks up pending jobs and stale sending jobs from Postgres.
 An index over pending and sending deadlines bounds the due scan.
@@ -84,6 +88,8 @@ Before sending a deferred job, the drain checks:
    A definite denial drops the job.
    Slack errors such as `channel_not_found`, `not_in_channel`, and `is_archived` are definite denials.
    Unknown channel privacy or a failed membership lookup retries without sending.
+   Missing authorization providers for a restricted channel thread also retry; they never imply a permanent denial.
+   Personal helper and workflow-editor ownership checks remain local.
    Attention checks never authorize with an expired public classification after a failed refresh.
    Their privacy cache is separate from ordinary readers, which retain the stale fallback.
    Loading a stored classification into memory does not extend its original freshness deadline.

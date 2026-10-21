@@ -55,10 +55,15 @@ interface DrainState {
 }
 /** One bounded batch per transport. Requests during a batch schedule another selection. */
 const inFlight = new WeakMap<AppDb, Map<string, DrainState>>();
+/** Outbox-owned providers, not cached authorization results. Access-less producers cannot remove them. */
+const authorizationProviders = new WeakMap<AppDb, NonNullable<AttentionDeps["access"]>>();
 
 /** Called by the event rail, or detached after an immediate durable insert. */
 export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.now(), immediateIds?: string[]): Promise<void> {
   registerAttentionQueueMetrics(deps.db);
+  if (deps.access) {
+    authorizationProviders.set(deps.db, { ...deps.access, onePassword: deps.access.onePassword ?? authorizationProviders.get(deps.db)?.onePassword });
+  }
   if (!startedAt.has(deps.db)) startedAt.set(deps.db, now);
   let running = inFlight.get(deps.db);
   if (!running) { running = new Map(); inFlight.set(deps.db, running); }
@@ -149,7 +154,7 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest, s
       if (event.owner.type === "team" && preference?.teamDm !== true) handled = true;
       if (!handled && tier.recipientEnabled && !await tier.recipientEnabled(job.userId)) handled = true;
       // Local terminal state wins even while Slack audience checks are unavailable.
-      if (!handled && !(await attentionAudience(deps, event, true)).audience.includes(job.userId)) handled = true;
+      if (!handled && !(await attentionAudience({ ...deps, access: authorizationProviders.get(deps.db) }, event, true)).audience.includes(job.userId)) handled = true;
       if (handled) {
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence);
         return;
