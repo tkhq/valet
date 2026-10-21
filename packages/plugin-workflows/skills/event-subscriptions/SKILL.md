@@ -68,7 +68,7 @@ A line runs a full assistant turn for every event that matches. A broad filter c
 
 ## Most lines cannot ask
 
-Most events run unattended: `ask_question` and `ask_approval` return a refusal at once, and no card opens. Routines run the same way. Only a Slack mention, a reply in a Slack thread that Valet follows, and a comment on a pull request that Valet opened let a person answer.
+An event that no person wrote runs unattended: `ask_question` and `ask_approval` return a refusal at once, and no card opens. An app's post (`slack.bot_message`), a reaction, and GitHub and Linear events run this way, and so do routines. A message that a person wrote in Slack (`slack.message` or `slack.app_mention`) and a comment on a pull request that Valet opened let a person answer.
 
 - Write the instruction so the assistant can finish without asking: name the channel, the repository, and the default choice.
 - An action that needs approval is refused in an unattended turn. Allow it by policy first: the owner for a personal line, a team admin for a team line. The `approvals` skill explains the choices.
@@ -85,7 +85,7 @@ Valet sends each event to one assistant thread per owner, once. It picks the thr
    - **Its own thread** (`own`): all events share one thread. They share context, and each one waits for the turn before it to finish.
    - **A thread the person picks** (`existing`).
 
-When no Where choice is set, a Slack mention or a reply in a followed thread gets a new thread, another Slack event gets one thread per channel, and any other event uses the line's own thread. A routine has a Where choice too, but no subject.
+When no Where choice is set, a message that a person wrote in Slack (`slack.message` or `slack.app_mention`) gets a new thread, another Slack event (such as an app's post) gets one thread per channel, and any other event uses the line's own thread. A routine has a Where choice too, but no subject.
 
 ## Personal and team lines
 
@@ -96,5 +96,5 @@ When no Where choice is set, a Slack mention or a reply in a followed thread get
 ## Debug a line that did not reply
 
 1. Call `events.list_problems` with the event key and channel. It lists received events that started no run, with the reason, such as a filter that excluded the event or a classifier that rejected it.
-2. Call `events.list_event_logs` to trace one event through intake and each line's decision. A person sees the same as Activity on the line's page, and organization admins see Diagnostics.
+2. If you run for an organization admin in a private chat (not a channel), call `events.list_event_logs` to trace one event through intake and each line's decision. Otherwise, send the person to the line's Activity in Presence, which shows the same decisions. Organization admins also see Diagnostics there.
 3. If the line matched, check whether a conversation or a waiting thread claimed the event, then open the thread where it landed and read the turn. A turn that asked a question was refused, not stuck.
