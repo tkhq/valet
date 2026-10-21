@@ -1567,10 +1567,10 @@ export interface SendPromptRequest {
   fileRefs?: Array<{ ref: string }>;
   /**
    * Per-submit queue mode. When omitted, the thread's persisted default
-   * applies. Web mid-turn submits send `followup` so a user orchestrator
-   * (thread default `steer`) queues instead of aborting.
+   * applies. Web mid-turn submits send `inject`: the message joins the
+   * running turn at its next step, or runs next when it cannot join.
    */
-  queueMode?: "followup" | "steer";
+  queueMode?: "followup" | "inject" | "steer";
   /**
    * Promote this already-queued item into a steer. Same item content, no
    * second user entry. `text` may be empty.
@@ -1898,20 +1898,39 @@ export type WireEvent =
 export type WireEventType = WireEvent["type"];
 
 /**
- * Thin projection of the engine's `QueueState` for the wire. The full items
- * live behind the admin REST surface; the live socket ships only id lists so
- * the client can reconcile ordering without carrying prompt payloads.
+ * Projection of the engine's `QueueState` for the wire. `pendingIds` keeps
+ * the order; `pending` adds what the composer's queued stack shows for each
+ * item, so a reload or another tab still shows the text. Attachments stay
+ * on the server; the item only counts them.
  */
 export interface WireQueueState {
-  mode: "followup" | "steer" | "collect";
+  mode: "followup" | "inject" | "steer" | "collect";
   status: "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
   activeItemId?: string;
   pendingIds: string[];
+  /** The pending items in `pendingIds` order. Absent from older servers. */
+  pending?: WireQueuedItem[];
   collectingIds: string[];
   /** Earliest server timestamp when the collected messages will be merged. */
   collectDeadline?: number;
   blockedGateId?: string;
 }
+
+/** One queued item as the composer's queued stack shows it. */
+export interface WireQueuedItem {
+  id: string;
+  /** The prompt text, or a signal's body, cut to `QUEUED_TEXT_MAX` characters. */
+  text: string;
+  /** Set for a signal: a wake-up, a finished task, or an event. */
+  signal?: { type: string };
+  /** True when the item joins the running turn at its next step when it can (`inject`). */
+  midTurn: boolean;
+  /** How many files or images the item carries. */
+  attachments?: number;
+}
+
+/** The longest queued-item text the queue state carries. */
+export const QUEUED_TEXT_MAX = 2000;
 
 // ── WebSocket: client → server frames ────────────────────────────────────
 

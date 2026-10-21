@@ -174,7 +174,7 @@ describe("WakeWatcher", () => {
     const { content, opts } = signalOf(h.prompt.mock.calls[0]);
     expect(content).toMatchObject({ kind: "signal", signalType: "process.exited", tagName: "wakeup", body: "ok\n" });
     expect(attr(content, "exitCode")).toBe("0");
-    expect(opts).toEqual({ threadId: "thread-1", dispatchId: "wakeup:wk_a:terminal", queueMode: "followup" });
+    expect(opts).toEqual({ threadId: "thread-1", dispatchId: "wakeup:wk_a:terminal", queueMode: "inject" });
   });
 
   it("records the release cause owner_ended on the lease", async () => {
@@ -352,7 +352,7 @@ describe("WakeWatcher", () => {
 
     expect(h.prompt).toHaveBeenCalledTimes(1);
     const { content, opts } = signalOf(h.prompt.mock.calls[0]);
-    expect(opts).toEqual({ dispatchId: "wakeup:wk_a:terminal", queueMode: "followup" });
+    expect(opts).toEqual({ dispatchId: "wakeup:wk_a:terminal", queueMode: "inject" });
     // The main thread can have other readers: the body is a notice, not the
     // work's output, and no channel origin rides along (fix wave 4, N3).
     const body = typeof content !== "string" && "body" in content ? content.body : "";
@@ -408,7 +408,7 @@ describe("WakeWatcher", () => {
       body: `Hold "debug" expired at ${new Date(NOW - 1).toISOString()}.`,
       attributes: { leaseId: "ls_h", reason: "debug", ownerKind: "hold" },
     });
-    expect(opts).toEqual({ dispatchId: "lease:ls_h:expired", queueMode: "followup" });
+    expect(opts).toEqual({ dispatchId: "lease:ls_h:expired", queueMode: "inject" });
   });
 
   it("leaves a hold lease before its deadline active", async () => {
@@ -1074,7 +1074,7 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(row).toMatchObject({ status: "done", cause: "fired" });
     expect(h.prompt).toHaveBeenCalledTimes(1);
     const { content, opts } = signalOf(h.prompt.mock.calls[0]);
-    expect(opts).toMatchObject({ threadId: "thread-1", dispatchId: "wakeup:wk_ev:terminal", queueMode: "followup" });
+    expect(opts).toMatchObject({ threadId: "thread-1", dispatchId: "wakeup:wk_ev:terminal", queueMode: "inject" });
     expect(content).toMatchObject({ signalType: "event.ended", attributes: { cause: "delivered" } });
     expect(h.wakeupEnded).toHaveBeenCalledWith("event", "fired");
     // A retried delivery and a later sweep send no second terminal signal (INV-E5).

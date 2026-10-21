@@ -232,6 +232,25 @@ describe("Composer queued-message stack", () => {
     expect(cancelQueuedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", itemId: "q-2" });
   });
 
+  it("shows a queued item's text from the queue state after reload, with Send now and Cancel", () => {
+    queueStateRef.current = {
+      ...queueState("followup"),
+      pendingIds: ["q-1", "q-2"],
+      pending: [
+        { id: "q-1", text: "also check the deploy logs", midTurn: true },
+        { id: "q-2", text: "Check the build now.", signal: { type: "wakeup" }, midTurn: true },
+      ],
+    };
+    renderComposer("streaming", [], 2);
+
+    expect(screen.getByText("also check the deploy logs")).toBeTruthy();
+    expect(screen.getByText("Wake-up")).toBeTruthy();
+    expect(screen.queryByText("Queued message. It runs when the current turn ends.")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Send now" })[0]!);
+    expect(sendMutateAsync).toHaveBeenCalledWith({ text: "", threadId: "thread-1", promoteItemId: "q-1" });
+    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(2);
+  });
+
   it("shows the server's corrective text when a cancel is refused", async () => {
     cancelQueuedMutateAsync.mockRejectedValueOnce(
       new ApiError(409, "POST /threads/thread-1/queue/q-1/cancel → 409", {
@@ -636,7 +655,7 @@ describe("Composer — mid-turn submit affordance", () => {
     expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
   });
 
-  it("queues a mid-turn message with queueMode followup", async () => {
+  it("queues a mid-turn message for the running turn's next step", async () => {
     const { default: userEvent } = await import("@testing-library/user-event");
     queueStateRef.current = queueState("steer");
     renderComposer("streaming");
@@ -647,7 +666,7 @@ describe("Composer — mid-turn submit affordance", () => {
       expect(sendMutateAsync).toHaveBeenCalledWith({
         text: "also update the runbook",
         threadId: "thread-1",
-        queueMode: "followup",
+        queueMode: "inject",
       }),
     );
     expect(addUserMessage).toHaveBeenCalled();
@@ -668,7 +687,7 @@ describe("Composer — mid-turn submit affordance", () => {
     await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
 
     expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
-    expect(screen.getByText(/queued\. press enter again/i)).toBeDefined();
+    expect(screen.getByText(/queued for the next step\. press enter again/i)).toBeDefined();
   });
 
   it("promotes the queued item on empty Enter and does not add a second bubble", async () => {
@@ -716,7 +735,7 @@ describe("Composer — mid-turn submit affordance", () => {
       expect(sendMutateAsync).toHaveBeenLastCalledWith({
         text: "second followup",
         threadId: "thread-1",
-        queueMode: "followup",
+        queueMode: "inject",
       }),
     );
   });

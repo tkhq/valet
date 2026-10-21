@@ -117,7 +117,25 @@ export interface SessionData {
   updatedAt: number;
 }
 
-export type QueueMode = "followup" | "steer" | "collect";
+/**
+ * How a prompt joins a busy thread.
+ * - `followup`: waits, and runs as its own turn after the running turn.
+ * - `inject`: joins the running turn at its next step, after the current tool
+ *   calls finish, the way a person's message reaches a coding agent mid-turn.
+ *   The engine delivers it only when the same actor sent it on the same
+ *   channel as the running turn (`Thread` mid-turn delivery); otherwise, or
+ *   when the turn ends first, it runs as a followup.
+ * - `steer`: aborts the running turn and every queued item, then runs.
+ * - `collect`: buffers prompts for a window and runs them as one turn.
+ */
+export type QueueMode = "followup" | "inject" | "steer" | "collect";
+
+/**
+ * Queue item metadata flag for an `inject` admission. The item is stored as
+ * a followup, so a turn boundary can deliver it into the running turn and
+ * every other path still runs it in order.
+ */
+export const MID_TURN_DELIVERY_KEY = "midTurnDelivery";
 export type ThreadStatus = "active" | "paused" | "archived";
 export type QueueStatus = "idle" | "queued" | "running" | "blocked_on_decision_gate" | "paused";
 

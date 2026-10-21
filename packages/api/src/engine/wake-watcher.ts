@@ -690,7 +690,10 @@ export class WakeWatcher {
       tagName: "wakeup",
       ...(origin !== undefined ? { origin: { ...origin, reply: "manual" } } : {}),
     };
-    const base: PromptOptions = { dispatchId: draft.dispatchId, queueMode: "followup" };
+    // A wake-up joins the running turn at its next step when it can, the
+    // way a coding agent takes a finished background task mid-turn
+    // (`QueueMode` `inject`); otherwise it runs after the turn.
+    const base: PromptOptions = { dispatchId: draft.dispatchId, queueMode: "inject" };
     if (threadId === undefined) {
       await session.prompt(content, base);
       return;

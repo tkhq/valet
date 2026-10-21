@@ -1091,7 +1091,7 @@ export async function submitSessionPrompt(
     appPageHint?: AppPageHint;
     attachments?: SendPromptRequest["attachments"];
     fileRefs?: SendPromptRequest["fileRefs"];
-    queueMode?: "followup" | "steer";
+    queueMode?: "followup" | "inject" | "steer";
     promoteItemId?: string;
     /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
     author?: PromptAuthor;
@@ -1314,9 +1314,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   if (!promoteItemId && typeof body.text !== "string") {
     return c.json({ error: "text must be a string (it may be empty with attachments)" }, 400);
   }
-  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "steer") {
+  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "inject" && body.queueMode !== "steer") {
     return c.json(
-      { error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." },
+      { error: "queueMode must be 'followup', 'inject' or 'steer'. Omit it to use the thread default." },
       400,
     );
   }

@@ -63,15 +63,16 @@ import {
   type ComposerFile,
 } from "./composer-files";
 import { useFileUpload } from "~/hooks/use-file-upload";
-import type { MessageReplyReference } from "@valet/api/wire";
+import type { MessageReplyReference, WireQueuedItem } from "@valet/api/wire";
 
 /**
  * What the submit button does with the text in the composer.
  *
- * Mid-turn Enter queues (`followup`) even on a user orchestrator whose
+ * Mid-turn Enter queues the message with `inject`: it joins the running
+ * turn at its next step, after the current tool calls, or runs next when it
+ * cannot join. It never aborts the turn, even on a user assistant whose
  * thread default is `steer`. A second Enter on an empty composer promotes
- * that queued item into a steer. The engine thread default is left alone
- * so Slack and other channels can still steer on first submit.
+ * that queued item: the turn stops and the message runs now.
  */
 type SubmitAction = "send" | "steer" | "queue";
 
@@ -85,13 +86,14 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
  * One line of copy for the action that needs a gloss. "Send" and "Queue"
  * explain themselves, so only the steer prompt has one.
  *
- * Mid-turn the first Enter queues. A second empty Enter promotes that
- * queued item into a steer (`Thread.promoteQueuedItem`) so the same
- * bubble becomes the new prompt. It does not POST the text again.
+ * Mid-turn the first Enter queues the message for the turn's next step. A
+ * second empty Enter promotes that queued item (`Thread.promoteQueuedItem`):
+ * the turn stops and the same bubble runs now. It does not POST the text
+ * again.
  */
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
-  steer: "Queued. Press Enter again, or select Send now above.",
+  steer: "Queued for the next step. Press Enter again, or select Send now, to send it now.",
   queue: "",
 };
 
@@ -351,11 +353,13 @@ export function Composer({
     setSubmitErrors((current) => ({ ...current, [key]: error }));
   }, [key]);
   const [promotingItemId, setPromotingItemId] = useState<string | null>(null);
-  // Pending items this window has no text for: queued before a reload, or
-  // from another tab. Each still gets a row with Cancel. Without the live
-  // queue state, only the count is known.
+  // Pending items this window has no bubble for: queued before a reload,
+  // from another tab, or by a timer. The queue state carries their text, so
+  // each gets a full row. Without the live queue state, only the count is
+  // known.
   const knownQueuedIds = new Set(queuedMessages.map((message) => message.queueItemId));
   const unresolvedQueuedIds = (queueState?.pendingIds ?? []).filter((itemId) => !knownQueuedIds.has(itemId));
+  const queuedItemById = new Map((queueState?.pending ?? []).map((item) => [item.id, item]));
   const unresolvedQueuedCount = queueState
     ? unresolvedQueuedIds.length
     : Math.max(0, queuedItemCount - queuedMessages.length);
@@ -574,14 +578,14 @@ export function Composer({
     }
   }
 
-  async function promoteQueuedItem(itemId: string, messageId: string) {
+  async function promoteQueuedItem(itemId: string, messageId?: string) {
     if (send.isPending || !threadId) return;
     lastUsedComposer = identity.current;
     setSubmitError(null);
     setPromotingItemId(itemId);
     try {
       const res = await send.mutateAsync({ text: "", threadId, promoteItemId: itemId });
-      if (res.messageId && res.messageId !== itemId) {
+      if (messageId && res.messageId && res.messageId !== itemId) {
         setMessageQueueItemId(sessionId, messageId, res.messageId);
       }
       if (queuedFollowup?.itemId === itemId) {
@@ -649,7 +653,7 @@ export function Composer({
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
         ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
-        ...(working ? { queueMode: "followup" as const } : {}),
+        ...(working ? { queueMode: "inject" as const } : {}),
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -955,26 +959,33 @@ export function Composer({
             const itemId = message.queueItemId;
             if (!itemId) return null;
             return (
-              <QueuedRow key={itemId} cancel={guest ? undefined : () => void cancelQueuedItem(itemId)} canceling={cancelQueued.isPending}>
+              <QueuedRow
+                key={itemId}
+                cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
+                canceling={cancelQueued.isPending}
+                sendNow={guest ? undefined : () => void promoteQueuedItem(itemId, message.id)}
+                sending={promotingItemId === itemId}
+                sendDisabled={send.isPending}
+              >
                 <p className="min-w-0 flex-1 line-clamp-2 text-ink">{message.content}</p>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  className="shrink-0"
-                  disabled={send.isPending}
-                  onClick={() => void promoteQueuedItem(itemId, message.id)}
-                >
-                  {promotingItemId === itemId ? "Sending…" : "Send now"}
-                </Button>
               </QueuedRow>
             );
           })}
-          {queueState ? unresolvedQueuedIds.map((itemId) => (
-            <QueuedRow key={itemId} cancel={guest ? undefined : () => void cancelQueuedItem(itemId)} canceling={cancelQueued.isPending}>
-              <p className="min-w-0 flex-1 text-muted">Queued message. It runs when the current turn ends.</p>
-            </QueuedRow>
-          )) : unresolvedQueuedCount > 0 && (
+          {queueState ? unresolvedQueuedIds.map((itemId) => {
+            const item = queuedItemById.get(itemId);
+            return (
+              <QueuedRow
+                key={itemId}
+                cancel={guest ? undefined : () => void cancelQueuedItem(itemId)}
+                canceling={cancelQueued.isPending}
+                sendNow={guest || !item ? undefined : () => void promoteQueuedItem(itemId)}
+                sending={promotingItemId === itemId}
+                sendDisabled={send.isPending}
+              >
+                <QueuedItemText item={item} />
+              </QueuedRow>
+            );
+          }) : unresolvedQueuedCount > 0 && (
             <p className="px-1 text-xs text-muted" role="status">
               {unresolvedQueuedCount} queued{" "}
               {unresolvedQueuedCount === 1 ? "message is" : "messages are"} waiting.
@@ -1226,10 +1237,48 @@ function QueueIndicator({
 
 /** One queued message above the composer: its content and actions, then
  * Cancel, which removes it before it starts. */
-function QueuedRow({ cancel, canceling, children }: { cancel?: () => void; canceling: boolean; children: ReactNode }) {
+/**
+ * A queued item with no bubble in this window, from the queue state. A
+ * signal reads with its kind first, such as "Wake-up". An item from an
+ * older server has no text and reads as a plain queued message.
+ */
+function QueuedItemText({ item }: { item: WireQueuedItem | undefined }) {
+  if (!item) return <p className="min-w-0 flex-1 text-muted">Queued message. It runs when the current turn ends.</p>;
+  const files = item.attachments ? `${item.attachments} ${item.attachments === 1 ? "attachment" : "attachments"}` : undefined;
+  const text = item.text.trim() || files || "Queued message";
+  return (
+    <p className="min-w-0 flex-1 line-clamp-2 text-ink">
+      {item.signal && <span className="mr-1.5 font-medium text-muted">{signalLabel(item.signal.type)}</span>}
+      {text}
+      {item.text.trim() && files && <span className="ml-1.5 text-muted">({files})</span>}
+    </p>
+  );
+}
+
+/** A short name for a queued signal's kind. */
+function signalLabel(type: string): string {
+  if (type === "wakeup" || type.startsWith("wakeup.")) return "Wake-up";
+  if (type.startsWith("child.")) return "Task result";
+  return "Event";
+}
+
+function QueuedRow({ cancel, canceling, sendNow, sending, sendDisabled, children }: {
+  cancel?: () => void;
+  canceling: boolean;
+  /** Stops the running turn and runs this item now. */
+  sendNow?: () => void;
+  sending: boolean;
+  sendDisabled: boolean;
+  children: ReactNode;
+}) {
   return (
     <div className="flex items-center gap-2 rounded-xl border border-line bg-ink-wash px-3 py-2 text-xs">
       {children}
+      {sendNow && (
+        <Button type="button" variant="secondary" size="sm" className="shrink-0" disabled={sendDisabled} onClick={sendNow}>
+          {sending ? "Sending…" : "Send now"}
+        </Button>
+      )}
       {cancel && (
         <Button type="button" variant="ghost" size="sm" className="shrink-0" disabled={canceling} onClick={cancel}>
           Cancel

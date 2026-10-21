@@ -321,6 +321,7 @@ export {
   type Turn,
 } from "./compaction.js";
 export {
+  canDeliverMidTurn,
   entriesToAgentMessages,
   skillInvocationsInContext,
   buildSpilledInputMarker,

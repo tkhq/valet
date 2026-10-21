@@ -1,4 +1,4 @@
-import { toolApprovalGateContext } from "@valet/engine";
+import { MID_TURN_DELIVERY_KEY, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -6,7 +6,9 @@ import type {
   DecisionResolution as EngineDecisionResolution,
   MessageEntry as EngineMessageEntry,
   MessagePart as EngineMessagePart,
+  QueueItem as EngineQueueItem,
   QueueState as EngineQueueState,
+  SignalContent as EngineSignalContent,
 } from "@valet/engine";
 import { gateApprover } from "../services/session-access.js";
 import type {
@@ -17,7 +19,9 @@ import type {
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
   WireEvent,
+  WireQueuedItem,
 } from "../wire/types.js";
+import { QUEUED_TEXT_MAX } from "../wire/types.js";
 
 /**
  * Project an engine DecisionGate to its wire shape. Drops engine-only fields
@@ -200,12 +204,44 @@ export type WireEventDraft = WireEvent extends infer T
     : never
   : never;
 
+function isQueuedSignal(content: EngineQueueItem["content"]): content is EngineSignalContent {
+  return typeof content === "object" && "kind" in content && content.kind === "signal";
+}
+
 /**
- * Project the engine's full QueueState to a `queue.state` frame with id
- * lists — the live socket stays thin; the admin surface returns full items.
- * Shared by the bus-event path below and the WS handshake, which seeds one
- * frame per thread so a client connecting mid-turn sees the queue without
- * waiting for the next transition.
+ * One pending item as the composer's queued stack shows it: its text, cut
+ * to `QUEUED_TEXT_MAX`, and an attachment count, never the files.
+ */
+export function queuedItemToWire(item: EngineQueueItem): WireQueuedItem {
+  const content = item.content;
+  let text = "";
+  let signalType: string | undefined;
+  let attachments = 0;
+  if (typeof content === "string") {
+    text = content;
+  } else if (isQueuedSignal(content)) {
+    text = content.body;
+    signalType = content.tagName ?? content.signalType;
+    attachments = content.attachments?.length ?? 0;
+  } else {
+    text = content.text ?? "";
+    attachments = content.attachments?.length ?? 0;
+  }
+  return {
+    id: item.id,
+    text: text.length > QUEUED_TEXT_MAX ? `${text.slice(0, QUEUED_TEXT_MAX)}…` : text,
+    ...(signalType ? { signal: { type: signalType } } : {}),
+    midTurn: item.metadata?.[MID_TURN_DELIVERY_KEY] === true,
+    ...(attachments > 0 ? { attachments } : {}),
+  };
+}
+
+/**
+ * Project the engine's full QueueState to a `queue.state` frame: id lists,
+ * plus each pending item's text for the queued stack. Shared by the
+ * bus-event path below and the WS handshake, which seeds one frame per
+ * thread so a client connecting mid-turn sees the queue without waiting for
+ * the next transition.
  */
 export function queueStateToWire(
   sessionId: string,
@@ -221,6 +257,7 @@ export function queueStateToWire(
       status: state.status,
       activeItemId: state.activeItemId,
       pendingIds: state.pending.map((i) => i.id),
+      pending: state.pending.map(queuedItemToWire),
       collectingIds: (state.collectBuffer ?? []).map((i) => i.id),
       collectDeadline: state.collectDeadline,
       blockedGateId: state.blockedGateId,

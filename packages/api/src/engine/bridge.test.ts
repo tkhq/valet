@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { BusEvent, DecisionGate, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
+import { MID_TURN_DELIVERY_KEY, type BusEvent, type DecisionGate, type MessageEntry, type MessagePart as EngineMessagePart, type QueueItem } from "@valet/engine";
+import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts, queuedItemToWire } from "./bridge.js";
+import { QUEUED_TEXT_MAX } from "../wire/types.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
@@ -455,5 +456,23 @@ describe("engineGateToWire riskLevel", () => {
   it("omits an unknown level and gates without tool context", () => {
     expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "extreme" })).riskLevel).toBeUndefined();
     expect(engineGateToWire(gate({ riskLevel: "high" })).riskLevel).toBeUndefined();
+  });
+});
+
+describe("queuedItemToWire", () => {
+  const item = (over: Partial<QueueItem>): QueueItem => ({
+    id: "q-1", threadId: "t1", content: "hello", status: "queued", attemptCount: 0, maxAttempts: 10,
+    timeoutAt: 0, createdAt: 1, updatedAt: 1, ...over,
+  });
+
+  it("carries the text the queued stack shows, never the files", () => {
+    expect(queuedItemToWire(item({ metadata: { [MID_TURN_DELIVERY_KEY]: true } }))).toEqual({ id: "q-1", text: "hello", midTurn: true });
+    expect(queuedItemToWire(item({
+      content: { text: "see the image", attachments: [{ type: "image", url: "data:image/png;base64,AAAA", mimeType: "image/png" }] },
+    }))).toEqual({ id: "q-1", text: "see the image", midTurn: false, attachments: 1 });
+    expect(queuedItemToWire(item({ content: { kind: "signal", signalType: "wakeup.timer", tagName: "wakeup", body: "Check it." } })))
+      .toEqual({ id: "q-1", text: "Check it.", signal: { type: "wakeup" }, midTurn: false });
+    const long = queuedItemToWire(item({ content: "x".repeat(QUEUED_TEXT_MAX + 50) }));
+    expect(long.text).toHaveLength(QUEUED_TEXT_MAX + 1);
   });
 });
