@@ -36,6 +36,7 @@ import {
   installWorkflowTemplate,
   listPluginTemplates,
   listWorkflowTemplateSummaries,
+  nextInstallSuffix,
   templateInputs,
   type TemplateServiceDeps,
 } from "./templates.js";
@@ -1157,6 +1158,28 @@ describe("installWorkflowTemplate", () => {
     expect(new Set(schedules.map((s) => s.workflowId))).toEqual(new Set([first.workflowId, second.workflowId]));
   });
 
+  it("never repeats a number that a remaining install still shows after an earlier one is deleted", async () => {
+    await connect("gmail");
+    const installs = [];
+    for (let i = 0; i < 3; i++) {
+      const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+      if (!result.ok) throw new Error("expected the install to succeed");
+      installs.push(result);
+    }
+    expect(installs.map((install) => install.workflowName)).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+
+    // Delete the second install with its schedule, as deleting a workflow does.
+    await db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, installs[1].workflowId));
+    await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, installs[1].workflowId));
+    await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, installs[1].workflowId));
+
+    const again = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!again.ok) throw new Error("expected the install to succeed");
+    expect(again.workflowName).toBe("Inbox sweeper (4)");
+    const names = (await db.select().from(workflowSchedules)).map((schedule) => schedule.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (3)", "Inbox sweeper (4)"]);
+  });
+
   it("bakes a supplied input into the installed definition", async () => {
     const result = await installWorkflowTemplate(deps(), OWNER, "notes-echo", { inputs: { noteId: "n_42" } });
     expect(result.ok).toBe(true);
@@ -1535,5 +1558,18 @@ describe("team GitHub template repository prerequisites", () => {
     expect(await db.select().from(workflowDefinitions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(eventSubscriptions)).toHaveLength(ok ? 1 : 0);
     expect(await db.select().from(workflowVersions)).toHaveLength(ok ? 1 : 0);
+  });
+});
+
+describe("nextInstallSuffix", () => {
+  it("numbers an install one past the highest number in use", () => {
+    expect(nextInstallSuffix("Inbox sweeper", [])).toBe("");
+    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper"])).toBe(" (2)");
+    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper", "Inbox sweeper (3)"])).toBe(" (4)");
+    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper (2)"])).toBe(" (3)");
+  });
+
+  it("ignores a name that only starts like the template's", () => {
+    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper (draft)", "Inbox sweeper (0)", "Inbox sweeper (2.5)"])).toBe("");
   });
 });

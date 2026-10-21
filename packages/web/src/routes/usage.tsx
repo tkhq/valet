@@ -641,7 +641,7 @@ export function UsagePage() {
                 </div>
               )}
               {outcomesQ.data && outcomesQ.data.unpricedTurns > 0 && (
-                <p className="text-xs text-muted mt-2">{fmt(outcomesQ.data.unpricedTurns)} unpriced model turns make these spend estimates a floor.</p>
+                <p className="text-xs text-muted mt-2">{formatTurns(outcomesQ.data.unpricedTurns)} unpriced: these spend estimates are a floor.</p>
               )}
             </div>
 

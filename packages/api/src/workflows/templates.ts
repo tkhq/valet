@@ -34,7 +34,7 @@ import { linearEventArmBlock } from "../services/linear-ingress.js";
  */
 import { githubAppRepositoryAccess } from "../services/github-app.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import {
   collectTemplatePaths,
@@ -1046,6 +1046,24 @@ function withInstallStep(reason: string): string {
  * services must be connected, the inputs must type-check, and the cron
  * must parse. The transaction then only writes.
  */
+/**
+ * The name suffix for the next install of a template named `base`: empty for
+ * the first install, else one more than the highest number in use. A deleted
+ * earlier install leaves its number unused, so a later install never repeats
+ * a number that a remaining install still shows.
+ */
+export function nextInstallSuffix(base: string, names: readonly string[]): string {
+  let highest = 0;
+  for (const name of names) {
+    if (name === base) highest = Math.max(highest, 1);
+    else if (name.startsWith(`${base} (`) && name.endsWith(")")) {
+      const n = Number(name.slice(base.length + 2, -1));
+      if (Number.isInteger(n) && n > 0) highest = Math.max(highest, n);
+    }
+  }
+  return highest === 0 ? "" : ` (${highest + 1})`;
+}
+
 export async function installWorkflowTemplate(
   deps: TemplateServiceDeps,
   owner: WorkflowOwner,
@@ -1379,12 +1397,13 @@ export async function installWorkflowTemplate(
     const ownerId = teamId ?? owner.userId;
 
     // Repeat installs get a counted name. There is no template_id column
-    // to count by, so the count comes from the names already installed —
-    // exact match, or the same name with a "(n)" suffix. A race between
-    // two installs can produce two rows with one name, which is harmless:
-    // names are display text, and every id is unique.
+    // to count by, so the number comes from the names already installed:
+    // exact match, or the same name with a "(n)" suffix. One install at a
+    // time per owner and template reads those names, so two installs never
+    // pick one number.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`workflow-install:${ownerType}:${ownerId}:${owned.template.name}`}))`);
     const siblings = await tx
-      .select({ id: workflowDefinitions.id })
+      .select({ name: workflowDefinitions.name })
       .from(workflowDefinitions)
       .where(
         and(
@@ -1395,7 +1414,7 @@ export async function installWorkflowTemplate(
       );
     // The schedule carries the same count, so a routine reads with the name
     // of the workflow it runs, and two installs stay apart in the schedules list.
-    const installCount = siblings.length > 0 ? ` (${siblings.length + 1})` : "";
+    const installCount = nextInstallSuffix(owned.template.name, siblings.map((row) => row.name));
     workflowName = `${owned.template.name}${installCount}`;
 
     await tx.insert(workflowDefinitions).values({

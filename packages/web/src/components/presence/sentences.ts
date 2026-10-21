@@ -949,7 +949,11 @@ export function routineSentenceParts(routine: RoutineLike, workflows: WorkflowNa
  * sentence starts at `<do>`: `Run <workflow>.`
  */
 export function routineRowParts(routine: RoutineLike, workflows: WorkflowNames, threads: ThreadTitles): SentencePart[] {
-  const parts = tidy([text(routineLead(routine, workflows)), ...routineDoesParts(routine, workflows, threads), text(".")]);
+  const lead = routineLead(routine, workflows);
+  const parts = tidy([text(lead), ...routineDoesParts(routine, workflows, threads), text(".")]);
+  // A lead is the routine's own name and keeps the casing the person wrote
+  // ("iOS release check"). Only the leadless form starts with "run".
+  if (lead !== "") return parts;
   const [first, ...rest] = parts;
   return first?.kind === "text" ? [text(upperFirst(first.text)), ...rest] : parts;
 }

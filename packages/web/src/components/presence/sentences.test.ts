@@ -567,6 +567,11 @@ describe("routineSentence", () => {
     );
   });
 
+  it("keeps the casing of a routine's own name on its row", () => {
+    const named = { ...routine({}), name: "iOS release check" };
+    expect(partsText(routineRowParts(named, workflows, threads))).toBe("iOS release check: work in its own thread.");
+  });
+
   it("names a timezone other than UTC after the schedule words", () => {
     // The zone reads by its long name, which follows daylight saving time.
     expect(routineSentence(routine({ timezone: "America/Denver" }), workflows, threads)).toBe(
