@@ -179,8 +179,8 @@ const ACME_API = place("github:acme/api", "acme/api", "github", null, counts(2, 
 const ACME_API_12 = place("github:acme/api#12", "acme/api#12", "github", "github:acme/api", counts(0, 0));
 
 const PLACES: Record<string, ListPresencePlacesResponse> = {
-  user: { places: [SLACK_ROOT, INCIDENTS_USER, ACME_API, ACME_API_12] },
-  sre: { places: [SLACK_ROOT, INCIDENTS_SRE] },
+  user: { places: [SLACK_ROOT, INCIDENTS_USER, ACME_API, ACME_API_12], channelNames: {} },
+  sre: { places: [SLACK_ROOT, INCIDENTS_SRE], channelNames: {} },
 };
 
 function conversation(sessionId: string, threadId: string, title: string, url?: string) {
@@ -460,7 +460,7 @@ async function answer(method: string, url: URL, body: string | undefined): Promi
     unhandled.push(`${method} ${path}`);
     return json({ error: "not in the scenario" }, 404);
   }
-  if (path === "/api/presence/places") return json(PLACES[scopeOf(q)] ?? { places: [] });
+  if (path === "/api/presence/places") return json(PLACES[scopeOf(q)] ?? { places: [], channelNames: {} });
   const placeMatch = /^\/api\/presence\/places\/(.+)$/.exec(path);
   if (placeMatch) {
     const scope = scopeOf(q);

@@ -179,7 +179,7 @@ beforeEach(() => {
   scopeTeamId = undefined;
   getPresencePlace.mockReset();
   listPresencePlaces.mockReset();
-  listPresencePlaces.mockResolvedValue({ places: [] });
+  listPresencePlaces.mockResolvedValue({ places: [], channelNames: {} });
   listThreads.mockReset();
   patchEventSubscription.mockReset();
   deleteEventSubscription.mockReset();
@@ -351,6 +351,7 @@ describe("PlacePage", () => {
         subject: "slack:T1/C777", label: "#ops", service: "slack",
         parent: "slack:T1", listenerCount: 0, activeThreadCount: 0, lastActivityAt: null,
       }],
+      channelNames: {},
     });
     getPresencePlace.mockResolvedValue({
       ...INCIDENTS,
@@ -364,6 +365,22 @@ describe("PlacePage", () => {
     await screen.findByRole("heading", { level: 1, name: "#incidents" });
     const [here] = sectionsInOrder(["Valet here"]);
     expect(await within(here!).findByText(sentenceText("When someone posts a message in #incidents or #ops, run Incident triage."))).toBeTruthy();
+  });
+
+  it("names a channel that is no place from the places read's channel names", async () => {
+    listPresencePlaces.mockResolvedValue({ places: [], channelNames: { C0QUIET: "alerts-prod" } });
+    getPresencePlace.mockResolvedValue({
+      ...INCIDENTS,
+      listeners: [listener("W", {
+        eventKeys: ["slack.message"],
+        filters: [{ field: "channel", op: "in", value: ["C900", "C0QUIET"] }],
+        target: { kind: "workflow", workflowId: "wf-1" },
+      })],
+    });
+    renderPage("slack:T1/C900");
+    await screen.findByRole("heading", { level: 1, name: "#incidents" });
+    const [here] = sectionsInOrder(["Valet here"]);
+    expect(await within(here!).findByText(sentenceText("When someone posts a message in #incidents or #alerts-prod, run Incident triage."))).toBeTruthy();
   });
 
   it("reads the place once when the URL's key differs from the place's key", async () => {

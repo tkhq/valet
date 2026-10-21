@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import githubPlugin from "@valet/plugin-github/plugin";
@@ -7,16 +8,17 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowSchedules } from "../schema/index.js";
+import { eventDeliveries, eventSubscriptions, events, followedThreads, slackChannelPrivacy, workflowSchedules } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { slowPlacesLine } from "./presence.js";
+import { resetChannelNameCaches } from "./workspace-channels.js";
 import type {
   ListEventSubscriptionsResponse, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceDetailResponse, PresencePlaceWire,
 } from "../wire/types.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
+afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); resetChannelNameCaches(); await api?.cleanup(); api = undefined; });
 
 const ORG = "local-org";
 const USER = "local-user";
@@ -28,21 +30,29 @@ async function boot(): Promise<TestApi> {
 
 /** Connects the org Slack bot for team `T1` and answers Slack's channel
  * checks: `members` lists each private channel's members; any other channel
- * is public. */
-async function connectSlack(a: TestApi, members: Record<string, string[]> = {}) {
+ * is public. `slack.names` names a channel in `conversations.info`, else the
+ * name is the lowercased id, and `slack.joined` lists the channels the bot
+ * has joined. The returned list holds the channel of each
+ * `conversations.info` call. */
+async function connectSlack(a: TestApi, members: Record<string, string[]> = {}, slack: { names?: Record<string, string>; joined?: Record<string, string> } = {}) {
+  const infoCalls: string[] = [];
+  // The Slack plugin caches its directory and its names by token, so each
+  // test's bot has its own token.
   await a.providers.engineCredentials.save({ type: "org", id: ORG }, "slack",
-    { type: "oauth2", accessToken: "xoxb-test", metadata: { teamId: "T1" } });
+    { type: "oauth2", accessToken: `xoxb-test-${randomUUID()}`, metadata: { teamId: "T1" } });
   const realFetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     if (url.hostname !== "slack.com") return realFetch(input, init);
     const channel = url.searchParams.get("channel") ?? "";
     const privateMembers = members[channel];
-    const body = url.pathname.endsWith("conversations.members")
-      ? { ok: true, members: privateMembers ?? [] }
-      : { ok: true, channel: { name: channel.toLowerCase(), is_private: privateMembers !== undefined } };
+    if (url.pathname.endsWith("conversations.info")) infoCalls.push(channel);
+    const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: privateMembers ?? [] }
+      : url.pathname.endsWith("users.conversations") ? { ok: true, channels: Object.entries(slack.joined ?? {}).map(([id, name]) => ({ id, name })) }
+      : { ok: true, channel: { name: slack.names?.[channel] ?? channel.toLowerCase(), is_private: privateMembers !== undefined } };
     return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
   });
+  return infoCalls;
 }
 
 interface RuleSeed {
@@ -431,5 +441,54 @@ it("sends only the places on the list route", async () => {
   const { session } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
   await session.createThread("subject:github:acme/api#12");
   const res = await fetch(`${api.baseUrl}/api/presence/places?scope=user`);
-  expect(Object.keys(await res.json() as Record<string, unknown>)).toEqual(["places"]);
+  expect(Object.keys(await res.json() as Record<string, unknown>)).toEqual(["places", "channelNames"]);
+});
+
+/** The places read as the overview reads it. */
+async function placesRead(a: TestApi, scope: string): Promise<ListPresencePlacesResponse> {
+  const res = await fetch(`${a.baseUrl}/api/presence/places?scope=${encodeURIComponent(scope)}`);
+  expect(res.status).toBe(200);
+  return await res.json() as ListPresencePlacesResponse;
+}
+
+// Dev, 10-21: a line over 21 channels lists at the Slack workspace, so its 8
+// channels with no event in 30 days were no place and read as raw ids.
+it("names every channel a line lists, though no event made it a place", async () => {
+  api = await boot();
+  const infoCalls = await connectSlack(api, { CPRIV: ["USOMEONE"] }, {
+    joined: { C900: "incidents", CPRIV: "secret-plans" },
+    names: { C950: "alerts-prod", CPRIV: "secret-plans" },
+  });
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950", "CPRIV"] }] });
+
+  const read = await placesRead(api, "user");
+  expect(read.places.map((row) => row.subject)).toEqual(["slack:T1"]);
+  // C900 is on the bot's channel list. C950 is not, so Slack names it one
+  // channel at a time. The viewer is not a member of the private CPRIV.
+  expect(read.channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
+
+  // A second read asks Slack nothing: it reuses the names and the checks.
+  const before = infoCalls.length;
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
+  expect(infoCalls.slice(before)).toEqual([]);
+
+  // A member of the private channel sees its name.
+  await linkIdentity(api.providers.db, { provider: "slack", externalId: "USOMEONE", userId: USER });
+  expect((await placesRead(api, "user")).channelNames).toMatchObject({ CPRIV: "secret-plans" });
+});
+
+it("names at most 20 unnamed channels for each read, and the rest on a later read", async () => {
+  api = await boot();
+  const ids = Array.from({ length: 25 }, (_, n) => `CQ${String(n).padStart(2, "0")}`);
+  await connectSlack(api);
+  // Each channel is public, as Slack answered before, so a read checks no privacy.
+  await api.providers.db.insert(slackChannelPrivacy).values(ids.map((channelId) => ({ orgId: ORG, channelId, isPrivate: false, checkedAt: Date.now() })));
+  await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+  await rule(api, { id: "r-many", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ids }] });
+
+  expect(Object.keys((await placesRead(api, "user")).channelNames)).toHaveLength(20);
+  const second = await placesRead(api, "user");
+  expect(Object.keys(second.channelNames).sort()).toEqual(ids);
+  expect(second.channelNames.CQ24).toBe("cq24");
 });

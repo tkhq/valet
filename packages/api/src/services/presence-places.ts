@@ -376,7 +376,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** What the place reads see of the request: names, channel access, thread access, and the org's Slack workspace. */
 export interface PresenceAccess {
+  /** Names from the bot's channel list. */
   names: ChannelNames;
+  /** Names one channel at a time, for a channel that no other source names. */
+  lookupNames: ChannelNames;
   canSee: ChannelVisibility;
   threadsShown: ThreadPairsShown;
   /** The org's Slack workspace id, from its bot credential, or null. */
@@ -453,6 +456,8 @@ interface LoadedPlaces {
   slackTeam: string;
   /** How many sessions the workspace has: its runtime and its team conversations. */
   sessionCount: number;
+  /** The names of the channels the workspace's lines name, by channel id (`ListPresencePlacesResponse.channelNames`). */
+  channelNames: Record<string, string>;
 }
 
 async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, access: PresenceAccess, now: number): Promise<LoadedPlaces> {
@@ -537,11 +542,16 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (state.wire.lastActivityAt === null || at > state.wire.lastActivityAt) state.wire.lastActivityAt = at;
   };
   const channelNames = new Map<string, string>();
+  // Every channel a line's exact channel filter names. A line over several
+  // channels lists at the Slack workspace, so its channels need not be places.
+  const lineChannels = new Set<string>();
 
   const rules = (await db.select().from(eventSubscriptions).where(and(eq(eventSubscriptions.orgId, orgId), ownedBy(owner))))
     .filter(isListener);
   for (const rule of rules) {
-    for (const [id, label] of channelFilterIds(rule.filters).labels) channelNames.set(id, label);
+    const filtered = channelFilterIds(rule.filters);
+    for (const id of filtered.ids) lineChannels.add(id);
+    for (const [id, label] of filtered.labels) channelNames.set(id, label);
     const own = listenerPlaces(rule, slackTeam);
     for (const place of own) placeFor(place)?.listeners.push(rule);
     // A pull request or issue line also lists at its overview row
@@ -597,15 +607,17 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     if (channelId && natural.label.startsWith("#")) channelNames.set(channelId, natural.label.slice(1));
   }
 
-  // A private Slack channel's place shows only to its members. A check that
-  // fails hides the place, as an unknown audience does.
+  // A private Slack channel's place and name show only to its members. A
+  // check that fails hides both, as an unknown audience does.
   const channelPlaces = [...places.keys()].flatMap((place) => {
     const channelId = slackChannelOf(place);
     return channelId ? [{ place, channelId }] : [];
   });
-  const seen = await mapBounded(channelPlaces, CHANNEL_CHECK_CONCURRENCY,
-    ({ channelId }) => access.canSee(`slack:${channelId}`).catch(() => false));
-  channelPlaces.forEach(({ place }, index) => { if (seen[index] !== true) places.delete(place); });
+  const checked = [...new Set([...channelPlaces.map(({ channelId }) => channelId), ...lineChannels])];
+  const seen = await mapBounded(checked, CHANNEL_CHECK_CONCURRENCY,
+    (channelId) => access.canSee(`slack:${channelId}`).catch(() => false));
+  const visible = new Set(checked.filter((_, index) => seen[index] === true));
+  for (const { place, channelId } of channelPlaces) if (!visible.has(channelId)) places.delete(place);
 
   // Every parent a row names is a row. A parent that only its children name
   // has no counts of its own and takes its children's newest activity.
@@ -624,9 +636,21 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     pending = next;
   }
 
-  const channelIds = [...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null);
+  const channelIds = [...new Set([
+    ...[...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null),
+    ...[...lineChannels].filter((id) => visible.has(id)),
+  ])];
   const resolved = channelIds.length > 0 ? await access.names(channelIds).catch(() => new Map<string, string>()) : new Map<string, string>();
   for (const [id, name] of resolved) channelNames.set(id, name);
+  // The bot's channel list stops at the picker's limit and holds only the
+  // channels the bot has joined. Slack names the rest one at a time.
+  const unnamed = channelIds.filter((id) => !channelNames.has(id));
+  const looked = unnamed.length > 0 ? await access.lookupNames(unnamed).catch(() => new Map<string, string>()) : new Map<string, string>();
+  for (const [id, name] of looked) channelNames.set(id, name);
+  const lineNames = Object.fromEntries([...lineChannels].flatMap((id) => {
+    const name = visible.has(id) ? channelNames.get(id)?.replace(/^#/, "") : undefined;
+    return name && name !== id ? [[id, name]] : [];
+  }));
   for (const state of places.values()) {
     state.wire.label = placeLabel(state.wire.subject, channelNames);
     // The reach describes listeners that list here or roll up here, so a row
@@ -636,7 +660,7 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     state.wire.listenerCount = state.listeners.length + state.rolledUp.length;
     state.wire.activeThreadCount = state.active.size;
   }
-  return { places, slackTeam, sessionCount: sessions.length };
+  return { places, slackTeam, sessionCount: sessions.length, channelNames: lineNames };
 }
 
 function compareConversations(a: ChannelConversation, b: ChannelConversation): number {
@@ -656,7 +680,7 @@ export async function listPresencePlaces(
   const rows = [...loaded.places.values()].map((state) => state.wire);
   rows.sort((a, b) => SERVICES.indexOf(a.service) - SERVICES.indexOf(b.service)
     || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.label.localeCompare(b.label));
-  return { places: rows, sessionCount: loaded.sessionCount };
+  return { places: rows, channelNames: loaded.channelNames, sessionCount: loaded.sessionCount };
 }
 
 /** One place with the rows its page shows. The route maps the rows to their wire shapes. */

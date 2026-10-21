@@ -3,7 +3,10 @@
  * channels a workspace talks and listens in.
  */
 import { Hono, type Context } from "hono";
+import { credentialSecret } from "@valet/engine";
+import { resolveChannelName } from "@valet/plugin-slack/actions";
 import type { AppEnv } from "../env.js";
+import { mapBounded } from "../lib/bounded-map.js";
 import { getChannel, listChannels, type ChannelNames } from "../services/channels.js";
 import { orgSlackCredential, setCapped } from "../services/thread-access.js";
 import { channelsVisibleTo, keepVisibleThreads } from "./_thread-access.js";
@@ -34,6 +37,55 @@ export function slackChannelNames(c: Context<AppEnv>): ChannelNames {
     setCapped(namesCache, orgId, { names, expiresAt: Date.now() + NAMES_TTL_MS });
     return names;
   };
+}
+
+/** The most channels one lookup asks Slack about. A later lookup asks about the rest. */
+const LOOKUP_LIMIT = 20;
+const LOOKUP_CONCURRENCY = 5;
+/**
+ * What `conversations.info` answered, by `<org>:<channel>`. A null name
+ * records a channel Slack did not name, such as one the bot cannot read, so a
+ * lookup asks Slack again only after the entry expires.
+ */
+const lookupCache = new Map<string, { name: string | null; expiresAt: number }>();
+
+/**
+ * Slack channel names from `conversations.info` with the org's bot
+ * credential, one channel at a time. It names a channel that the bot's
+ * channel list (`slackChannelNames`) leaves out: that list stops at the
+ * picker's limit, and it holds only channels the bot has joined. One lookup
+ * asks Slack about at most `LOOKUP_LIMIT` channels with no current answer.
+ * An expired answer still names its channel until Slack answers again. No
+ * credential leaves the ids.
+ */
+export function slackChannelLookup(c: Context<AppEnv>): ChannelNames {
+  return async (channelIds) => {
+    const orgId = c.var.user.orgId;
+    const now = Date.now();
+    const names = new Map<string, string>();
+    const ask: string[] = [];
+    for (const id of new Set(channelIds)) {
+      const known = lookupCache.get(`${orgId}:${id}`);
+      if ((known === undefined || known.expiresAt <= now) && ask.length < LOOKUP_LIMIT) ask.push(id);
+      else if (known?.name) names.set(id, known.name);
+    }
+    if (ask.length === 0) return names;
+    const token = credentialSecret(await orgSlackCredential(c.var.providers, orgId));
+    if (!token) return names;
+    const found = await mapBounded(ask, LOOKUP_CONCURRENCY, (id) => resolveChannelName(token, id));
+    ask.forEach((id, index) => {
+      const name = found[index] ?? null;
+      setCapped(lookupCache, `${orgId}:${id}`, { name, expiresAt: now + NAMES_TTL_MS });
+      if (name) names.set(id, name);
+    });
+    return names;
+  };
+}
+
+/** Forgets the channel names that `slackChannelNames` and `slackChannelLookup` hold. Tests only. */
+export function resetChannelNameCaches(): void {
+  namesCache.clear();
+  lookupCache.clear();
 }
 
 workspaceChannelsRouter.get("/:workspace/channels", async (c) => {

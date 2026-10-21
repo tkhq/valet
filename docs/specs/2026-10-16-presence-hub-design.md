@@ -270,6 +270,18 @@ Pass criterion: all steps, in one run, from a clean start.
     `MATERIALIZED`, so PostgreSQL cannot inline it and repeat the walks
     for each thread row. A read slower than one
     second logs one line with its scope, duration, and session count.
+    The places read also returns `channelNames`: the name of each Slack
+    channel that an exact `channel` filter of the workspace's lines names,
+    by channel id. A line over several channels lists at the Slack
+    workspace, so each of its channels is a place only when a thread, a
+    follow, a waiter, or a recent event names it. A private channel's name
+    shows only to its members, as its place does. A channel's name comes
+    from the bot's channel list, else a filter's label or a recent event,
+    else Slack's `conversations.info`. The bot's channel list holds at most
+    100 channels, and only channels the bot has joined. One read asks
+    `conversations.info` about at most 20 channels with no current answer.
+    The api keeps each answer for five minutes. A later read reuses those
+    answers and asks about the channels that are still unnamed.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.
@@ -313,7 +325,9 @@ Pass criterion: all steps, in one run, from a clean start.
    post a message in #incidents`). A labeled sender on a mention line is
    the actor (`When Alice mentions Valet`). A Slack channel in `<place>`
    reads the filter's own label, then the channel's name from the places
-   list (`#proj-valet`), then the raw channel id.
+   read (`#proj-valet`), then the raw channel id. The places read names
+   every channel that a line's exact `channel` filter names, also a channel
+   that is no place (Part B step 10).
 
    For a Slack mention, `<event in words>` names who mentions Valet. The
    api scopes a personal, org, or workflow mention line to its creator

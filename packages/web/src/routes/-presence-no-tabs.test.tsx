@@ -90,7 +90,7 @@ function json(body: unknown, status = 200): Response {
 
 function answer(url: URL): Response {
   const path = url.pathname;
-  if (path === "/api/presence/places") return json({ places: [SLACK_ROOT, INCIDENTS] } satisfies ListPresencePlacesResponse);
+  if (path === "/api/presence/places") return json({ places: [SLACK_ROOT, INCIDENTS], channelNames: {} } satisfies ListPresencePlacesResponse);
   if (path.startsWith("/api/presence/places/")) {
     const detail: PresencePlaceDetailResponse = {
       place: INCIDENTS, listeners: [SUB_1], threads: { subject: [], following: [], active: [] }, activity: [],

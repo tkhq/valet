@@ -1,12 +1,12 @@
 /**
  * The people and places a Presence sentence may name: the viewer, every org
- * member by user id, and every Slack channel on the places list by channel id.
+ * member by user id, and every Slack channel the places read names, by channel id.
  * A mention line created by someone else reads `When <name> mentions Valet`,
  * and a channel filter saved without a label reads the channel's name
  * (docs/specs/2026-10-16-presence-hub-design.md Part C step 2). The member
  * directory is readable by every member, unlike the admin roster.
  */
-import type { PresencePlaceWire } from "@valet/api/wire";
+import type { ListPresencePlacesResponse, PresencePlaceWire } from "@valet/api/wire";
 import { usePresencePlaces } from "~/api/presence";
 import { useOrgDirectory, useMe } from "~/api/settings";
 import type { SentenceNames } from "./sentences";
@@ -33,6 +33,20 @@ export function channelNames(places: readonly Pick<PresencePlaceWire, "subject" 
 }
 
 /**
+ * Slack channel names by channel id for a sentence: the names the places
+ * read gives for the channels the lines name, and the names of the Slack
+ * channel places on it and in `known`. A line over several channels lists
+ * at the Slack workspace, so a channel with no recent event need not be a
+ * place. Then only the read's `channelNames` names it.
+ */
+export function sentenceChannels(
+  read: Partial<ListPresencePlacesResponse> | undefined,
+  known: readonly Pick<PresencePlaceWire, "subject" | "label">[] = [],
+): Record<string, string> {
+  return { ...read?.channelNames, ...channelNames([...(read?.places ?? []), ...known]) };
+}
+
+/**
  * `known` adds places the caller already has, such as a place page's own
  * channel, so its name shows before the places list loads.
  */
@@ -45,6 +59,6 @@ export function useSentenceNames(known: readonly Pick<PresencePlaceWire, "subjec
     const name = user.name.trim() || user.email;
     if (name.length > 0) members[user.userId] = name;
   }
-  const channels = channelNames([...(places.data?.places ?? []), ...known]);
+  const channels = sentenceChannels(places.data, known);
   return { members, channels, ...(me.data?.id !== undefined ? { me: me.data.id } : {}) };
 }

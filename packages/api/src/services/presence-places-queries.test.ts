@@ -103,6 +103,7 @@ async function countedPlaces(a: TestApi, teamId: string) {
   const shownCalls: Array<Array<{ sessionId: string; threadId: string }>> = [];
   const access: PresenceAccess = {
     names: async () => new Map(),
+    lookupNames: async () => new Map(),
     canSee: async () => true,
     threadsShown: async (threads) => {
       shownCalls.push([...threads]);
