@@ -63,6 +63,12 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+vi.mock("~/api/settings", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/settings")>()),
+  // Prompt recall reads the signed-in person; the fixtures' prompts are theirs.
+  useMe: () => ({ data: { id: "user-1" } }),
+}));
+
 vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
@@ -1169,7 +1175,7 @@ describe("Composer — reply target", () => {
 
 describe("Composer prompt recall", () => {
   function sent(id: string, content: string, threadId = "thread-1"): StreamMessage {
-    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1 };
+    return { id, sessionId: "orchestrator:user-1", threadId, role: "user", content, parts: [], createdAt: 1, author: { id: "user-1" } };
   }
 
   it("steps through this thread's earlier prompts with Up and Down", () => {
@@ -1226,6 +1232,20 @@ describe("Composer prompt recall", () => {
     fireEvent.keyDown(box, { key: "ArrowUp" });
     fireEvent.change(box, { target: { value: "/st" } });
     expect(screen.getByRole("listbox")).toBeTruthy();
+  });
+
+  it("treats typed text that matches an earlier prompt as a draft after a recall is sent", async () => {
+    streamMessagesRef.current = [sent("m1", "earlier prompt"), sent("m2", "continue")];
+    renderComposer();
+    const box = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("continue");
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ text: "continue" })));
+
+    fireEvent.change(box, { target: { value: "continue" } });
+    fireEvent.keyDown(box, { key: "ArrowUp" });
+    expect(box.value).toBe("continue");
   });
 
   it("sends a recalled prompt as a new message", async () => {

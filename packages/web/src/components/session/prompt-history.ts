@@ -5,8 +5,11 @@ import { useStreamStore, type StreamMessage } from "~/stores/stream";
 /**
  * The viewer's earlier prompts in one thread, oldest first: what the
  * composer's Up and Down keys step through. A teammate's message, a channel
- * sender's message, and a signal card are not the viewer's prompts. A
- * repeat of the prompt just before it is kept once.
+ * sender's message, and a signal card are not the viewer's prompts. Neither
+ * is a message with no author, such as a delegated task's brief, which an
+ * agent wrote; the one exception is the composer's own optimistic copy of a
+ * prompt the viewer just sent. A repeat of the prompt just before it is kept
+ * once.
  */
 export function promptHistory(
   messages: readonly StreamMessage[],
@@ -17,11 +20,25 @@ export function promptHistory(
   for (const message of messages) {
     if (message.role !== "user" || message.threadId !== threadId || message.signal) continue;
     const author = message.author;
-    if (author && (author.id !== viewerId || author.externalSender)) continue;
-    const text = message.content.trim();
+    const own = author ? author.id === viewerId && !author.externalSender : message.persistence === "optimistic";
+    if (!own) continue;
+    const text = typedText(message);
     if (text && history.at(-1) !== text) history.push(text);
   }
   return history;
+}
+
+/**
+ * The text the person typed for one message. A skill invocation reads as the
+ * slash command it came from: the server stores the expanded skill body as
+ * the content and keeps the command in `skill`.
+ */
+function typedText(message: StreamMessage): string {
+  if (message.skill) {
+    const args = message.skill.args?.trim();
+    return args ? `/${message.skill.name} ${args}` : `/${message.skill.name}`;
+  }
+  return message.content.trim();
 }
 
 /** Where the composer stands in the history: the recalled index, or null for the person's own draft. */
@@ -36,6 +53,8 @@ export interface HistoryStep {
  * Up starts only from an empty composer, and both keys step only while the
  * composer shows a recalled prompt unchanged. Up acts on the first line and
  * Down on the last line, so the arrows still move through a long prompt.
+ * Lines are the prompt's own line breaks: a prompt that only wraps on screen
+ * counts as one line, so Up anywhere in it steps to an older prompt.
  * Down past the newest prompt empties the composer.
  */
 export function stepHistory(

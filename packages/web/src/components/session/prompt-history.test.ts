@@ -7,20 +7,36 @@ function message(id: string, content: string, extra?: Partial<StreamMessage>): S
 }
 
 describe("promptHistory", () => {
+  const mine = { author: { id: "u1" } };
+
   it("keeps the viewer's prompts in this thread, oldest first, without a repeat in a row", () => {
     expect(promptHistory([
-      message("m1", "first"),
+      message("m1", "first", mine),
       message("m2", "reply", { role: "assistant" }),
-      message("m3", "other thread", { threadId: "t2" }),
-      message("m4", " second \n"),
-      message("m5", "second"),
+      message("m3", "other thread", { ...mine, threadId: "t2" }),
+      message("m4", " second \n", mine),
+      message("m5", "second", mine),
       message("m6", "teammate", { author: { id: "u2", name: "Pat" } }),
       message("m7", "channel sender", { author: { id: "u1", name: "Slack person", externalSender: true } }),
-      message("m8", "child settled", { signal: { signalType: "child.settled" } }),
-      message("m9", "mine, signed", { author: { id: "u1" } }),
-      message("m10", "/compact"),
-      message("m11", "   "),
+      message("m8", "child settled", { ...mine, signal: { signalType: "child.settled" } }),
+      message("m9", "mine, signed", mine),
+      message("m10", "/compact", mine),
+      message("m11", "   ", mine),
     ], "t1", "u1")).toEqual(["first", "second", "mine, signed", "/compact"]);
+  });
+
+  it("leaves out an unauthored message an agent wrote, but keeps the viewer's optimistic copy", () => {
+    expect(promptHistory([
+      message("m1", "Delegated brief: audit every workflow and report back."),
+      message("m2", "just sent", { persistence: "optimistic" }),
+    ], "t1", "u1")).toEqual(["just sent"]);
+  });
+
+  it("recalls a skill invocation as the slash command, not the expanded skill body", () => {
+    expect(promptHistory([
+      message("m1", "<skill name=\"review\">Long review instructions…</skill>\n\nfix the bug", { ...mine, skill: { name: "review", args: "fix the bug" } }),
+      message("m2", "<skill name=\"status\">Status instructions…</skill>", { ...mine, skill: { name: "status" } }),
+    ], "t1", "u1")).toEqual(["/review fix the bug", "/status"]);
   });
 });
 

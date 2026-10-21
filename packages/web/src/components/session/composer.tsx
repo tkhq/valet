@@ -602,6 +602,8 @@ export function Composer({
   }
 
   async function submit() {
+    // A sent recall is no longer a recall; the next Up starts from the newest prompt.
+    recalled.current = { key, index: null };
     if (submitting.current || send.isPending || !threadId || uploadsPending) return;
     // A send uses this composer even when its text came from a prefill.
     lastUsedComposer = identity.current;
@@ -1052,7 +1054,12 @@ export function Composer({
           <Textarea
             ref={inputRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              // Typing ends a recall: text that matches an earlier prompt by
+              // hand is the person's draft, and Up must not replace it.
+              recalled.current = { key, index: null };
+              setText(e.target.value);
+            }}
             onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
             onKeyDown={onKeyDown}
             onPaste={onPaste}
