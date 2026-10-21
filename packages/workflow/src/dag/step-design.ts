@@ -65,9 +65,11 @@ const SCHEDULE_DATA_KEYS: ReadonlySet<string> = new Set(['scheduleName', 'cron',
 
 /**
  * The `trigger.data.<field>` reads that are empty on a scheduled run, by
- * node id. A foreach body counts under the foreach's id. A field that the
- * same template also reads as `trigger.data.input.<field>` works on both
- * kinds of run, so it is left out.
+ * node id. A foreach body counts under the foreach's id, and an edge's
+ * `when` counts under the edge's `from` node, where the branch is decided.
+ * A field that the same template or expression also reads as
+ * `trigger.data.input.<field>` works on both kinds of run, so it is left
+ * out.
  */
 export function scheduledRunMisses(definition: unknown): Map<string, string[]> {
   const misses = new Map<string, string[]>();
@@ -77,6 +79,14 @@ export function scheduledRunMisses(definition: unknown): Map<string, string[]> {
     const fields = new Set<string>();
     collectMisses(node, fields);
     if (fields.size > 0) misses.set(node.id, [...fields]);
+  }
+  if (Array.isArray(definition.edges)) {
+    for (const edge of definition.edges) {
+      if (!isRecord(edge) || typeof edge.from !== 'string' || typeof edge.when !== 'string') continue;
+      const fields = new Set(misses.get(edge.from));
+      addMisses(edge.when.includes('{{') ? collectTemplateValuePaths(edge.when) : collectExpressionValuePaths(edge.when), fields);
+      if (fields.size > 0) misses.set(edge.from, [...fields]);
+    }
   }
   return misses;
 }

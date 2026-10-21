@@ -49,4 +49,16 @@ describe('scheduledRunMisses', () => {
     };
     expect([...scheduledRunMisses(definition)]).toEqual([['gate', ['push']], ['each', ['channel']]]);
   });
+
+  it('lists a trigger.data read in an edge condition under the edge\'s from node', () => {
+    const definition = {
+      nodes: [{ id: 'start', type: 'trigger' }, { id: 'publish', type: 'session', prompt: 'go' }, { id: 'skip', type: 'stop' }],
+      edges: [
+        { from: 'start', to: 'publish', when: 'trigger.data.push' },
+        { from: 'start', to: 'skip', when: '!trigger.data.push' },
+        { from: 'publish', to: 'skip', when: 'trigger.data.input.dry || trigger.data.dry' },
+      ],
+    };
+    expect([...scheduledRunMisses(definition)]).toEqual([['start', ['push']]]);
+  });
 });
