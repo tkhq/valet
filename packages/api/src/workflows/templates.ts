@@ -1047,21 +1047,21 @@ function withInstallStep(reason: string): string {
  * must parse. The transaction then only writes.
  */
 /**
- * The name suffix for the next install of a template named `base`: empty for
- * the first install, else one more than the highest number in use. A deleted
- * earlier install leaves its number unused, so a later install never repeats
- * a number that a remaining install still shows.
+ * The highest install number that `names` use for a template named `base`:
+ * 0 when none does, 1 for the bare name, n for `base (n)`. The next install
+ * takes one more, so a deleted earlier install leaves its number unused and a
+ * later install never repeats a number that a remaining install still shows.
  */
-export function nextInstallSuffix(base: string, names: readonly string[]): string {
+export function installNumber(base: string, names: readonly string[]): number {
   let highest = 0;
   for (const name of names) {
     if (name === base) highest = Math.max(highest, 1);
     else if (name.startsWith(`${base} (`) && name.endsWith(")")) {
-      const n = Number(name.slice(base.length + 2, -1));
-      if (Number.isInteger(n) && n > 0) highest = Math.max(highest, n);
+      const digits = name.slice(base.length + 2, -1);
+      if (/^[1-9][0-9]*$/.test(digits)) highest = Math.max(highest, Number(digits));
     }
   }
-  return highest === 0 ? "" : ` (${highest + 1})`;
+  return highest;
 }
 
 export async function installWorkflowTemplate(
@@ -1413,8 +1413,26 @@ export async function installWorkflowTemplate(
         ),
       );
     // The schedule carries the same count, so a routine reads with the name
-    // of the workflow it runs, and two installs stay apart in the schedules list.
-    const installCount = nextInstallSuffix(owned.template.name, siblings.map((row) => row.name));
+    // of the workflow it runs, and two installs stay apart in the schedules
+    // list. A renamed workflow keeps its routine's name, so the routines'
+    // names count too.
+    const routines = schedule
+      ? await tx
+        .select({ name: workflowSchedules.name })
+        .from(workflowSchedules)
+        .where(
+          and(
+            eq(workflowSchedules.ownerType, ownerType),
+            eq(workflowSchedules.ownerId, ownerId),
+            or(eq(workflowSchedules.name, schedule.name), like(workflowSchedules.name, `${schedule.name} (%`)),
+          ),
+        )
+      : [];
+    const inUse = Math.max(
+      installNumber(owned.template.name, siblings.map((row) => row.name)),
+      schedule ? installNumber(schedule.name, routines.map((row) => row.name)) : 0,
+    );
+    const installCount = inUse === 0 ? "" : ` (${inUse + 1})`;
     workflowName = `${owned.template.name}${installCount}`;
 
     await tx.insert(workflowDefinitions).values({

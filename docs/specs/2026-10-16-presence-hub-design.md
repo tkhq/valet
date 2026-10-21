@@ -491,7 +491,9 @@ Pass criterion: all steps, in one run, from a clean start.
    memory sweep.` A template install names its routine after the workflow
    it installs, with the same install count (`Nightly memory sweep (2)`).
    The count is one more than the highest number in use, so deleting an
-   earlier install never makes a later one repeat a number. Installs of one
+   earlier install never makes a later one repeat a number. The count reads
+   the owner's workflow names and routine names, because a renamed workflow
+   keeps its routine's name. Installs of one
    template for one owner run one at a time. The row keeps the routine's own
    name as written (`iOS release check`); only the leadless `Run <workflow>`
    form gets a capital.

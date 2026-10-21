@@ -36,7 +36,7 @@ import {
   installWorkflowTemplate,
   listPluginTemplates,
   listWorkflowTemplateSummaries,
-  nextInstallSuffix,
+  installNumber,
   templateInputs,
   type TemplateServiceDeps,
 } from "./templates.js";
@@ -1158,6 +1158,21 @@ describe("installWorkflowTemplate", () => {
     expect(new Set(schedules.map((s) => s.workflowId))).toEqual(new Set([first.workflowId, second.workflowId]));
   });
 
+  it("gives a later install a routine name that a renamed install's routine does not use", async () => {
+    await connect("gmail");
+    const first = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    const second = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!first.ok || !second.ok) throw new Error("expected both installs to succeed");
+    // A rename changes the workflow's name; its routine keeps `Inbox sweeper (2)`.
+    await db.update(workflowDefinitions).set({ name: "My triage" }).where(eq(workflowDefinitions.id, second.workflowId));
+
+    const third = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
+    if (!third.ok) throw new Error("expected the install to succeed");
+    expect(third.workflowName).toBe("Inbox sweeper (3)");
+    const names = (await db.select().from(workflowSchedules)).map((s) => s.name).sort();
+    expect(names).toEqual(["Inbox sweeper", "Inbox sweeper (2)", "Inbox sweeper (3)"]);
+  });
+
   it("never repeats a number that a remaining install still shows after an earlier one is deleted", async () => {
     await connect("gmail");
     const installs = [];
@@ -1561,15 +1576,15 @@ describe("team GitHub template repository prerequisites", () => {
   });
 });
 
-describe("nextInstallSuffix", () => {
-  it("numbers an install one past the highest number in use", () => {
-    expect(nextInstallSuffix("Inbox sweeper", [])).toBe("");
-    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper"])).toBe(" (2)");
-    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper", "Inbox sweeper (3)"])).toBe(" (4)");
-    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper (2)"])).toBe(" (3)");
+describe("installNumber", () => {
+  it("reads the highest install number in use", () => {
+    expect(installNumber("Inbox sweeper", [])).toBe(0);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper"])).toBe(1);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper", "Inbox sweeper (3)"])).toBe(3);
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (2)"])).toBe(2);
   });
 
   it("ignores a name that only starts like the template's", () => {
-    expect(nextInstallSuffix("Inbox sweeper", ["Inbox sweeper (draft)", "Inbox sweeper (0)", "Inbox sweeper (2.5)"])).toBe("");
+    expect(installNumber("Inbox sweeper", ["Inbox sweeper (draft)", "Inbox sweeper (0)", "Inbox sweeper (2.5)", "Inbox sweeper (1e9)"])).toBe(0);
   });
 });
