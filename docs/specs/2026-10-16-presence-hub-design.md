@@ -397,7 +397,10 @@ Pass criterion: all steps, in one run, from a clean start.
       reads the stored line at mount, and the patch diffs against that
       copy. While the form is clean, a refetched line that reads
       differently mounts a new form on it; while the reader has a change,
-      the form keeps it. Amended 2026-10-20: How it works was three
+      the form keeps it. A move to another line's page starts a new form,
+      so a change is never saved to a different line. The form is locked
+      while a save is in flight. After a save that stores the line with
+      overlaps, the form is frozen and leaving does not ask. Amended 2026-10-20: How it works was three
       read-only columns with an explanation each and a `Change` that opened
       the sheet on that section.
    7. **Activity**: one timeline, grouped by day, newest first, with chips

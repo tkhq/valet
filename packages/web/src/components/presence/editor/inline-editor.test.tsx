@@ -22,6 +22,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 let blockerOn = false;
+let patchPending = false;
 const patchSubscription = vi.fn();
 const updateSchedule = vi.fn();
 const catalogData = {
@@ -37,7 +38,7 @@ vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: { subscriptions: [] } }),
   useCreateEventSubscription: () => ({ mutate: vi.fn(), isPending: false }),
-  usePatchEventSubscription: () => ({ mutate: patchSubscription, isPending: false }),
+  usePatchEventSubscription: () => ({ mutate: patchSubscription, isPending: patchPending }),
   useFilterOptions: () => ({ data: { options: [], reason: "Connect first." }, isLoading: false }),
 }));
 function plugin(name: string): PluginSummary {
@@ -88,6 +89,7 @@ beforeEach(() => {
   patchSubscription.mockReset();
   updateSchedule.mockReset();
   blockerOn = false;
+  patchPending = false;
 });
 
 describe("InlineEditor", () => {
@@ -140,6 +142,34 @@ describe("InlineEditor", () => {
     fireEvent.click(within(bar() ?? document.body).getByRole("button", { name: "Save" }));
     const { body } = patchSubscription.mock.calls[0]?.[0] as { body: PatchEventSubscriptionRequest };
     expect(body).toEqual({ thread: { mode: "new" } });
+  });
+
+  it("starts over for another line, so it never saves one line's change to a different line", () => {
+    const { rerender } = render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
+    fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
+    expect(bar()).not.toBeNull();
+    const other = { ...CHECK_LINE, id: "l2", name: "Deploy failures" };
+    rerender(<InlineEditor mode={{ kind: "edit", line: other }} readOnly={false} />);
+    expect(bar()).toBeNull();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Deploy failures");
+    expect((screen.getByRole("radio", { name: "Its own thread" }) as HTMLInputElement).checked).toBe(true);
+    expect(blockerOn).toBe(false);
+  });
+
+  it("locks the form while a save is in flight", () => {
+    patchPending = true;
+    render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
+    expect(form().querySelector("fieldset")?.disabled).toBe(true);
+  });
+
+  it("does not ask before leaving once a save stored the line with overlaps", () => {
+    patchSubscription.mockImplementation((_vars: unknown, handlers: { onSuccess: (resp: { id: string; collisions?: unknown }) => void }) =>
+      handlers.onSuccess({ id: "l1", collisions: { blocking: [], overlapping: [] } }));
+    render(<InlineEditor mode={{ kind: "edit", line: CHECK_LINE }} readOnly={false} />);
+    fireEvent.click(screen.getByRole("radio", { name: "A new thread each time" }));
+    expect(blockerOn).toBe(true);
+    fireEvent.click(within(bar() ?? document.body).getByRole("button", { name: "Save" }));
+    expect(blockerOn).toBe(false);
   });
 
   it("shows a read-only viewer the form, disabled, with no bar", () => {

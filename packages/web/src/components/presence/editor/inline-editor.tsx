@@ -32,12 +32,25 @@ function seedKey(mode: InlineMode): string {
 
 const alwaysBlock = () => true;
 
-export function InlineEditor({ mode, readOnly, onSaved }: {
+/** The stored row a mode edits. */
+function modeId(mode: InlineMode): string {
+  return mode.kind === "edit" ? `line:${mode.line.id}` : `routine:${mode.routine.id}`;
+}
+
+interface InlineEditorProps {
   mode: InlineMode;
   /** True when the viewer may not change it: the form shows, disabled. */
   readOnly: boolean;
   onSaved?(result: EditorSaved): void;
-}) {
+}
+
+export function InlineEditor(props: InlineEditorProps) {
+  // The router reuses a page when only its id changes. A form for another row
+  // starts over, so it never saves one row's changes to a different row.
+  return <RowEditor key={modeId(props.mode)} {...props} />;
+}
+
+function RowEditor({ mode, readOnly, onSaved }: InlineEditorProps) {
   const key = seedKey(mode);
   const [dirty, setDirty] = useState(false);
   const [seed, setSeed] = useState({ mode, key, generation: 0 });
@@ -73,7 +86,9 @@ function InlineForm({ mode, readOnly, onDirtyChange, onRestart, onSaved }: {
   const form = useEditorForm(mode, { onSaved, onFinish: onRestart, inline: true });
   const { dirty, sideProps } = form;
   useEffect(() => onDirtyChange(dirty), [dirty]);
-  const leave = useBlocker({ shouldBlockFn: alwaysBlock, disabled: !dirty, withResolver: true });
+  // A save that stored the row with overlaps freezes the form: nothing is
+  // left to lose, so leaving does not ask.
+  const leave = useBlocker({ shouldBlockFn: alwaysBlock, disabled: !dirty || form.frozen, withResolver: true });
   const showBar = !readOnly && (dirty || form.frozen || sideProps.error !== null || (sideProps.collisions ?? null) !== null);
 
   return (

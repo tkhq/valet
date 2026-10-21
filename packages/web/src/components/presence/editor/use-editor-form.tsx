@@ -413,7 +413,10 @@ export function useEditorForm(openedMode: EditorMode, { onSaved, onFinish, inlin
     const row = (id: SectionId) => ({ open: isOpen(id), ...(toggle !== undefined ? { onToggle: () => toggle(id) } : {}) });
     return (
       // After a save with overlaps the line is stored: the form reads it, and nothing in it changes.
-      <fieldset ref={formRef} disabled={disabled || frozen} className="m-0 min-w-0 border-0 p-0">
+      // While a save is in flight the form is locked too: a change made then
+      // would diff against the row loaded before the save, and a revert to it
+      // would be dropped.
+      <fieldset ref={formRef} disabled={disabled || frozen || pending} className="m-0 min-w-0 border-0 p-0">
         <Section
           id="when"
           name="When"
