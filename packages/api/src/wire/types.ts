@@ -1169,6 +1169,14 @@ export interface PresencePlaceWire {
 /** `GET /api/presence/places?scope=<workspace>`. Rows are ordered Slack, GitHub, Linear, then newest activity first. */
 export interface ListPresencePlacesResponse {
   places: PresencePlaceWire[];
+  /**
+   * The name without `#` of each Slack channel that an exact `channel`
+   * filter of the workspace's lines names, by channel id, such as
+   * `{ C900: "incidents" }`. A line over several channels lists at the Slack
+   * workspace, so its channels need not be places. A channel the viewer may
+   * not see, or one with no known name, has no entry.
+   */
+  channelNames: Record<string, string>;
 }
 
 /** `GET /api/presence/places/:subject?scope=<workspace>`. A parent row's thread lists include its child places' threads. */

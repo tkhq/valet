@@ -22,6 +22,15 @@ import { isAssistantKind } from "../events/target-names.js";
 /** Resolves Slack channel ids to names. Missing ids keep their id. */
 export type ChannelNames = (channelIds: string[]) => Promise<Map<string, string>>;
 
+/** A Slack channel the org's bot has joined. */
+export interface DirectoryChannel {
+  name: string;
+  isPrivate: boolean;
+}
+
+/** Every live Slack channel the org's bot has joined, by channel id. */
+export type ChannelDirectory = () => Promise<ReadonlyMap<string, DirectoryChannel>>;
+
 interface ChannelState {
   summary: ChannelSummary;
   conversations: Map<string, ChannelConversation>;
