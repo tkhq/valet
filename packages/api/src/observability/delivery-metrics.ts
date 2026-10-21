@@ -68,3 +68,16 @@ export function registerAttentionQueueMetrics(db: import("../lib/drizzle.js").Ap
     result.observe(oldest ? Math.max(0, (Date.now() - oldest.createdAt) / 1_000) : 0);
   });
 }
+
+let attentionRejectedCounter: Counter | undefined;
+
+/** Definite recipient rejections are terminal, separate from retryable recovery failures. */
+export function recordAttentionDeliveryRejected(channel: string, reason: string): void {
+  attentionRejectedCounter ??= metrics.getMeter("@valet/api").createCounter("valet_attention_delivery_rejected", {
+    description: "Terminal personal attention rejections by provider and bounded reason",
+  });
+  attentionRejectedCounter.add(1, {
+    channel: ["slack", "telegram"].includes(channel) ? channel : "other",
+    reason: ["bot_blocked", "user_deactivated", "user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"].includes(reason) ? reason : "other",
+  });
+}

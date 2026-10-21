@@ -706,6 +706,8 @@ export const pendingChannelDeliveries = pgTable("pending_channel_deliveries", {
   deliverAfter: bigint("deliver_after", { mode: "number" }).notNull(),
   status: text("status", { enum: ["pending", "sending", "sent", "dropped"] }).notNull().default("pending"),
   sendingAt: bigint("sending_at", { mode: "number" }),
+  firstSendingAt: bigint("first_sending_at", { mode: "number" }),
+  deliveryToken: text("delivery_token").notNull().default(sql`gen_random_uuid()::text`),
   attempts: integer("attempts").notNull().default(0),
   messageRefs: jsonb("message_refs").$type<import("../orchestrator/attention.js").AttentionDeliveryRef[]>(),
   lastError: text("last_error"),

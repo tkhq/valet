@@ -181,7 +181,7 @@ export class TelegramTransport implements ChannelTransport {
 
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const chatId = chatIdFromConversationKey(conversationKey);
-    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown) });
+    const res = await this.api.sendMessage({ chatId, html: markdownToTelegramHtml(message.markdown), attention: message.attentionDeliveryId !== undefined });
     return { conversationKey, messageId: String(res.messageId) };
   }
 
@@ -213,7 +213,7 @@ export class TelegramTransport implements ChannelTransport {
     }));
     // An open question has no buttons; send no keyboard rather than an empty row.
     const res = await this.api.sendMessage({
-      chatId, html, ...(buttons.length > 0 ? { replyMarkup: { inline_keyboard: [buttons] } } : {}),
+      chatId, html, attention: gate.attentionDeliveryId !== undefined, ...(buttons.length > 0 ? { replyMarkup: { inline_keyboard: [buttons] } } : {}),
     });
     return { conversationKey, messageId: String(res.messageId) };
   }

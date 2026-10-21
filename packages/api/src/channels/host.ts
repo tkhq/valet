@@ -1965,7 +1965,7 @@ export class ChannelHost {
           const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId, true) : `${channelType}:dm:${link.externalId}`;
           const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt);
           if (!ref) return undefined;
-          if (event.gate && ref.gateId === event.gate.id && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id)) {
+          if (event.gate && ref.gateCard === true && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id)) {
             this.gateActions.set(event.gate.id, event.gate.actions);
             this.recordGatePrompt(event.gate.id, ref, event.sessionId);
             try {
@@ -1988,7 +1988,7 @@ export class ChannelHost {
           if (channelTypeFilter && (!link || link.notifyAttention === false)) return [];
           throw new Error("No attention transport is running. Retry after channel startup.");
         }
-        const attentionDeliveryId = attempt?.deliveryId ?? event.dedupeKey ?? randomUUID();
+        const attentionDeliveryId = attempt?.deliveryId ?? randomUUID();
         const refs: AttentionDeliveryRef[] = [];
         const failures: unknown[] = [];
         for (const [channelType, transport] of transports()) {

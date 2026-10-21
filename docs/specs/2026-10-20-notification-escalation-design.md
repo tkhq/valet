@@ -103,6 +103,9 @@ A later dispatcher pass always checks durable gate state.
 ## Delivery boundary
 
 A conditional update moves each due job to `sending` and records `sending_at`.
+It sets `first_sending_at` only when that field is null, using the prior `sending_at` for legacy rows.
+Later claims never move that first unreconciled send time.
+Reconciliation searches from that time minus the provider clock-skew window.
 The same statement moves its next deadline forward by two minutes from the claim time, not the batch start.
 The update repeats the due predicate to fence concurrent workers.
 Only the winning worker sends.
@@ -125,19 +128,32 @@ An uncertain send may produce a duplicate.
 This is intentional: a lost approval notification is worse than a duplicate.
 
 Slack sends plain attention DMs and approval cards with message metadata:
-`event_type: valet_attention` and `event_payload.delivery_id` equal to the durable job identifier.
+`event_type: valet_attention` identifies summaries; `valet_attention_gate` identifies interactive cards.
+Both metadata payloads contain only `delivery_id`, an opaque random token stored in the row's `delivery_token` column.
+The producer generates a new UUID per inserted row. Replays retain the existing token.
+Schema repairs give existing rows a random token.
+Neither metadata payload contains a gate id, resume key, derived job id, or action arguments.
+Direct calls without a durable row also generate a random token.
 Its reconciliation hook reads recent DM history with metadata included.
 The lookup checks at most five pages of 100 messages.
 Each history request has a two-second timeout and does not retry rate limits.
 Missing history permissions cause a resend, not a lost notification.
-Approval metadata also records `event_payload.gate_id`.
+The card event type distinguishes an authorized card from a summary without exposing its gate id.
+The host maps the row token back to its local gate event during reconciliation.
 Reconciliation restores gate callbacks only for an actual gate card and a currently authorized recipient.
 A plain summary never becomes a gate card during recovery.
 A failed callback-ref save is logged but does not resend a confirmed message.
 Saving the same gate reference twice is idempotent.
 Transports without history reconciliation still recover by resending.
 
-A provider failure retains `sending` and its error for the next recovery attempt.
+A transient or unknown provider failure retains `sending` and its error for the next recovery attempt.
+Definite per-recipient rejections instead mark the job `dropped` on the first attempt.
+Slack rejects `user_not_found`, `account_inactive`, `cannot_dm_bot`, and DM `channel_not_found`.
+Telegram rejects a 403 response that states the user blocked the bot or is deactivated.
+Plugins normalize these replies to `ChannelDeliveryRejectedError`.
+Mixed permanent and transient failures keep retrying.
+The rejection counter exports as `valet_attention_delivery_rejected_total`, with bounded `channel` and `reason` labels.
+Rejected rows do not increment the recovery-failure counter and do not enter the oldest-job gauge.
 Failed sends use exponential backoff from two minutes to 30 minutes.
 Fresh deliveries sort ahead of retrying jobs.
 There is no retry limit or age cutoff for an unhandled notification.
@@ -155,7 +171,8 @@ Only attention Slack posts, DM opens, and delivery-time audience checks use a te
 That deadline includes rate-limit waits and response body reads.
 Reconciliation keeps its two-second per-history-request deadline.
 Shared Slack API callers, uploads, downloads, and connection requests retain their prior timeout behavior.
-Telegram sends have a ten-second request timeout.
+Only attention Telegram messages and gate cards have a ten-second request timeout.
+Ordinary sends, photos, documents, and downloads retain their prior timeout behavior.
 Telegram long polls retain a 40-second bound and the caller's cancellation signal.
 
 Completed job keys and confirmed refs remain stored to prevent producer replay.
@@ -191,3 +208,5 @@ Regression tests cover nonblocking routing, independent transport batches, bound
 They cover bounded startup deferral, session and local-stub presence, terminal-payload scrubbing, and transient audience failures.
 They also cover queue-age metrics and alerts, re-draining, permanent Slack denial, long rate-limit waits, and attention-only deadlines.
 Recovery tests distinguish summaries from cards and tolerate failed callback-ref saves.
+
+Regression tests cover summary metadata secrecy, stable row tokens, terminal provider rejection, earliest-send recovery, and ordinary Telegram operations over ten seconds.

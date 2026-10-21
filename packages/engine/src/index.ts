@@ -232,6 +232,7 @@ export {
   type FilterOptionContext,
   type FilterOptionResolver,
   type PluginValidationIssue,
+  ChannelDeliveryRejectedError,
   type ChannelTransport,
   type ChannelTransportFactory,
   type TransportContext,

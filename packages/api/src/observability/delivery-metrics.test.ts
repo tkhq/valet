@@ -26,7 +26,7 @@ describe("delivery destination metrics", () => {
     metrics.setGlobalMeterProvider(provider);
     // Load a fresh module after this test installs its recordable provider.
     vi.resetModules();
-    const { recordDeliveryDestination, destinationMetricReason, recordAttentionDeliveryFailure } = await import("./delivery-metrics.js");
+    const { recordDeliveryDestination, destinationMetricReason, recordAttentionDeliveryFailure, recordAttentionDeliveryRejected } = await import("./delivery-metrics.js");
 
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
     recordDeliveryDestination(destinationMetricReason({ kind: "key", key: "sub:r1", title: "R1", reason: "policy_own" }));
@@ -34,6 +34,8 @@ describe("delivery destination metrics", () => {
     recordDeliveryDestination("pin_unavailable");
     recordAttentionDeliveryFailure(false);
     recordAttentionDeliveryFailure(true);
+    recordAttentionDeliveryRejected("telegram", "bot_blocked");
+    recordAttentionDeliveryRejected("slack", "account_inactive");
     await provider.forceFlush();
 
     const metric = exporter
@@ -49,6 +51,12 @@ describe("delivery destination metrics", () => {
       .find(candidate => candidate.descriptor.name === "valet_attention_delivery_failures");
     if (!attention || attention.dataPointType !== DataPointType.SUM) throw new Error("expected an attention failure counter");
     expect(Object.fromEntries(attention.dataPoints.map(point => [String(point.attributes.retry), point.value]))).toEqual({ false: 1, true: 1 });
+
+    const rejections = exporter.getMetrics().flatMap(resource => resource.scopeMetrics).flatMap(scope => scope.metrics)
+      .find(candidate => candidate.descriptor.name === "valet_attention_delivery_rejected");
+    if (!rejections || rejections.dataPointType !== DataPointType.SUM) throw new Error("expected a rejection counter");
+    expect(rejections.dataPoints.map(point => ({ channel: point.attributes.channel, reason: point.attributes.reason, value: point.value })))
+      .toEqual([{ channel: "telegram", reason: "bot_blocked", value: 1 }, { channel: "slack", reason: "account_inactive", value: 1 }]);
 
     await provider.shutdown();
   });
@@ -69,6 +77,7 @@ it("samples oldest outstanding enqueue age even when retries are scheduled in th
       { id: "pending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "pending", createdAt: now - 1_900_000, deliverAfter: now + 100_000 },
       { id: "sending", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "sending", createdAt: now - 2_000_000, deliverAfter: now + 200_000 },
       { id: "sent", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "sent", createdAt: 1, deliverAfter: 1 },
+      { id: "rejected", userId: "u", tierId: "dm", event: { kind: "notification", owner: { type: "user", id: "u" }, title: "Update" }, status: "dropped", createdAt: 1, deliverAfter: 1 },
     ]);
     registerAttentionQueueMetrics(db);
     registerAttentionQueueMetrics(db);

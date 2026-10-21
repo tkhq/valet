@@ -403,6 +403,8 @@ CREATE TABLE "pending_channel_deliveries" (
 	"deliver_after" bigint NOT NULL,
 	"status" text NOT NULL DEFAULT 'pending',
 	"sending_at" bigint,
+	"first_sending_at" bigint,
+	"delivery_token" text NOT NULL DEFAULT gen_random_uuid()::text,
 	"attempts" integer NOT NULL DEFAULT 0,
 	"message_refs" jsonb,
 	"last_error" text

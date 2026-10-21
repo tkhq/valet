@@ -1,6 +1,7 @@
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 import { mapBounded } from "../lib/bounded-map.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { recordAttentionDeliveryFailure, registerAttentionQueueMetrics } from "../observability/delivery-metrics.js";
+import { recordAttentionDeliveryFailure, recordAttentionDeliveryRejected, registerAttentionQueueMetrics } from "../observability/delivery-metrics.js";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { matchesGateOccurrence } from "@valet/workflow";
 import { attentionAudience, type AttentionDeps, type AttentionEvent } from "../orchestrator/attention.js";
@@ -100,7 +101,9 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
     // Repeat the due predicate on the outer update to fence concurrent drains.
     // A process crash leaves sending recoverable after the durable deadline.
     const [claimed] = await deps.db.update(pendingChannelDeliveries).set({
-      status: "sending", sendingAt: claimedAt, deliverAfter: claimedAt + ATTENTION_SENDING_TIMEOUT_MS,
+      status: "sending", sendingAt: claimedAt,
+      firstSendingAt: sql`coalesce(${pendingChannelDeliveries.firstSendingAt}, ${pendingChannelDeliveries.sendingAt}, ${claimedAt})`,
+      deliverAfter: claimedAt + ATTENTION_SENDING_TIMEOUT_MS,
       attempts: sql`${pendingChannelDeliveries.attempts} + 1`, lastError: null,
     }).where(and(eq(pendingChannelDeliveries.id, job.id), dueCondition)).returning();
     if (!claimed) return;
@@ -132,7 +135,7 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
       let refs;
       if (job.status === "sending" && tier.reconcile) {
         try {
-          refs = await tier.reconcile(job.userId, event, { deliveryId: job.id, sendingAt: job.sendingAt ?? claimedAt });
+          refs = await tier.reconcile(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
         } catch (err) {
           // A lookup failure must not cost a blocking approval notification.
           console.error(`attention reconciliation ${job.id} failed; resending:`, err);
@@ -141,16 +144,22 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
       // The deliverer checks the current per-link notifyAttention setting.
       if (!refs) {
         try {
-          refs = await tier.deliver(job.userId, event, { deliveryId: job.id, sendingAt: claimedAt });
+          refs = await tier.deliver(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
         } catch (err) {
           // A timed-out post may have landed. Restore its gate controls now when possible.
           if (!isAttentionTimeout(err) || !tier.reconcile) throw err;
-          refs = await tier.reconcile(job.userId, event, { deliveryId: job.id, sendingAt: claimedAt });
+          refs = await tier.reconcile(job.userId, event, { deliveryId: claimed.deliveryToken, sendingAt: claimed.firstSendingAt ?? claimedAt });
           if (!refs) throw err;
         }
       }
       await deps.db.update(pendingChannelDeliveries).set({ status: "sent", messageRefs: refs ?? [], event: sql`'null'::jsonb`, lastError: null }).where(fence);
     } catch (err) {
+      const rejections = attentionRejections(err);
+      if (rejections) {
+        const dropped = await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence).returning({ id: pendingChannelDeliveries.id });
+        if (dropped.length > 0) for (const rejection of rejections) recordAttentionDeliveryRejected(rejection.channel, rejection.reason);
+        return;
+      }
       const lastError = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
       // Expected provider outages remain recoverable. Backoff prevents old
       // failures from filling every batch, without discarding a blocking gate.
@@ -165,4 +174,12 @@ async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): 
 /** Channel hosts aggregate provider errors without discarding their original types. */
 function isAttentionTimeout(err: unknown): boolean {
   return err instanceof Error && (err.name === "TimeoutError" || (err instanceof AggregateError && err.errors.some(isAttentionTimeout)));
+}
+
+/** Mixed or unknown failures must retry; one rejected recipient cannot hide a transport outage. */
+function attentionRejections(err: unknown): ChannelDeliveryRejectedError[] | undefined {
+  if (err instanceof ChannelDeliveryRejectedError) return [err];
+  if (!(err instanceof AggregateError) || err.errors.length === 0) return undefined;
+  const nested = err.errors.map(attentionRejections);
+  return nested.every(rejections => rejections !== undefined) ? nested.flat() : undefined;
 }

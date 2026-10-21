@@ -30,6 +30,14 @@ describe("workspace singleton repair on an already migrated database", () => {
     expect(await missingSchemaRepairs(db)).toEqual([]);
     const created = await db.query("SELECT created_at FROM pending_channel_deliveries WHERE id = 'repair-job'");
     expect(Number(created.rows[0]?.created_at)).toBeGreaterThan(0);
+    await db.query("ALTER TABLE pending_channel_deliveries DROP COLUMN delivery_token, DROP COLUMN first_sending_at");
+    await applyAppMigrations(db);
+    const token = await db.query("SELECT delivery_token, first_sending_at FROM pending_channel_deliveries WHERE id = 'repair-job'");
+    expect(token.rows[0]?.delivery_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(token.rows[0]?.first_sending_at).toBeNull();
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT delivery_token FROM pending_channel_deliveries WHERE id = 'repair-job'")).rows[0]?.delivery_token).toBe(token.rows[0]?.delivery_token);
     await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
   });
 

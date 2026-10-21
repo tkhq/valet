@@ -1,3 +1,4 @@
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
 import { webPresence } from "../services/web-presence.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2841,7 +2842,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     const channels = [host.attentionDeliverer("fake")];
     await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "gate-session", gate: { id: "gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "gate" }));
     expect(fakeTransport.gatePrompts).toHaveLength(1);
-    const ref = { conversationKey: "fake:dm:77", messageId: "1", gateId: "gate" };
+    const ref = { conversationKey: "fake:dm:77", messageId: "1", gateCard: true };
     const reconcile = vi.fn(async () => ref);
     if (saveFails) vi.spyOn(PgSessionStore.prototype, "saveDecisionGateRef").mockRejectedValueOnce(new Error("store unavailable"));
     Object.assign(fakeTransport, { reconcileAttention: reconcile });
@@ -2863,7 +2864,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     const timeout = new Error("request timed out");
     timeout.name = "TimeoutError";
     vi.spyOn(fakeTransport, "sendGatePrompt").mockRejectedValueOnce(timeout);
-    const ref = { conversationKey: "fake:dm:77", messageId: "landed", gateId: "timeout-gate" };
+    const ref = { conversationKey: "fake:dm:77", messageId: "landed", gateCard: true };
     const reconcile = vi.fn(async () => ref);
     Object.assign(fakeTransport, { reconcileAttention: reconcile });
     const channels = [host.attentionDeliverer("fake")];
@@ -2924,7 +2925,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(send).toHaveBeenCalledTimes(2);
     const [sent] = await testDb.appDb.select().from(pendingChannelDeliveries);
     expect(sent).toMatchObject({ status: "sent", messageRefs: [{ channelType: "fake", conversationKey: "fake:dm:77", messageId: "1" }] });
-    expect(fakeTransport.sent[0]?.message.attentionDeliveryId).toBe(job.id);
+    expect(fakeTransport.sent[0]?.message.attentionDeliveryId).toBe(job.deliveryToken);
   });
 
   it("sends one DM to a linked user with notifyAttention enabled", async () => {
@@ -3127,6 +3128,31 @@ describe("ChannelHost.attentionDeliverer", () => {
     }));
     await vi.waitFor(() => expect(fakeTransport.gateEdits).toHaveLength(1));
     expect(fakeTransport.gateEdits[0]!.resolution.label).toMatch(/Expired/);
+  });
+
+  it("publishes only an opaque token in a summary-only Slack DM's metadata", async () => {
+    const factory = slackPlugin.transports?.[0];
+    if (!factory) throw new Error("Expected the Slack transport factory");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: true, channel: { id: "D123" }, ts: "1" }), { headers: { "content-type": "application/json" } }));
+    try {
+      host = await buildHost({ plugins: [{ name: "fake", version: "0", transports: [{ channelType: "fake", create: ctx => factory.create({ ...ctx, credential: { ...ctx.credential, metadata: { teamId: "T123" } } }) }] }] });
+      await linkIdentity(testDb.appDb, { provider: "fake", externalId: "U123", userId: USER_ID });
+      await seedUserSession("summary-private", "someone-else");
+      await testDb.appDb.insert(userNotificationPreferences).values({ userId: USER_ID, kind: "approval", web: false });
+      const gateId = 'gate:resume-key:{"argument":"private-argument"}';
+      await routeAttention({ db: testDb.appDb, channels: [host.attentionDeliverer("fake")] }, event({ kind: "approval", sessionId: "summary-private", dedupeKey: gateId, gate: { id: gateId, actions: [{ id: "approve", label: "Approve" }] } }));
+      const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+      expect(job?.id).toContain("private-argument");
+      expect(job?.status).toBe("sent");
+      const posts = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/chat.postMessage"));
+      expect(posts).toHaveLength(1);
+      const body = JSON.parse(String(posts[0]?.[1]?.body)) as Record<string, unknown>;
+      expect(body.metadata).toEqual({ event_type: "valet_attention", event_payload: { delivery_id: job?.deliveryToken } });
+      const metadata = JSON.stringify(body.metadata);
+      for (const secret of [gateId, "gate:", "resume-key", "private-argument", "argument"]) expect(metadata).not.toContain(secret);
+      expect(job?.deliveryToken).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.blocks).toBeUndefined();
+    } finally { fetchMock.mockRestore(); }
   });
 
   it("a recipient who may not resolve the gate gets the plain summary, not dead buttons", async () => {

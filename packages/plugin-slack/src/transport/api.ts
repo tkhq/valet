@@ -6,6 +6,7 @@
  * triple, the assistant thread methods, auth.test, users.list,
  * apps.connections.open, files.info, url_private downloads).
  */
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 import { createHash } from "node:crypto";
 import { SLACK_API, SLACK_REQUEST_TIMEOUT_MS, slackFetch, slackGet, slackGetOnce } from "../actions/api.js";
 import { markdownToSlackMrkdwn } from "./format.js";
@@ -89,6 +90,9 @@ export class SlackApi {
     const res = await slackFetch(method, this.token, body, this.baseUrl, attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
+      if (attention && res.ok && ["user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"].includes(parsed.error ?? "")) {
+        throw new ChannelDeliveryRejectedError("slack", parsed.error!);
+      }
       throw new SlackApiError(
         method,
         parsed.error ?? `http ${res.status}`,
@@ -132,7 +136,7 @@ export class SlackApi {
     channel: string;
     text: string;
     attentionDeliveryId?: string;
-    attentionGateId?: string;
+    attentionGateCard?: boolean;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
     /** Per-assistant display name override (`chat:write.customize` scope).
@@ -149,7 +153,7 @@ export class SlackApi {
       unfurl_links: false,
     };
     if (opts.attentionDeliveryId !== undefined) body.metadata = {
-      event_type: "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId, ...(opts.attentionGateId ? { gate_id: opts.attentionGateId } : {}) },
+      event_type: opts.attentionGateCard ? "valet_attention_gate" : "valet_attention", event_payload: { delivery_id: opts.attentionDeliveryId },
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
@@ -162,7 +166,7 @@ export class SlackApi {
   }
 
   /** Bounded recent DM history. A miss or a lookup failure permits a resend. */
-  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<{ ts: string; gateId?: string } | null> {
+  async findAttentionMessage(channel: string, deliveryId: string, sendingAt: number): Promise<{ ts: string; gateCard?: boolean } | null> {
     let cursor: string | undefined;
     for (let page = 0; page < 5; page++) {
       // Recovery is best effort. Never sleep through Retry-After while an
@@ -176,11 +180,10 @@ export class SlackApi {
       for (const raw of Array.isArray(res.messages) ? res.messages : []) {
         const message = rec(raw);
         const metadata = rec(message?.metadata);
-        if (metadata?.event_type === "valet_attention" && rec(metadata.event_payload)?.delivery_id === deliveryId) {
+        if ((metadata?.event_type === "valet_attention" || metadata?.event_type === "valet_attention_gate") && rec(metadata.event_payload)?.delivery_id === deliveryId) {
           const ts = str(message?.ts);
           if (ts) {
-            const gateId = str(rec(metadata.event_payload)?.gate_id);
-            return { ts, ...(gateId ? { gateId } : {}) };
+            return { ts, ...(metadata?.event_type === "valet_attention_gate" ? { gateCard: true } : {}) };
           }
         }
       }

@@ -1,3 +1,4 @@
+import { ChannelDeliveryRejectedError } from "@valet/engine";
 import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
@@ -85,6 +86,7 @@ describe("personal attention outbox", () => {
     await routeAttention({ db, channels: [tier] }, event);
     await drainAttentionDeliveries({ db, channels: [tier] }, job.deliverAfter);
     expect(deliver).toHaveBeenCalledOnce();
+    expect((await pending()).deliveryToken).toBe(job.deliveryToken);
   });
 
   it("uses ordered tiers and the user's grace", async () => {
@@ -128,6 +130,28 @@ describe("sending recovery", () => {
     expect(await pending()).toMatchObject({ status: "sent", messageRefs: refs, attempts: 1 });
     await drainAttentionDeliveries({ db, channels: [channel] }, 1_000 + 2 * ATTENTION_SENDING_TIMEOUT_MS);
     expect(send).toHaveBeenCalledTimes(result === "found" ? 0 : 1);
+  });
+
+  it("retains the first unreconciled send time across a failed readiness claim", async () => {
+    const firstSend = 1_000;
+    const intermediate = Date.now();
+    await db.insert(pendingChannelDeliveries).values({ id: "landed-before-crash", userId: "u", tierId: tier.id, event, status: "sending", sendingAt: firstSend, deliverAfter: 1 });
+    let ready = false;
+    const ref = [{ channelType: "slack", conversationKey: "dm", messageId: "landed" }];
+    const reconcile = vi.fn(async (_user: string, _event: AttentionEvent, attempt: { sendingAt: number; deliveryId: string }) => attempt.sendingAt === firstSend ? ref : undefined);
+    const channel = { ...tier, ready: () => ready, reconcile };
+    const deps = { db, channels: [channel] };
+    await drainAttentionDeliveries(deps, intermediate);
+    await drainAttentionDeliveries(deps, intermediate + ATTENTION_STARTUP_GRACE_MS);
+    const failed = await pending();
+    expect(failed).toMatchObject({ firstSendingAt: firstSend, attempts: 1, status: "sending" });
+    expect(failed.sendingAt).toBeGreaterThan(firstSend);
+    ready = true;
+    await drainAttentionDeliveries(deps, failed.deliverAfter);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(reconcile.mock.calls[0]?.[2].deliveryId).toBe(failed.deliveryToken);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await pending()).toMatchObject({ status: "sent", firstSendingAt: firstSend, messageRefs: ref });
   });
 
   it("persists sending before the provider call and retries a rejected send", async () => {
@@ -182,6 +206,29 @@ describe("provider outage scheduling", () => {
       expect(retry.deliverAfter - job.deliverAfter).toBeLessThan(delay + 1_000);
     }
     expect(send).toHaveBeenCalledTimes(6);
+  });
+
+  it.each(["bot_blocked", "user_deactivated", "user_not_found", "account_inactive", "cannot_dm_bot", "channel_not_found"])("drops a definite %s rejection on the first drain", async reason => {
+    const channel = reason === "bot_blocked" || reason === "user_deactivated" ? "telegram" : "slack";
+    const rejected = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryRejected");
+    const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    try {
+      await db.insert(userNotificationPreferences).values({ userId: "u", kind: "notification", web: false });
+      const send = vi.fn(async () => { throw new AggregateError([new ChannelDeliveryRejectedError(channel, reason)]); });
+      const deps = { db, channels: [{ ...tier, deliver: send }] };
+      await routeAttention(deps, { ...event, kind: "notification" });
+      expect(await pending()).toMatchObject({ status: "dropped", attempts: 1, event: null, lastError: null });
+      expect(rejected).toHaveBeenCalledWith(channel, reason);
+      expect(failure).not.toHaveBeenCalled();
+      await drainAttentionDeliveries(deps, Date.now() + 86_400_000);
+      expect(send).toHaveBeenCalledOnce();
+    } finally { rejected.mockRestore(); failure.mockRestore(); }
+  });
+
+  it("retries mixed permanent and transient failures instead of dropping uncertain sends", async () => {
+    const send = vi.fn(async () => { throw new AggregateError([new ChannelDeliveryRejectedError("slack", "account_inactive"), new Error("provider unavailable")]); });
+    await routeAttention({ db, channels: [{ ...tier, deliver: send }] }, event);
+    expect(await pending()).toMatchObject({ status: "sending", attempts: 1 });
   });
 
   it("serves new approvals ahead of a backlog of failed jobs", async () => {
