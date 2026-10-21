@@ -8,8 +8,10 @@ import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import { recapWindow, type RecapMessage, type RecapWindow } from "@valet/shared";
 import type { ThreadRecapPoint, ThreadRecapResponse } from "../wire/types.js";
 
-/** Same small model as thread naming: the recap needs speed, not reasoning. */
-const RECAP_MODEL = "claude-haiku-4-5";
+/** On real team threads, Haiku 4.5 invented details and read requests to
+ * Valet as asks of the reader. Sonnet 5.5 kept to the transcript in the same
+ * time, about two seconds. */
+const RECAP_MODEL = "claude-sonnet-5-5";
 const RECAP_TIMEOUT_MS = 20_000;
 const MAX_POINTS = 3;
 const MAX_POINT_CHARS = 200;
@@ -23,12 +25,16 @@ const CACHE_LIMIT = 500;
 const RECAP_SYSTEM = [
   "You write a short recap for a person who opens a shared conversation between people and an AI assistant named Valet.",
   "Reply with JSON only, in this shape: {\"points\":[{\"text\":\"...\",\"forReader\":false}]}",
+  "How to read the transcript:",
+  "- Each person's message is a request to Valet. Each Valet message answers the person who wrote just before it.",
+  "- The reader wrote none of the messages you recap.",
   "Rules:",
-  "- One to three points, most important first. Use fewer points when little happened.",
-  "- Each point is one plain sentence of 15 words or fewer. No markdown, no emoji, no filler.",
-  "- Say what was decided, done, sent, made, or asked. Keep concrete names, numbers, and document titles.",
-  "- Name people by first name. Call the assistant Valet.",
-  "- When something waits on the reader (a question to them, an approval only they can give, someone deferring to them), put it first, set forReader to true, and say what they need to do. Every other point has forReader false.",
+  "- One to three points, most important first: what waits on the reader, then a request Valet has not answered, then the rest. Use fewer points when little happened.",
+  "- Each point is at most 12 words. Count them. No markdown, no emoji, no semicolons.",
+  "- Say who asked for what and what Valet did: made, sent, found, decided, or could not do. Keep concrete names, numbers, and titles.",
+  "- When a person's last request has no answer from Valet yet, say so.",
+  "- Use first names. Call the assistant Valet. Never write the reader's name.",
+  "- forReader is true only when a message asks for the reader by name, defers to them, or Valet asks the reader directly. A request to Valet, or advice Valet gave someone else, is never for the reader. Write a forReader point as an instruction to the reader that starts with a verb.",
   "- Use only facts from the transcript.",
 ].join("\n");
 
@@ -113,6 +119,29 @@ export function parseRecapPoints(reply: string): ThreadRecapPoint[] {
   return points.sort((a, b) => Number(b.forReader ?? false) - Number(a.forReader ?? false)).slice(0, MAX_POINTS);
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Fits the model's points to the reader. A "waiting on you" point stands only
+ * when a recapped message names the reader: the model can read a request to
+ * Valet, or Valet's advice to someone else, as an ask of the reader. The
+ * reader's name reads as "you". Exported for tests.
+ */
+export function fitToReader(points: ThreadRecapPoint[], window: RecapWindow, readerName: string): ThreadRecapPoint[] {
+  const first = readerName.trim().split(/\s+/)[0] ?? "";
+  if (!first) return points.filter((point) => !point.forReader);
+  const name = escapeRegExp(first);
+  const named = window.messages.some((message) => new RegExp(`\\b${name}\\b`, "i").test(message.content));
+  return points
+    .filter((point) => !point.forReader || named)
+    .map((point) => ({
+      ...point,
+      text: point.text.replace(new RegExp(`\\b${name}'s\\b`, "gi"), "your").replace(new RegExp(`\\b${name}\\b`, "gi"), "you"),
+    }));
+}
+
 /**
  * Recaps by window. A reader who reopens the same window, or a second tab,
  * reuses the recap instead of paying for another model call. The key holds
@@ -141,8 +170,10 @@ export async function threadRecap(input: {
   const last = window.messages.at(-1)?.id ?? "";
   const key = [input.threadId, input.readerId, window.mode, window.since ?? 0, last].join("|");
   const points = await (cache.get(key) ?? remember(key,
-    (input.write ?? defaultRecapWriter)(recapPrompt(window, input.readerId, input.readerName)).then(parseRecapPoints)));
-  return { recap: { mode: window.mode, points } };
+    (input.write ?? defaultRecapWriter)(recapPrompt(window, input.readerId, input.readerName))
+      .then((reply) => fitToReader(parseRecapPoints(reply), window, input.readerName))));
+  // Every point can drop out in `fitToReader`; an empty card says nothing.
+  return points.length ? { recap: { mode: window.mode, points } } : { recap: null };
 }
 
 /** Test seam: empties the recap cache. */

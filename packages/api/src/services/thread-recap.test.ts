@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecapMessage } from "@valet/shared";
-import { clearThreadRecapCache, parseRecapPoints, recapPrompt, threadRecap } from "./thread-recap.js";
+import { clearThreadRecapCache, fitToReader, parseRecapPoints, recapPrompt, threadRecap } from "./thread-recap.js";
 
 const reader = { id: "u-reader", name: "Reader" };
 const teammate = { id: "u-mate", name: "Mate" };
@@ -33,6 +33,23 @@ describe("parseRecapPoints", () => {
   });
 });
 
+describe("fitToReader", () => {
+  const span = (messages: RecapMessage[]) => ({ mode: "away" as const, since: 5_000, messages, earlier: [], people: ["Mate"], worthRecap: true });
+
+  it("drops a waiting-on-you point when no recapped message names the reader", () => {
+    const points = [{ text: "Check the launch claim before publishing.", forReader: true }, { text: "Valet drafted the post." }];
+    expect(fitToReader(points, span(thread().slice(2, 6)), "Reader Person")).toEqual([{ text: "Valet drafted the post." }]);
+  });
+
+  it("keeps it when a message names the reader, and writes the reader's name as you", () => {
+    const points = [{ text: "Decide on the pen-test summary.", forReader: true }, { text: "Valet is waiting on Reader's answer for Reader." }];
+    expect(fitToReader(points, span(thread().slice(2)), "Reader Person")).toEqual([
+      { text: "Decide on the pen-test summary.", forReader: true },
+      { text: "Valet is waiting on your answer for you." },
+    ]);
+  });
+});
+
 describe("recapPrompt", () => {
   it("names the reader, gives earlier messages as context, and lists the new ones", () => {
     const prompt = recapPrompt({
@@ -62,6 +79,13 @@ describe("threadRecap", () => {
     await expect(threadRecap(input)).resolves.toEqual({ recap: { mode: "away", points: [{ text: "Mate had Valet draft and send the Acme answers." }] } });
     await threadRecap(input);
     expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no recap when the only point was an unbacked ask of the reader", async () => {
+    const write = vi.fn(async () => '{"points":[{"text":"Approve the send.","forReader":true}]}');
+    const messages = thread().slice(0, 6);
+    await expect(threadRecap({ threadId: "t1", messages, readerId: reader.id, readerName: "Reader", readAt: 5_000, write }))
+      .resolves.toEqual({ recap: null });
   });
 
   it("does not keep a failed recap", async () => {
