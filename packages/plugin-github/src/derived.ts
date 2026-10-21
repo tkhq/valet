@@ -53,9 +53,13 @@ const JOB_CACHE_MAX_RUNS = 2048;
 class DeriveReadBudgetError extends Error {}
 interface DeriveAuth { token: string; refreshed: boolean; requests: number }
 interface JobMembership { checkId: number; attempt: number }
-interface JobCacheEntry { pages: Map<number, JobMembership[]>; nextPage: number; complete: boolean; touchedAt: number; loading?: Promise<void> }
+interface JobReadProgress { nextPage: number; lastReadOrder: number; touchedAt: number }
+interface JobCacheEntry extends JobReadProgress { pages: Map<number, JobMembership[]>; lastPage?: number; complete: boolean; loading?: Promise<void> }
 interface JobMembershipSnapshot { jobs: Map<number, { run: Record<string, unknown>; attempt: number }>; complete: boolean }
 const jobCache = new Map<string, JobCacheEntry>();
+// Active runs retain only a rotating cursor, never a cross-derive membership snapshot.
+const activeJobProgress = new Map<string, JobReadProgress>();
+let jobReadOrder = 0;
 
 async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string, deadline?: number): Promise<unknown> {
   if (auth.requests >= DERIVE_MAX_REQUESTS || (deadline !== undefined && Date.now() >= deadline)) throw new DeriveReadBudgetError("GitHub derive read budget reached. Retry the event wait or wait on github.check_run.completed.");
@@ -158,34 +162,48 @@ function jobCheckId(job: Record<string, unknown>): number | undefined {
   return typeof job.id === "number" ? job.id : undefined;
 }
 
-/** Bounded page workers retain completed pages across retries of immutable finished runs. */
+/** Finished runs retain unique pages. Active runs rotate uncached reads across derives. */
 async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: string, runs: Record<string, unknown>[]): Promise<JobMembershipSnapshot> {
   const now = Date.now();
-  for (const [key, entry] of jobCache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now) jobCache.delete(key);
+  for (const cache of [jobCache, activeJobProgress]) {
+    for (const [key, entry] of cache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now) cache.delete(key);
+  }
   const work = runs.map((run) => {
     if (typeof run.id !== "number") throw new Error("GitHub returned a workflow without its run id. Retry the event wait.");
     const key = JSON.stringify([ctx.orgId, resolveGithubApiUrl(), base, run.id, run.run_attempt ?? 1]);
-    const cached = run.status === "completed" ? jobCache.get(key) : undefined;
-    const entry: JobCacheEntry = cached ?? { pages: new Map(), nextPage: 1, complete: false, touchedAt: now };
+    const finished = run.status === "completed";
+    const cached = finished ? jobCache.get(key) : undefined;
+    const progress = finished ? undefined : activeJobProgress.get(key) ?? { nextPage: 1, lastReadOrder: 0, touchedAt: now };
+    const entry: JobCacheEntry = cached ?? { pages: new Map(), nextPage: progress?.nextPage ?? 1,
+      lastReadOrder: progress?.lastReadOrder ?? 0, complete: false, touchedAt: now };
     entry.touchedAt = now;
-    if (run.status === "completed") {
+    if (finished) {
+      activeJobProgress.delete(key);
       jobCache.delete(key);
       if (jobCache.size >= JOB_CACHE_MAX_RUNS) jobCache.delete(jobCache.keys().next().value ?? "");
       jobCache.set(key, entry);
+    } else if (progress) {
+      progress.touchedAt = now;
+      activeJobProgress.delete(key);
+      if (activeJobProgress.size >= JOB_CACHE_MAX_RUNS) activeJobProgress.delete(activeJobProgress.keys().next().value ?? "");
+      activeJobProgress.set(key, progress);
     }
-    return { run, entry };
+    return { run, entry, progress };
   });
-  const queue = work.filter(({ entry }) => !entry.complete);
+  // Least recently read runs go first, so an active matrix cannot starve later finished runs.
+  const queue = work.filter(({ entry }) => !entry.complete).sort((a, b) => a.entry.lastReadOrder - b.entry.lastReadOrder);
   let remaining = Math.min(JOB_REQUESTS_PER_DERIVE, Math.max(0, DERIVE_MAX_REQUESTS - auth.requests - 4));
   const deadline = now + JOB_READ_BUDGET_MS;
   const worker = async () => {
     while (queue.length > 0 && remaining > 0 && Date.now() < deadline) {
       const item = queue.shift();
       if (!item) break;
-      const { run, entry } = item;
+      const { run, entry, progress } = item;
       const ownsLoad = entry.loading === undefined;
       if (ownsLoad) {
         remaining--;
+        entry.lastReadOrder = ++jobReadOrder;
+        if (progress) progress.lastReadOrder = entry.lastReadOrder;
         const pageNumber = entry.nextPage;
         entry.loading = (async () => {
           const body = rec(await getJson(ctx, auth, `${base}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${pageNumber}`, deadline));
@@ -197,9 +215,14 @@ async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: str
             return { checkId, attempt: job.run_attempt };
           });
           entry.pages.set(pageNumber, page);
-          while (entry.pages.has(entry.nextPage)) entry.nextPage++;
-          // Completion counts successful unique pages, never duplicate items from shared readers.
-          entry.complete = page.length < 100 || (typeof body.total_count === "number" && entry.nextPage > Math.ceil(body.total_count / 100));
+          if (typeof body.total_count === "number" && Number.isFinite(body.total_count)) entry.lastPage = Math.max(1, Math.ceil(body.total_count / 100));
+          else if (page.length < 100) entry.lastPage = pageNumber;
+          // Only contiguous successful pages prove a complete snapshot, including after a cursor wraps.
+          let firstMissing = 1;
+          while (entry.pages.has(firstMissing)) firstMissing++;
+          entry.complete = entry.lastPage !== undefined && firstMissing > entry.lastPage;
+          entry.nextPage = entry.lastPage !== undefined && pageNumber >= entry.lastPage ? 1 : pageNumber + 1;
+          if (progress) progress.nextPage = entry.nextPage;
         })();
       }
       const loading = entry.loading;
@@ -352,7 +375,7 @@ export const checksCompleted: DerivedEventDef = {
     const isFailed = (run: CheckRunState) => typeof run.conclusion === "string" && FAILED_CONCLUSIONS.has(run.conclusion);
     const failed = classified.some(isFailed) || statuses.some((state) => typeof state.state === "string" && FAILED_STATUS_STATES.has(state.state));
     if ([...uncertain].some((run) => run.status !== "completed" || (!failed && isFailed(run)))) {
-      throw new DeriveRetryError("GitHub job membership is incomplete. Retry the event wait to resume cached pages.", 1_000);
+      throw new DeriveRetryError("GitHub job membership is incomplete. Retry the event wait to continue job classification.", 1_000);
     }
     const status = failed ? "failure" : "success";
     const label = `${ownerRepo}#${pr.number}`;

@@ -368,6 +368,68 @@ describe("checksCompleted (spec B1)", () => {
     expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
   });
 
+  it.each(["workflow_dispatch", "superseded"])("rotates active %s pages to find a pending job on page 17 of 1701 jobs", async (kind) => {
+    const old = { ...actionJob(10, "queued", null), id: 10000, name: "ignored pending job" };
+    const jobs = Array.from({ length: 1700 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 1 }));
+    jobs.splice(1600, 0, { id: 10000, name: "ignored pending job", run_attempt: 1 });
+    const stub = stubFetch({ pages: [[old, actionJob(20)]], workflows: [workflow(10, kind === "superseded" ? "pull_request" : kind, "in_progress"), workflow(20)], jobs: { 10: jobs } });
+    const ctx = ctxWith(stub.fetch);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
+    const before = stub.calls.length;
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.slice(before).find((path) => path.includes("/jobs?"))).toContain("page=17");
+  });
+
+  it("does not starve a finished run behind 17 active matrices", async () => {
+    const failed = { ...actionJob(99, "completed", "failure"), id: 10000, name: "old job" };
+    const active = Array.from({ length: 17 }, (_, i) => ({ ...workflow(i + 1, "workflow_dispatch", "in_progress"), id: i + 1, workflow_id: i + 10 }));
+    const jobs: NonNullable<Fixture["jobs"]> = {};
+    for (const run of active) jobs[run.id] = Array.from({ length: 1701 }, (_, i) => ({ id: (run.id + 1) * 100000 + i, name: `matrix-${i}`, run_attempt: 1 }));
+    jobs[99] = [{ id: 10000, name: "old job", run_attempt: 1 }];
+    const stub = stubFetch({ pages: [[failed, actionJob(100)]], workflows: [...active, { ...workflow(99), run_attempt: 2 }, workflow(100)], jobs });
+    const ctx = ctxWith(stub.fetch);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
+    const before = stub.calls.length;
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.slice(before).filter((path) => path.includes("/jobs?"))[1]).toContain("/runs/99/jobs?");
+  });
+
+  it("never reuses active-run job memberships across derives", async () => {
+    const jobs = [{ id: 10000, name: "old job", run_attempt: 1 }];
+    const stub = stubFetch({ pages: [[{ ...actionJob(10, "completed", "failure"), id: 10000, name: "old job" }, actionJob(20)]], workflows: [{ ...workflow(10, "pull_request", "in_progress"), run_attempt: 2 }], jobs: { 10: jobs } });
+    const ctx = ctxWith(stub.fetch);
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+  });
+
+  it("skips job reads when the only failing check belongs to a safe current attempt-1 suite", async () => {
+    const stub = stubFetch({ pages: [[actionJob(20, "completed", "failure")]], workflows: [workflow(10, "workflow_dispatch", "in_progress"), workflow(20)] });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+    expect(stub.calls.some((path) => path.includes("/jobs?"))).toBe(false);
+  });
+
+  it("shares one 251-job snapshot between two concurrent derives and excludes the failure on page 3", async () => {
+    const stub = stubFetch({ pages: [[{ ...actionJob(10, "completed", "failure"), id: 10000, name: "old job" }, actionJob(20)]], workflows: [{ ...workflow(10), run_attempt: 2 }], jobs: { 10: [
+      ...Array.from({ length: 250 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 2 })),
+      { id: 10000, name: "old job", run_attempt: 1 },
+    ] } });
+    const pages: number[] = [];
+    const http: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/jobs")) {
+        pages.push(Number(url.searchParams.get("page")));
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      return stub.fetch(input, init);
+    };
+    const ctx = ctxWith(http);
+    const results = await Promise.all([checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)), checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))]);
+    expect(results.map((result) => result?.status)).toEqual(["success", "success"]);
+    expect(pages).toEqual([1, 2, 3]);
+  });
+
   it("shares unique cached pages between two readers and retries a transient page-5 failure", async () => {
     const old = { ...actionJob(10, "completed", "failure"), id: 10000, name: "old attempt job" };
     const stub = stubFetch({ pages: [[old, actionJob(20)]], workflows: [{ ...workflow(10), run_attempt: 2 }], jobs: { 10: [

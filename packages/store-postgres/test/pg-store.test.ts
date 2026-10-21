@@ -73,6 +73,18 @@ function runDueScanSafetyTests(factory: () => Promise<PgSessionStore>, db: PgDb)
     } finally { errors.mockRestore(); }
   });
 
+  it("includes the 12289-byte cap boundary for 4096 empty seen keys", async () => {
+    const store = await factory();
+    const base = { sessionId: "s", threadId: "t", kind: "event" as const, status: "running" as const, reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1, deadlineAt: 1000 };
+    await store.createWakeup({ ...base, id: "at_boundary" });
+    await store.createWakeup({ ...base, id: "below_boundary" });
+    const seen = JSON.stringify(Array.from({ length: 4096 }, () => ""));
+    expect(Buffer.byteLength(seen)).toBe(12289);
+    await db.query("UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'at_boundary'", [seen]);
+    await db.query("UPDATE engine_wakeups SET event_seen = $1 WHERE id = 'below_boundary'", [JSON.stringify(Array.from({ length: 4095 }, () => ""))]);
+    expect((await store.listDueWakeups(10, 10)).rows.map((row) => row.id)).toEqual(["at_boundary"]);
+  });
+
   it("advances through an empty candidate page to a healthy due timer", async () => {
     const store = await factory();
     const base = { sessionId: "s", threadId: "t", reason: "r", logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 };

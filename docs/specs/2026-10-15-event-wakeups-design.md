@@ -344,7 +344,10 @@ subject.
    A proven failure makes another unclassified failure irrelevant, but an unclassified pending check still requires retry.
    Completed pages of finished runs are cached by org, repository, run id, and attempt.
    The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
-   Retries resume unfinished pagination rather than starting again at page one.
+   Finished-run retries resume cached pagination rather than starting again at page one.
+   Active runs cache no memberships across derives. They retain a rotating page cursor for up to 30 idle minutes.
+   After the last active-run page, the cursor wraps to page one. Each derive uses only pages fetched during that call.
+   Runs with the oldest read sequence go first, so earlier active matrices cannot starve later finished runs.
    Concurrent readers share each page load. Only its owner can clear the matching in-flight promise.
    Cache successful pages by unique page number. Completion requires contiguous successful pages through the last page or total count.
    A failed page leaves the entry incomplete and does not advance its cursor.
@@ -357,6 +360,10 @@ subject.
    - Its run uses `schedule` or `workflow_dispatch`.
    Keep every unmapped Actions check, including reporters in superseded, dispatch, or separate suites.
    Neither suite ids, job names, nor suite conclusions prove check membership.
+   GitHub adds Checks API reporters to suites by repository and SHA, not by Actions run id.
+   A shared suite therefore does not prove that a reporter is a job of an excluded or superseded run.
+   See [GitHub's Checks API guide](https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-checks).
+   Rerun attempts also retain the run's suite id. Suite identity cannot identify the selected attempt.
    An all-green PR makes no jobs calls.
    A pending check in the current suite of an active relevant attempt-1 workflow can return `null` after three reads.
    This conservative early return never drops a check. Completion still requires check-based selection.
@@ -418,6 +425,13 @@ deadline ends that wait.
 | 28 completed runs and 900 ms jobs latency | delivers before the 20-second deadline |
 | 1601 jobs, historical failure on page 17 | first derive retains source for retry, second derive returns success |
 | Two concurrent readers, 450 jobs, transient failure on page 5 | no partial terminal result, repaired page resumes to success |
+| Two concurrent readers, 251 jobs, historical failure on page 3 | both return success using three unique page reads |
+| Active excluded or superseded run, 1701 jobs, pending job on page 17 | first derive retries, second rotates to page 17 and returns success |
+| Finished run after 17 active matrices | next derive prioritizes unread runs and classifies the failure |
+| Active run read twice | both derives fetch memberships instead of reusing a cached snapshot |
+| Failing check in a safe current attempt-1 suite | no jobs reads |
+| 4096 empty seen keys, 12289 bytes | due scan includes the capped row |
+| Expired installation no longer queried | another installation's derive prunes its expired cooldown |
 | Unclassified failure with a proven failure elsewhere | failure, because classification cannot change the result |
 | Unclassified pending check, even with a proven failure | retry, because classification can change completion |
 | Mixed-precision completion arrives during an earlier derive returning `null` | new source stays, next pass delivers |

@@ -1288,6 +1288,30 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect((await h.store.getWakeup("wk_second"))?.eventBuffer).toEqual([]);
   });
 
+  it("prunes an expired installation cooldown without revisiting that installation", async () => {
+    let now = NOW;
+    const request: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.includes("/expired/")) return new Response("rate limited", { status: 429, headers: { "Retry-After": "60" } });
+      if (url.pathname.includes("/active/")) return new Response("rate limited", { status: 429, headers: { "Retry-After": "120" } });
+      return Response.json({ head: { sha: "bbbb" } });
+    };
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "prune-org", now: () => now,
+      contextFor: (orgId, _key, subject) => ({ orgId, appToken: async () => "token", fetch: request,
+        rateLimitKey: async () => `github:installation:prune-${subject.split("/")[1]?.split("#")[0]}` }),
+    });
+    const run = (repo: string) => deriveEvent(eventRow({ subjects: [`github:acme/${repo}#42`] }), digest(1, { derive: CHECKS, subjects: [`github:acme/${repo}@aaaa`] }));
+    expect((await run("expired")).result).toBe("error");
+    expect((await run("active")).result).toBe("error");
+    now += 60_001;
+    const remove = vi.spyOn(Map.prototype, "delete");
+    try {
+      expect((await run("third")).result).toBe("null");
+      expect(remove).toHaveBeenCalledWith("github:installation:prune-expired");
+      expect(remove).not.toHaveBeenCalledWith("github:installation:prune-active");
+    } finally { remove.mockRestore(); }
+  });
+
   it("stops an in-flight group before its next request when another group hits an installation limit", async () => {
     const h = harness();
     let release = () => {};
@@ -1370,22 +1394,24 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("keeps a once-waiter's source until page 17 excludes the historical failure", async () => {
+  it.each(["historical failure", "excluded pending"])("keeps a once-waiter's source until page 17 classifies the %s", async (kind) => {
+    const pending = kind === "excluded pending";
     const h = harness();
     let now = NOW;
     const pages: number[] = [];
     const jobs = [
       ...Array.from({ length: 1600 }, (_, i) => ({ id: i + 100000, run_attempt: 2 })),
       { id: 10000, run_attempt: 1 },
+      ...(pending ? Array.from({ length: 100 }, (_, i) => ({ id: i + 200000, run_attempt: 1 })) : []),
     ];
     const http: typeof fetch = async (input) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/pulls/42")) return Response.json({ head: { sha: "aaaa" } });
       if (url.pathname.endsWith("/check-runs")) return Response.json({ check_runs: [
-        { id: 10000, app: { id: 1, slug: "github-actions" }, check_suite: { id: 10 }, name: "old job", status: "completed", conclusion: "failure" },
+        { id: 10000, app: { id: 1, slug: "github-actions" }, check_suite: { id: 10 }, name: "old job", status: pending ? "queued" : "completed", conclusion: pending ? null : "failure" },
         { id: 200, app: { id: 1, slug: "github-actions" }, check_suite: { id: 10 }, name: "current job", status: "completed", conclusion: "success" },
       ] });
-      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [{ id: 10, workflow_id: 1, run_attempt: 2, event: "pull_request", check_suite_id: 10, status: "completed" }] });
+      if (url.pathname.endsWith("/actions/runs")) return Response.json({ workflow_runs: [{ id: 10, workflow_id: 1, run_attempt: 2, event: pending ? "workflow_dispatch" : "pull_request", check_suite_id: 10, status: pending ? "in_progress" : "completed" }] });
       if (url.pathname.endsWith("/jobs")) {
         const page = Number(url.searchParams.get("page"));
         pages.push(page);
@@ -1394,7 +1420,7 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
       if (url.pathname.endsWith("/status")) return Response.json({ statuses: [] });
       throw new Error(`Unexpected read ${url.pathname}`);
     };
-    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => "membership-budget-org",
+    const deriveEvent = eventWaiterDeriver({ plugins: [githubPlugin], sessionOrg: async () => `membership-budget-${kind}`,
       contextFor: (orgId) => ({ orgId, appToken: async () => "token", fetch: http }),
     });
     const source = digest(1, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
@@ -1409,7 +1435,8 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(pages).toHaveLength(16);
     now++;
     await watcher.sweep(now);
-    expect(pages).toEqual(Array.from({ length: 17 }, (_, i) => i + 1));
+    expect(pages[16]).toBe(17);
+    expect(pages.length).toBeLessThanOrEqual(32);
     expect(await h.store.getWakeup("wk_ev")).toMatchObject({ status: "done", cause: "fired" });
     expect(h.prompt).toHaveBeenCalledTimes(1);
     const { content } = signalOf(h.prompt.mock.calls[0]);
