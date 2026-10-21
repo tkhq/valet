@@ -27,6 +27,7 @@ import {
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
+import { useThreadRecap } from "~/components/session/thread-recap";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
@@ -172,6 +173,7 @@ export function SessionView({
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
+  const recap = useThreadRecap({ threadId: effectiveThreadId, thread: helperThread, messages: stream.messages, viewerId: me.data?.id });
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
@@ -353,6 +355,7 @@ export function SessionView({
               pendingIds={threadQueueState?.pendingIds}
               viewerId={me.data?.id}
               onReply={enableReplies ? setReplyTarget : undefined}
+              recap={recap}
             />
             {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay

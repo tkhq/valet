@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
@@ -8,6 +8,7 @@ import { MessageItem } from "./message-item";
 import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
+import { ThreadRecapBlock, type ThreadRecapView } from "./thread-recap";
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -37,6 +38,7 @@ export function MessageList({
   header,
   onReply,
   ratings = true,
+  recap,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -69,6 +71,9 @@ export function MessageList({
    * ratings are session-addressed, so they belong to the session's viewers.
    */
   ratings?: boolean;
+  /** What other people did since the reader's last visit. The list shows it before
+   * its first message and opens scrolled there instead of at the bottom. */
+  recap?: ThreadRecapView;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -97,14 +102,31 @@ export function MessageList({
     setScrolledAway(false);
   }, [threadId]);
 
+  // A recap opens its visit scrolled to the "new" line, once, unless the
+  // reader already scrolled away from the bottom.
+  const recapScrolledRef = useRef<string | undefined>(undefined);
+  const recapVisible = recap !== undefined && visible.some((message) => message.id === recap.anchorId);
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    if (recap && recapVisible && recapScrolledRef.current !== recap.key && stickToBottomRef.current) {
+      const target = el.querySelector<HTMLElement>("[data-recap-anchor]");
+      if (target) {
+        recapScrolledRef.current = recap.key;
+        const header = scrollHeader.headerRef.current?.offsetHeight ?? 0;
+        el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - header - 8;
+        scrollHeader.syncPosition();
+        const nearBottom = el.scrollHeight - (el.scrollTop + el.clientHeight) < 80;
+        stickToBottomRef.current = nearBottom;
+        setScrolledAway(!nearBottom);
+        return;
+      }
+    }
     if (stickToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
       scrollHeader.syncPosition();
     }
-  }, [visible, scrollHeader.syncPosition]);
+  }, [visible, recap, recapVisible, scrollHeader.syncPosition, scrollHeader.headerRef]);
 
   function onScroll() {
     const el = containerRef.current;
@@ -176,7 +198,7 @@ export function MessageList({
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
               }
               const m = item.message;
-              return m.compaction ? (
+              const row = m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
                 <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
@@ -193,6 +215,9 @@ export function MessageList({
                   ratings={ratings}
                 />
               );
+              return recap && recapVisible && m.id === recap.anchorId
+                ? <Fragment key={m.id}><ThreadRecapBlock recap={recap} />{row}</Fragment>
+                : row;
             })}
           </div>
         )}

@@ -44,6 +44,7 @@ import type {
   ListThreadsResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadRecapResponse,
   MarkThreadsReadRequest,
   Message,
   MessagePart,
@@ -86,6 +87,7 @@ import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
 import { isAssistantConversationOf } from "../services/thread-access.js";
 import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
+import { threadRecap } from "../services/thread-recap.js";
 import { threadChannel } from "../services/channels.js";
 import { threadChannelActivity } from "../services/channel-messages.js";
 
@@ -558,6 +560,35 @@ export async function getThreadContext(c: Context<AppEnv>, sessionId: string, th
   if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   const body: ThreadContextResponse = { context: (await thread.contextUsage()) ?? null };
   return c.json(body);
+}
+
+/** Entries read for a recap. Tool entries count too, so this covers a few dozen messages. */
+const RECAP_ENTRY_LIMIT = 600;
+
+/** What other people did in a thread since the reader last saw it. `since` is the reader's last read time. */
+export async function getThreadRecap(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const result = await loadEngineSession(c, sessionId);
+  if ("error" in result) return result.error;
+  const thread = await visibleThread(c, result.session, result.engineSession, threadId);
+  if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
+  const since = c.req.query("since");
+  const readAt = since === undefined ? undefined : Number(since);
+  if (readAt !== undefined && (!Number.isFinite(readAt) || readAt < 0)) {
+    return c.json({ error: "since must be a time in milliseconds. Omit it for a thread the reader never opened." }, 400);
+  }
+  const messages = (await thread.readEntries({ limit: RECAP_ENTRY_LIMIT }))
+    .map((entry) => entryToMessage(entry, sessionId, thread.id))
+    .filter((message): message is Message => message !== null);
+  const user = c.var.user;
+  try {
+    const body: ThreadRecapResponse = await threadRecap({
+      threadId: thread.id, messages, readerId: user.id, readerName: user.name || user.email, readAt,
+    });
+    return c.json(body);
+  } catch (err) {
+    console.error(`GET /threads/${thread.id}/recap: the recap failed:`, err);
+    return c.json({ error: "Valet could not write the recap. Open the thread again to retry." }, 502);
+  }
 }
 
 /** Marks threads read for the caller. With no ids, marks every thread in the session. */
