@@ -18,32 +18,46 @@ const NAMES_TTL_MS = 5 * 60_000;
 const FAILED_SCAN_TTL_MS = 60_000;
 const directoryCache = new Map<string, { channels: ReadonlyMap<string, DirectoryChannel>; expiresAt: number }>();
 
+type JoinedChannels = Awaited<ReturnType<typeof joinedChannelDirectory>>;
+
+/**
+ * The org's joined channels from the cache, else from `scan`, kept for five
+ * minutes. A null scan (no Slack plugin, no credential) gives an empty list
+ * and keeps nothing. A failed scan propagates and keeps an empty list for one
+ * minute, so a read does not wait on a rate-limited Slack again. A scan that
+ * fails after a newer scan answered leaves that answer in place.
+ */
+export async function cachedChannelDirectory(
+  orgId: string, scan: () => Promise<JoinedChannels | null>,
+): Promise<ReadonlyMap<string, DirectoryChannel>> {
+  const cached = directoryCache.get(orgId);
+  if (cached && cached.expiresAt > Date.now()) return cached.channels;
+  let joined: JoinedChannels | null;
+  try {
+    joined = await scan();
+  } catch (err) {
+    if (directoryCache.get(orgId) === cached) {
+      setCapped(directoryCache, orgId, { channels: new Map(), expiresAt: Date.now() + FAILED_SCAN_TTL_MS });
+    }
+    throw err;
+  }
+  if (joined === null) return new Map();
+  const channels = new Map(joined.map(({ id, name, isPrivate }) => [id, { name, isPrivate }]));
+  setCapped(directoryCache, orgId, { channels, expiresAt: Date.now() + NAMES_TTL_MS });
+  return channels;
+}
+
 /**
  * Every live Slack channel the org's bot has joined, by channel id, with its
- * name and privacy. It reads the Slack plugin's joined-channel scan, which
- * has no picker limit. No Slack plugin or no credential gives an empty list.
- * A provider error propagates, and the next minute's reads get an empty list
- * without asking Slack.
+ * name and privacy (`cachedChannelDirectory`). It reads the Slack plugin's
+ * joined-channel scan, which has no picker limit.
  */
 export function slackChannelDirectory(c: Context<AppEnv>): ChannelDirectory {
-  return async () => {
-    const orgId = c.var.user.orgId;
-    const cached = directoryCache.get(orgId);
-    if (cached && cached.expiresAt > Date.now()) return cached.channels;
-    if (!c.var.providers.plugins.some((candidate) => candidate.filterOptionResolvers?.["slack.channels"])) return new Map();
-    const credential = await orgSlackCredential(c.var.providers, orgId);
-    if (!credential) return new Map();
-    let joined: Awaited<ReturnType<typeof joinedChannelDirectory>>;
-    try {
-      joined = await joinedChannelDirectory(credential);
-    } catch (err) {
-      setCapped(directoryCache, orgId, { channels: new Map(), expiresAt: Date.now() + FAILED_SCAN_TTL_MS });
-      throw err;
-    }
-    const channels = new Map(joined.map(({ id, name, isPrivate }) => [id, { name, isPrivate }]));
-    setCapped(directoryCache, orgId, { channels, expiresAt: Date.now() + NAMES_TTL_MS });
-    return channels;
-  };
+  return () => cachedChannelDirectory(c.var.user.orgId, async () => {
+    if (!c.var.providers.plugins.some((candidate) => candidate.filterOptionResolvers?.["slack.channels"])) return null;
+    const credential = await orgSlackCredential(c.var.providers, c.var.user.orgId);
+    return credential ? joinedChannelDirectory(credential) : null;
+  });
 }
 
 /**

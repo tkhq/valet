@@ -9,6 +9,7 @@ import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { recentTerminalReview, recordActionChannelMessage, recordChannelMessage, recordTerminalPullRequestWrite, threadForPullRequest, wasSentByValet } from "../services/channel-messages.js";
 import type { ChannelDetailResponse, ListChannelsResponse, ThreadChannelActivity, ListThreadsResponse } from "../wire/types.js";
+import { cachedChannelDirectory, resetChannelNameCaches } from "./workspace-channels.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); resetThreadAccessCache(); await api?.cleanup(); api = undefined; });
@@ -331,4 +332,19 @@ it("does not hydrate archived-only executions in the active thread list", async 
   }
   const archived = await (await fetch(`${url}?archived=1`)).json() as ListThreadsResponse;
   expect(archived.threads.map(t => t.sessionId).sort()).toEqual(archivedIds.sort());
+});
+
+// Review of PR #1012: a scan that waits through Slack's retries and then
+// fails must not replace the list a newer scan already stored.
+it("keeps a newer channel list when an older scan fails after it", async () => {
+  resetChannelNameCaches();
+  let failOld: (err: Error) => void = () => {};
+  const old = cachedChannelDirectory("org-race", () => new Promise((_, reject) => { failOld = reject; }));
+  const fresh = await cachedChannelDirectory("org-race", async () => [{ id: "C950", name: "alerts-prod", isPrivate: false }]);
+  expect([...fresh.keys()]).toEqual(["C950"]);
+  failOld(new Error("ratelimited"));
+  await expect(old).rejects.toThrow("ratelimited");
+  const after = await cachedChannelDirectory("org-race", async () => { throw new Error("the cache must answer"); });
+  expect(after.get("C950")).toEqual({ name: "alerts-prod", isPrivate: false });
+  resetChannelNameCaches();
 });
