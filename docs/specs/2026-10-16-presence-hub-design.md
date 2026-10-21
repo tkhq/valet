@@ -274,14 +274,13 @@ Pass criterion: all steps, in one run, from a clean start.
     channel that an exact `channel` filter of the workspace's lines names,
     by channel id. A line over several channels lists at the Slack
     workspace, so each of its channels is a place only when a thread, a
-    follow, a waiter, or a recent event names it. A private channel's name
-    shows only to its members, as its place does. A channel's name comes
-    from the bot's channel list, else a filter's label or a recent event,
-    else Slack's `conversations.info`. The bot's channel list holds at most
-    100 channels, and only channels the bot has joined. One read asks
-    `conversations.info` about at most 20 channels with no current answer.
-    The api keeps each answer for five minutes. A later read reuses those
-    answers and asks about the channels that are still unnamed.
+    follow, a waiter, or a recent event names it. A channel's name comes
+    from the bot's channel list (every channel it has joined, with no
+    picker limit), else a filter's label or a recent event. The api keeps
+    the list for five minutes. The list says which channels are private.
+    A public channel on it shows its name with no Slack call. A private
+    channel's name shows only to its members, with the check its place
+    takes. A channel the bot has not joined keeps its id.
 11. Phone width: the place column stacks above its sentence column; the
     switch and the overflow menu stay on the sentence row; nothing scrolls
     sideways.

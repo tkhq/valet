@@ -20,7 +20,9 @@ import { isAssistantKind, readScheduleTargetKind, readStoredTarget } from "../ev
 import { slackMessageUrl } from "./channel-messages.js";
 import { eventHeadColumns, type EventHead } from "./event-columns.js";
 import { mapBounded } from "../lib/bounded-map.js";
-import { channelFilterIds, runtimeSessionId, type ChannelNames, type ChannelVisibility, type ThreadPairsShown } from "./channels.js";
+import {
+  channelFilterIds, runtimeSessionId, type ChannelDirectory, type ChannelVisibility, type DirectoryChannel, type ThreadPairsShown,
+} from "./channels.js";
 import type {
   ChannelConversation, ListPresencePlacesResponse, ListThreadFeedersResponse, PresencePlaceService, PresencePlaceWire,
   ThreadFeederWire,
@@ -376,10 +378,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** What the place reads see of the request: names, channel access, thread access, and the org's Slack workspace. */
 export interface PresenceAccess {
-  /** Names from the bot's channel list. */
-  names: ChannelNames;
-  /** Names one channel at a time, for a channel that no other source names. */
-  lookupNames: ChannelNames;
+  /** The channels the org's bot has joined, with their names and privacy. */
+  directory: ChannelDirectory;
   canSee: ChannelVisibility;
   threadsShown: ThreadPairsShown;
   /** The org's Slack workspace id, from its bot credential, or null. */
@@ -613,10 +613,20 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     const channelId = slackChannelOf(place);
     return channelId ? [{ place, channelId }] : [];
   });
-  const checked = [...new Set([...channelPlaces.map(({ channelId }) => channelId), ...lineChannels])];
+  const placeChannels = new Set(channelPlaces.map(({ channelId }) => channelId));
+  const directory = placeChannels.size + lineChannels.size > 0
+    ? await access.directory().catch(() => new Map<string, DirectoryChannel>()) : new Map<string, DirectoryChannel>();
+  // A line's channel that is no place has a name only when the bot has
+  // joined it. The bot's channel list says whether it is private, so only a
+  // private one takes the check, and a public one costs no Slack call.
+  const lineOnly = [...lineChannels].filter((id) => !placeChannels.has(id) && directory.has(id));
+  const checked = [...placeChannels, ...lineOnly.filter((id) => directory.get(id)?.isPrivate === true)];
   const seen = await mapBounded(checked, CHANNEL_CHECK_CONCURRENCY,
     (channelId) => access.canSee(`slack:${channelId}`).catch(() => false));
-  const visible = new Set(checked.filter((_, index) => seen[index] === true));
+  const visible = new Set([
+    ...checked.filter((_, index) => seen[index] === true),
+    ...lineOnly.filter((id) => directory.get(id)?.isPrivate === false),
+  ]);
   for (const { place, channelId } of channelPlaces) if (!visible.has(channelId)) places.delete(place);
 
   // Every parent a row names is a row. A parent that only its children name
@@ -636,17 +646,10 @@ async function loadPlaces(deps: PresenceDeps, orgId: string, owner: Principal, a
     pending = next;
   }
 
-  const channelIds = [...new Set([
-    ...[...places.keys()].map(slackChannelOf).filter((id): id is string => id !== null),
-    ...[...lineChannels].filter((id) => visible.has(id)),
-  ])];
-  const resolved = channelIds.length > 0 ? await access.names(channelIds).catch(() => new Map<string, string>()) : new Map<string, string>();
-  for (const [id, name] of resolved) channelNames.set(id, name);
-  // The bot's channel list stops at the picker's limit and holds only the
-  // channels the bot has joined. Slack names the rest one at a time.
-  const unnamed = channelIds.filter((id) => !channelNames.has(id));
-  const looked = unnamed.length > 0 ? await access.lookupNames(unnamed).catch(() => new Map<string, string>()) : new Map<string, string>();
-  for (const [id, name] of looked) channelNames.set(id, name);
+  for (const id of visible) {
+    const name = directory.get(id)?.name;
+    if (name) channelNames.set(id, name);
+  }
   const lineNames = Object.fromEntries([...lineChannels].flatMap((id) => {
     const name = visible.has(id) ? channelNames.get(id)?.replace(/^#/, "") : undefined;
     return name && name !== id ? [[id, name]] : [];

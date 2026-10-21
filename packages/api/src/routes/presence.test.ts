@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { eventDeliveries, eventSubscriptions, events, followedThreads, slackChannelPrivacy, workflowSchedules } from "../schema/index.js";
+import { eventDeliveries, eventSubscriptions, events, followedThreads, workflowSchedules } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
 import { slowPlacesLine } from "./presence.js";
@@ -30,11 +30,9 @@ async function boot(): Promise<TestApi> {
 
 /** Connects the org Slack bot for team `T1` and answers Slack's channel
  * checks: `members` lists each private channel's members; any other channel
- * is public. `slack.names` names a channel in `conversations.info`, else the
- * name is the lowercased id, and `slack.joined` lists the channels the bot
- * has joined. The returned list holds the channel of each
- * `conversations.info` call. */
-async function connectSlack(a: TestApi, members: Record<string, string[]> = {}, slack: { names?: Record<string, string>; joined?: Record<string, string> } = {}) {
+ * is public. `joined` names the channels the bot has joined, by id. The
+ * returned list holds the channel of each `conversations.info` call. */
+async function connectSlack(a: TestApi, members: Record<string, string[]> = {}, joined: Record<string, string> = {}) {
   const infoCalls: string[] = [];
   // The Slack plugin caches its directory and its names by token, so each
   // test's bot has its own token.
@@ -48,8 +46,9 @@ async function connectSlack(a: TestApi, members: Record<string, string[]> = {}, 
     const privateMembers = members[channel];
     if (url.pathname.endsWith("conversations.info")) infoCalls.push(channel);
     const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: privateMembers ?? [] }
-      : url.pathname.endsWith("users.conversations") ? { ok: true, channels: Object.entries(slack.joined ?? {}).map(([id, name]) => ({ id, name })) }
-      : { ok: true, channel: { name: slack.names?.[channel] ?? channel.toLowerCase(), is_private: privateMembers !== undefined } };
+      : url.pathname.endsWith("users.conversations")
+        ? { ok: true, channels: Object.entries(joined).map(([id, name]) => ({ id, name, is_private: members[id] !== undefined })) }
+      : { ok: true, channel: { name: channel.toLowerCase(), is_private: privateMembers !== undefined } };
     return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
   });
   return infoCalls;
@@ -455,58 +454,50 @@ async function placesRead(a: TestApi, scope: string): Promise<ListPresencePlaces
 // channels with no event in 30 days were no place and read as raw ids.
 it("names every channel a line lists, though no event made it a place", async () => {
   api = await boot();
-  const infoCalls = await connectSlack(api, { CPRIV: ["USOMEONE"] }, {
-    joined: { C900: "incidents", CPRIV: "secret-plans" },
-    names: { C950: "alerts-prod", CPRIV: "secret-plans" },
-  });
+  const infoCalls = await connectSlack(api, { CPRIV: ["USOMEONE"] }, { C900: "incidents", C950: "alerts-prod", CPRIV: "secret-plans" });
   await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
-  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950", "CPRIV"] }] });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C900", "C950", "CPRIV", "CGONE"] }] });
 
   const read = await placesRead(api, "user");
   expect(read.places.map((row) => row.subject)).toEqual(["slack:T1"]);
-  // C900 is on the bot's channel list. C950 is not, so Slack names it one
-  // channel at a time. The viewer is not a member of the private CPRIV.
+  // The viewer is not a member of the private CPRIV, and the bot has not
+  // joined CGONE. Only the private channel takes a check.
   expect(read.channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
+  expect(infoCalls).toEqual(["CPRIV"]);
 
-  // A second read asks Slack nothing: it reuses the names and the checks.
-  const before = infoCalls.length;
+  // A second read asks Slack nothing.
   expect((await placesRead(api, "user")).channelNames).toEqual({ C900: "incidents", C950: "alerts-prod" });
-  expect(infoCalls.slice(before)).toEqual([]);
+  expect(infoCalls).toEqual(["CPRIV"]);
 
   // A member of the private channel sees its name.
   await linkIdentity(api.providers.db, { provider: "slack", externalId: "USOMEONE", userId: USER });
   expect((await placesRead(api, "user")).channelNames).toMatchObject({ CPRIV: "secret-plans" });
 });
 
-// Review of PR #1012: a name from conversations.info must expire with the
-// five-minute answer, so a renamed channel shows its new name.
-it("reads a renamed channel's new name once the five-minute answer expires", async () => {
+// Review of PR #1012: one conversations.info call for each channel did not
+// fit Slack's rate limit, and the channel picker stops at 100 channels.
+it("names a line's channels past the picker's first 100 with no Slack call for each channel", async () => {
   api = await boot();
-  const names = { C950: "alerts-prod" };
-  await connectSlack(api, {}, { names });
+  const ids = Array.from({ length: 150 }, (_, n) => `C${String(n).padStart(3, "0")}`);
+  const infoCalls = await connectSlack(api, {}, Object.fromEntries(ids.map((id) => [id, `ch-${id.slice(1)}`])));
   await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
-  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "eq", value: "C950" }] });
-  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
+  const listed = ids.slice(100, 125);
+  await rule(api, { id: "r-many", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: listed }] });
 
-  names.C950 = "alerts-production";
-  // Inside five minutes the read keeps the answer it has.
-  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
-  const later = Date.now() + 6 * 60_000;
-  vi.spyOn(Date, "now").mockReturnValue(later);
-  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-production" });
+  const read = await placesRead(api, "user");
+  expect(read.channelNames).toEqual(Object.fromEntries(listed.map((id) => [id, `ch-${id.slice(1)}`])));
+  expect(infoCalls).toEqual([]);
 });
 
-it("names at most 20 unnamed channels for each read, and the rest on a later read", async () => {
+it("reads a renamed channel's new name once the five-minute list expires", async () => {
   api = await boot();
-  const ids = Array.from({ length: 25 }, (_, n) => `CQ${String(n).padStart(2, "0")}`);
-  await connectSlack(api);
-  // Each channel is public, as Slack answered before, so a read checks no privacy.
-  await api.providers.db.insert(slackChannelPrivacy).values(ids.map((channelId) => ({ orgId: ORG, channelId, isPrivate: false, checkedAt: Date.now() })));
+  const joined = { C950: "alerts-prod" };
+  await connectSlack(api, {}, joined);
   await ensureDefaultAssistantSession(api.providers, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
-  await rule(api, { id: "r-many", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ids }] });
+  await rule(api, { id: "r-alerts", eventKeys: ["slack.message"], filters: [{ field: "channel", op: "in", value: ["C950", "C951"] }] });
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-prod" });
 
-  expect(Object.keys((await placesRead(api, "user")).channelNames)).toHaveLength(20);
-  const second = await placesRead(api, "user");
-  expect(Object.keys(second.channelNames).sort()).toEqual(ids);
-  expect(second.channelNames.CQ24).toBe("cq24");
+  joined.C950 = "alerts-production";
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60_000);
+  expect((await placesRead(api, "user")).channelNames).toEqual({ C950: "alerts-production" });
 });
