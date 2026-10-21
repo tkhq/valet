@@ -23,6 +23,13 @@ describe("workspace singleton repair on an already migrated database", () => {
       VALUES ('repair-job', 'u', 'dm', '{}', 100)`);
     expect((await db.query("SELECT status, sending_at, attempts, message_refs FROM pending_channel_deliveries WHERE id = 'repair-job'")).rows)
       .toEqual([{ status: "pending", sending_at: null, attempts: 0, message_refs: null }]);
+    await db.query("DROP INDEX pending_channel_deliveries_age");
+    await db.query("ALTER TABLE pending_channel_deliveries DROP COLUMN created_at");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    const created = await db.query("SELECT created_at FROM pending_channel_deliveries WHERE id = 'repair-job'");
+    expect(Number(created.rows[0]?.created_at)).toBeGreaterThan(0);
     await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
   });
 

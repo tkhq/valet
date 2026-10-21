@@ -85,8 +85,8 @@ export class SlackApi {
     return this.cachedDirectoryKey;
   }
 
-  private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
-    const res = await slackFetch(method, this.token, body, this.baseUrl);
+  private async call(method: string, body: Record<string, unknown>, attention = false): Promise<SlackResponse> {
+    const res = await slackFetch(method, this.token, body, this.baseUrl, attention ? AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS) : undefined);
     const parsed = (await res.json()) as SlackResponse;
     if (!parsed.ok) {
       throw new SlackApiError(
@@ -111,7 +111,6 @@ export class SlackApi {
     const form = new URLSearchParams();
     for (const [key, value] of Object.entries(body)) form.set(key, String(value));
     const res = await fetch(`${this.baseUrl}/${method}`, {
-      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -156,7 +155,7 @@ export class SlackApi {
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.username !== undefined) body.username = opts.username;
     if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
-    const res = await this.call("chat.postMessage", body);
+    const res = await this.call("chat.postMessage", body, opts.attentionDeliveryId !== undefined);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");
     return { ts };
@@ -245,8 +244,8 @@ export class SlackApi {
   }
 
   /** conversations.open with a user id → the IM channel id. */
-  async openConversation(userId: string): Promise<string> {
-    const res = await this.call("conversations.open", { users: userId });
+  async openConversation(userId: string, attention = false): Promise<string> {
+    const res = await this.call("conversations.open", { users: userId }, attention);
     const channelId = str(rec(res.channel)?.id);
     if (!channelId) throw new SlackApiError("conversations.open", "response missing channel.id");
     return channelId;
@@ -264,7 +263,6 @@ export class SlackApi {
 
   async uploadToUrl(uploadUrl: string, data: Uint8Array, mimeType: string): Promise<void> {
     const res = await fetch(uploadUrl, {
-      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       body: new Blob([toArrayBuffer(data)], { type: mimeType }),
     });
@@ -514,7 +512,7 @@ export class SlackApi {
    * `maxBytes` via Content-Length and the actual body size; null when over.
    */
   async downloadFile(url: string, maxBytes: number): Promise<Uint8Array | null> {
-    const res = await fetch(url, { signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS), headers: { Authorization: `Bearer ${this.token}` } });
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
     if (!res.ok) return null;
     const contentLength = res.headers.get("Content-Length");
     if (contentLength !== null && Number.parseInt(contentLength, 10) > maxBytes) return null;
@@ -528,7 +526,6 @@ export class SlackApi {
   /** POST apps.connections.open with the app-level (xapp) token → wss URL. */
   async connectionsOpen(appToken: string): Promise<string> {
     const res = await fetch(`${this.baseUrl}/apps.connections.open`, {
-      signal: AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS),
       method: "POST",
       headers: { Authorization: `Bearer ${appToken}` },
     });

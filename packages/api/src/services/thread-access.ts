@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { Thread, type StoredCredential, type ThreadAccessCheck, type ThreadData } from "@valet/engine";
 import type { WorkflowRunOrigin } from "@valet/workflow";
-import { checkPrivateChannelAccess } from "@valet/plugin-slack/actions";
+import { checkPrivateChannelAccess, isPermanentSlackAccessError } from "@valet/plugin-slack/actions";
 import { identityForUser } from "../channels/identity-links.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { Providers } from "../providers/types.js";
@@ -156,13 +156,15 @@ const MEMBERSHIP_TTL_MS = 5 * 60_000;
 const privacyCache = new Map<string, { isPrivate: boolean | undefined; expiresAt: number }>();
 const membershipCache = new Map<string, { allowed: boolean; expiresAt: number }>();
 
+class SlackChannelDenied extends Error {}
+
 /**
  * Whether a Slack channel is private: from memory, then the stored answer
  * while it is fresh, then Slack, with the stored answer standing when Slack
  * cannot answer. Undefined only for a channel never classified.
  */
 export async function slackChannelIsPrivate(
-  deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>,
+  deps: Pick<AccessDeps, "db">, orgId: string, channelId: string, token: () => Promise<string | null>, retryUnknownAccess = false,
 ): Promise<boolean | undefined> {
   const cacheKey = `${orgId}:${channelId}`;
   const now = Date.now();
@@ -178,7 +180,8 @@ export async function slackChannelIsPrivate(
     // membership check, so no viewer is needed here.
     // A DM or group DM counts as private: one person's conversation with the
     // bot is not the team's.
-    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined, { directIsPrivate: true }).catch(() => null) : null;
+    const info = bot ? await checkPrivateChannelAccess(bot, channelId, undefined, { directIsPrivate: true, ...(retryUnknownAccess ? { timeoutMs: 10_000 } : {}) }).catch(() => null) : null;
+    if (retryUnknownAccess && isPermanentSlackAccessError(info?.errorCode)) throw new SlackChannelDenied();
     const answered = info && (!info.error || info.isPrivate);
     if (answered) {
       isPrivate = info.isPrivate;
@@ -425,7 +428,13 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer, retryU
   return async (channelKey) => {
     const channelId = /^slack:([^:]+)$/.exec(channelKey)?.[1];
     if (!channelId) return true;
-    const isPrivate = await slackChannelIsPrivate(deps, viewer.orgId, channelId, bot);
+    let isPrivate: boolean | undefined;
+    try {
+      isPrivate = await slackChannelIsPrivate(deps, viewer.orgId, channelId, bot, retryUnknownAccess);
+    } catch (err) {
+      if (err instanceof SlackChannelDenied) return false;
+      throw err;
+    }
     if (isPrivate === false) return true;
     // A channel never classified, with Slack unable to answer, may be
     // private: it stays hidden until Slack says otherwise.
@@ -446,7 +455,8 @@ export function channelVisibility(deps: AccessDeps, viewer: ThreadViewer, retryU
       if (retryUnknownAccess) throw new Error("Slack membership cannot be checked without credentials. Restore the Slack integration.");
       return false;
     }
-    const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true }).catch(() => null);
+    const access = await checkPrivateChannelAccess(token, channelId, member, { directIsPrivate: true, ...(retryUnknownAccess ? { timeoutMs: 10_000 } : {}) }).catch(() => null);
+    if (isPermanentSlackAccessError(access?.errorCode)) return false;
     if (retryUnknownAccess && (!access || access.error?.startsWith("Slack API error"))) {
       throw new Error("Slack membership lookup failed. Retry the attention delivery.");
     }

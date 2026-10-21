@@ -14,7 +14,7 @@ it.each(["post", "get"])("aborts a blackholed %s request", async method => {
     init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
   }));
   vi.stubGlobal("fetch", fetchMock);
-  const request = method === "post" ? slackFetch("chat.postMessage", "test") : slackGet("conversations.info", "test");
+  const request = method === "post" ? slackFetch("chat.postMessage", "test", undefined, undefined, AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS)) : slackGet("conversations.info", "test", undefined, undefined, AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS));
   const outcome = expect(request).rejects.toThrow("request timed out");
   await vi.advanceTimersByTimeAsync(SLACK_REQUEST_TIMEOUT_MS);
   await outcome;
@@ -30,8 +30,20 @@ it("bounds Retry-After waits with the same request deadline", async () => {
   });
   const fetchMock = vi.fn(async () => new Response("{}", { status: 429, headers: { "Retry-After": "300" } }));
   vi.stubGlobal("fetch", fetchMock);
-  const outcome = expect(slackFetch("chat.postMessage", "test")).rejects.toThrow("request timed out");
+  const outcome = expect(slackFetch("chat.postMessage", "test", undefined, undefined, AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS))).rejects.toThrow("request timed out");
   await vi.advanceTimersByTimeAsync(SLACK_REQUEST_TIMEOUT_MS);
   await outcome;
   expect(fetchMock).toHaveBeenCalledOnce();
+});
+
+it.each(["post", "get"])("preserves long Retry-After waits for ordinary %s callers", async method => {
+  vi.useFakeTimers();
+  const fetchMock = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 429, headers: { "Retry-After": "15" } }))
+    .mockResolvedValueOnce(new Response('{"ok":true}'));
+  vi.stubGlobal("fetch", fetchMock);
+  const request = method === "post" ? slackFetch("chat.postMessage", "test") : slackGet("conversations.info", "test");
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect((await request).status).toBe(200);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls.every(([, init]) => init.signal === undefined)).toBe(true);
 });

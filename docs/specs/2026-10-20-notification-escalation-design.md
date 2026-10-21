@@ -35,7 +35,7 @@ Input remains recent for two minutes.
 A visibility change reports the tab's current state immediately.
 An idle tab reports inactive and stops active heartbeats.
 
-`POST /api/notifications/presence` requires browser session authentication.
+`POST /api/notifications/presence` requires browser session authentication or the local development stub.
 Personal API keys and CLI tokens cannot report presence.
 Pointer movement and scrolling do not count as input.
 The server uses the authenticated user's identifier, never a client-supplied user identifier.
@@ -64,7 +64,11 @@ Each batch runs at most four jobs concurrently and selects at most 20 jobs.
 A slow Slack batch cannot hold Telegram's next batch.
 Dispatcher shutdown does not await personal provider calls.
 Unfinished sends retain their durable leases for restart recovery.
-Configured transports that are still starting do not claim jobs or spend attempts.
+Configured transports get a 30-second startup grace from the first dispatcher drain.
+During that window, unready transports do not claim jobs or spend attempts.
+After the window, an unready transport records failed attempts and uses the normal recovery backoff.
+A failed startup therefore raises the recovery failure alert.
+A drain request during an active batch schedules another row selection after that batch.
 No in-process timeout owns a notification deadline.
 A restart picks up pending jobs and stale sending jobs from Postgres.
 An index over pending and sending deadlines bounds the due scan.
@@ -78,6 +82,7 @@ Before sending a deferred job, the drain checks:
 3. The workflow checkpoint still holds the same unanswered approval, when the event references one.
 4. The recipient still belongs to the event's authorized audience.
    A definite denial drops the job.
+   Slack errors such as `channel_not_found`, `not_in_channel`, and `is_archived` are definite denials.
    Unknown channel privacy or a failed membership lookup retries without sending.
 5. The recipient still allows team DM copies, for team events.
 
@@ -113,6 +118,9 @@ After two minutes, the dispatcher claims that job for recovery.
 It calls the deliverer's optional `reconcile` hook before resending.
 If reconciliation finds the message, the worker records its ref without sending again.
 A miss, unsupported hook, or lookup failure causes a resend.
+After a timeout, the worker tries reconciliation immediately, including errors wrapped by the channel host.
+A confirmed gate card gets its callback refs before the worker records success.
+A miss or failed lookup retains the normal durable recovery path.
 An uncertain send may produce a duplicate.
 This is intentional: a lost approval notification is worse than a duplicate.
 
@@ -136,18 +144,26 @@ There is no retry limit or age cutoff for an unhandled notification.
 This preserves blocking approvals across long channel outages.
 The failure counter labels recovery failures with `retry=true`.
 The provisioned attention recovery alert reports those failures for operator action.
+The `valet_attention_oldest_job_age` gauge samples the oldest pending or sending enqueue time from Postgres.
+Its `s` unit exports as `valet_attention_oldest_job_age_seconds`.
+An alert warns when that age exceeds 30 minutes, even if a transport has never become ready.
+The active-row enqueue-time index bounds this query.
+Existing branch databases get their initial enqueue timestamp when the schema repair adds the column.
 Every retry repeats the read, gate, audience, and preference checks.
 
-Slack Web API requests abort after ten seconds, including rate-limit waits and response body reads.
-Direct Slack upload and connection requests also have a ten-second timeout.
+Only attention Slack posts, DM opens, and delivery-time audience checks use a ten-second deadline.
+That deadline includes rate-limit waits and response body reads.
+Reconciliation keeps its two-second per-history-request deadline.
+Shared Slack API callers, uploads, downloads, and connection requests retain their prior timeout behavior.
 Telegram sends have a ten-second request timeout.
 Telegram long polls retain a 40-second bound and the caller's cancellation signal.
 
 Completed job keys and confirmed refs remain stored to prevent producer replay.
 Terminal jobs replace the event payload with JSON null and clear their last error.
 The schema permits JSON null, not SQL NULL, for these tombstones.
-The event rail also scrubs up to 20 legacy terminal payloads per batch.
-A partial index bounds that cleanup without another timer.
+The delivery path has no legacy-payload cleanup query.
+Only earlier builds of this branch wrote those legacy rows.
+An active row with a JSON-null event is logged and dropped independently of other jobs.
 
 ## Preferences
 
@@ -172,5 +188,6 @@ Routing tests cover active users, inactive users, disabled web delivery, custom 
 Outbox tests cover handled rows, terminal gates, pending gates, deduplication, concurrent claims, and restart recovery.
 Existing channel suites cover gate controls and current identity-link preferences.
 Regression tests cover nonblocking routing, independent transport batches, bounded concurrency, and claim-time leases.
-They cover startup deferral, session-only presence, terminal-payload cleanup, and transient audience failures.
+They cover bounded startup deferral, session and local-stub presence, terminal-payload scrubbing, and transient audience failures.
+They also cover queue-age metrics and alerts, re-draining, permanent Slack denial, long rate-limit waits, and attention-only deadlines.
 Recovery tests distinguish summaries from cards and tolerate failed callback-ref saves.

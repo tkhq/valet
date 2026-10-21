@@ -2854,6 +2854,27 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'gate'")).rows).toHaveLength(1);
   });
 
+  it("restores landed gate controls immediately after a timed-out post", async () => {
+    host = await buildHost();
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(agentSessions).values({ id: "timeout-session", workspace: "/", orgId: ORG_ID, userId: USER_ID, ownerType: "user", ownerId: USER_ID, createdAt: 1, updatedAt: 1 });
+    const store = new PgSessionStore(testDb.pgdb);
+    await store.saveDecisionGate("timeout-session", "thread", { id: "timeout-gate", sessionId: "timeout-session", threadId: "thread", queueItemId: "q", resumeKey: "r", ordinal: 0, type: "approval", status: "pending", title: "Approve", actions: [{ id: "approve", label: "Approve" }], createdAt: 1, updatedAt: 1 });
+    const timeout = new Error("request timed out");
+    timeout.name = "TimeoutError";
+    vi.spyOn(fakeTransport, "sendGatePrompt").mockRejectedValueOnce(timeout);
+    const ref = { conversationKey: "fake:dm:77", messageId: "landed", gateId: "timeout-gate" };
+    const reconcile = vi.fn(async () => ref);
+    Object.assign(fakeTransport, { reconcileAttention: reconcile });
+    const channels = [host.attentionDeliverer("fake")];
+    await routeAttention({ db: testDb.appDb, channels }, event({ kind: "approval", sessionId: "timeout-session", gate: { id: "timeout-gate", actions: [{ id: "approve", label: "Approve" }] }, dedupeKey: "timeout" }));
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(host.gateForRef(ref)).toMatchObject({ gateId: "timeout-gate", sessionId: "timeout-session" });
+    const [job] = await testDb.appDb.select().from(pendingChannelDeliveries);
+    expect(job).toMatchObject({ status: "sent", attempts: 1 });
+    expect((await testDb.pgdb.query("SELECT * FROM engine_decision_gate_refs WHERE gate_id = 'timeout-gate'")).rows).toHaveLength(1);
+  });
+
   it("does not register recovered summary messages as gate cards", async () => {
     host = await buildHost();
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });

@@ -36,3 +36,12 @@ it("rejects anonymous presence requests", async () => {
   });
   expect(response.status).toBe(401);
 });
+
+it("accepts local stub presence for grace-period testing", async () => {
+  api = await bootTestApi();
+  const response = await fetch(`${api.baseUrl}/api/notifications/presence`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tabId: "local", active: true }),
+  });
+  expect(response.status).toBe(200);
+  expect(webPresence(api.providers.db).isActive("local-user")).toBe(true);
+});

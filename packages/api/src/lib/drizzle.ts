@@ -403,7 +403,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     event jsonb NOT NULL, deliver_after bigint NOT NULL, status text NOT NULL DEFAULT 'pending',
     sending_at bigint, attempts integer NOT NULL DEFAULT 0, message_refs jsonb, last_error text
   )` },
-  { describe: "terminal attention payload cleanup", probe: { kind: "index", index: "pending_channel_deliveries_terminal_payload" }, sql: `CREATE INDEX pending_channel_deliveries_terminal_payload ON pending_channel_deliveries (id) WHERE status IN ('sent', 'dropped') AND event <> 'null'::jsonb` },
+  { describe: "attention enqueue time", probe: { kind: "column", table: "pending_channel_deliveries", column: "created_at" }, sql: 'ALTER TABLE pending_channel_deliveries ADD COLUMN created_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp()) * 1000)::bigint' },
+  { describe: "attention oldest job", probe: { kind: "index", index: "pending_channel_deliveries_age" }, sql: `CREATE INDEX pending_channel_deliveries_age ON pending_channel_deliveries (created_at) WHERE status IN ('pending', 'sending')` },
   { describe: "due personal attention", probe: { kind: "index", index: "pending_channel_deliveries_due" }, sql: 'CREATE INDEX pending_channel_deliveries_due ON pending_channel_deliveries (deliver_after) WHERE status IN (\'pending\', \'sending\')' },
   { describe: "attention notification lookup", probe: { kind: "index", index: "pending_channel_deliveries_notification" }, sql: 'CREATE INDEX pending_channel_deliveries_notification ON pending_channel_deliveries (notification_id) WHERE notification_id IS NOT NULL' },
   { describe: "workflow step start times", probe: { kind: "column", table: "workflow_checkpoints", column: "started_at" }, sql: 'ALTER TABLE "workflow_checkpoints" ADD COLUMN "started_at" bigint' },

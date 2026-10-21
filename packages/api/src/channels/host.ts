@@ -368,7 +368,7 @@ function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string, per
  * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
 export function hasOpenDirect(
   transport: ChannelTransport,
-): transport is ChannelTransport & { openDirectConversation(externalId: string): Promise<string> } {
+): transport is ChannelTransport & { openDirectConversation(externalId: string, attention?: boolean): Promise<string> } {
   return typeof (transport as { openDirectConversation?: unknown }).openDirectConversation === "function";
 }
 
@@ -1962,7 +1962,7 @@ export class ChannelHost {
           const link = await identityForUser(this.deps.db, channelType, userId);
           if (!link || link.notifyAttention === false) continue;
           if (!transport.reconcileAttention) return undefined;
-          const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId) : `${channelType}:dm:${link.externalId}`;
+          const key = hasOpenDirect(transport) ? await transport.openDirectConversation(link.externalId, true) : `${channelType}:dm:${link.externalId}`;
           const ref = await transport.reconcileAttention(key, attempt.deliveryId, attempt.sendingAt);
           if (!ref) return undefined;
           if (event.gate && ref.gateId === event.gate.id && event.sessionId && await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id)) {
@@ -2000,7 +2000,7 @@ export class ChannelHost {
             // Slack: `U…` names a person, `D…` names the DM with them. Ask the
             // transport to open the conversation when it knows the difference.
             const conversationKey = hasOpenDirect(transport)
-              ? await transport.openDirectConversation(link.externalId)
+              ? await transport.openDirectConversation(link.externalId, true)
               : `${channelType}:dm:${link.externalId}`;
             // An approval event carries its gate, so the DM can be a real
             // prompt: the same buttons the channel-thread card gets, answered

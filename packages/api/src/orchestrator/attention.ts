@@ -289,7 +289,7 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
         previousOrder = tier.order;
         const jobId = JSON.stringify([id, tier.id]);
         const inserted = await tx.insert(pendingChannelDeliveries).values({
-          id: jobId, userId, tierId: tier.id, notificationId: web ? id : null, event, deliverAfter,
+          id: jobId, userId, tierId: tier.id, notificationId: web ? id : null, event, createdAt: now, deliverAfter,
         }).onConflictDoNothing().returning({ id: pendingChannelDeliveries.id });
         if (inserted.length > 0 && deliverAfter <= now) immediate.push(jobId);
       }

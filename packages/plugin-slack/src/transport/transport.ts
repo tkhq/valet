@@ -1337,8 +1337,8 @@ export class SlackTransport implements ChannelTransport {
    * `Date.now()` and the string build is atomic within an event-loop turn.
    * The function performs no `await` between those two points.
    */
-  async openDirectConversation(slackUserId: string): Promise<string> {
-    const channelId = await this.api.openConversation(slackUserId);
+  async openDirectConversation(slackUserId: string, attention = false): Promise<string> {
+    const channelId = await this.api.openConversation(slackUserId, attention);
     // Slack ts format is "seconds.microseconds" (6 fractional digits).
     // The seconds come from wall clock; the microseconds come from a local
     // counter so distinct calls always mint distinct keys within a 10^6

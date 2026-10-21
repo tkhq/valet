@@ -4,5 +4,5 @@
  */
 export { slackPlugin, slimMessage } from "./actions.js";
 export { slackFetch, slackGet } from "./api.js";
-export { checkPrivateChannelAccess } from "./channel-access.js";
+export { checkPrivateChannelAccess, isPermanentSlackAccessError } from "./channel-access.js";
 export { markdownToSlackMrkdwn } from "../transport/format.js";

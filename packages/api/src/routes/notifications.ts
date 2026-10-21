@@ -41,7 +41,7 @@ import type {
 export const notificationsRouter = new Hono<AppEnv>();
 
 notificationsRouter.post("/presence", async c => {
-  if (c.var.authVia !== "session") return c.json({ error: "Web presence requires a browser session. Sign in to Valet." }, 403);
+  if (c.var.authVia !== "session" && c.var.authVia !== "stub") return c.json({ error: "Web presence requires a browser session. Sign in to Valet." }, 403);
   const body: unknown = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object" || !("tabId" in body) || !("active" in body)
     || typeof body.tabId !== "string" || body.tabId.length < 1 || body.tabId.length > 128 || typeof body.active !== "boolean") {

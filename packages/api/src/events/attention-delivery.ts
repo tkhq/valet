@@ -1,6 +1,6 @@
 import { mapBounded } from "../lib/bounded-map.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { recordAttentionDeliveryFailure } from "../observability/delivery-metrics.js";
+import { recordAttentionDeliveryFailure, registerAttentionQueueMetrics } from "../observability/delivery-metrics.js";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { matchesGateOccurrence } from "@valet/workflow";
 import { attentionAudience, type AttentionDeps, type AttentionEvent } from "../orchestrator/attention.js";
@@ -35,42 +35,66 @@ export async function attentionGatePending(deps: AttentionDeps, event: Attention
 /** A stale provider request is ambiguous. Recovery reconciles it before resending. */
 export const ATTENTION_SENDING_TIMEOUT_MS = 120_000;
 
-/** One bounded batch per transport. A slow tier cannot occupy another tier's slots. */
-const inFlight = new WeakMap<AppDb, Map<string, Promise<void>>>();
+/** Startup may defer claims briefly, but a failed startup must become visible. */
+export const ATTENTION_STARTUP_GRACE_MS = 30_000;
+const startedAt = new WeakMap<AppDb, number>();
+interface DrainRequest {
+  deps: AttentionDeps;
+  now: number;
+  immediateIds?: string[];
+  selectAll: boolean;
+}
+interface DrainState {
+  promise: Promise<void>;
+  requested?: DrainRequest;
+}
+/** One bounded batch per transport. Requests during a batch schedule another selection. */
+const inFlight = new WeakMap<AppDb, Map<string, DrainState>>();
 
 /** Called by the event rail, or detached after an immediate durable insert. */
 export async function drainAttentionDeliveries(deps: AttentionDeps, now = Date.now(), immediateIds?: string[]): Promise<void> {
+  registerAttentionQueueMetrics(deps.db);
+  if (!startedAt.has(deps.db)) startedAt.set(deps.db, now);
   let running = inFlight.get(deps.db);
   if (!running) { running = new Map(); inFlight.set(deps.db, running); }
   await Promise.all((deps.channels ?? []).map(tier => {
+    const request: DrainRequest = { deps: { ...deps, channels: [tier] }, now, immediateIds, selectAll: immediateIds === undefined };
     const existing = running.get(tier.id);
-    if (existing) return existing;
-    if (tier.enabled?.() !== false && tier.ready?.() === false) return;
-    const batch = drainTier({ ...deps, channels: [tier] }, now, immediateIds)
-      .finally(() => { running.delete(tier.id); });
-    running.set(tier.id, batch);
-    return batch;
+    if (existing) {
+      const previous = existing.requested;
+      existing.requested = { ...request, now: Math.max(now, previous?.now ?? now),
+        selectAll: request.selectAll || previous?.selectAll === true,
+        immediateIds: [...new Set([...(previous?.immediateIds ?? []), ...(immediateIds ?? [])])],
+      };
+      return existing.promise;
+    }
+    if (tier.enabled?.() !== false && tier.ready?.() === false && now - startedAt.get(deps.db)! < ATTENTION_STARTUP_GRACE_MS) return;
+    const state: DrainState = { promise: Promise.resolve() };
+    state.promise = (async () => {
+      let next: typeof request | undefined = request;
+      while (next) {
+        state.requested = undefined;
+        await drainTier(next);
+        next = state.requested;
+      }
+    })().finally(() => { running.delete(tier.id); });
+    running.set(tier.id, state);
+    return state.promise;
   }));
 }
 
-async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string[]): Promise<void> {
+async function drainTier({ deps, now, immediateIds, selectAll }: DrainRequest): Promise<void> {
   const tier = deps.channels?.[0];
   if (!tier) return;
-  // Keep dedupe tombstones, not gate digests. Scrub terminal rows from older
-  // versions in bounded batches on the same rail, without a retention timer.
-  await deps.db.execute(sql`UPDATE pending_channel_deliveries SET event = 'null'::jsonb, last_error = NULL
-    WHERE id IN (SELECT id FROM pending_channel_deliveries
-      WHERE status IN ('sent', 'dropped') AND event <> 'null'::jsonb LIMIT 20)`);
   const dueCondition = and(
     inArray(pendingChannelDeliveries.status, ["pending", "sending"]),
     lte(pendingChannelDeliveries.deliverAfter, now),
   );
   const due = await deps.db.select().from(pendingChannelDeliveries).where(and(
     dueCondition, eq(pendingChannelDeliveries.tierId, tier.id),
-    immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
+    !selectAll && immediateIds ? inArray(pendingChannelDeliveries.id, immediateIds) : undefined,
   )).orderBy(asc(pendingChannelDeliveries.attempts), asc(pendingChannelDeliveries.deliverAfter)).limit(20);
   await mapBounded(due, 4, async job => {
-    if (!job.event) throw new Error("Active attention job has no event. Check the outbox row.");
     const event = job.event;
     const claimedAt = Math.max(now, Date.now());
     // Repeat the due predicate on the outer update to fence concurrent drains.
@@ -82,6 +106,11 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
     if (!claimed) return;
     const fence = and(eq(pendingChannelDeliveries.id, job.id), eq(pendingChannelDeliveries.attempts, claimed.attempts), eq(pendingChannelDeliveries.status, "sending"));
     try {
+      if (!event) {
+        await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", lastError: null }).where(fence);
+        console.error(`[attention] dropped job ${job.id}: its event is JSON null`);
+        return;
+      }
       let handled = tier.enabled?.() === false;
       if (job.notificationId) {
         const [row] = await deps.db.select({ readAt: notifications.readAt }).from(notifications)
@@ -89,7 +118,7 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
         handled ||= !row || row.readAt !== null;
       }
       // Immediate producers can run before a workflow finishes parking.
-      if (!immediateIds && !await attentionGatePending(deps, event)) handled = true;
+      if (!immediateIds?.includes(job.id) && !await attentionGatePending(deps, event)) handled = true;
       const [preference] = await deps.db.select().from(userNotificationPreferences).where(and(
         eq(userNotificationPreferences.userId, job.userId), eq(userNotificationPreferences.kind, event.kind),
       )).limit(1);
@@ -99,6 +128,7 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
         await deps.db.update(pendingChannelDeliveries).set({ status: "dropped", event: sql`'null'::jsonb`, lastError: null }).where(fence);
         return;
       }
+      if (tier.ready?.() === false) throw new Error("Attention transport is not ready. Check channel startup and credentials.");
       let refs;
       if (job.status === "sending" && tier.reconcile) {
         try {
@@ -109,7 +139,16 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
         }
       }
       // The deliverer checks the current per-link notifyAttention setting.
-      refs ??= await tier.deliver(job.userId, event, { deliveryId: job.id, sendingAt: claimedAt });
+      if (!refs) {
+        try {
+          refs = await tier.deliver(job.userId, event, { deliveryId: job.id, sendingAt: claimedAt });
+        } catch (err) {
+          // A timed-out post may have landed. Restore its gate controls now when possible.
+          if (!isAttentionTimeout(err) || !tier.reconcile) throw err;
+          refs = await tier.reconcile(job.userId, event, { deliveryId: job.id, sendingAt: claimedAt });
+          if (!refs) throw err;
+        }
+      }
       await deps.db.update(pendingChannelDeliveries).set({ status: "sent", messageRefs: refs ?? [], event: sql`'null'::jsonb`, lastError: null }).where(fence);
     } catch (err) {
       const lastError = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
@@ -121,4 +160,9 @@ async function drainTier(deps: AttentionDeps, now: number, immediateIds?: string
       console.error(`attention delivery ${job.id} failed; retrying after its sending deadline:`, err);
     }
   });
+}
+
+/** Channel hosts aggregate provider errors without discarding their original types. */
+function isAttentionTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || (err instanceof AggregateError && err.errors.some(isAttentionTimeout)));
 }

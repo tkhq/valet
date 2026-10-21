@@ -1,15 +1,15 @@
 export const SLACK_API = 'https://slack.com/api';
 
-/** Bounds each API call, including rate-limit waits and response body reads. */
+/** Attention calls alone bound rate-limit waits and response body reads. */
 export const SLACK_REQUEST_TIMEOUT_MS = 10_000;
 
-async function waitForRetry(res: Response, signal: AbortSignal): Promise<void> {
+async function waitForRetry(res: Response, signal?: AbortSignal): Promise<void> {
   const seconds = Number(res.headers.get('Retry-After') || '2');
   await new Promise<void>((resolve, reject) => {
-    const abort = () => { clearTimeout(timer); reject(signal.reason); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, Math.max(0, seconds) * 1000);
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) abort();
+    const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, Math.max(0, seconds) * 1000);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -19,8 +19,8 @@ export async function slackFetch(
   token: string,
   body?: Record<string, unknown>,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
-  const signal = AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS);
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(`${baseUrl}/${method}`, {
       signal,
@@ -65,10 +65,10 @@ export async function slackGet(
   token: string,
   params?: Record<string, unknown>,
   baseUrl: string = SLACK_API,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const finalUrl = slackGetUrl(method, params, baseUrl);
 
-  const signal = AbortSignal.timeout(SLACK_REQUEST_TIMEOUT_MS);
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(finalUrl, {
       signal,

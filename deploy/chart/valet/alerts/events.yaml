@@ -71,3 +71,34 @@ groups:
           summary: Personal attention delivery failed again during recovery.
           description: Inspect pending_channel_deliveries.last_error and the channel startup logs. Restore bot credentials or ask the user to reconnect the channel. Pending approvals keep retrying until handled.
         labels: { severity: warning }
+
+      - uid: valet-attention-oldest-job
+        title: Valet personal notification queue is too old
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(valet_attention_oldest_job_age_seconds) > 1800'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              expression: A
+              type: threshold
+              refId: C
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [C] }
+                  reducer: { type: last, params: [] }
+                  type: query
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: A personal attention job has waited more than 30 minutes.
+          description: Inspect pending_channel_deliveries and channel startup logs. Restore the channel or resolve the pending request. Jobs do not expire.
+        labels: { severity: warning }

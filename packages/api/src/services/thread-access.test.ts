@@ -5,7 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
-import { cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
+import { channelVisibility, cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -512,3 +512,23 @@ it("stops showing a child's frames once its parent thread records a private chan
   await parentThread.addToMetadataList(SLACK_CHANNELS_METADATA_KEY, "CPARENTPRIV");
   expect(await shown(child.id)).toBe(false);
 });
+
+it.each(["channel_not_found", "not_in_channel", "is_archived", "ratelimited", "internal_error", "unknown_failure"])(
+  "distinguishes permanent Slack access denial from retryable %s", async error => {
+    api = await bootTestApi();
+    const { providers } = api;
+    await providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    await linkIdentity(providers.db, { provider: "slack", externalId: "UMEMBER", userId: "member" });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ ok: false, error }), { headers: { "content-type": "application/json" } }));
+    const permanent = ["channel_not_found", "not_in_channel", "is_archived"].includes(error);
+    // Exercise both an unknown channel's info lookup and a known private channel's membership lookup.
+    for (const known of [false, true]) {
+      resetThreadAccessCache();
+      const channelId = known ? "CKNOWN" : "CUNKNOWN";
+      if (known) await providers.db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId, isPrivate: true, checkedAt: Date.now() });
+      const check = channelVisibility(providers, { orgId: "local-org", userId: "member" }, true);
+      if (permanent) expect(await check(`slack:${channelId}`)).toBe(false);
+      else await expect(check(`slack:${channelId}`)).rejects.toThrow(/Retry/);
+    }
+  },
+);

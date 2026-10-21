@@ -1,3 +1,4 @@
+import * as deliveryMetrics from "../observability/delivery-metrics.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -5,7 +6,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { notifications, pendingChannelDeliveries, userNotificationPreferences, workflowRuns, workflowCheckpoints, workflowSignals } from "../schema/index.js";
 import { routeAttention as enqueueAttention, type AttentionChannelDeliverer, type AttentionEvent } from "../orchestrator/attention.js";
 import { webPresence } from "../services/web-presence.js";
-import { ATTENTION_SENDING_TIMEOUT_MS, drainAttentionDeliveries } from "./attention-delivery.js";
+import { ATTENTION_SENDING_TIMEOUT_MS, ATTENTION_STARTUP_GRACE_MS, drainAttentionDeliveries } from "./attention-delivery.js";
 
 let db: AppDb;
 const event: AttentionEvent = { kind: "question", owner: { type: "user", id: "u" }, title: "Choose", dedupeKey: "event-1" };
@@ -293,16 +294,86 @@ describe("isolated delivery execution", () => {
 
   it("scrubs terminal payloads while preserving dedupe keys and provider refs", async () => {
     const refs = [{ channelType: "slack", conversationKey: "dm", messageId: "1" }];
-    await db.insert(pendingChannelDeliveries).values([
-      { id: "old-sent", userId: "u", tierId: tier.id, event, deliverAfter: 1, status: "sent", messageRefs: refs },
-      { id: "old-dropped", userId: "u", tierId: tier.id, event, deliverAfter: 1, status: "dropped" },
-    ]);
     await routeAttention({ db, channels: [{ ...tier, deliver: async () => refs }] }, event);
     const jobs = await db.select().from(pendingChannelDeliveries);
-    expect(jobs).toHaveLength(3);
-    expect(jobs.every(job => job.event === null)).toBe(true);
-    expect(jobs.find(job => job.id === "old-sent")?.messageRefs).toEqual(refs);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ event: null, status: "sent", messageRefs: refs });
     await routeAttention({ db, channels: [tier] }, event);
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("counts failed readiness after startup grace, including recovery failures", async () => {
+    const failure = vi.spyOn(deliveryMetrics, "recordAttentionDeliveryFailure");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await db.insert(pendingChannelDeliveries).values({ id: "unready", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+      const deps = { db, channels: [{ ...tier, ready: () => false }] };
+      for (let n = 0; n < 5; n++) await drainAttentionDeliveries(deps, 1_000 + n);
+      expect(await pending()).toMatchObject({ status: "pending", attempts: 0 });
+      expect(failure).not.toHaveBeenCalled();
+      await drainAttentionDeliveries(deps, 1_000 + ATTENTION_STARTUP_GRACE_MS);
+      expect(await pending()).toMatchObject({ status: "sending", attempts: 1, lastError: expect.stringContaining("not ready") });
+      await drainAttentionDeliveries(deps, (await pending()).deliverAfter);
+      expect((await pending()).attempts).toBe(2);
+      expect(failure.mock.calls).toEqual([[false], [true]]);
+      expect(deliver).not.toHaveBeenCalled();
+    } finally { failure.mockRestore(); log.mockRestore(); }
+  });
+
+  it.each([false, true])("re-drains new jobs after a running batch, immediate IDs: %s", async immediate => {
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn(async () => { await blocked; });
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    await db.insert(pendingChannelDeliveries).values({ id: "first", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+    const first = drainAttentionDeliveries(deps);
+    let second: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      await db.insert(pendingChannelDeliveries).values({ id: "later", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+      second = drainAttentionDeliveries(deps, Date.now(), immediate ? ["later"] : undefined);
+      release();
+      await Promise.all([first, second]);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect((await db.select().from(pendingChannelDeliveries)).every(job => job.status === "sent")).toBe(true);
+    } finally { release(); await Promise.all([first, second]); }
+  });
+
+  it("keeps immediate gate events trusted when a full rail request also queues a re-drain", async () => {
+    let release = () => {};
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const send = vi.fn(async () => { await blocked; });
+    const deps = { db, channels: [{ ...tier, deliver: send }] };
+    await db.insert(pendingChannelDeliveries).values({ id: "first", userId: "u", tierId: tier.id, event, deliverAfter: 1 });
+    const first = drainAttentionDeliveries(deps);
+    let rail: Promise<void> | undefined;
+    let immediate: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
+      await db.insert(pendingChannelDeliveries).values({ id: "parking", userId: "u", tierId: tier.id,
+        event: { ...event, workflowGate: { runId: "not-yet-parked", nodeId: "approve", iteration: 0 } }, deliverAfter: 1 });
+      rail = drainAttentionDeliveries(deps);
+      immediate = drainAttentionDeliveries(deps, Date.now(), ["parking"]);
+      release();
+      await Promise.all([first, rail, immediate]);
+      expect(send).toHaveBeenCalledTimes(2);
+      const [job] = await db.select().from(pendingChannelDeliveries).where(eq(pendingChannelDeliveries.id, "parking"));
+      expect(job?.status).toBe("sent");
+    } finally { release(); await Promise.all([first, rail, immediate]); }
+  });
+
+  it("drops a JSON-null event without rejecting other rows", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await db.insert(pendingChannelDeliveries).values([
+        { id: "corrupt", userId: "u", tierId: tier.id, event: sql`'null'::jsonb`, deliverAfter: 1 },
+        { id: "valid", userId: "u", tierId: tier.id, event, deliverAfter: 1 },
+      ]);
+      await drainAttentionDeliveries({ db, channels: [tier] });
+      const jobs = await db.select().from(pendingChannelDeliveries);
+      expect(jobs.find(job => job.id === "corrupt")?.status).toBe("dropped");
+      expect(jobs.find(job => job.id === "valid")?.status).toBe("sent");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("corrupt"));
+    } finally { log.mockRestore(); }
   });
 });

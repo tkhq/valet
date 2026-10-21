@@ -25,7 +25,7 @@ describe('checkPrivateChannelAccess', () => {
     const result = await checkPrivateChannelAccess('xoxb-token', 'C123', 'U999');
     expect(result).toEqual({ allowed: true, isPrivate: false });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
-    expect(slackGetMock).toHaveBeenCalledWith('conversations.info', 'xoxb-token', { channel: 'C123' });
+    expect(slackGetMock).toHaveBeenCalledWith('conversations.info', 'xoxb-token', { channel: 'C123' }, undefined, undefined);
   });
 
   it('allows DMs (is_im) without membership check', async () => {
@@ -90,7 +90,7 @@ describe('checkPrivateChannelAccess', () => {
       .mockResolvedValueOnce(mockSlackResponse({ channels: [], response_metadata: { next_cursor: 'page2' } }))
       .mockResolvedValueOnce(mockSlackResponse({ channels: [{ id: 'C123' }] }));
     expect(await checkPrivateChannelAccess('xoxb-token', 'C123', undefined, { ownerType: 'team' })).toMatchObject({ allowed: true, isPrivate: true });
-    expect(slackGetMock).toHaveBeenLastCalledWith('users.conversations', 'xoxb-token', { types: 'private_channel', limit: 200, cursor: 'page2' });
+    expect(slackGetMock).toHaveBeenLastCalledWith('users.conversations', 'xoxb-token', { types: 'private_channel', limit: 200, cursor: 'page2' }, undefined, undefined);
   });
   it('fails closed when bot membership cannot be verified', async () => {
     slackGetMock.mockResolvedValueOnce(mockSlackResponse({ channel: { id: 'C123', is_private: true } }))
@@ -187,6 +187,7 @@ describe('checkPrivateChannelAccess', () => {
     expect(result).toEqual({
       allowed: false,
       isPrivate: false,
+      errorCode: 'channel_not_found',
       error: 'Slack API error checking channel: channel_not_found',
     });
   });
@@ -202,6 +203,7 @@ describe('checkPrivateChannelAccess', () => {
     expect(result).toEqual({
       allowed: false,
       isPrivate: true,
+      errorCode: 'not_in_channel',
       error: 'Slack API error checking membership: not_in_channel',
     });
   });
