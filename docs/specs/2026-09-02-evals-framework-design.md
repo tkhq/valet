@@ -375,11 +375,12 @@ to build and save a workflow without running it. The suite measures the
 `workflows` skill and the model defaults, so a change to either is
 compared on the same briefs instead of judged from one trial. Like the
 hard and long suites, the directory is outside the default `make eval`
-load. Each case runs 3 times (`runs: 3`). Run one model per call:
+load. Each case runs 3 times (`runs: 3`). Run one model per call, and
+run the calls one after another; two at once dropped model connections:
 
 ```bash
-make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-haiku-4-5"
-make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-sonnet-4-6"
+make eval EVAL_ARGS="--cases evals/cases/workflows --model anthropic/claude-sonnet-5-5"
+make eval EVAL_ARGS="--cases evals/cases/workflows --model openai/gpt-6-luna"
 ```
 
 The `workflow_definition` check finds the definitions the agent sent to
@@ -447,40 +448,62 @@ The cases:
 - `workflow-bot-alert-triage`: bot messages in two Slack channels start
   the workflow, and a high alert opens a GitHub issue in a tool step.
 
-Results from 2026-10-20, 3 runs per case. The skill text is the one
-before PR #993. The s tier is `anthropic/claude-haiku-4-5` and the m tier
-is `anthropic/claude-sonnet-4-6`, the built-in tier defaults.
+Dev's org tier map sends `s` to `openai/gpt-6-luna` and `m` to
+`anthropic/claude-sonnet-5-5`. The baselines name concrete models, not
+tiers. `openai/gpt-6-luna` is not measured yet, because the eval machine
+has no OpenAI key.
 
-| Case | Tier | Final correct | First draft correct | Rejections per run | Cost per run |
-|---|---|---|---|---|---|
-| sales-tracker | s | 3/3 | 0/3 | 1.0 | $0.11 |
-| sales-tracker | m | 3/3 | 0/3 | 1.7 | $0.49 |
-| scheduled-refresh | s | 0/3 | 0/3 | 1.3 | $0.08 |
-| scheduled-refresh | m | 3/3 | 0/3 | 1.0 | $0.64 |
-| onboarding-linear | s | 0/3 | 0/3 | 1.0 | $0.08 |
-| onboarding-linear | m | 0/3 | 0/3 | 1.0 | $0.39 |
-| bot-alert-triage | s | 3/3 | 0/3 | 1.3 | $0.10 |
-| bot-alert-triage | m | 3/3 | 0/3 | 1.3 | $0.55 |
-| all | s | 6/12 | 0/12 | 1.2 | $0.09 |
-| all | m | 9/12 | 0/12 | 1.2 | $0.52 |
+Current baselines. Base: `da0c13c2a` (dev-v2 with #993 and #1000). Product
+drive, 3 runs per case. Runs: 2026-10-20 18:03 to 18:58 EDT, and the
+`claude-sonnet-5-5` sales-tracker case on 2026-10-21.
 
-- No first draft on either tier was correct. Every first draft gave a
-  stop step the outcome `completed`, the value in the skill's own stop
-  example. Other repeated first-draft errors: an `if` step with
-  `condition` instead of `conditions`, a `session` step with a wrong
-  `mode`, and a foreach body that is not one inline object. Each run then
-  needed one or two validator rejections before a save.
-- The tiers separate on one case. In every s-tier run of
-  `workflow-scheduled-refresh`, the workflow read the schedule input at
-  `trigger.data.<field>`, which renders null at run time. The m tier read
-  `trigger.data.input.<field>`.
-- Neither tier set `maxItems` on the onboarding foreach steps.
-- An m-tier run cost about 5.7 times as much as an s-tier run.
-- In the first m-tier batch, 3 runs ended before any save because the
-  model's HTTP stream closed (error `terminated`). Both tiers ran at the
-  same time. The table uses a second batch of the two affected cases, run
-  alone. Read a `terminated` error as a transport failure, not as model
-  behavior.
+| Case | Model | Final correct | First full draft correct | Rejections per run | Unknown-tool calls per run | Cost per run |
+|---|---|---|---|---|---|---|
+| sales-tracker | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.7 | $0.40 |
+| sales-tracker | claude-sonnet-4-6 | 3/3 | 2/3 | 0.3 | 0.0 | $0.51 |
+| sales-tracker | claude-haiku-4-5 | 3/3 | 1/3 | 1.0 | 0.0 | $0.12 |
+| scheduled-refresh | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.7 | $0.29 |
+| scheduled-refresh | claude-sonnet-4-6 | 3/3 | 3/3 | 0.0 | 0.0 | $0.55 |
+| scheduled-refresh | claude-haiku-4-5 | 0/3 | 0/3 | 1.0 | 0.0 | $0.09 |
+| onboarding-linear | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.3 | $0.27 |
+| onboarding-linear | claude-sonnet-4-6 | 2/3 | 2/3 | 0.0 | 0.0 | $0.37 |
+| onboarding-linear | claude-haiku-4-5 | 3/3 | 1/3 | 1.0 | 0.0 | $0.10 |
+| bot-alert-triage | claude-sonnet-5-5 | 3/3 | 3/3 | 0.0 | 0.0 | $0.29 |
+| bot-alert-triage | claude-sonnet-4-6 | 3/3 | 3/3 | 0.0 | 0.0 | $0.53 |
+| bot-alert-triage | claude-haiku-4-5 | 3/3 | 1/3 | 0.7 | 0.0 | $0.12 |
+| all | claude-sonnet-5-5 | 12/12 | 12/12 | 0.00 | 0.42 | $0.31 |
+| all | claude-sonnet-4-6 | 11/12 | 10/12 | 0.08 | 0.00 | $0.49 |
+| all | claude-haiku-4-5 | 9/12 | 3/12 | 0.92 | 0.00 | $0.11 |
+
+- No first draft uses the stop outcome `completed` any more.
+- `claude-sonnet-5-5` drafted every workflow correctly the first time. Its
+  only wasted calls go to `workflows__validate_definition`, a tool that
+  does not exist.
+- `claude-haiku-4-5` still reads schedule input at `trigger.data.<field>`
+  in every scheduled-refresh run. Its other first-draft errors are
+  template pipes such as `| length` and `| truncate`, which the template
+  parser rejects.
+- One `claude-sonnet-4-6` onboarding run created the issues without a
+  foreach step.
+- Batches that ended with `Connection error.` or `terminated` were run
+  again alone, and only the clean batch is kept. The first
+  `claude-sonnet-5-5` sales-tracker batch also logged a failed Docker
+  sandbox start, so it was run again on 2026-10-21.
+
+Before #993, for comparison. Base `8498af1cb`, 2026-10-20 13:00 EDT, 3 runs
+per case, first-draft metric before probes and unknown-tool calls were
+counted apart (neither occurred in the saved runs):
+
+| Model | Final correct | First draft correct | Rejections per run | Cost per run |
+|---|---|---|---|---|
+| claude-haiku-4-5 | 6/12 | 0/12 | 1.2 | $0.09 |
+| claude-sonnet-4-6 | 9/12 | 0/12 | 1.2 | $0.52 |
+
+Every first draft then used the stop outcome `completed` from the old
+skill example.
+
+A rerun follows once #997 merges, because its design warnings can change
+drafts.
 
 ## Known limitations
 
