@@ -58,9 +58,10 @@ class JobReadLocalError extends Error {}
 interface JobPageLoad { owner: DeriveAuth; promise: Promise<void> }
 interface JobCacheEntry {
   jobs: Map<number, number>; pages: Set<number>; loads: Map<number, JobPageLoad>;
-  lastPage?: number; complete: boolean; touchedAt: number; lastReadOrder: number;
+  lastPage?: number; totalCount?: number; completedCount?: number; complete: boolean; finalized: boolean;
+  scanId: number; scanAt: number; touchedAt: number; lastReadOrder: number;
 }
-interface JobMembershipSnapshot { jobs: Map<number, { run: Record<string, unknown>; attempt: number }>; complete: boolean; madeProgress: boolean }
+interface JobMembershipSnapshot { jobs: Map<number, { run: Record<string, unknown>; attempt: number }>; uncertain: Set<CheckRunState>; madeProgress: boolean }
 const jobCache = new Map<string, JobCacheEntry>();
 let jobReadOrder = 0;
 
@@ -169,13 +170,28 @@ function jobCheckId(job: Record<string, unknown>): number | undefined {
 async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: string, runs: Record<string, unknown>[], needed: readonly CheckRunState[]): Promise<JobMembershipSnapshot> {
   const now = Date.now();
   for (const [key, entry] of jobCache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now && entry.loads.size === 0) jobCache.delete(key);
+  const highestCheckId = Math.max(0, ...needed.map((check) => typeof check.id === "number" ? check.id : 0));
+  // A full traversal proves absence only for checks that existed before that traversal started.
+  const covers = (entry: JobCacheEntry, run: Record<string, unknown>, check: CheckRunState) => {
+    if (typeof check.id === "number" && entry.jobs.has(check.id)) return true;
+    if (!entry.complete) return false;
+    if (run.status === "completed") return entry.finalized;
+    const startedAt = Date.parse(str(check.started_at) ?? "");
+    return typeof check.id === "number" && check.id <= entry.scanId && (!Number.isFinite(startedAt) || startedAt <= entry.scanAt);
+  };
   const work = runs.map((run) => {
     if (typeof run.id !== "number") throw new Error("GitHub returned a workflow without its run id. Retry the event wait.");
     const key = JSON.stringify([ctx.orgId, resolveGithubApiUrl(), base, run.id, run.run_attempt ?? 1]);
-    const entry: JobCacheEntry = jobCache.get(key) ?? { jobs: new Map(), pages: new Set(), loads: new Map(), complete: false, touchedAt: now, lastReadOrder: 0 };
+    const entry: JobCacheEntry = jobCache.get(key) ?? { jobs: new Map(), pages: new Set(), loads: new Map(), complete: false, finalized: false, scanId: highestCheckId, scanAt: now, touchedAt: now, lastReadOrder: 0 };
     entry.touchedAt = now;
-    // An active run can append jobs. Refresh its tail for absence proofs, but never forget learned identities.
-    if (run.status !== "completed" && entry.complete) { entry.pages.delete(entry.lastPage ?? 1); entry.complete = false; }
+    // Only newer checks or an active-to-completed transition invalidate an absence proof.
+    // Keep learned identities and earlier pages while refreshing the tail.
+    if (entry.complete && ((run.status === "completed" && !entry.finalized) || needed.some((check) => !covers(entry, run, check)))) {
+      entry.pages.delete(entry.lastPage ?? 1);
+      entry.complete = false;
+      entry.scanId = highestCheckId;
+      entry.scanAt = now;
+    }
     jobCache.delete(key);
     if (jobCache.size >= JOB_CACHE_MAX_RUNS) jobCache.delete(jobCache.keys().next().value ?? "");
     jobCache.set(key, entry);
@@ -183,7 +199,11 @@ async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: str
   });
   const before = work.reduce((count, { entry }) => count + entry.jobs.size, 0);
   const madeProgress = () => work.reduce((count, { entry }) => count + entry.jobs.size, 0) > before;
-  const classified = () => needed.every((check) => { const id = check.id; return typeof id === "number" && work.some(({ entry }) => entry.jobs.has(id)); }) || work.every(({ entry }) => entry.complete);
+  const classifiedCheck = (check: CheckRunState) => {
+    const id = check.id;
+    return (typeof id === "number" && work.some(({ entry }) => entry.jobs.has(id))) || work.every(({ run, entry }) => covers(entry, run, check));
+  };
+  const classified = () => needed.every(classifiedCheck);
   // The total limit leaves 16 jobs reads even after 20 check and 20 workflow pages.
   let remaining = Math.min(JOB_REQUESTS_PER_DERIVE, Math.max(0, DERIVE_MAX_REQUESTS - auth.requests - 22));
   const deadline = now + JOB_READ_BUDGET_MS;
@@ -214,11 +234,18 @@ async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: str
             });
             for (const job of jobs) entry.jobs.set(job.checkId, job.attempt);
             entry.pages.add(page);
-            if (typeof body.total_count === "number" && Number.isFinite(body.total_count)) entry.lastPage = Math.max(1, Math.ceil(body.total_count / 100));
-            else if (jobs.length < 100) entry.lastPage = page;
+            if (typeof body.total_count === "number" && Number.isFinite(body.total_count)) {
+              entry.totalCount = Math.max(entry.totalCount ?? 0, body.total_count);
+              entry.lastPage = Math.max(1, Math.ceil(entry.totalCount / 100));
+              if (run.status === "completed") entry.completedCount = body.total_count;
+            } else if (jobs.length < 100) entry.lastPage = page;
+            else entry.lastPage = Math.max(entry.lastPage ?? 1, page + 1);
             let firstMissing = 1;
             while (entry.pages.has(firstMissing)) firstMissing++;
-            entry.complete = entry.lastPage !== undefined && firstMissing > entry.lastPage;
+            entry.complete = entry.lastPage !== undefined && firstMissing > entry.lastPage && (entry.totalCount === undefined || entry.jobs.size === entry.totalCount);
+            // A transient count mismatch must leave a page eligible for retry, not strand a full page set.
+            if (!entry.complete && entry.lastPage !== undefined && firstMissing > entry.lastPage) entry.pages.delete(entry.lastPage);
+            entry.finalized = entry.complete && run.status === "completed" && (entry.completedCount === undefined || entry.jobs.size === entry.completedCount);
           } catch (error) {
             if (error instanceof DeriveReadBudgetError || ctx.signal?.aborted || Date.now() >= deadline ||
                 (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
@@ -252,7 +279,7 @@ async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: str
   }
   const jobs = new Map<number, { run: Record<string, unknown>; attempt: number }>();
   for (const { run, entry } of work) for (const [checkId, attempt] of entry.jobs) jobs.set(checkId, { run, attempt });
-  return { jobs, complete: work.every(({ entry }) => entry.complete), madeProgress: madeProgress() };
+  return { jobs, uncertain: new Set(needed.filter((check) => !classifiedCheck(check))), madeProgress: madeProgress() };
 }
 
 /** Superseded runs and suites cannot change the latest attempt's result. */
@@ -363,8 +390,7 @@ export const checksCompleted: DerivedEventDef = {
     // Current attempt-1 jobs all participate. Only potentially droppable checks need classification.
     // An incomplete map cannot settle a result that an unclassified check could change.
     const membership = await readJobMembership(ctx, token, base, needsMembership.length > 0 ? candidates : [], needsMembership);
-    const uncertain = new Set(allRuns.filter((check) => isActions(check) && !membership.complete &&
-      !(typeof check.id === "number" && membership.jobs.has(check.id)) && !safeSuites.has(rec(check.check_suite)?.id)));
+    const uncertain = membership.uncertain;
     const actions = allRuns.filter((check) => {
       if (!isActions(check)) return false;
       const job = typeof check.id === "number" ? membership.jobs.get(check.id) : undefined;

@@ -21,10 +21,27 @@ export type RunDeriveResult =
   | { result: "null" }
   | { result: "error"; error: unknown; consumeSource?: boolean; retryAfterMs?: number; madeProgress?: boolean };
 
-/** Explain a deadline reached while provider confirmation was still being retried. */
-export function deriveDeadlineNote(key: string, reason: string): string {
-  const action = key.startsWith("github.") ? "Check the pull request, then wait again." : "Check the source, then wait again.";
-  return `The wait could not confirm ${key} before its deadline. Last retry: ${reason} ${action}`;
+export type DeriveRetryReason = "jobs" | "timeout" | "rate" | "provider";
+
+/** Raw provider errors stay in logs. Only fixed phrases reach the ending message. */
+export function deriveRetryReason(error: unknown): DeriveRetryReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/rate.limit|cooldown/i.test(message)) return "rate";
+  if (/job details|job membership/i.test(message)) return "jobs";
+  if (/abort|timeout|timed out|\d+ ms/i.test(message)) return "timeout";
+  return "provider";
+}
+
+export function deriveDeadlineNote(retries: readonly { key: string; reason: DeriveRetryReason }[]): string {
+  const phrases: Record<DeriveRetryReason, string> = {
+    jobs: "GitHub job details were still loading.",
+    timeout: "The check took too long to finish.",
+    rate: "The service was limiting requests.",
+    provider: "The service could not confirm the result.",
+  };
+  const notes = retries.map(({ key, reason }) => `The wait could not confirm ${key} before its deadline. ${phrases[reason]}`);
+  const action = retries.every(({ key }) => key.startsWith("github.")) ? "Check the pull request, then wait again." : "Check the source, then wait again.";
+  return `${notes.join("\n")} ${action}`;
 }
 
 function findDerived(plugins: ValetPlugin[], key: string): DerivedEventDef | undefined {

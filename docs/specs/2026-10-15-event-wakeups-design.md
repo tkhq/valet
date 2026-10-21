@@ -339,6 +339,7 @@ subject.
    Check and workflow pagination each permit 20 pages, leaving capacity for jobs even at both limits.
    Reserve 22 request slots for remaining status pages, the final head read, and a token refresh.
    Pages within one run can load in parallel after its first page establishes the total count.
+   Without `total_count`, a full page schedules the next page. A short page establishes the last page.
    Stop scheduling when all result-relevant non-passing or pending checks have known mappings.
    Already-started page reads can finish. Do not read the rest of an irrelevant matrix.
    If incomplete membership could change the result, return a retryable error instead of a terminal event or `null`.
@@ -350,8 +351,17 @@ subject.
    Key entries by org, API host, repository, run id, and selected attempt.
    The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
    Successful pages accumulate across derives. Resume at the first missing page, not page one.
-   An active run can append jobs. Refresh its tail when an absence proof is needed.
-   Never discard learned identities when refreshing an active tail.
+   An active run can append jobs. A full traversal proves absence only for checks that existed before that traversal started.
+   Record the highest check id and scan start time for that proof.
+   Reuse absence proofs for those check ids, even while the run stays active.
+   For a newer id or later `started_at`, refresh the tail before treating that check as an unmapped reporter.
+   Refresh missing tails in least-recently-read order. Other entries retain their completed traversals across derives.
+   When an active run completes, its active snapshot cannot prove absence for the completed run.
+   Refresh its tail before accepting a completed snapshot. Keep the learned identities and earlier pages.
+   When `total_count` is present, completion also requires that many unique mapped jobs.
+   A completed snapshot requires a read made after run completion, with a count that matches the cached mappings.
+   A count mismatch remains retryable. It must leave a page eligible for another read.
+   Never discard learned identities when refreshing a tail.
    Runs with the oldest read sequence go first, so earlier active matrices cannot starve later runs.
    Process restart clears all mappings, page progress, and in-flight loads. Classification then starts again.
    Concurrent readers share each page load. Only its owner can clear the matching in-flight promise.
@@ -444,6 +454,13 @@ deadline ends that wait.
 | At least 27 check/workflow pages | jobs retain request capacity and classification progresses |
 | Cache owner aborts or exhausts its budget, healthy follower | follower starts its own load and returns success |
 | Deadline while classification is retrying | ending signal names the derive key and last retry reason |
+| Active dispatch snapshot complete, then run finishes with an added failed job | tail refresh classifies the new job, not false failure |
+| 17 active dispatch runs, unmapped failed reporter | second derive returns failure, without refreshing already-proven absences |
+| New check id or later started_at after an active absence proof | tail refresh classifies the new check |
+| Full jobs page without total_count | next page is read |
+| Completed snapshot count mismatch, then repaired response | retry retains learned mappings, repaired read settles |
+| Repeated same-commit sources without progress | source resets happen at most once per minute, not each second |
+| Deadline after loading, abort, or derive timeout errors | fixed copy names key, hides internal errors, and gives one action |
 | Failing check in a safe current attempt-1 suite | no jobs reads |
 | 4096 empty seen keys, 12289 bytes | due scan includes the capped row |
 | Expired installation no longer queried | another installation's derive prunes its expired cooldown |
@@ -778,11 +795,13 @@ step that returns early for an event that no subscription matched.
    When a newly observed source commit arrives, re-derive stale groups immediately despite their generic backoff.
    Removing a foreign group alone does not reset backoff. Installation cooldowns still apply.
    A retry that learns mappings resets generic backoff to one second. Provider cooldowns still apply.
-   A new source for the same commit shortens generic cooldown to at most one second.
-   Repeated source arrivals cannot extend that shortened deadline.
+   A new source for the same commit can shorten generic cooldown to at most one second, once per minute.
+   Repeated source arrivals cannot extend that shortened deadline or repeatedly reset no-progress backoff.
    Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
    Restart also clears membership mappings and page progress. It does not preserve a pagination cursor.
-   If the waiter reaches its deadline during retries, its ending signal names the derive key and last retry reason.
+   If the waiter reaches its deadline during retries, its ending signal names the derive key and a fixed retry phrase.
+   Retry phrases cover loading jobs, timeouts, rate limits, and other provider failures.
+   Raw errors stay in logs. The ending body replaces the default deadline copy and gives corrective action once.
    Every other derive error also retains the source with exponential backoff, starting at one second and capped at 15 minutes.
    This includes 5xx responses, timeouts, malformed payloads, and pagination safety limits.
    Pagination-limit errors remain retryable because later snapshots or head changes can resolve them.

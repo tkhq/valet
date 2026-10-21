@@ -1497,10 +1497,16 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(deriveEvent).toHaveBeenCalledTimes(4); // 4.1 seconds, before the old seven-second deadline.
   });
 
-  it("names the derive key and last retry reason when confirmation reaches its deadline", async () => {
+  it.each([
+    { raw: "GitHub job details are still loading. Check the pull request, then wait again.", phrase: "GitHub job details were still loading." },
+    { raw: "aborted due to timeout", phrase: "The check took too long to finish." },
+    { raw: "The derive of github.pull_request.checks_completed for waiter wk_ev passed its 20000 ms deadline.", phrase: "The check took too long to finish." },
+    { raw: "The GitHub installation is rate limited. Retry after the cooldown.", phrase: "The service was limiting requests." },
+    { raw: "GitHub GET /repos/acme/lean-proofs/actions/runs returned 502: internal upstream failure", phrase: "The service could not confirm the result." },
+  ])("uses plain deadline copy for $raw", async ({ raw, phrase }) => {
     const h = harness();
     let now = NOW;
-    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => ({ result: "error", error: new Error(now === NOW ? "Earlier reason." : "GitHub job details are still loading."), retryAfterMs: 1_000 }));
+    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => ({ result: "error", error: new Error(now === NOW ? "Earlier reason." : raw), retryAfterMs: 1_000 }));
     await h.store.createWakeup(eventRow({ deadlineAt: NOW + 2_000, eventBuffer: [digest(1, { derive: CHECKS })] }));
     const watcher = h.watcher({ deriveEvent, now: () => now });
     await watcher.sweep(now);
@@ -1512,10 +1518,46 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(await h.store.getWakeup("wk_ev")).toMatchObject({ status: "expired", cause: "deadline" });
     const { content } = signalOf(h.prompt.mock.calls[0]);
     const body = typeof content !== "string" && "body" in content ? content.body : "";
-    expect(body).toContain(CHECKS);
-    expect(body).toContain("GitHub job details are still loading.");
-    expect(body).toContain("Check the pull request, then wait again.");
+    expect(body).toBe(`The wait could not confirm ${CHECKS} before its deadline. ${phrase} Check the pull request, then wait again.`);
     expect(body).not.toContain("Earlier reason.");
+    expect(body).not.toContain("wk_ev");
+  });
+
+  it("resets delay for a new same-commit source even when the old cooldown already expired", async () => {
+    const h = harness();
+    let now = NOW;
+    const source = (i: number) => digest(i, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source(1)] }));
+    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => ({ result: "error", error: new Error("GitHub 502"), madeProgress: false }));
+    const watcher = h.watcher({ deriveEvent, now: () => now });
+    for (const delay of [0, 1_000, 2_000]) { now += delay; await watcher.sweep(now); }
+    now += 4_000;
+    await h.store.appendEventMatch("wk_ev", source(2), now);
+    await watcher.sweep(now);
+    expect(deriveEvent).toHaveBeenCalledTimes(4);
+    now += 999;
+    await watcher.sweep(now);
+    expect(deriveEvent).toHaveBeenCalledTimes(4);
+    now++;
+    await watcher.sweep(now); // The newSource term chooses one second, not an exponential delay.
+    expect(deriveEvent).toHaveBeenCalledTimes(5);
+  });
+
+  it("rate limits repeated same-commit source resets that make no progress", async () => {
+    const h = harness();
+    let now = NOW;
+    const source = (i: number) => digest(i, { derive: CHECKS, subjects: ["github:acme/lean-proofs@aaaa"] });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source(1)] }));
+    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => ({ result: "error", error: new Error("GitHub 502"), madeProgress: false }));
+    const watcher = h.watcher({ deriveEvent, now: () => now });
+    await watcher.sweep(now);
+    for (let i = 2; i <= 21; i++) {
+      now += 1_000;
+      await h.store.appendEventMatch("wk_ev", source(i), now);
+      await watcher.sweep(now);
+    }
+    expect(deriveEvent).toHaveBeenCalledTimes(6); // Not 21 full read sets at one-second cadence.
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
   });
 
   it("backs off exponentially to 15 minutes", async () => {

@@ -33,7 +33,7 @@ import type {
   WakeupLimits,
   WakeupStatus,
 } from "@valet/engine";
-import { deriveDeadlineNote, type EventWaiterDerive } from "../events/derive.js";
+import { deriveDeadlineNote, deriveRetryReason, type DeriveRetryReason, type EventWaiterDerive } from "../events/derive.js";
 import { derivedClausesAccept } from "../events/waiter-match.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
@@ -184,7 +184,7 @@ export class WakeWatcher {
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
   /** Retry deadlines and exponential delays, retained until success or the idle reset. */
-  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number; sourceKey: string; reason: string }>();
+  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number; sourceKey: string; sourceResetAt?: number; reason: DeriveRetryReason }>();
   /** Last observed source commit per waiter/derive, for prompt stale-group revalidation. */
   private readonly deriveHeads = new Map<string, { commits: Set<string>; seenAt: number }>();
   /** Event waiters that ingest appended to since the last light pass read them. */
@@ -455,9 +455,9 @@ export class WakeWatcher {
     if (decision.cause === "deadline") {
       const notes = deriveGroups(row.eventBuffer ?? []).flatMap(({ latest }) => {
         const retry = this.deriveCooldowns.get(JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]));
-        return retry && latest.derive ? [deriveDeadlineNote(latest.derive, retry.reason)] : [];
+        return retry && latest.derive ? [{ key: latest.derive, reason: retry.reason }] : [];
       });
-      for (const signal of decision.signals) if (signal.signalType === "event.ended" && notes.length > 0) signal.body += `\n${notes.join("\n")}`;
+      for (const signal of decision.signals) if (signal.signalType === "event.ended" && notes.length > 0) signal.body = deriveDeadlineNote(notes);
     }
     await this.applyDecision(row, decision, null, progress);
   }
@@ -503,8 +503,8 @@ export class WakeWatcher {
     for (const [key, current] of commits) {
       const identity = JSON.stringify([row.id, key]);
       const previous = this.deriveHeads.get(identity);
-      // Removing a foreign group is not a new head. Only a newly observed
-      // commit can bypass generic backoff; installation cooldowns stay intact.
+      // New commits bypass generic backoff. Same-commit sources can shorten it once per minute.
+      // Removing a foreign group changes neither. Installation cooldowns stay intact.
       if (previous && [...current].some((commit) => !previous.commits.has(commit))) changed.add(key);
       this.deriveHeads.set(identity, { commits: current, seenAt: this.clock() });
     }
@@ -515,9 +515,10 @@ export class WakeWatcher {
       const cooldownKey = JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]);
       if (latest.derive !== undefined && changed.has(latest.derive)) this.deriveCooldowns.delete(cooldownKey);
       let previousRetry = this.deriveCooldowns.get(cooldownKey);
-      const newSource = previousRetry !== undefined && previousRetry.sourceKey !== latest.dedupeKey;
+      const newSource = previousRetry !== undefined && previousRetry.sourceKey !== latest.dedupeKey &&
+        (previousRetry.sourceResetAt === undefined || this.clock() - previousRetry.sourceResetAt >= 60_000);
       if (previousRetry && newSource) {
-        previousRetry = { ...previousRetry, until: Math.min(previousRetry.until, this.clock() + 1_000), delayMs: 1_000, sourceKey: latest.dedupeKey };
+        previousRetry = { ...previousRetry, until: Math.min(previousRetry.until, this.clock() + 1_000), delayMs: 1_000, sourceKey: latest.dedupeKey, sourceResetAt: this.clock() };
         this.deriveCooldowns.set(cooldownKey, previousRetry);
       }
       if ((previousRetry?.until ?? 0) > this.clock()) return;
@@ -534,8 +535,8 @@ export class WakeWatcher {
       if (outcome.result === "error") {
         if (!outcome.consumeSource) {
           const delayMs = outcome.madeProgress || newSource ? 1_000 : Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs ?? 1_000));
-          const reason = (outcome.error instanceof Error ? outcome.error.message : String(outcome.error)).replace(/\s+/g, " ").slice(0, 400);
-          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs, sourceKey: latest.dedupeKey, reason });
+          const reason = deriveRetryReason(outcome.error);
+          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs, sourceKey: latest.dedupeKey, sourceResetAt: previousRetry?.sourceResetAt, reason });
         } else this.deriveCooldowns.delete(cooldownKey);
         console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "retry delayed by backoff"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");

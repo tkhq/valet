@@ -10,7 +10,7 @@ const OLD = "bbbb000000000000000000000000000000000002";
 const PR_SUBJECT = "github:acme/lean-proofs#42";
 
 interface CheckRun {
-  status: string; conclusion: string | null; completed_at?: string;
+  status: string; conclusion: string | null; completed_at?: string; started_at?: string;
   id?: number; name?: string; check_suite?: { id: number }; app?: { id: number; slug?: string };
 }
 interface SuiteState {
@@ -418,7 +418,103 @@ describe("checksCompleted (spec B1)", () => {
     const ctx = ctxWith(stub.fetch);
     await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toMatchObject({ madeProgress: true });
     expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
-    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(20); // Three already-started reads can finish with the last mapping.
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(17); // Previously read tails need no refresh for these same check identities.
+  });
+
+  it("refreshes an active snapshot after the run finishes and adds a failed job", async () => {
+    const run = workflow(10, "workflow_dispatch", "in_progress");
+    const first = actionJob(10, "queued", null);
+    const jobs = [{ id: 100, name: "test", run_attempt: 1 }];
+    const stub = stubFetch({ pages: [[first, ...ok(1)]], workflows: [run], jobs: { 10: jobs } });
+    const http: typeof fetch = async (input, init) => {
+      if (run.status === "completed" && new URL(String(input)).pathname.endsWith("/check-runs")) {
+        return Response.json({ check_runs: [
+          { ...first, status: "completed", conclusion: "success" },
+          { ...actionJob(10, "completed", "failure"), id: 200, name: "new matrix job" },
+          ...ok(1),
+        ] });
+      }
+      return stub.fetch(input, init);
+    };
+    const ctx = ctxWith(http);
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    run.status = "completed";
+    jobs.push({ id: 200, name: "new matrix job", run_attempt: 1 });
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+    // The completed snapshot is now valid. A third derive needs no jobs read.
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+  });
+
+  it("classifies a failed reporter while 17 dispatch runs remain active", async () => {
+    const workflows = Array.from({ length: 17 }, (_, i) => ({ ...workflow(i + 1, "workflow_dispatch", "in_progress"), workflow_id: i + 1 }));
+    const jobs: NonNullable<Fixture["jobs"]> = {};
+    for (let i = 1; i <= 17; i++) jobs[i] = [{ id: i * 10, name: `queued-${i}`, run_attempt: 1 }];
+    const reporter = { ...actionJob(1, "completed", "failure"), id: 9000, name: "reporter" };
+    const stub = stubFetch({ pages: [[reporter, ...ok(1)]], workflows, jobs });
+    const ctx = ctxWith(stub.fetch);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(17);
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(17);
+    expect(workflows.every((run) => run.status === "in_progress")).toBe(true);
+  });
+
+  it.each(["id", "started_at"])("refreshes active absence proofs for checks newer by %s", async (field) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(DONE_AT));
+    const check = { ...actionJob(10, "completed", "failure"), id: 9000, name: "reporter", started_at: DONE_AT };
+    const jobs = [{ id: 100, name: "old job", run_attempt: 1 }];
+    const stub = stubFetch({ pages: [[check, ...ok(1)]], workflows: [workflow(10, "workflow_dispatch", "in_progress")], jobs: { 10: jobs } });
+    const ctx = ctxWith(stub.fetch);
+    try {
+      expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+      vi.setSystemTime(Date.parse(DONE_AT) + 1000);
+      if (field === "id") check.id++;
+      else { check.id--; check.started_at = new Date().toISOString(); }
+      jobs.push({ id: check.id, name: "new job", run_attempt: 1 });
+      expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+      expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retries a completed snapshot whose cached unique count disagrees with total_count", async () => {
+    const check = { ...actionJob(10, "completed", "failure"), id: 10000, name: "reporter" };
+    const stub = stubFetch({ pages: [[check, ...ok(1)]], workflows: [workflow(10, "workflow_dispatch")], jobs: { 10: [{ id: 100, name: "test", run_attempt: 1 }] } });
+    let inconsistent = true;
+    const http: typeof fetch = async (input, init) => {
+      const response = await stub.fetch(input, init);
+      if (inconsistent && new URL(String(input)).pathname.endsWith("/jobs")) return Response.json({ total_count: 2, jobs: [{ id: 100, run_attempt: 1 }] });
+      return response;
+    };
+    const ctx = ctxWith(http);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toBeInstanceOf(DeriveRetryError);
+    inconsistent = false;
+    // Repair the count and expose the second job without losing the cached first job.
+    const repaired: typeof fetch = async (input, init) => new URL(String(input)).pathname.endsWith("/jobs")
+      ? Response.json({ total_count: 2, jobs: [{ id: 100, run_attempt: 1 }, { id: 200, run_attempt: 1 }] }) : http(input, init);
+    expect((await checksCompleted.derive({ ...ctx, fetch: repaired }, PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+  });
+
+  it("advances beyond a full jobs page without total_count", async () => {
+    const check = { ...actionJob(10, "completed", "failure"), id: 10000 };
+    const stub = stubFetch({ pages: [[check, ...ok(1)]], workflows: [workflow(10, "workflow_dispatch")], jobs: { 10: [
+      ...Array.from({ length: 100 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 1 })),
+      { id: 10000, name: "test", run_attempt: 1 },
+    ] } });
+    const http: typeof fetch = async (input, init) => {
+      const response = await stub.fetch(input, init);
+      if (!new URL(String(input)).pathname.endsWith("/jobs")) return response;
+      const body: unknown = await response.json();
+      if (!body || typeof body !== "object" || !("jobs" in body)) throw new Error("The test needs a jobs response.");
+      return Response.json({ jobs: body.jobs });
+    };
+    expect((await checksCompleted.derive(ctxWith(http), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+    expect(stub.calls.some((path) => path.includes("/jobs?") && path.endsWith("page=2"))).toBe(true);
   });
 
   it("accumulates active mappings from pages 1, 11, and 21 of a 3000-job dispatch run", async () => {
