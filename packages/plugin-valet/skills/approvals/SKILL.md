@@ -14,7 +14,7 @@ Every integration action resolves to one mode: `allow`, `require_approval`, or `
 1. An organization policy that denies the action. Nothing overrides it.
 2. A team policy that denies the action.
 3. A grant that is live for this session: "Approve for this session" in a chat.
-4. The person's own override, set with "Always allow for me" or on the personal Policies page.
+4. In a personal session, the owner's own override, set with "Always allow for me" or on the personal Policies page. A team session does not read personal overrides.
 5. The team or organization policy mode. A team can make an organization rule stricter, never looser.
 6. A saved permission for a workflow step. It applies only when no team or organization policy matches the action, so it never loosens a policy.
 7. The plugin's own default mode.
@@ -28,7 +28,7 @@ A chat approval offers these choices. Explain what each one does before the pers
 
 - **Approve** allows this one call.
 - **Approve for this session** allows the same action for the rest of this session.
-- **Always allow for me** (personal session) or **Always allow for this team** (team session) saves a setting for the session's owner. It is the same setting as the Integrations and team permission pages. Valet shows it only where that setting can allow the action.
+- **Always allow for me** (personal session) or **Always allow for this team** (team session) saves a setting for the session's owner. It is the same setting as the Integrations and team permission pages. Valet shows it only where that setting can allow the action. In a team session, only a team admin can pick it.
 - **Always allow (org)** saves an organization policy. Only an organization admin can pick it.
 - **Deny** stops the call.
 

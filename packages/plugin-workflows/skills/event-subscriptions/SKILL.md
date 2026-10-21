@@ -57,6 +57,7 @@ A line runs a full assistant turn for every event that matches. A broad filter c
 - Use channel IDs, not names. Add `bot_id` or `app_id` to listen to one app only.
 - The operators are `eq`, `in`, `prefix`, `contains`, and `regex`. Valet refuses a `regex` that is invalid or too slow.
 - A `slack.app_mention` line needs a channel filter (`eq` or `in`), or `any_channel: true` to listen in every channel the app can see.
+- A personal mention line fires only for its creator's own @-mentions. Valet adds a `user` filter for the creator's linked Slack account, and refuses the line until the creator links Slack in Integrations. To answer other people's mentions, put the line on a team assistant (see `audience` below).
 - Do not depend on the standing instruction to drop unwanted events. A filter costs nothing; an assistant turn that decides to stop still costs a full turn.
 
 ## Write the instructions

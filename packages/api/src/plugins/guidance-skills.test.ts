@@ -45,8 +45,11 @@ describe("event-subscriptions skill", () => {
   const text = skillText("workflows", "event-subscriptions");
   const blocks = jsonBlocks(text);
 
-  it("lists every filter operator the validator accepts", () => {
-    for (const op of FILTER_OPS) expect(text).toContain(`\`${op}\``);
+  it("lists exactly the filter operators the validator accepts", () => {
+    const line = text.split("\n").find((entry) => entry.startsWith("- The operators are "));
+    if (line === undefined) throw new Error('the skill has no "- The operators are" line');
+    const listed = [...line.matchAll(/`([a-z_]+)`/g)].map((match) => match[1]);
+    expect(new Set(listed)).toEqual(new Set(FILTER_OPS));
   });
 
   it("has an example to check", () => {
@@ -62,6 +65,11 @@ describe("event-subscriptions skill", () => {
       const example = JSON.parse(block) as {
         name: string; event_keys: string[]; filters?: unknown[]; system_prompt?: string; user_prompt_template?: string;
       };
+      // Only fields this check reads, and `proposal_key`, which only names
+      // the proposal. A field it would drop could be one the tool refuses.
+      for (const field of Object.keys(example)) {
+        expect(["proposal_key", "name", "event_keys", "filters", "system_prompt", "user_prompt_template"]).toContain(field);
+      }
       const target = {
         kind: "assistant",
         assistant: "user",
