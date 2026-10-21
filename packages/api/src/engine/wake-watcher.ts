@@ -33,7 +33,7 @@ import type {
   WakeupLimits,
   WakeupStatus,
 } from "@valet/engine";
-import type { EventWaiterDerive } from "../events/derive.js";
+import { deriveDeadlineNote, type EventWaiterDerive } from "../events/derive.js";
 import { derivedClausesAccept } from "../events/waiter-match.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
@@ -184,7 +184,7 @@ export class WakeWatcher {
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
   /** Retry deadlines and exponential delays, retained until success or the idle reset. */
-  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number }>();
+  private readonly deriveCooldowns = new Map<string, { until: number; delayMs: number; sourceKey: string; reason: string }>();
   /** Last observed source commit per waiter/derive, for prompt stale-group revalidation. */
   private readonly deriveHeads = new Map<string, { commits: Set<string>; seenAt: number }>();
   /** Event waiters that ingest appended to since the last light pass read them. */
@@ -452,6 +452,13 @@ export class WakeWatcher {
       this.metrics.badRow("engine_wakeups");
       console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
     }
+    if (decision.cause === "deadline") {
+      const notes = deriveGroups(row.eventBuffer ?? []).flatMap(({ latest }) => {
+        const retry = this.deriveCooldowns.get(JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]));
+        return retry && latest.derive ? [deriveDeadlineNote(latest.derive, retry.reason)] : [];
+      });
+      for (const signal of decision.signals) if (signal.signalType === "event.ended" && notes.length > 0) signal.body += `\n${notes.join("\n")}`;
+    }
     await this.applyDecision(row, decision, null, progress);
   }
 
@@ -507,7 +514,12 @@ export class WakeWatcher {
       const { latest, sources } = group;
       const cooldownKey = JSON.stringify([row.id, latest.derive, eventSourceCommit(latest)]);
       if (latest.derive !== undefined && changed.has(latest.derive)) this.deriveCooldowns.delete(cooldownKey);
-      const previousRetry = this.deriveCooldowns.get(cooldownKey);
+      let previousRetry = this.deriveCooldowns.get(cooldownKey);
+      const newSource = previousRetry !== undefined && previousRetry.sourceKey !== latest.dedupeKey;
+      if (previousRetry && newSource) {
+        previousRetry = { ...previousRetry, until: Math.min(previousRetry.until, this.clock() + 1_000), delayMs: 1_000, sourceKey: latest.dedupeKey };
+        this.deriveCooldowns.set(cooldownKey, previousRetry);
+      }
       if ((previousRetry?.until ?? 0) > this.clock()) return;
       ran = true;
       let outcome: Awaited<ReturnType<EventWaiterDerive>>;
@@ -521,8 +533,9 @@ export class WakeWatcher {
       });
       if (outcome.result === "error") {
         if (!outcome.consumeSource) {
-          const delayMs = Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs ?? 1_000));
-          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs });
+          const delayMs = outcome.madeProgress || newSource ? 1_000 : Math.min(15 * 60_000, previousRetry ? previousRetry.delayMs * 2 : Math.min(60_000, outcome.retryAfterMs ?? 1_000));
+          const reason = (outcome.error instanceof Error ? outcome.error.message : String(outcome.error)).replace(/\s+/g, " ").slice(0, 400);
+          this.deriveCooldowns.set(cooldownKey, { until: this.clock() + Math.max(delayMs, outcome.retryAfterMs ?? 0), delayMs, sourceKey: latest.dedupeKey, reason });
         } else this.deriveCooldowns.delete(cooldownKey);
         console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; ${outcome.consumeSource ? "consuming denied source" : "retry delayed by backoff"}:`, outcome.error);
         if (outcome.consumeSource) await this.deps.engineStore.removeEventMatches(row.id, sources, this.clock(), "source");

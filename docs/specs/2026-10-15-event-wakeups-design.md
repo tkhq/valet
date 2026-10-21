@@ -335,22 +335,30 @@ subject.
    Only superseded runs, schedule/dispatch runs, and runs with `run_attempt > 1` need membership reads.
    Every job of a current attempt-1 run participates, so that run needs no jobs read.
    Read `/actions/runs/{run_id}/jobs?filter=all` with four workers and an eight-second membership budget.
-   Each derive permits at most 32 GitHub requests, including at most 16 jobs pages.
-   Reserve four request slots for remaining status and head reads.
+   Each derive permits at most 80 GitHub requests, including at most 16 jobs pages.
+   Check and workflow pagination each permit 20 pages, leaving capacity for jobs even at both limits.
+   Reserve 22 request slots for remaining status pages, the final head read, and a token refresh.
+   Pages within one run can load in parallel after its first page establishes the total count.
+   Stop scheduling when all result-relevant non-passing or pending checks have known mappings.
+   Already-started page reads can finish. Do not read the rest of an irrelevant matrix.
    If incomplete membership could change the result, return a retryable error instead of a terminal event or `null`.
    An unclassified pending check can change completion. An unclassified failed check can change success into failure.
    Keep such sources buffered so the next derive resumes cached pages.
    Unclassified checks can remain only when they cannot change the result.
    A proven failure makes another unclassified failure irrelevant, but an unclassified pending check still requires retry.
-   Completed pages of finished runs are cached by org, repository, run id, and attempt.
+   Cache immutable job-to-run/attempt mappings for both active and completed runs.
+   Key entries by org, API host, repository, run id, and selected attempt.
    The cache retains 2048 runs for up to 30 idle minutes. Changed attempts use new entries.
-   Finished-run retries resume cached pagination rather than starting again at page one.
-   Active runs cache no memberships across derives. They retain a rotating page cursor for up to 30 idle minutes.
-   After the last active-run page, the cursor wraps to page one. Each derive uses only pages fetched during that call.
-   Runs with the oldest read sequence go first, so earlier active matrices cannot starve later finished runs.
+   Successful pages accumulate across derives. Resume at the first missing page, not page one.
+   An active run can append jobs. Refresh its tail when an absence proof is needed.
+   Never discard learned identities when refreshing an active tail.
+   Runs with the oldest read sequence go first, so earlier active matrices cannot starve later runs.
+   Process restart clears all mappings, page progress, and in-flight loads. Classification then starts again.
    Concurrent readers share each page load. Only its owner can clear the matching in-flight promise.
    Cache successful pages by unique page number. Completion requires contiguous successful pages through the last page or total count.
-   A failed page leaves the entry incomplete and does not advance its cursor.
+   A failed page leaves the entry incomplete and stays eligible for the next read.
+   A healthy follower replaces a failed owner load after owner-local abort, timeout, or budget exhaustion.
+   Provider-wide failures still apply to both readers.
    The jobs response contains all attempts. Parse the final path segment of `check_run_url` for its check id.
    Fall back to the job's `id` when that URL is absent or malformed.
    Map each check id to its run and `run_attempt`.
@@ -360,7 +368,8 @@ subject.
    - Its run uses `schedule` or `workflow_dispatch`.
    Keep every unmapped Actions check, including reporters in superseded, dispatch, or separate suites.
    Neither suite ids, job names, nor suite conclusions prove check membership.
-   GitHub adds Checks API reporters to suites by repository and SHA, not by Actions run id.
+   Each Actions workflow run has its own suite.
+   API reporters can attach to any github-actions suite on the SHA.
    A shared suite therefore does not prove that a reporter is a job of an excluded or superseded run.
    See [GitHub's Checks API guide](https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-checks).
    Rerun attempts also retain the run's suite id. Suite identity cannot identify the selected attempt.
@@ -426,9 +435,15 @@ deadline ends that wait.
 | 1601 jobs, historical failure on page 17 | first derive retains source for retry, second derive returns success |
 | Two concurrent readers, 450 jobs, transient failure on page 5 | no partial terminal result, repaired page resumes to success |
 | Two concurrent readers, 251 jobs, historical failure on page 3 | both return success using three unique page reads |
-| Active excluded or superseded run, 1701 jobs, pending job on page 17 | first derive retries, second rotates to page 17 and returns success |
+| Active excluded or superseded run, 1701 jobs, pending job on page 17 | first derive retries, second resumes at page 17 and returns success |
 | Finished run after 17 active matrices | next derive prioritizes unread runs and classifies the failure |
-| Active run read twice | both derives fetch memberships instead of reusing a cached snapshot |
+| Active run read twice | second derive reuses learned immutable mappings |
+| 17 active dispatch runs with one queued check each | terminal success within two derives while all runs stay active |
+| Active 3000-job dispatch run, queued checks on pages 1, 11, 21 | terminal success within two derives, without reading the irrelevant tail |
+| Active 1000-job run, queued check each page, 900 ms jobs reads | parallel reads produce terminal success within one derive |
+| At least 27 check/workflow pages | jobs retain request capacity and classification progresses |
+| Cache owner aborts or exhausts its budget, healthy follower | follower starts its own load and returns success |
+| Deadline while classification is retrying | ending signal names the derive key and last retry reason |
 | Failing check in a safe current attempt-1 suite | no jobs reads |
 | 4096 empty seen keys, 12289 bytes | due scan includes the capped row |
 | Expired installation no longer queried | another installation's derive prunes its expired cooldown |
@@ -762,7 +777,12 @@ step that returns early for an event that no subscription matched.
    Success or a permanent error resets only that group's backoff.
    When a newly observed source commit arrives, re-derive stale groups immediately despite their generic backoff.
    Removing a foreign group alone does not reset backoff. Installation cooldowns still apply.
+   A retry that learns mappings resets generic backoff to one second. Provider cooldowns still apply.
+   A new source for the same commit shortens generic cooldown to at most one second.
+   Repeated source arrivals cannot extend that shortened deadline.
    Backoff state is in-process. It resets on restart or after 30 minutes past its last retry deadline.
+   Restart also clears membership mappings and page progress. It does not preserve a pagination cursor.
+   If the waiter reaches its deadline during retries, its ending signal names the derive key and last retry reason.
    Every other derive error also retains the source with exponential backoff, starting at one second and capped at 15 minutes.
    This includes 5xx responses, timeouts, malformed payloads, and pagination safety limits.
    Pagination-limit errors remain retryable because later snapshots or head changes can resolve them.

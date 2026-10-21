@@ -19,7 +19,13 @@ import { toDigest } from "./waiter-match.js";
 export type RunDeriveResult =
   | { result: "event"; digest: EventMatchDigest }
   | { result: "null" }
-  | { result: "error"; error: unknown; consumeSource?: boolean; retryAfterMs?: number };
+  | { result: "error"; error: unknown; consumeSource?: boolean; retryAfterMs?: number; madeProgress?: boolean };
+
+/** Explain a deadline reached while provider confirmation was still being retried. */
+export function deriveDeadlineNote(key: string, reason: string): string {
+  const action = key.startsWith("github.") ? "Check the pull request, then wait again." : "Check the source, then wait again.";
+  return `The wait could not confirm ${key} before its deadline. Last retry: ${reason} ${action}`;
+}
 
 function findDerived(plugins: ValetPlugin[], key: string): DerivedEventDef | undefined {
   for (const plugin of plugins) {
@@ -85,7 +91,7 @@ export async function runDerive(
     return { result: "event", digest: toDigest(derived) };
   } catch (error) {
     record(key, "error");
-    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}), ...(error instanceof DeriveRetryError ? { retryAfterMs: error.retryAfterMs } : {}) };
+    return { result: "error", error, ...(error instanceof DerivePermissionError ? { consumeSource: true } : {}), ...(error instanceof DeriveRetryError ? { retryAfterMs: error.retryAfterMs, madeProgress: error.madeProgress } : {}) };
   }
 }
 
@@ -173,7 +179,7 @@ export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDer
         resolve({ result: "error", error });
       }, deadlineMs);
     });
-    const ctx = deps.contextFor(orgId, deriveKey, subject, controller.signal);
+    const ctx: DeriveContext = { ...deps.contextFor(orgId, deriveKey, subject, controller.signal), signal: controller.signal };
     // Resolve identity inside the overall deadline. Never use a rotating token as a key.
     const run = async (): Promise<RunDeriveResult> => {
       const installation = await ctx.rateLimitKey?.();

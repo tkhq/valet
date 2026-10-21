@@ -139,12 +139,14 @@ export class DerivePermissionError extends Error {}
 
 /** A transient provider failure retains its source and delays the next attempt. */
 export class DeriveRetryError extends Error {
-  constructor(message: string, readonly retryAfterMs = 60_000) { super(message); }
+  constructor(message: string, readonly retryAfterMs = 60_000, readonly madeProgress = false) { super(message); }
 }
 
 /** What a `DerivedEventDef.derive` call receives (spec Part B). */
 export interface DeriveContext {
   orgId: string;
+  /** Cancels reads owned by this derive, not reads owned by a cache follower. */
+  signal?: AbortSignal;
   /** Org app credential for the plugin's service. Null when not connected. */
   appToken(forceRefresh?: boolean): Promise<string | null>;
   fetch: typeof fetch;

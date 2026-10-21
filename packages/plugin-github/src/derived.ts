@@ -43,7 +43,8 @@ function sourceSha(source: NormalizedEvent, ownerRepo: string): string | undefin
 }
 
 /** Includes head/check/workflow/status reads and a possible token-refresh retry. */
-export const DERIVE_MAX_REQUESTS = 32;
+// 20 check, 20 workflow, 20 status, 16 jobs, two head, and refresh requests fit.
+export const DERIVE_MAX_REQUESTS = 80;
 const JOB_REQUESTS_PER_DERIVE = 16;
 const JOB_READ_CONCURRENCY = 4;
 const JOB_READ_BUDGET_MS = 8_000;
@@ -53,12 +54,14 @@ const JOB_CACHE_MAX_RUNS = 2048;
 class DeriveReadBudgetError extends Error {}
 interface DeriveAuth { token: string; refreshed: boolean; requests: number }
 interface JobMembership { checkId: number; attempt: number }
-interface JobReadProgress { nextPage: number; lastReadOrder: number; touchedAt: number }
-interface JobCacheEntry extends JobReadProgress { pages: Map<number, JobMembership[]>; lastPage?: number; complete: boolean; loading?: Promise<void> }
-interface JobMembershipSnapshot { jobs: Map<number, { run: Record<string, unknown>; attempt: number }>; complete: boolean }
+class JobReadLocalError extends Error {}
+interface JobPageLoad { owner: DeriveAuth; promise: Promise<void> }
+interface JobCacheEntry {
+  jobs: Map<number, number>; pages: Set<number>; loads: Map<number, JobPageLoad>;
+  lastPage?: number; complete: boolean; touchedAt: number; lastReadOrder: number;
+}
+interface JobMembershipSnapshot { jobs: Map<number, { run: Record<string, unknown>; attempt: number }>; complete: boolean; madeProgress: boolean }
 const jobCache = new Map<string, JobCacheEntry>();
-// Active runs retain only a rotating cursor, never a cross-derive membership snapshot.
-const activeJobProgress = new Map<string, JobReadProgress>();
 let jobReadOrder = 0;
 
 async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string, deadline?: number): Promise<unknown> {
@@ -71,7 +74,7 @@ async function getJson(ctx: DeriveContext, auth: DeriveAuth, path: string, deadl
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "Valet/1.0",
     },
-    signal: AbortSignal.timeout(Math.max(1, Math.min(DERIVE_REQUEST_TIMEOUT_MS, deadline === undefined ? DERIVE_REQUEST_TIMEOUT_MS : deadline - Date.now()))),
+    signal: AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), AbortSignal.timeout(Math.max(1, Math.min(DERIVE_REQUEST_TIMEOUT_MS, deadline === undefined ? DERIVE_REQUEST_TIMEOUT_MS : deadline - Date.now())))]),
   });
   if (res.status === 401 && !res.headers.has("retry-after")) {
     if (!auth.refreshed) {
@@ -162,86 +165,94 @@ function jobCheckId(job: Record<string, unknown>): number | undefined {
   return typeof job.id === "number" ? job.id : undefined;
 }
 
-/** Finished runs retain unique pages. Active runs rotate uncached reads across derives. */
-async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: string, runs: Record<string, unknown>[]): Promise<JobMembershipSnapshot> {
+/** Job identities are immutable, including while their run remains active. */
+async function readJobMembership(ctx: DeriveContext, auth: DeriveAuth, base: string, runs: Record<string, unknown>[], needed: readonly CheckRunState[]): Promise<JobMembershipSnapshot> {
   const now = Date.now();
-  for (const cache of [jobCache, activeJobProgress]) {
-    for (const [key, entry] of cache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now) cache.delete(key);
-  }
+  for (const [key, entry] of jobCache) if (entry.touchedAt + JOB_CACHE_TTL_MS <= now && entry.loads.size === 0) jobCache.delete(key);
   const work = runs.map((run) => {
     if (typeof run.id !== "number") throw new Error("GitHub returned a workflow without its run id. Retry the event wait.");
     const key = JSON.stringify([ctx.orgId, resolveGithubApiUrl(), base, run.id, run.run_attempt ?? 1]);
-    const finished = run.status === "completed";
-    const cached = finished ? jobCache.get(key) : undefined;
-    const progress = finished ? undefined : activeJobProgress.get(key) ?? { nextPage: 1, lastReadOrder: 0, touchedAt: now };
-    const entry: JobCacheEntry = cached ?? { pages: new Map(), nextPage: progress?.nextPage ?? 1,
-      lastReadOrder: progress?.lastReadOrder ?? 0, complete: false, touchedAt: now };
+    const entry: JobCacheEntry = jobCache.get(key) ?? { jobs: new Map(), pages: new Set(), loads: new Map(), complete: false, touchedAt: now, lastReadOrder: 0 };
     entry.touchedAt = now;
-    if (finished) {
-      activeJobProgress.delete(key);
-      jobCache.delete(key);
-      if (jobCache.size >= JOB_CACHE_MAX_RUNS) jobCache.delete(jobCache.keys().next().value ?? "");
-      jobCache.set(key, entry);
-    } else if (progress) {
-      progress.touchedAt = now;
-      activeJobProgress.delete(key);
-      if (activeJobProgress.size >= JOB_CACHE_MAX_RUNS) activeJobProgress.delete(activeJobProgress.keys().next().value ?? "");
-      activeJobProgress.set(key, progress);
-    }
-    return { run, entry, progress };
+    // An active run can append jobs. Refresh its tail for absence proofs, but never forget learned identities.
+    if (run.status !== "completed" && entry.complete) { entry.pages.delete(entry.lastPage ?? 1); entry.complete = false; }
+    jobCache.delete(key);
+    if (jobCache.size >= JOB_CACHE_MAX_RUNS) jobCache.delete(jobCache.keys().next().value ?? "");
+    jobCache.set(key, entry);
+    return { run, entry };
   });
-  // Least recently read runs go first, so an active matrix cannot starve later finished runs.
-  const queue = work.filter(({ entry }) => !entry.complete).sort((a, b) => a.entry.lastReadOrder - b.entry.lastReadOrder);
-  let remaining = Math.min(JOB_REQUESTS_PER_DERIVE, Math.max(0, DERIVE_MAX_REQUESTS - auth.requests - 4));
+  const before = work.reduce((count, { entry }) => count + entry.jobs.size, 0);
+  const madeProgress = () => work.reduce((count, { entry }) => count + entry.jobs.size, 0) > before;
+  const classified = () => needed.every((check) => { const id = check.id; return typeof id === "number" && work.some(({ entry }) => entry.jobs.has(id)); }) || work.every(({ entry }) => entry.complete);
+  // The total limit leaves 16 jobs reads even after 20 check and 20 workflow pages.
+  let remaining = Math.min(JOB_REQUESTS_PER_DERIVE, Math.max(0, DERIVE_MAX_REQUESTS - auth.requests - 22));
   const deadline = now + JOB_READ_BUDGET_MS;
   const worker = async () => {
-    while (queue.length > 0 && remaining > 0 && Date.now() < deadline) {
-      const item = queue.shift();
-      if (!item) break;
-      const { run, entry, progress } = item;
-      const ownsLoad = entry.loading === undefined;
-      if (ownsLoad) {
+    while (!classified() && remaining > 0 && Date.now() < deadline && !ctx.signal?.aborted) {
+      let selected: { run: Record<string, unknown>; entry: JobCacheEntry; page: number } | undefined;
+      for (const item of [...work].sort((a, b) => a.entry.lastReadOrder - b.entry.lastReadOrder)) {
+        if (item.entry.complete) continue;
+        for (let page = 1; page <= (item.entry.lastPage ?? 1); page++) {
+          if (!item.entry.pages.has(page) && !item.entry.loads.has(page)) { selected = { ...item, page }; break; }
+        }
+        if (selected) break;
+      }
+      let load: JobPageLoad | undefined;
+      if (selected) {
+        const { run, entry, page } = selected;
         remaining--;
         entry.lastReadOrder = ++jobReadOrder;
-        if (progress) progress.lastReadOrder = entry.lastReadOrder;
-        const pageNumber = entry.nextPage;
-        entry.loading = (async () => {
-          const body = rec(await getJson(ctx, auth, `${base}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${pageNumber}`, deadline));
-          if (!Array.isArray(body?.jobs)) throw new Error("GitHub did not return jobs. Retry the event wait.");
-          const page: JobMembership[] = body.jobs.map((value) => {
-            const job = rec(value);
-            const checkId = job ? jobCheckId(job) : undefined;
-            if (checkId === undefined || typeof job?.run_attempt !== "number") throw new Error("GitHub returned a job without its check id or run_attempt. Retry the event wait.");
-            return { checkId, attempt: job.run_attempt };
-          });
-          entry.pages.set(pageNumber, page);
-          if (typeof body.total_count === "number" && Number.isFinite(body.total_count)) entry.lastPage = Math.max(1, Math.ceil(body.total_count / 100));
-          else if (page.length < 100) entry.lastPage = pageNumber;
-          // Only contiguous successful pages prove a complete snapshot, including after a cursor wraps.
-          let firstMissing = 1;
-          while (entry.pages.has(firstMissing)) firstMissing++;
-          entry.complete = entry.lastPage !== undefined && firstMissing > entry.lastPage;
-          entry.nextPage = entry.lastPage !== undefined && pageNumber >= entry.lastPage ? 1 : pageNumber + 1;
-          if (progress) progress.nextPage = entry.nextPage;
+        const promise = (async () => {
+          try {
+            const body = rec(await getJson(ctx, auth, `${base}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${page}`, deadline));
+            if (!Array.isArray(body?.jobs)) throw new Error("GitHub did not return jobs. Retry the event wait.");
+            const jobs: JobMembership[] = body.jobs.map((value) => {
+              const job = rec(value);
+              const checkId = job ? jobCheckId(job) : undefined;
+              if (checkId === undefined || typeof job?.run_attempt !== "number") throw new Error("GitHub returned a job without its check id or run_attempt. Retry the event wait.");
+              return { checkId, attempt: job.run_attempt };
+            });
+            for (const job of jobs) entry.jobs.set(job.checkId, job.attempt);
+            entry.pages.add(page);
+            if (typeof body.total_count === "number" && Number.isFinite(body.total_count)) entry.lastPage = Math.max(1, Math.ceil(body.total_count / 100));
+            else if (jobs.length < 100) entry.lastPage = page;
+            let firstMissing = 1;
+            while (entry.pages.has(firstMissing)) firstMissing++;
+            entry.complete = entry.lastPage !== undefined && firstMissing > entry.lastPage;
+          } catch (error) {
+            if (error instanceof DeriveReadBudgetError || ctx.signal?.aborted || Date.now() >= deadline ||
+                (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+              throw new JobReadLocalError("GitHub job details are still loading. Check the pull request, then wait again.");
+            }
+            throw error;
+          }
         })();
+        const owned: JobPageLoad = { owner: auth, promise: promise.finally(() => { if (entry.loads.get(page) === owned) entry.loads.delete(page); }) };
+        entry.loads.set(page, owned);
+        load = owned;
+      } else {
+        // All missing pages are in flight. Followers can replace a load lost to its owner's local limit.
+        load = work.flatMap(({ entry }) => [...entry.loads.values()])[0];
       }
-      const loading = entry.loading;
-      try { await loading; } catch (error) {
-        if (error instanceof DeriveReadBudgetError || Date.now() >= deadline) break;
+      if (!load) break;
+      try { await load.promise; } catch (error) {
+        if (error instanceof JobReadLocalError && load.owner !== auth) continue;
         throw error;
-      } finally {
-        // A follower must not clear a later page started by the original owner.
-        if (ownsLoad && entry.loading === loading) entry.loading = undefined;
       }
-      if (!entry.complete) queue.push(item);
     }
   };
-  await Promise.all(Array.from({ length: JOB_READ_CONCURRENCY }, worker));
-  const membership = new Map<number, { run: Record<string, unknown>; attempt: number }>();
-  for (const { run, entry } of work) for (const page of entry.pages.values()) {
-    for (const job of page) membership.set(job.checkId, { run, attempt: job.attempt });
+  const results = await Promise.allSettled(Array.from({ length: JOB_READ_CONCURRENCY }, worker));
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") {
+    const error: unknown = failed.reason;
+    if (madeProgress() && !(error instanceof DerivePermissionError)) {
+      throw new DeriveRetryError(error instanceof Error ? error.message : "GitHub job details are still loading. Check the pull request, then wait again.", error instanceof DeriveRetryError ? error.retryAfterMs : 1_000, true);
+    }
+    throw error;
   }
-  return { jobs: membership, complete: work.every(({ entry }) => entry.complete) };
+  const jobs = new Map<number, { run: Record<string, unknown>; attempt: number }>();
+  for (const { run, entry } of work) for (const [checkId, attempt] of entry.jobs) jobs.set(checkId, { run, attempt });
+  return { jobs, complete: work.every(({ entry }) => entry.complete), madeProgress: madeProgress() };
 }
 
 /** Superseded runs and suites cannot change the latest attempt's result. */
@@ -346,12 +357,12 @@ export const checksCompleted: DerivedEventDef = {
     const candidates = allWorkflows.filter((run) => !selected.has(run) || excludedWorkflow(run) ||
       (typeof run.run_attempt === "number" && run.run_attempt > 1));
     const safeSuites = new Set(allWorkflows.filter((run) => !candidates.includes(run) && typeof run.check_suite_id === "number").map((run) => run.check_suite_id));
-    const needsMembership = allRuns.some((check) => isActions(check) &&
+    const needsMembership = allRuns.filter((check) => isActions(check) &&
       (check.status !== "completed" || !["success", "neutral", "skipped"].includes(String(check.conclusion))) &&
       !safeSuites.has(rec(check.check_suite)?.id));
     // Current attempt-1 jobs all participate. Only potentially droppable checks need classification.
     // An incomplete map cannot settle a result that an unclassified check could change.
-    const membership = await readJobMembership(ctx, token, base, needsMembership ? candidates : []);
+    const membership = await readJobMembership(ctx, token, base, needsMembership.length > 0 ? candidates : [], needsMembership);
     const uncertain = new Set(allRuns.filter((check) => isActions(check) && !membership.complete &&
       !(typeof check.id === "number" && membership.jobs.has(check.id)) && !safeSuites.has(rec(check.check_suite)?.id)));
     const actions = allRuns.filter((check) => {
@@ -375,7 +386,7 @@ export const checksCompleted: DerivedEventDef = {
     const isFailed = (run: CheckRunState) => typeof run.conclusion === "string" && FAILED_CONCLUSIONS.has(run.conclusion);
     const failed = classified.some(isFailed) || statuses.some((state) => typeof state.state === "string" && FAILED_STATUS_STATES.has(state.state));
     if ([...uncertain].some((run) => run.status !== "completed" || (!failed && isFailed(run)))) {
-      throw new DeriveRetryError("GitHub job membership is incomplete. Retry the event wait to continue job classification.", 1_000);
+      throw new DeriveRetryError("GitHub job details are still loading. Check the pull request, then wait again.", 1_000, membership.madeProgress);
     }
     const status = failed ? "failure" : "success";
     const label = `${ownerRepo}#${pr.number}`;

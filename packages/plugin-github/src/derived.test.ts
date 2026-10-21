@@ -236,7 +236,7 @@ describe("checksCompleted (spec B1)", () => {
     const stub = stubFetch({ pages: [[actionJob(10, "completed", "failure"), ...ok(1)]], workflowPages: [Array.from({ length: 100 }, (_, i) => ({ ...workflow(i + 1), workflow_id: i + 1, run_attempt: 2 })), [{ ...workflow(101), run_attempt: 2 }]], jobs: { 10: [{ id: 100, name: "test", run_attempt: 1 }] } });
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
     expect(stub.calls).toContain(`/repos/acme/lean-proofs/actions/runs?head_sha=${HEAD}&per_page=100&page=2`);
-    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(16);
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(12);
   });
 
   it("refuses a partial status snapshot at the pagination safety limit", async () => {
@@ -395,19 +395,121 @@ describe("checksCompleted (spec B1)", () => {
     expect(stub.calls.slice(before).filter((path) => path.includes("/jobs?"))[1]).toContain("/runs/99/jobs?");
   });
 
-  it("never reuses active-run job memberships across derives", async () => {
+  it("retains immutable active-run job memberships across derives", async () => {
     const jobs = [{ id: 10000, name: "old job", run_attempt: 1 }];
     const stub = stubFetch({ pages: [[{ ...actionJob(10, "completed", "failure"), id: 10000, name: "old job" }, actionJob(20)]], workflows: [{ ...workflow(10, "pull_request", "in_progress"), run_attempt: 2 }], jobs: { 10: jobs } });
     const ctx = ctxWith(stub.fetch);
     expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
     expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
-    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(2);
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(1);
   });
 
   it("skips job reads when the only failing check belongs to a safe current attempt-1 suite", async () => {
     const stub = stubFetch({ pages: [[actionJob(20, "completed", "failure")]], workflows: [workflow(10, "workflow_dispatch", "in_progress"), workflow(20)] });
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
     expect(stub.calls.some((path) => path.includes("/jobs?"))).toBe(false);
+  });
+
+  it("finishes while 17 active dispatch runs each hold a queued job", async () => {
+    const workflows = Array.from({ length: 17 }, (_, i) => ({ ...workflow(i + 1, "workflow_dispatch", "in_progress"), workflow_id: i + 1 }));
+    const jobs: NonNullable<Fixture["jobs"]> = {};
+    for (let i = 1; i <= 17; i++) jobs[i] = [{ id: i * 10, name: `queued-${i}`, run_attempt: 1 }];
+    const stub = stubFetch({ pages: [[...Array.from({ length: 17 }, (_, i) => ({ ...actionJob(i + 1, "queued", null), name: `queued-${i + 1}` })), ...ok(1)]], workflows, jobs });
+    const ctx = ctxWith(stub.fetch);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toMatchObject({ madeProgress: true });
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(20); // Three already-started reads can finish with the last mapping.
+  });
+
+  it("accumulates active mappings from pages 1, 11, and 21 of a 3000-job dispatch run", async () => {
+    const ids = [100000, 101000, 102000];
+    const stub = stubFetch({ pages: [[...ids.map((id) => ({ ...actionJob(10, "queued", null), id, name: `queued-${id}` })), ...ok(1)]], workflows: [workflow(10, "workflow_dispatch", "in_progress")], jobs: { 10: Array.from({ length: 3000 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 1 })) } });
+    const ctx = ctxWith(stub.fetch);
+    await expect(checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD))).rejects.toMatchObject({ madeProgress: true });
+    expect((await checksCompleted.derive(ctx, PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    const reads = stub.calls.filter((path) => path.includes("/jobs?"));
+    expect(reads.filter((path) => path.endsWith("page=1"))).toHaveLength(1);
+    expect(reads).toContain("/repos/acme/lean-proofs/actions/runs/10/jobs?filter=all&per_page=100&page=21");
+    expect(reads.length).toBeLessThanOrEqual(24); // Stop after the last needed mapping, not the remaining 3000-job tail.
+  });
+
+  it("reads one active run's pages in parallel: 1000 jobs at 900 ms per page", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const ids = Array.from({ length: 10 }, (_, i) => i * 100 + 100000);
+    const stub = stubFetch({ pages: [[...ids.map((id) => ({ ...actionJob(10, "queued", null), id, name: `queued-${id}` })), ...ok(1)]], workflows: [workflow(10, "workflow_dispatch", "in_progress")], jobs: { 10: Array.from({ length: 1000 }, (_, i) => ({ id: i + 100000, name: `matrix-${i}`, run_attempt: 1 })) } });
+    let active = 0;
+    let peak = 0;
+    const http: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/jobs")) {
+        peak = Math.max(peak, ++active);
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        active--;
+      }
+      return stub.fetch(input, init);
+    };
+    try {
+      const result = checksCompleted.derive(ctxWith(http), PR_SUBJECT, source(HEAD));
+      await vi.advanceTimersByTimeAsync(7_900);
+      expect((await result)?.status).toBe("success");
+      expect(peak).toBe(4);
+      expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(10);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([1500, 2000])("reserves jobs budget after a large %s-check snapshot", async (count) => {
+    const runs = Array.from({ length: count === 1500 ? 1201 : 1901 }, (_, i) => ({ ...workflow(i + 1, i === 9 ? "workflow_dispatch" : "pull_request", "in_progress"), workflow_id: i + 1 }));
+    const stub = stubFetch({ pages: [[...ok(count - 1), { ...actionJob(10, "queued", null), id: 10000 }]], workflowPages: Array.from({ length: Math.ceil(runs.length / 100) }, (_, i) => runs.slice(i * 100, i * 100 + 100)), jobs: { 10: [{ id: 10000, name: "test", run_attempt: 1 }] } });
+    expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("success");
+    expect(stub.calls.filter((path) => path.includes("/jobs?"))).toHaveLength(1);
+    expect(stub.calls.length).toBeLessThanOrEqual(80);
+  });
+
+  it.each(["abort", "budget"])("lets a healthy follower replace a cache owner's %s failure", async (kind) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const stub = stubFetch({ pages: [[actionJob(10, "completed", "failure"), actionJob(20)]], workflows: [workflow(10, "workflow_dispatch")], jobs: { 10: [{ id: 100, name: "test", run_attempt: 1 }] } });
+    const controller = new AbortController();
+    let started = () => {};
+    const ownerStarted = new Promise<void>((resolve) => { started = resolve; });
+    let refresh = () => {};
+    const refreshGate = new Promise<void>((resolve) => { refresh = resolve; });
+    let ownerReads = 0;
+    let followerReads = 0;
+    const http: typeof fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/jobs")) {
+        if (new Headers(init?.headers).get("authorization") === "Bearer owner") {
+          ownerReads++;
+          if (kind === "budget") return new Response("expired", { status: 401 });
+          started();
+          return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) throw new Error("The cache owner must have a cancellation signal.");
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        followerReads++;
+      }
+      return stub.fetch(input, init);
+    };
+    const shared = ctxWith(http);
+    const owner: DeriveContext = { ...shared, signal: controller.signal, appToken: async (force) => {
+      if (force) { started(); await refreshGate; return "fresh-owner"; }
+      return "owner";
+    } };
+    try {
+      const first = checksCompleted.derive(owner, PR_SUBJECT, source(HEAD)).then(() => "event", () => "retry");
+      await ownerStarted;
+      vi.setSystemTime(6_000);
+      const second = checksCompleted.derive({ ...shared, appToken: async () => "follower" }, PR_SUBJECT, source(HEAD));
+      await vi.advanceTimersByTimeAsync(0);
+      if (kind === "budget") { vi.setSystemTime(9_000); refresh(); }
+      else controller.abort(new DOMException("owner stopped", "AbortError"));
+      expect(await first).toBe("retry");
+      expect((await second)?.status).toBe("success");
+      expect(ownerReads).toBe(1);
+      expect(followerReads).toBe(1);
+    } finally { refresh(); controller.abort(); vi.useRealTimers(); }
   });
 
   it("shares one 251-job snapshot between two concurrent derives and excludes the failure on page 3", async () => {

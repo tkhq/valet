@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { DeriveContext, EventMatchDigest, ValetPlugin } from "@valet/engine";
+import { DeriveRetryError, type DeriveContext, type EventMatchDigest, type ValetPlugin } from "@valet/engine";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { catalogForService, allCatalogEntries } from "./ingest.js";
 import { listEventTypes } from "../workflows/trigger-service.js";
@@ -70,6 +70,12 @@ describe("runDerive", () => {
     expect(out.digest.derive).toBeUndefined();
     expect(out.digest.head_sha).toBe(HEAD);
     expect(rec.points).toEqual([{ key: KEY, result: "event" }]);
+  });
+
+  it("preserves the progress hint on a retryable provider outcome", async () => {
+    const plugin: ValetPlugin = { ...githubPlugin, derivedEvents: [{ key: KEY, description: "Checks completed", sources: ["github.status"], derive: async () => { throw new DeriveRetryError("GitHub job details are still loading.", 1_000, true); } }] };
+    const stub = githubFixture();
+    expect(await runDerive([plugin], "org-1", digest(), PR_SUBJECT, ctx(stub.fetch))).toMatchObject({ result: "error", retryAfterMs: 1_000, madeProgress: true });
   });
 
   it("returns null when the condition does not hold yet", async () => {
