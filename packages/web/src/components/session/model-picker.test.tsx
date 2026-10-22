@@ -624,3 +624,30 @@ it("only offers supported thinking levels on a phone, within the organization li
   expect(select).toHaveProperty("value", "medium");
   expect(Array.from(select.querySelectorAll("option"), o => o.value)).toEqual(["", "low", "medium", "high"]);
 });
+
+describe("ModelPicker — new-thread default", () => {
+  it("shows the default and saves the current choice as the default when they differ", async () => {
+    const user = userEvent.setup();
+    const onMakeDefault = vi.fn();
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
+
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3 · Medium/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make default" }));
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+  });
+
+  it("offers no save when the thread already matches the default, or the viewer cannot change it", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderPicker({ currentId: "custom_1/llama-3", currentReasoning: "medium", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault: vi.fn() } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+    unmount();
+
+    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+  });
+});

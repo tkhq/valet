@@ -87,6 +87,8 @@ Add optional `sourceThreadId` to `CreateThreadRequest`. `POST /api/sessions/:id/
 
 The host exposes a focused new-thread-default resolver. It reuses the existing model and reasoning cascade helpers without weakening restore-no-clobber behavior for existing sessions.
 
+`GET /api/sessions/:id/thread-defaults` (2026-10-22) returns what a new thread in the session gets now: `model`, `reasoning`, and `scope`. `scope` names the default that a change applies to: `personal` (the session owner's) or `team`. It is null when the assistant's carried model still resolves, because that model outranks both defaults. The route needs view access to the session and never builds the session or wakes the sandbox.
+
 ## Web changes
 
 The thread tree creates a source-less request for sidebar **New thread**. The server resolves current defaults for that top-level conversation.
@@ -94,6 +96,8 @@ The thread tree creates a source-less request for sidebar **New thread**. The se
 Centralize selected tier label resolution in `packages/web/src/lib/model-tiers.ts`. Both `ModelPicker` and `ModelCombobox` use the helper.
 
 `ModelPicker` reads the approved-models setting. If the restriction is active, it removes the full-catalog reveal and limits the list to approved entries.
+
+In a workspace conversation, the picker footer shows "New threads:" with the model and reasoning from `thread-defaults` (2026-10-22). When the thread's choice differs and `scope` is set, a **Make default** button saves the thread's model, and its reasoning when set, as that default: `PATCH /api/me` for `personal`, `PATCH /api/teams/:id` for `team`. The picker only renders for a person who may change the session, so a team thread offers the button to team admins. Every personal or team default change refreshes the footer.
 
 ## Error handling
 

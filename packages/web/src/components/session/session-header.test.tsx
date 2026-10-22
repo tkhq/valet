@@ -11,7 +11,7 @@ import type { ReactNode } from "react";
 import { RouterContextProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { act, render as renderUnrouted, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail, ThreadDefaultsResponse } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
@@ -97,7 +97,17 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+let threadDefaultsData: ThreadDefaultsResponse | undefined;
+const patchMeMutate = vi.fn();
+const patchTeamMutate = vi.fn();
+vi.mock("~/api/thread-defaults", () => ({
+  qkThreadDefaults: { all: ["thread-defaults"], session: (id: string) => ["thread-defaults", id] },
+  useThreadDefaults: () => ({ data: threadDefaultsData }),
+}));
+
 vi.mock("~/api/settings", () => ({
+  usePatchMe: () => ({ mutate: patchMeMutate, isPending: false }),
+  usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false }),
   useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   useMe: () => ({ data: meData, isLoading: false, error: null }),
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
@@ -225,6 +235,9 @@ beforeEach(() => {
   teamsData = { teams: [] };
   isWorkspaceRuntime = false;
   channelsData = undefined;
+  threadDefaultsData = undefined;
+  patchMeMutate.mockClear();
+  patchTeamMutate.mockClear();
 });
 
 describe("SessionHeader — phone thread menu", () => {
@@ -305,6 +318,29 @@ describe("SandboxChip — suspended state", () => {
 });
 
 describe("SessionHeader — thread-scoped model picker", () => {
+  it("saves the thread's model and reasoning as the personal default for new threads", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: "personal" };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "high" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads:/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Make default" }));
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
+  });
+
+  it("offers no save when the assistant's own model outranks the defaults", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: null };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    expect(screen.getByText(/New threads:/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+  });
+
   it("shows a pending selection immediately without changing the saved pin", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "s" }];
     threadModelPending = true;

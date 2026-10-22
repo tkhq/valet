@@ -17,7 +17,7 @@ import {
 } from "~/api/settings";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { ModelSizeList } from "./model-size-list";
-import { curatedForCatalogId } from "~/lib/models";
+import { curatedForCatalogId, sameModelSpec } from "~/lib/models";
 import {
   SIZE_TIERS,
   TIER_LABELS,
@@ -98,6 +98,24 @@ export interface ModelPickerProps {
   onSelectReasoning?: (level: string | null) => void;
   /** Disable interactions (e.g. while a mutation is in flight). */
   disabled?: boolean;
+  /** The model and reasoning a new thread starts with. The footer shows it,
+   * and offers `onMakeDefault` when the current choice differs. */
+  newThreadDefault?: NewThreadDefault;
+}
+
+export interface NewThreadDefault {
+  model: string;
+  reasoning?: string;
+  /** Saves the current model and reasoning as the default. Omitted when the
+   * viewer cannot change the default, or a change would not reach new threads. */
+  onMakeDefault?: () => void;
+  saving?: boolean;
+}
+
+/** True when the current choice differs from the new-thread default. */
+export function differsFromDefault(currentId: string | undefined, currentReasoning: string | undefined, preset: NewThreadDefault): boolean {
+  if (currentId === undefined) return false;
+  return !sameModelSpec(currentId, preset.model) || (currentReasoning !== undefined && currentReasoning !== preset.reasoning);
 }
 
 function isAnthropic(id: string): boolean {
@@ -166,6 +184,7 @@ export function ModelPicker({
   currentReasoning,
   onSelectReasoning,
   disabled,
+  newThreadDefault,
 }: ModelPickerProps) {
   const panel = presentation === "panel";
   const [open, setOpen] = useState(false);
@@ -557,6 +576,26 @@ export function ModelPicker({
               })}
             </div>
           ))}
+          {newThreadDefault && (
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-line text-[10px] text-muted">
+              <span className="min-w-0 flex-1 truncate">
+                New threads: {selectionLabel(newThreadDefault.model, tierMapQ.data, models)}
+                {newThreadDefault.reasoning ? ` · ${reasoningLabelFor(newThreadDefault.reasoning)}` : ""}
+              </span>
+              {newThreadDefault.onMakeDefault && differsFromDefault(currentId, currentReasoning, newThreadDefault) && (
+                <button
+                  type="button"
+                  disabled={newThreadDefault.saving}
+                  className="shrink-0 max-sm:min-h-11 rounded-full border border-line px-2 py-0.5 text-ink hover:bg-moss-wash disabled:opacity-50"
+                  // Keep focus in the menu on click; Enter and Space still activate it.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => newThreadDefault.onMakeDefault?.()}
+                >
+                  {newThreadDefault.saving ? "Saving…" : "Make default"}
+                </button>
+              )}
+            </div>
+          )}
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
               {filteredModels.length} of {roleScoped.length} models

@@ -4117,6 +4117,31 @@ export class EngineHost {
   }
 
   /**
+   * What a new thread gets now, and which default sets the model. A carried
+   * assistant model outranks the personal and team defaults while it still
+   * resolves, so a change to either would not reach new threads.
+   */
+  async newThreadDefaults(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId: string,
+  ): Promise<{ model: string; reasoning: ReasoningLevel; scope: "personal" | "team" | null }> {
+    const settings = await this.resolveFreshThreadSettings(sessionId, meta, actorUserId);
+    const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
+    let carried = false;
+    if (legacy.model) {
+      try {
+        await this.resolveModelObject(meta.orgId, legacy.model);
+        carried = true;
+      } catch {
+        // The carried model no longer resolves, so the next default applies.
+      }
+    }
+    const scope = carried ? null : userId ? "personal" : ownerTeamId ? "team" : null;
+    return { ...settings, scope };
+  }
+
+  /**
    * The reasoning half of `resolveFreshThreadSettings`. It skips the model
    * cascade, so an unavailable default model cannot block a reasoning reset.
    */
