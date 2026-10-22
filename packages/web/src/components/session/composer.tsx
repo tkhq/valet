@@ -1,4 +1,5 @@
 import { AppPageHintContext, inAskValetDock } from "~/lib/app-page-hint";
+import { announceTyping } from "~/api/ws";
 import {
   useCallback,
   useContext,
@@ -636,6 +637,7 @@ export function Composer({
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
     useComposerDraftStore.getState().clear(slot);
+    announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
@@ -1069,6 +1071,8 @@ export function Composer({
               // Typing ends a recall (`setText`): text that matches an earlier
               // prompt by hand is the person's draft, and Up must not replace it.
               setText(e.target.value);
+              // The people in the thread see "typing"; the text never leaves.
+              if (threadId) announceTyping(sessionId, threadId, e.target.value.trim().length > 0);
             }}
             onFocus={() => { lastUsedComposer = identity.current; setSelected(true); }}
             onKeyDown={onKeyDown}

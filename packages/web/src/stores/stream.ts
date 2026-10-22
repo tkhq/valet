@@ -711,6 +711,9 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // the query cache in the socket hook after the persisted write completes.
       return ev.offset && ev.offset > slice.lastOffset ? next : slice;
     }
+    case "thread.viewers":
+      // Viewer lists live in their own store (`api/active-viewers.ts`).
+      return slice;
 
     case "command_result": {
       // Command results reach the message list through the REST refetch in

@@ -27,7 +27,7 @@ let fullProfile = false;
 let readOnlyReason: string | undefined;
 beforeEach(() => { fullProfile = false; readOnlyReason = undefined; });
 
-vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined }));
+vi.mock("~/api/ws", () => ({ useSessionWebSocket: () => undefined, useAnnounceThreadView: () => undefined, announceTyping: () => undefined }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {

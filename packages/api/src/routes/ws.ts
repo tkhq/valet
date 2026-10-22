@@ -21,16 +21,18 @@
  */
 import type { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, users } from "../schema/index.js";
+import { activeViewers } from "../services/active-viewers.js";
 import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
 import { cachedThreadVisibility, requestViewer, threadVisibility, threadRef } from "../services/thread-access.js";
 import { shareWriteCount, threadShareGrant } from "../services/thread-share.js";
-import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
+import type { AssistantOwner, ClientFrame, ClientViewing, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent, QueueItem } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
@@ -77,6 +79,8 @@ const THREAD_ACCESS_RECHECK_MS = 5 * 60_000;
 /** How long a shared thread's guest stream trusts a share before reading it
  * again. A share change in this process is seen at once. */
 const SHARE_RECHECK_MS = 5_000;
+/** The most threads one tab reports at once: a page shows one, a panel adds a few. */
+const MAX_VIEWED_THREADS = 8;
 
 export function registerWsRoutes(
   app: Hono<AppEnv>,
@@ -109,6 +113,20 @@ export function registerWsRoutes(
       const sharedThreadId = c.req.query("threadId") || undefined;
       let guestOnly = false;
       let chain: Promise<void> = Promise.resolve();
+      // Who has which thread open (`services/active-viewers.ts`). A person's
+      // socket reports the threads its tab shows; a team API key never does.
+      const connectionId = randomUUID();
+      let viewing: ((frame: ClientViewing | { type: "typing"; threadId: string; active: boolean }) => Promise<void>) | undefined;
+      let pendingViewing: ClientViewing | undefined;
+      let stopViewers: (() => void) | undefined;
+      // Frames apply in arrival order: each awaits access checks, so a quick
+      // hidden-then-visible pair must not land the wrong way round.
+      let viewerFrames: Promise<void> = Promise.resolve();
+      const applyViewerFrame = (frame: ClientViewing | { type: "typing"; threadId: string; active: boolean }) => {
+        const apply = viewing;
+        if (!apply) return;
+        viewerFrames = viewerFrames.then(() => apply(frame)).catch((err) => console.error(`ws ${frame.type} frame failed:`, err));
+      };
       const deliver = (ws: { send: (data: string) => void; close: (code?: number, reason?: string) => void }, draftEvent: WireEventDraft) => {
         const threadId = "threadId" in draftEvent && typeof draftEvent.threadId === "string" ? draftEvent.threadId : undefined;
         const shown = threadShown;
@@ -376,6 +394,43 @@ export function registerWsRoutes(
             lifecycle.startKeepalive(() => {
               deliver(ws, { type: "ping" });
             });
+
+            // Viewer changes reach this socket through `deliver`, so a private
+            // thread's or a guest's filter applies to them too.
+            if (lifecycle.closed) return;
+            stopViewers = activeViewers.subscribe(sessionId, (threadId, viewers) => {
+              if (!lifecycle.closed) deliver(ws, { type: "thread.viewers", threadId, viewers });
+            });
+            if (caller.type === "user") {
+              const [account] = await providers.db.select({ name: users.name, email: users.email, image: users.image })
+                .from(users).where(eq(users.id, caller.id)).limit(1);
+              if (lifecycle.closed) return;
+              const person = {
+                userId: caller.id,
+                name: account?.name || account?.email || "A teammate",
+                ...(account?.image ? { avatarUrl: account.image } : {}),
+              };
+              const mayShow = async (threadId: string) =>
+                Boolean(engineSession.threadById(threadId) ?? await providers.engineStore.getThread(sessionId, threadId))
+                && (!threadShown || await threadShown(threadId).catch(() => false));
+              viewing = async (frame) => {
+                if (frame.type === "viewing") {
+                  const requested = [...new Set(frame.threadIds.filter((id): id is string => typeof id === "string"))].slice(0, MAX_VIEWED_THREADS);
+                  const allowed = (await Promise.all(requested.map(async (id) => (await mayShow(id)) ? id : undefined)))
+                    .filter((id): id is string => id !== undefined);
+                  if (lifecycle.closed) return;
+                  const added = activeViewers.view({ id: connectionId, sessionId, orgId: row.orgId, person }, allowed, frame.visible === true);
+                  // A second tab of someone already listed changes no list, so
+                  // this socket gets a newly shown thread's list directly.
+                  for (const threadId of added) {
+                    deliver(ws, { type: "thread.viewers", threadId, viewers: activeViewers.viewersOf(sessionId, threadId) });
+                  }
+                  return;
+                }
+                activeViewers.type(connectionId, frame.threadId, frame.active === true);
+              };
+              if (pendingViewing) applyViewerFrame(pendingViewing);
+            }
           } catch (err) {
             // Engine setup failed (e.g. workspace doesn't exist, Docker
             // unreachable). Surface as a wire error and close — never
@@ -407,10 +462,19 @@ export function registerWsRoutes(
           }
           // v1: subscribe is implicit on connect, pong is best-effort.
           if (frame.type === "subscribe" || frame.type === "pong") return;
+          if (frame.type === "viewing" && Array.isArray(frame.threadIds)) {
+            // A frame sent before the handshake ends waits for it.
+            if (!viewing) { pendingViewing = frame; return; }
+            applyViewerFrame(frame);
+            return;
+          }
+          if (frame.type === "typing" && typeof frame.threadId === "string") applyViewerFrame(frame);
         },
 
         onClose() {
           lifecycle.close();
+          stopViewers?.();
+          activeViewers.leave(connectionId);
         },
 
         onError(err) {

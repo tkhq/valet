@@ -1,4 +1,6 @@
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useWorkspaceViewers } from "~/api/active-viewers";
+import { RowFaces } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
@@ -36,6 +38,7 @@ import {
   X,
 } from "lucide-react";
 import type {
+  ActiveViewer,
   DecisionGate,
   ChildWorkSummary,
   ThreadPullRequest,
@@ -247,7 +250,7 @@ export function childStatusDotClassName(status: ChildWorkSummary["status"]): str
  * treatment (moss left rail + soft ink wash), and the full title is
  * recoverable via hover tooltip when truncated.
  */
-export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
+export function ThreadTree({ sessionId: override, showChildren = true, workspace }: ThreadTreeProps = {}) {
   const info = useWorkspaceRuntimeInfo(override ? undefined : "user");
   // No `override` means the caller's own assistant — the original and still
   // the default behavior.
@@ -255,7 +258,7 @@ export function ThreadTree({ sessionId: override, showChildren = true }: ThreadT
 
   if (!sessionId) return <ThreadTreeWaiting />;
 
-  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} />;
+  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} workspace={workspace} />;
 }
 
 /**
@@ -283,10 +286,17 @@ export interface ThreadTreeProps {
    * caller's personal children.
    */
   showChildren?: boolean;
+  /** The workspace the rows belong to ("user" or a team id), for the faces of
+   * who is in each thread. Without it the rows show no faces. */
+  workspace?: string;
 }
 
-function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
+const NO_VIEWERS: ActiveViewer[] = [];
+
+function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: string; showChildren: boolean; workspace?: string }) {
   const viewer = useMe();
+  // Who is in which thread now: faces on the rows.
+  const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
@@ -592,6 +602,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               onRename={(threadId, title) =>
                 void renameThread.mutateAsync({ threadId, title })
               }
+              viewers={(workspaceViewers.data?.threads[t.id] ?? NO_VIEWERS).filter((person) => person.userId !== viewer.data?.id)}
             />
 
   );
@@ -818,7 +829,10 @@ function ThreadNode({
   organizingDisabled,
   timerFireAt,
   eventWait,
+  viewers,
 }: {
+  /** The other people with this thread open now. */
+  viewers: ActiveViewer[];
   organizingDisabled: boolean;
   /** When the thread's soonest timer fires. Only timers get a row line. */
   timerFireAt?: number;
@@ -977,6 +991,7 @@ function ThreadNode({
               <ThreadOriginIcon thread={thread} />
               <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
               {thread.share && <Share2 className="mx-1 h-3.5 w-3.5 shrink-0 text-muted" role="img" aria-label="Shared" />}
+              <RowFaces viewers={viewers} />
               {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
               {question
                 ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>

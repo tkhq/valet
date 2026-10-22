@@ -80,6 +80,7 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   "submission.settled": true,
   "title.updated": true,
   "thread.activity": true,
+  "thread.viewers": true,
   "sandbox.status": true,
   command_result: true,
   ping: true,

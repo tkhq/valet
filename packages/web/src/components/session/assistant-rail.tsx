@@ -1,15 +1,16 @@
 import type { TeamSummary } from "@valet/api/wire";
-import { useWorkspaceConversation } from "~/hooks/use-workspace-conversation";
+import { useCurrentWorkspace, useWorkspaceConversation } from "~/hooks/use-workspace-conversation";
 import { ThreadTree, ThreadTreeWaiting } from "./thread-tree";
 
 /** Workspace thread list. Assistant profiles are internal routing identities. */
 export function AssistantRail() {
   const conversation = useWorkspaceConversation();
+  const workspace = useCurrentWorkspace();
   if (conversation.error) return <div role="alert" className="p-4 text-sm text-danger-500">
     Could not load threads. <button className="underline" onClick={() => void conversation.refetch()}>Retry</button>
   </div>;
   return <>
-    {conversation.data ? <ThreadTree sessionId={conversation.data.sessionId} /> : <ThreadTreeWaiting />}
+    {conversation.data ? <ThreadTree sessionId={conversation.data.sessionId} workspace={workspace} /> : <ThreadTreeWaiting />}
   </>;
 }
 

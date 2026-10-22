@@ -4,7 +4,9 @@ import { useEffect, useMemo } from "react";
 import { api } from "~/api/client";
 import { useMessages } from "~/api/queries";
 import { useMe } from "~/api/settings";
-import { useSessionWebSocket } from "~/api/ws";
+import { useAnnounceThreadView, useSessionWebSocket } from "~/api/ws";
+import { useActiveViewers } from "~/api/active-viewers";
+import { TypingLine, ViewerFaces } from "./viewer-faces";
 import { Badge, LoadingRow } from "~/components/primitives";
 import { Composer } from "~/components/session/composer";
 import { MessageList } from "~/components/session/message-list";
@@ -36,6 +38,8 @@ export function SharedThreadView({ address, guest }: {
   useSessionWebSocket(sessionId, threadId);
   const stream = useSessionStream(sessionId);
   const me = useMe();
+  useAnnounceThreadView(sessionId, threadId, threadId);
+  const viewers = useActiveViewers(sessionId, threadId, me.data?.id);
   const messagesQ = useMessages(sessionId, threadId);
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
@@ -70,6 +74,7 @@ export function SharedThreadView({ address, guest }: {
       <span className="min-w-0 truncate text-sm font-semibold tracking-tight text-ink font-display">{address.title || "Untitled thread"}</span>
       <Badge variant="accent" data-testid="thread-shared">Shared by {guest.ownerName}</Badge>
       <Badge>{guest.mode === "reply" ? "View + reply" : "View only"}</Badge>
+      <ViewerFaces viewers={viewers} />
     </header>
   );
 
@@ -82,6 +87,7 @@ export function SharedThreadView({ address, guest }: {
           Waiting for {guest.ownerName} to answer an approval.
         </p>
       )}
+      <TypingLine viewers={viewers} />
       {guest.mode === "reply" ? (
         <Composer sessionId={sessionId} threadId={threadId} agentStatus={status.status}
           queuedMessages={queuedMessages} queuedItemCount={queueState?.pendingIds.length ?? 0} guest />
