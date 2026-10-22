@@ -22,13 +22,14 @@ import { Hono, type Context } from "hono";
 import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
+  ConflictError,
   dispatchCommand,
   MESSAGE_TURN_ERROR_KEY,
   NotFoundError,
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
-import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
+import { readBranchNote, readThreadEdit, type PromptAuthor, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
@@ -37,6 +38,7 @@ import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  ForkThreadResponse,
   ListCommandsResponse,
   WireCommandInfo,
   ListDecisionsResponse,
@@ -57,6 +59,7 @@ import type {
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
+  ReturnToBranchResponse,
   AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -161,6 +164,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       },
     };
   }
+  if (e.type === "branch_summary") return branchNoteToMessage(e, sessionId, threadId);
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
@@ -172,6 +176,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   const skill = skillInvocationFromMetadata(e.metadata, role);
   const author = authorFromEntry(e.author, role);
   const errorMessage = turnErrorFromMetadata(e.metadata, role);
+  const editOf = role === "user" ? readThreadEdit(e.metadata)?.entryId : undefined;
   return {
     id: e.id,
     sessionId,
@@ -188,8 +193,43 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     model: e.model,
     ...(skill ? { skill } : {}),
     ...(author ? { author } : {}),
+    ...(editOf ? { editOf } : {}),
+    ...(role === "user" && e.channel ? { channelType: e.channel.channelType } : {}),
     ...(errorMessage ? { errorMessage } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
+  };
+}
+
+/**
+ * Wire projection of a branch note (docs/specs/2026-10-22-thread-edit-fork-design.md).
+ * `content` carries the note text, so a client without a divider renderer
+ * still shows readable text. A fork copies notes with an empty
+ * `branchLeafId` when the version they left was not copied.
+ */
+function branchNoteToMessage(
+  e: Extract<SessionEntry, { type: "branch_summary" }>,
+  sessionId: string,
+  threadId: string,
+): Message {
+  const note = readBranchNote(e.metadata);
+  const kind = note?.kind ?? "edit";
+  return {
+    id: e.id,
+    sessionId,
+    threadId,
+    role: "system",
+    content: e.summary,
+    parts: [],
+    createdAt: wireCreatedAt(e.createdAt),
+    sequence: e.sequence,
+    branch: {
+      kind,
+      actions: (note?.actions ?? []).map(({ label, count, urls }) => ({ label, count, urls })),
+      moreActions: note?.moreActions ?? 0,
+      filesChanged: note?.filesChanged ?? false,
+      canReturn: kind !== "fork" && e.branchLeafId !== "",
+      ...(note?.source ? { source: { threadId: note.source.threadId, sameWorkingDirectory: note.source.sameWorkingDirectory } } : {}),
+    },
   };
 }
 
@@ -915,8 +955,8 @@ messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
 export async function createThread(c: Context<AppEnv>, sessionId: string) {
   const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
-  const { session, engineSession, meta } = result;
-  const { db, engineHost } = c.var.providers;
+  const { session, engineSession } = result;
+  const { db } = c.var.providers;
 
   let parsed: unknown = {};
   try {
@@ -958,6 +998,24 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
 
+  const { summary } = await openThread(c, result, { source, title });
+  return c.json(summary, 201);
+}
+
+/**
+ * Create a thread in a loaded session: the body of `POST .../threads`, and
+ * the destination of a fork. A team workspace runtime is read-only, so a
+ * team thread gets its own execution session. `source` lends its model and
+ * reasoning level when the person keeps current settings for new threads.
+ */
+export async function openThread(
+  c: Context<AppEnv>,
+  loaded: { session: typeof agentSessions.$inferSelect; engineSession: EngineSession; meta: Awaited<ReturnType<typeof loadSessionMeta>> },
+  opts: { source?: Thread | null; title?: string },
+): Promise<{ thread: Thread; summary: CreateThreadResponse }> {
+  const { session, engineSession, meta } = loaded;
+  const { db, engineHost } = c.var.providers;
+  const { source, title } = opts;
   const behaviorRows = await db
     .select({ newThreadBehavior: users.newThreadBehavior })
     .from(users)
@@ -999,7 +1057,7 @@ export async function createThread(c: Context<AppEnv>, sessionId: string) {
     undefined,
     thread.reasoning() ?? null,
   );
-  return c.json(summary, 201);
+  return { thread, summary };
 }
 
 /**
@@ -1134,9 +1192,11 @@ export async function submitSessionPrompt(
     inheritToolScope?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
+    /** The sender's earlier user message that this text replaces (`Thread.editMessage`). */
+    editEntryId?: string;
   },
 ): Promise<SendPromptResponse | null> {
-  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo } = opts ?? {};
+  const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo, editEntryId } = opts ?? {};
   const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
@@ -1174,6 +1234,9 @@ export async function submitSessionPrompt(
   const outcome = text.startsWith("/") ? dispatchCommand(text, engineSession.commandRegistry()) : null;
   if (replyTo && outcome?.kind === "execute") {
     throw new ValidationError("A reply must include a message. Cancel the reply before you run a slash command.");
+  }
+  if (editEntryId !== undefined && outcome && outcome.kind !== "pass") {
+    throw new ValidationError("An edited message cannot run a slash command. Send the command as a new message.");
   }
 
   // Resolve file attachment refs. Consumption is atomic for the whole
@@ -1270,8 +1333,12 @@ export async function submitSessionPrompt(
   const activityAt = Date.now();
   let receipt;
   try {
-    receipt =
-      outcome && outcome.kind === "execute"
+    receipt = editEntryId !== undefined
+      ? await thread.editMessage(editEntryId, withAttachments(promptText), {
+          metadata: continuationMetadata,
+          ...(author ? { author } : {}),
+        })
+      : outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
@@ -1382,6 +1449,14 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
     return c.json({ error: "Add a message or an attachment." }, 400);
   }
+  if (body.editEntryId !== undefined) {
+    if (typeof body.editEntryId !== "string" || body.editEntryId.length === 0) {
+      return c.json({ error: "editEntryId must name one of your messages in this thread." }, 400);
+    }
+    if (promoteItemId || body.replyToMessageId !== undefined || body.queueMode !== undefined) {
+      return c.json({ error: "An edit cannot also reply, promote, or set a queue mode. Send the edit alone." }, 400);
+    }
+  }
   if (row.ownerType === "team" && body.threadId !== undefined) {
     const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
@@ -1441,6 +1516,7 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       ...(promoteItemId ? { promoteItemId } : {}),
       author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
       ...(replyTo ? { replyTo } : {}),
+      ...(body.editEntryId !== undefined ? { editEntryId: body.editEntryId } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);
@@ -1529,6 +1605,81 @@ export async function abortThread(c: Context<AppEnv>, sessionId: string, threadI
 
 // One queued message the person no longer wants. Only a message that has not
 // started is canceled here; a started turn ends with Stop (`abortThread`).
+// ── Thread branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──
+//
+// An edit is a send with `editEntryId` (`sendPrompt`). A return moves the
+// leaf back to the version a branch note left. A fork copies the active path
+// into a new thread in the same workspace.
+
+export async function returnToBranch(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const noteEntryId = body?.noteEntryId;
+  if (typeof noteEntryId !== "string" || noteEntryId.length === 0) {
+    return c.json({ error: "noteEntryId must name a version note in this thread." }, 400);
+  }
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const thread = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  try {
+    const result: ReturnToBranchResponse = await thread.returnToBranch(noteEntryId, { id: c.var.user.id });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    if (err instanceof ConflictError) return c.json({ error: err.message }, 409);
+    throw err;
+  }
+}
+
+export async function forkThread(c: Context<AppEnv>, sessionId: string, threadId: string) {
+  const body = await readOptionalJsonObject(c);
+  const entryId = body?.entryId;
+  if (typeof entryId !== "string" || entryId.length === 0) {
+    return c.json({ error: "entryId must name a message in this thread." }, 400);
+  }
+  const loaded = await loadEngineSession(c, sessionId);
+  if ("error" in loaded) return loaded.error;
+  const source = await visibleThread(c, loaded.session, loaded.engineSession, threadId);
+  if (!source) return c.json({ error: "thread not found" }, 404);
+
+  // A user message branches from just before it, and its text goes to the
+  // new thread's composer. Any other entry branches through itself.
+  const active = await source.readEntries();
+  const index = active.findIndex((entry) => entry.id === entryId);
+  const entry = active[index];
+  if (!entry) {
+    return c.json({ error: "That message is not in this version of the conversation. Reload the thread and try again." }, 404);
+  }
+  const typed = entry.type === "message" && entry.role === "user" && !entry.signal;
+  let path: SessionEntry[];
+  try {
+    path = await source.forkPath(typed ? active[index - 1]?.id ?? null : entry.id);
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+
+  // A team conversation runs in its own execution session. Its fork starts
+  // from the team runtime, as a new team thread does.
+  const { db } = c.var.providers;
+  const [execution] = await db.select({ runtimeId: assistants.sessionId }).from(assistantExecutions)
+    .innerJoin(assistants, eq(assistants.id, assistantExecutions.assistantId))
+    .where(eq(assistantExecutions.sessionId, sessionId)).limit(1);
+  const home = execution && execution.runtimeId !== sessionId ? await loadEngineSession(c, execution.runtimeId) : loaded;
+  if ("error" in home) return home.error;
+  const [titled] = await db.select({ title: sessionThreads.title }).from(sessionThreads)
+    .where(and(eq(sessionThreads.sessionId, sessionId), eq(sessionThreads.id, threadId))).limit(1);
+  const title = titled?.title ? `${titled.title} (branch)`.slice(0, MAX_THREAD_TITLE_CHARS) : undefined;
+
+  const { thread, summary } = await openThread(c, home, { source, title });
+  await thread.copyPath(path, { source: { sessionId, threadId }, actorId: c.var.user.id });
+  const response: ForkThreadResponse = {
+    thread: summary,
+    ...(typed && entry.type === "message" ? { draft: entry.content } : {}),
+  };
+  return c.json(response, 201);
+}
+
 messagesRouter.post("/:id/threads/:threadId/queue/:itemId/cancel", (c) => cancelQueuedItem(c, c.req.param("id"), c.req.param("threadId")));
 
 export async function cancelQueuedItem(c: Context<AppEnv>, sessionId: string, threadId: string) {

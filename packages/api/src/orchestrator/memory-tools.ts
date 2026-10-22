@@ -291,6 +291,7 @@ function asReadResultBody(body: unknown): ReadResultBody | null {
 
 export const memReadTool = defineTool({
   name: "mem_read",
+  sideEffect: "none",
   ownerOnly: true,
   description:
     "Read a memory file (returns its rendered document) or a directory (returns a virtual index of its files and subdirectories). Pass a path ending in '/' or '' for the root to read a directory.",
@@ -343,6 +344,7 @@ function asSearchResultBody(body: unknown): SearchResultBody | null {
 
 export const memSearchTool = defineTool({
   name: "mem_search",
+  sideEffect: "none",
   ownerOnly: true,
   description:
     "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search before mem_write when the memory might already exist, especially for anything with a `resource`.",
@@ -543,6 +545,7 @@ function formatEdges(label: string, edges: LinkEdgeRow[]): string {
 
 export const memLinksTool = defineTool({
   name: "mem_links",
+  sideEffect: "none",
   ownerOnly: true,
   description:
     "List one memory file's link edges: inbound (files whose markdown links point at it) and outbound (files its links point at, phantom targets included). Check inbound before mem_move or mem_rm, and use it to orient on a topic's cluster.",

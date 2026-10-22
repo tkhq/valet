@@ -511,6 +511,9 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "branch_switched":
+      return [{ type: "branch_switched", threadId: e.threadId, noteEntryId: e.noteEntryId }];
+
     // Out of agent-loop v1 scope — silently dropped. Future plans:
     // child-task events, thread lifecycle.
     case "thread_start":
