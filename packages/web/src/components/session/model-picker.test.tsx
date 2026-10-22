@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -637,17 +637,25 @@ describe("ModelPicker — new-thread default", () => {
     expect(onMakeDefault).toHaveBeenCalledOnce();
   });
 
-  it("offers no save when the thread already matches the default, or the viewer cannot change it", async () => {
+  it("offers no save without a save handler", async () => {
     const user = userEvent.setup();
-    const { unmount } = renderPicker({ currentId: "custom_1/llama-3", currentReasoning: "medium", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault: vi.fn() } });
-    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
-    expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
-    unmount();
-
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Make default" })).toBeNull();
+  });
+
+  it("saves the default on Enter instead of picking the highlighted model", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onMakeDefault = vi.fn();
+    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    // The menu focuses its search box on the next frame; move focus after that.
+    await waitFor(() => expect(document.activeElement?.tagName).toBe("INPUT"));
+    screen.getByRole("button", { name: "Make default" }).focus();
+    await user.keyboard("{Enter}");
+    expect(onMakeDefault).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });
