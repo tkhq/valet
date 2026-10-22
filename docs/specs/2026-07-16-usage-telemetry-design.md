@@ -483,7 +483,14 @@ Hosted inserts remain asynchronous per-call writes, not batched writes.
 The search query remains a substring scan within the scoped time range.
 The usage query retains previous data while search changes, so the input keeps focus.
 Team members can see aggregates.
-Team admins can also see individual intents.
+Team admins can also see individual intents from threads they can read.
+The recent feed uses the existing batched thread visibility check, including private-channel and personal-helper restrictions.
+Pagination offsets count candidate rows, so filtered pages can contain fewer rows.
+Admitted invoke bodies supply team workspace ownership for MCP and CLI calls.
+CLI discovery requests do not overwrite an invocation's resolved team ownership.
+Legacy replay repairs missing or invalid metadata without relaxing fresh-call validation.
+External policy refusals carry `errorCode: "policy_denied"` and record a denied outcome.
+Error rates count execution errors, not denied or pending-approval outcomes.
 The Usage page adds a Tool usage view with the same scope and period controls.
 
 Classification is not part of this change.

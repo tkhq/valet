@@ -1,4 +1,4 @@
-import { requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
+import { parseToolIntent, requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
 import { IsObject } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
@@ -54,8 +54,11 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
       const provided = params as Record<string, unknown>;
       // Old suspended calls predate intent. This path is never used for a fresh call.
       const field = def.intent === "summary" ? "summary" : "intent";
-      const original = replay && provided[field] === undefined && (requiresToolIntent(def) || def.intent === "summary")
-        ? { ...provided, [field]: "Resume the previously suspended tool call." } : provided;
+      let original = provided;
+      if (replay && (requiresToolIntent(def) || def.intent === "summary")) {
+        try { parseToolIntent(provided[field]); }
+        catch { original = { ...provided, [field]: "Resume the previously suspended tool call." }; }
+      }
       let intent: string | null = null;
       let clean = original;
       let validationError: Error | undefined;

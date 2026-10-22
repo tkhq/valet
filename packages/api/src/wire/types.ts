@@ -6564,7 +6564,7 @@ export interface ActionInvokeRequest {
 /** `POST /api/actions/:toolId/invoke` response. */
 export type ActionInvokeResponse =
   | { tool_id: string; status: "completed"; result: unknown }
-  | { tool_id: string; status: "failed"; error: string }
+  | { tool_id: string; status: "failed"; error: string; errorCode?: "policy_denied" }
   | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string; allowTeamConsent?: true }; next_step: string }
   /** A call with the same idempotency key, tool, and params is still running. */
   | { tool_id: string; status: "in_progress"; next_step: string };

@@ -174,3 +174,16 @@ describe("shared tool intent", () => {
     } finally { await session.destroy(); faux.unregister(); }
   });
 });
+
+describe("legacy summary replay", () => {
+  it.each([undefined, "", "   ", "x".repeat(501)])("resumes invalid legacy metadata without relaxing fresh validation: %s", async summary => {
+    const calls: Record<string, unknown>[] = [];
+    const def = defineTool({ name: "call_tool", intent: "summary", description: "Replay a broker", parameters: Type.Object({ summary: Type.String() }),
+      execute: async args => { calls.push(args); return { text: "resumed" }; } });
+    const args = summary === undefined ? {} : { summary };
+    expect((await toAgentTool(def, buildCtx).execute("fresh", args)).content).toEqual([{ type: "text", text: expect.stringContaining("Add intent") }]);
+    expect(calls).toEqual([]);
+    expect((await toAgentTool(def, buildCtx, true).execute("replay", args)).content).toEqual([{ type: "text", text: "resumed" }]);
+    expect(calls).toEqual([{ summary: "Resume the previously suspended tool call." }]);
+  });
+});

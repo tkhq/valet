@@ -110,7 +110,9 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         if (res.ok) {
           const url = new URL(inner.url);
           const pathParts = url.pathname.split("/");
-          const team = url.searchParams.get("workspace") ?? (url.searchParams.get("ownerType") === "team" ? url.searchParams.get("ownerId") : null);
+          const invokeBody = pathParts[2] === "actions" && pathParts[4] === "invoke" ? object(body) : undefined;
+          const team = url.searchParams.get("workspace") ?? (typeof invokeBody?.workspace === "string" ? invokeBody.workspace : null)
+            ?? (url.searchParams.get("ownerType") === "team" ? url.searchParams.get("ownerId") : null);
           if (team && team !== "user") resolvedTeamId = team;
           if (typeof action?.tool_id === "string") resolvedActionId = action.tool_id;
           if (pathParts[2] === "threads") resolvedThreadId = typeof action?.id === "string" ? action.id : pathParts[3];
@@ -180,7 +182,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
             if (typeof text !== "string") continue;
             let action: Record<string, unknown> | undefined;
             try { action = object(JSON.parse(text)); } catch { continue; }
-            if (action?.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
+            if (action?.status === "failed") { outcome = action.errorCode === "policy_denied" ? "denied" : "error"; errorCode = action.errorCode === "policy_denied" ? "policy_denied" : "action_failed"; }
             if (action?.status === "approval_required") { outcome = "pending-approval"; errorCode = "approval_required"; }
           }
         }

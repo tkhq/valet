@@ -242,6 +242,7 @@ describe("MCP tool broker", () => {
     const { testApi, demo, alice } = await setup();
     const blocked = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.blocked" });
     expect(blocked.data).toMatchObject({ status: "failed", error: expect.stringContaining("blocked by org policy") });
+    await vi.waitFor(async () => expect((await testApi.providers.db.select().from(externalCalls)).find(row => row.name === "demo.blocked")).toMatchObject({ outcome: "denied", errorCode: "policy_denied" }));
     const risky = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.risky" });
     expect(risky.data).toMatchObject({ status: "approval_required", next_step: expect.stringContaining("start_thread") });
     expect(demo.calls["demo.blocked"]).toBeUndefined();
@@ -383,6 +384,7 @@ describe("MCP tool broker", () => {
       const res = await tool(testApi.baseUrl, bob, "call_tool", { tool_id: "demo.ping", workspace: "team-1" });
       expect(res.data).toMatchObject({ status: "approval_required", approver: { userId: "alice" } });
       expect(demo.calls["demo.ping"]).toBeUndefined();
+      await vi.waitFor(async () => expect((await testApi.providers.db.select().from(externalCalls)).find(row => row.name === "demo.ping")).toMatchObject({ ownerType: "team", ownerId: "team-1", outcome: "pending-approval" }));
       const rows = await auditRows(testApi);
       expect(rows.map((r) => [r.actionId, r.status, r.resolvedMode, r.userId, r.caller])).toEqual([
         ["demo.ping", "pending", "require_approval", "bob", "mcp:client-bob"],

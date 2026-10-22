@@ -182,5 +182,5 @@ usageRouter.get("/external", async (c) => {
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000 || !Number.isInteger(limit) || limit < 1 || limit > 100 || search.length > 500) {
     return c.json({ error: "Use offset 0 to 100000, limit 1 to 100, and search text of 500 characters or fewer." }, 400);
   }
-  return c.json(await getExternalUsage(c.var.providers.db, { scope, period, offset, limit, search, surface }));
+  return c.json(await getExternalUsage(c.var.providers.db, { viewer: { deps: c.var.providers, userId: c.var.user.id }, scope, period, offset, limit, search, surface }));
 });

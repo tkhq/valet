@@ -276,7 +276,7 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
     return { ok: true, result: record.result };
   }
   if (record.ok === false && typeof record.error === "string") {
-    return { ok: false, error: record.error };
+    return { ok: false, error: record.error, ...(record.errorCode === "policy_denied" ? { errorCode: "policy_denied" as const } : {}) };
   }
   // A requiresApproval row must never land in the dedup table (the guard in
   // buildActionInvoker skips the insert). If one exists, the data is corrupt.
@@ -830,7 +830,7 @@ async function enforceWorkflowPolicy(
       createdAt: now,
     });
     await updateInvocationOutcome(opts.db, key, ctx.orgId, { status: "denied", error });
-    return { ok: false, error };
+    return { ok: false, error, errorCode: "policy_denied" };
   }
 
   // decision.mode === "require_approval"

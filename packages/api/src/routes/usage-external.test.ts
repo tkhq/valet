@@ -238,3 +238,57 @@ it("nulls old intent text while retaining counts and hides personal rows in the 
   expect(org.recent.map(row => row.id)).toEqual(["team"]);
   expect(org.tools[0]?.uniqueUsers).toBe(1);
 });
+
+it("attributes a CLI invoke body to its admitted team after personal discovery requests", async () => {
+  const plugin: ValetPlugin = { name: "demo", version: "1", actions: [{ service: "demo", actions: [{
+    id: "demo.ping", name: "Ping", description: "Check the team connection", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true, data: { ok: true } }),
+  }] }] };
+  api = await bootTestApi({ plugins: [plugin] });
+  const db = api.providers.db;
+  await db.insert(teams).values({ id: "team", name: "Team", orgId: "local-org", createdAt: Date.now() });
+  await db.insert(teamMembers).values({ teamId: "team", userId: "local-user", role: "admin" });
+  await api.providers.engineCredentials.save({ type: "team", id: "team" }, "demo", { type: "api_key", apiKey: "fixture-only" });
+  const client = new InstanceClient({ url: api.baseUrl });
+  await withCliInvocation("tools", ["call", "demo.ping"], async () => {
+    await client.me();
+    expect((await client.callTool("demo.ping", { workspace: "team", params: {} })).status).toBe("completed");
+    await client.me();
+  });
+  await vi.waitFor(async () => {
+    const rows = (await db.select().from(externalCalls)).filter(row => row.surface === "cli");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ownerType: "team", ownerId: "team", outcome: "ok" });
+  });
+  await createPolicy(db, { orgId: "local-org", type: "org", id: "local-org" }, { actionId: "demo.ping", mode: "deny", managedBy: "test", now: Date.now() });
+  await withCliInvocation("tools", ["call", "demo.ping"], async () => {
+    expect(await client.callTool("demo.ping", { workspace: "team", params: {} })).toMatchObject({ status: "failed", errorCode: "policy_denied" });
+  });
+  await vi.waitFor(async () => expect((await db.select().from(externalCalls)).filter(row => row.surface === "cli" && row.outcome === "denied")).toHaveLength(1));
+});
+
+it("does not disclose team thread intents to an admin outside their audience", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+  await db.insert(teams).values({ id: "team", name: "Team", orgId: "local-org", createdAt: Date.now() });
+  await db.insert(teamMembers).values({ teamId: "team", userId: "local-user", role: "admin" });
+  await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+    ('private', 'session', 'app-assistant:test-member', 'idle', 'steer', 1, 1),
+    ('shared', 'session', 'web:default', 'idle', 'steer', 1, 1),
+    ('slack-private', 'session', 'slack:CUNKNOWNPRIVATE:1', 'idle', 'steer', 1, 1)`);
+  await seed(api, "private-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "private", userId: "test-member" });
+  await seed(api, "shared-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "shared", userId: "test-member" });
+  await seed(api, "slack-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "slack-private", userId: "test-member" });
+  for (const scope of ["&scope=org", "&scope=team&teamId=team"]) {
+    const data = await (await read(api, scope)).json() as ExternalUsageResponse;
+    expect(data.daily.reduce((sum, day) => sum + day.calls, 0)).toBe(3);
+    expect(data.recent.map(row => row.id)).toEqual(["shared-call"]);
+  }
+});
+
+it("counts execution errors separately from policy denial and pending approval", async () => {
+  api = await bootTestApi();
+  for (const outcome of ["ok", "error", "denied", "pending-approval"] as const) await seed(api, outcome, { outcome });
+  const data = await (await read(api)).json() as ExternalUsageResponse;
+  expect(data.tools[0]).toMatchObject({ calls: 4, errorRate: .25 });
+});

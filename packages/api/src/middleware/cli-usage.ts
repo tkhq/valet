@@ -21,15 +21,23 @@ export function cliUsage(): MiddlewareHandler<AppEnv> {
       if (c.req.path.startsWith("/api/actions/") && c.req.path.endsWith("/invoke") && c.res.ok) {
         const response: unknown = await c.res.clone().json();
         if (response && typeof response === "object" && "status" in response) {
-          if (response.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
+          if (response.status === "failed") {
+            const denied = "errorCode" in response && response.errorCode === "policy_denied";
+            outcome = denied ? "denied" : "error"; errorCode = denied ? "policy_denied" : "action_failed";
+          }
           if (response.status === "approval_required") { outcome = "pending-approval"; errorCode = "approval_required"; }
         }
       }
       const parts = c.req.path.split("/");
+      let workspace = c.req.query("workspace");
+      if (c.res.ok && parts[2] === "actions" && parts[4] === "invoke") {
+        const body: unknown = await c.req.json().catch(() => null);
+        if (body && typeof body === "object" && "workspace" in body && typeof body.workspace === "string") workspace = body.workspace;
+      }
       const owner = c.var.principal.type === "team"
         ? { ownerType: "team" as const, ownerId: c.var.principal.id }
         : await externalCallOwner(c.var.providers.db, user.orgId, user.id,
-          c.res.ok && parts[2] === "threads" ? parts[3] : undefined, c.res.ok && parts[2] === "sessions" ? parts[3] : undefined, c.res.ok ? c.req.query("workspace") : undefined);
+          c.res.ok && parts[2] === "threads" ? parts[3] : undefined, c.res.ok && parts[2] === "sessions" ? parts[3] : undefined, c.res.ok ? workspace : undefined);
       await recordExternalCall(c.var.providers.db, {
         id: `cli:${user.orgId}:${user.id}:${id}`, orgId: user.orgId, userId: user.id, surface: "cli", name,
         clientName: "Valet CLI", clientVersion: version?.slice(0, 100), ...owner,

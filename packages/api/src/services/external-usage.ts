@@ -1,3 +1,4 @@
+import { visibleThreadIds, type AccessDeps } from "./thread-access.js";
 import { getTeamInOrg, isTeamMember } from "./teams.js";
 import type { ToolUsageFact } from "@valet/shared";
 import { randomUUID } from "node:crypto";
@@ -26,6 +27,9 @@ export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise
       set: call.surface !== "cli" ? { outcome: call.outcome, errorCode: call.errorCode, durationMs: call.durationMs, createdAt: call.createdAt } : {
         outcome: sql`CASE WHEN ${call.createdAt + call.durationMs} >= ${externalCalls.createdAt} + ${externalCalls.durationMs} THEN ${call.outcome} ELSE ${externalCalls.outcome} END`,
         errorCode: sql`CASE WHEN ${call.createdAt + call.durationMs} >= ${externalCalls.createdAt} + ${externalCalls.durationMs} THEN ${call.errorCode ?? null} ELSE ${externalCalls.errorCode} END`,
+        // Discovery requests may precede invocation. Keep the admitted team workspace once known.
+        ownerType: call.ownerType === "team" ? call.ownerType : externalCalls.ownerType,
+        ownerId: call.ownerType === "team" ? call.ownerId : externalCalls.ownerId,
         createdAt: sql`least(${call.createdAt}, ${externalCalls.createdAt})`,
         durationMs: sql`greatest(0, greatest(${call.createdAt + call.durationMs}, ${externalCalls.createdAt} + ${externalCalls.durationMs}) - least(${call.createdAt}, ${externalCalls.createdAt}))::integer`,
       },
@@ -61,7 +65,7 @@ export async function saveMcpClientInfo(db: AppDb, identity: { orgId: string; us
 }
 
 export async function getExternalUsage(db: AppDb, opts: {
-  period: ResolvedUsagePeriod; scope: UsageScope; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
+  viewer: { deps: AccessDeps; userId: string }; period: ResolvedUsagePeriod; scope: UsageScope; surface?: "hosted" | "mcp" | "cli"; search: string; offset: number; limit: number;
 }): Promise<ExternalUsageResponse> {
   const { scope, period } = opts;
   const where = and(eq(externalCalls.orgId, scope.orgId),
@@ -76,7 +80,7 @@ export async function getExternalUsage(db: AppDb, opts: {
       .where(where).groupBy(sql`1`, externalCalls.surface).orderBy(sql`1`),
     db.select({ name: externalCalls.name, surface: externalCalls.surface,
       calls: sql<number>`count(*)`.mapWith(Number),
-      errorRate: sql<number>`count(*) filter (where ${externalCalls.outcome} <> 'ok')::float / count(*)`.mapWith(Number),
+      errorRate: sql<number>`count(*) filter (where ${externalCalls.outcome} = 'error')::float / count(*)`.mapWith(Number),
       uniqueUsers: sql<number>`count(distinct ${externalCalls.userId})`.mapWith(Number) }).from(externalCalls)
       .where(where).groupBy(externalCalls.name, externalCalls.surface).orderBy(sql`count(*) desc`, externalCalls.name).limit(25),
     db.select({ surface: externalCalls.surface, name: sql<string>`coalesce(${externalCalls.clientName}, case when ${externalCalls.surface} = 'hosted' then 'Hosted Valet' else 'Unknown client' end)`,
@@ -98,8 +102,12 @@ export async function getExternalUsage(db: AppDb, opts: {
     scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined,
     opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
     .orderBy(sql`${externalCalls.createdAt} desc`, sql`${externalCalls.id} desc`).offset(opts.offset).limit(opts.limit + 1);
+  const teamThreads = recent.flatMap(({ call }) => call.ownerType === "team" && call.sessionId && call.threadId
+    ? [{ sessionId: call.sessionId, threadId: call.threadId }] : []);
+  const visible = await visibleThreadIds(opts.viewer.deps, { ownerType: "team" }, { orgId: scope.orgId, userId: opts.viewer.userId }, teamThreads);
+  const readable = recent.slice(0, opts.limit).filter(({ call }) => call.ownerType !== "team" || !call.sessionId || !call.threadId || visible.has(`${call.sessionId}:${call.threadId}`));
   return { daily: filledDaily, tools, clients, detailsVisible, hasMore: recent.length > opts.limit,
-    recent: recent.slice(0, opts.limit).map(({ call: r, userName }) => ({ userName, id: r.id, surface: r.surface, name: r.name,
+    recent: readable.map(({ call: r, userName }) => ({ userName, id: r.id, surface: r.surface, name: r.name,
       clientName: r.clientName, clientVersion: r.clientVersion, userId: r.userId, outcome: r.outcome, intent: r.intent, createdAt: r.createdAt })) };
 }
 
