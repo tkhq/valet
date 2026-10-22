@@ -44,6 +44,7 @@ import type {
   ListThreadsResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadDefaultsResponse,
   ThreadRecapResponse,
   MarkThreadsReadRequest,
   Message,
@@ -559,6 +560,17 @@ export async function getThreadContext(c: Context<AppEnv>, sessionId: string, th
   const thread = await visibleThread(c, result.session, result.engineSession, threadId);
   if (!thread) return c.json({ error: "Thread not found. Refresh the thread list." }, 404);
   const body: ThreadContextResponse = { context: (await thread.contextUsage()) ?? null };
+  return c.json(body);
+}
+
+/** The model and reasoning a new thread in this session starts with. Reading them never wakes the sandbox. */
+messagesRouter.get("/:id/thread-defaults", (c) => getThreadDefaults(c, c.req.param("id")));
+
+export async function getThreadDefaults(c: Context<AppEnv>, sessionId: string) {
+  const session = await loadOwnedSession(c, sessionId);
+  if (!session) return c.json({ error: "session not found" }, 404);
+  const { db, engineHost } = c.var.providers;
+  const body: ThreadDefaultsResponse = await engineHost.newThreadDefaults(session.id, await loadSessionMeta(db, session), c.var.user.id);
   return c.json(body);
 }
 

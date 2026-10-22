@@ -18,6 +18,7 @@ import type {
   PresencePlaceDetailResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadDefaultsResponse,
   ActiveViewersResponse,
   ThreadRecapResponse,
   WaitingThreadsResponse,
@@ -652,6 +653,9 @@ export const api = {
   /** How full the thread's model context is. Reading it never wakes the sandbox. */
   getThreadContext: (threadId: string) =>
     request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
+  /** The model and reasoning a new thread in the session starts with. */
+  getThreadDefaults: (sessionId: string) =>
+    request<ThreadDefaultsResponse>("GET", `/sessions/${encodeURIComponent(sessionId)}/thread-defaults`),
   getActiveViewers: (workspace: string) =>
     request<ActiveViewersResponse>("GET", `/threads/viewers?workspace=${encodeURIComponent(workspace)}`),
   getThreadRecap: (threadId: string, since?: number) =>
