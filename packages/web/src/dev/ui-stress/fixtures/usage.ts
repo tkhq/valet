@@ -1,6 +1,7 @@
 /** `/usage` in a team workspace with a long name: 30 owners, many models and
  * skills, and a workflow drill-down with many steps per workflow. */
 import type {
+  SessionOutcomeUsage,
   UsageBreakdownResponse,
   UsageBucket,
   UsageDrillItem,
@@ -153,3 +154,9 @@ export const stressUsageItems: Record<UsageUseCase, UsageDrillResponse> = {
   orchestrator: { items: orchestratorItems },
   proxy: { items: proxyItems },
 };
+
+export const stressSessionOutcomes: SessionOutcomeUsage = { outcomes: [
+  { key: "completed", label: "Completed", definition: "The requested work was delivered.", sessions: 123456 },
+  { key: "partial", label: "Partial", definition: "Some requested work remains unfinished.", sessions: 1234 },
+  { key: "blocked_on_human", label: "Blocked on human", definition: "Work needs a person to answer or approve.", sessions: 321 },
+] };

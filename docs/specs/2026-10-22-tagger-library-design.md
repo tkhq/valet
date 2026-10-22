@@ -136,3 +136,5 @@ Local validation finished one session and displayed Completed: 1.
 The completion provider was deterministic, not a live model.
 
 Session outcome labels also retain null actors for synthetic team runtime principals.
+
+The UI stress gallery seeds scoped session outcomes without network requests.
