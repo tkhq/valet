@@ -1715,6 +1715,84 @@ describe("ChildWatcher", () => {
       expect(await c.engineStore.listUnsettledSubmissions(c.watch.parentSessionId)).toHaveLength(2);
     });
 
+    it("does not resurrect a permanently denied signal result after reboot or block later updates", async () => {
+      const c = await armedChild("denied-reboot");
+      const db = api!.providers.db;
+      await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1", reply: "auto" }), replyRoute: "origin" })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      await c.engineStore.createWakeup({ id: "wk_child_wait", sessionId: c.child.id, threadId: c.childThread.id,
+        kind: "event", status: "running", reason: "wait_for_event", subjects: ["github:tkhq/valet#1030"],
+        deadlineAt: Date.now() + 60_000, eventMatch: { clauses: [{ key: "github.pull_request.*" }], self: [], once: false },
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now() });
+      c.parent.options.signalHopBudget = 0;
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const signal = async (id: string) => {
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, ""),
+          content: { kind: "signal", signalType: "event.matched", body: id } });
+        const claimed = await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id,
+          itemId: id, attemptId: `attempt-${id}`, ownerId: "test" });
+        expect(claimed?.childResultDelivery).toBe("pending");
+        const fence = { itemId: id, attemptId: `attempt-${id}` };
+        await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "failed", error: id }, fence);
+        await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+        await c.watcher.observeTurn(c.child.id, id);
+      };
+      await signal("denied-signal");
+      await vi.waitFor(async () => expect(await db.select().from(childEventOutbox)).toHaveLength(1));
+      const [deniedEvent] = await db.select().from(childEventOutbox);
+      await childDelivery!.sweep();
+      expect((await c.engineStore.getQueueItem(c.child.id, "denied-signal"))?.childResultDelivery).toBe("denied");
+      expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventSourceSeen).toContain(deniedEvent!.id);
+      expect(await db.select().from(childEventOutbox)).toHaveLength(0);
+      expect((await db.select().from(eventDropLog)).filter(row => row.reason === "hop_budget")).toHaveLength(2);
+
+      const reboot = testChildWatcher(c.deps);
+      await reboot.rearm();
+      expect(await db.select().from(childEventOutbox)).toHaveLength(0);
+      c.parent.options.signalHopBudget = 8;
+      // A legacy or crash-left outbox row can still name a consumed source.
+      // Clear the durable outcome to exercise the drain's seen-list fallback separately.
+      await db.execute(sql`UPDATE engine_queue_items SET child_result_delivery = NULL WHERE id = 'denied-signal'`);
+      await db.insert(childEventOutbox).values(deniedEvent!);
+      await signal("later-result");
+      await waitFor(async () => (await c.settledSignal())?.body.includes("later-result") === true);
+      await reboot.rearm();
+      await childDelivery!.sweep();
+      expect(await db.select().from(childEventOutbox)).toHaveLength(0);
+      expect((await c.engineStore.getQueueItem(c.child.id, "denied-signal"))?.childResultDelivery).toBe("denied");
+      expect((await c.engineStore.getQueueItem(c.child.id, "later-result"))?.childResultDelivery).toBe("delivered");
+      expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:denied-signal`)).toBeNull();
+      expect((await db.select().from(childReplyDeliveries)).find(row => row.childQueueItemId === "later-result")?.queueItemId).toBeTruthy();
+    });
+
+    it("recovers a claimed signal that settles after idle close but crashes before publication", async () => {
+      const c = await armedChild("closed-unpublished");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      const waiterId = `wk_child_events:${c.child.id}`;
+      expect((await c.engineStore.getWakeup(waiterId))?.status).toBe("done");
+      expect((await api!.providers.db.select().from(childWatches))[0]?.deliveryActive).toBe(false);
+      const id = "unpublished-signal";
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem(id, c.childThread.id, ""),
+        content: { kind: "signal", signalType: "lease.released", body: "hold ended" } });
+      const claimed = await c.engineStore.claimSubmission({ sessionId: c.child.id, threadId: c.childThread.id,
+        itemId: id, attemptId: "unpublished-attempt", ownerId: "test" });
+      expect(claimed?.childResultDelivery).toBe("pending");
+      const fence = { itemId: id, attemptId: "unpublished-attempt" };
+      await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "failed", error: "recovered result" }, fence);
+      await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+      const reboot = testChildWatcher(c.deps);
+      await reboot.rearm();
+      await waitFor(async () => (await c.settledSignal())?.body === "recovered result");
+      expect((await c.engineStore.getQueueItem(c.child.id, id))?.childResultDelivery).toBe("delivered");
+      expect((await c.engineStore.getWakeup(waiterId))?.status).toBe("done");
+      await reboot.rearm();
+      await childDelivery!.sweep();
+      expect(await c.engineStore.listUnsettledSubmissions(c.parent.id)).toHaveLength(2);
+    });
+
     it("drop-logs a hop-budget denial on event delivery", async () => {
       const c = await armedChild("hop-budget");
       const parent = api!.providers.engineHost.liveSession(c.watch.parentSessionId);

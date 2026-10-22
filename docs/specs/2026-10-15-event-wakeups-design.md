@@ -832,6 +832,12 @@ The dispatch id uses `namespaceInternalDispatchId(child, settled:<child>:<turn>)
 A retry returns the same parent submission.
 Transient delivery errors keep the event for the next pass.
 Permanent denials write the existing drop-log reasons.
+`engine_queue_items.child_result_delivery` records `pending`, `delivered`, or `denied` for child signal results.
+The claim writes `pending` before the signal turn starts.
+Delivery resolution does not change the turn's execution outcome or activity clock.
+The first resolution wins.
+Recovery treats delivered and denied results as resolved.
+A consumed source also removes a stale outbox entry without blocking later results.
 
 Internal subscriptions use bounded source history instead of the external output budget.
 The parent's durable dispatch ids provide replay protection.
@@ -840,6 +846,9 @@ A partial buffer index supports ready event rows.
 Boot recovery restores subscriptions that still owe work.
 The indexed `child_watches.delivery_active` marker identifies subscriptions that can still owe delivery.
 Recovery pages unsettled rows, delivery-active rows, and children with outbox entries.
+An indexed pending-result marker also selects child turns that started after an idle close.
+A crash before publication cannot hide those turns from recovery.
+Idle close refuses while such a result remains pending.
 Fully-done historical rows require no engine-store reads.
 Each recovery row has its own error handler.
 Recovery runs in the background without delaying WakeWatcher or readiness.

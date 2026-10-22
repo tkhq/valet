@@ -1237,6 +1237,41 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect((await store.getSession("without-ref"))?.startRef).toBeUndefined();
     });
 
+    it("marks child signal delivery pending at claim and resolves it without changing execution or activity", async () => {
+      await store.saveSession(newSession({ parentSessionId: "parent" }));
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const item = { ...queueItem("child-signal", Date.now(), Date.now()),
+        content: { kind: "signal" as const, signalType: "lease.released", body: "work ended" } };
+      await store.admitSubmission("sess-1", "th-1", item);
+      expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBeUndefined();
+      const claimed = await store.claimSubmission({ sessionId: "sess-1", threadId: "th-1", itemId: item.id, attemptId: "att-1", ownerId: "owner" });
+      expect(claimed?.childResultDelivery).toBe("pending");
+      const fence = { itemId: item.id, attemptId: "att-1" };
+      await store.reserveSettlement("sess-1", "th-1", item.id, { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", item.id, fence);
+      const settled = await store.getQueueItem("sess-1", item.id);
+      expect(settled?.childResultDelivery).toBe("pending");
+      await store.resolveChildResultDelivery("other-session", item.id, "delivered");
+      expect((await store.getQueueItem("sess-1", item.id))?.childResultDelivery).toBe("pending");
+      await store.resolveChildResultDelivery("sess-1", item.id, "denied");
+      await store.resolveChildResultDelivery("sess-1", item.id, "delivered");
+      expect(await store.getQueueItem("sess-1", item.id)).toEqual({ ...settled, childResultDelivery: "denied" });
+      await store.resolveChildResultDelivery("sess-1", "missing", "denied");
+    });
+
+    it("does not mark non-child signals or ordinary prompts as pending child delivery", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("signal", 100, 100),
+        content: { kind: "signal", signalType: "lease.released", body: "work ended" } });
+      const claim = { sessionId: "sess-1", threadId: "th-1", itemId: "signal", attemptId: "att", ownerId: "owner" };
+      expect((await store.claimSubmission(claim))?.childResultDelivery).toBeUndefined();
+      await store.forceSettle("sess-1", "signal", "failed");
+      await store.saveSession(newSession({ parentSessionId: "parent" }));
+      await store.admitSubmission("sess-1", "th-1", queueItem("prompt", 200, 200));
+      expect((await store.claimSubmission({ ...claim, itemId: "prompt" }))?.childResultDelivery).toBeUndefined();
+    });
+
     it("snapshots a continuation's source and scope before a queued delegation can replace them", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

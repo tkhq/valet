@@ -1197,7 +1197,9 @@ export class ChildWatcher {
     const current = await this.deps.engineStore.getWakeup(row.id);
     const [pending] = await this.deps.db.select({ id: childEventOutbox.id }).from(childEventOutbox)
       .where(eq(childEventOutbox.childSessionId, child)).limit(1);
-    return !watch.settled || pending !== undefined || (current?.eventBuffer?.length ?? 0) > 0
+    const owed = await this.deps.db.select({ id: childWatches.childSessionId }).from(childWatches)
+      .where(and(eq(childWatches.childSessionId, child), sql`EXISTS (SELECT 1 FROM engine_queue_items WHERE session_id = ${child} AND child_result_delivery = 'pending')`)).limit(1);
+    return !watch.settled || pending !== undefined || (current?.eventBuffer?.length ?? 0) > 0 || owed.length > 0
       || (await this.deps.engineStore.listUnsettledSubmissions(child)).length > 0
       || await this.holdsBackgroundWork(child);
   }
@@ -1222,13 +1224,19 @@ export class ChildWatcher {
     const backlog = await this.deps.db.select().from(childEventOutbox)
       .where(eq(childEventOutbox.childSessionId, watch.childSessionId))
       .orderBy(sql`CASE WHEN ${childEventOutbox.event}->>'key' = 'child.gate_opened' THEN 0 ELSE 1 END`, childEventOutbox.createdAt, childEventOutbox.id).limit(200);
-    const buffered = new Set((await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`))?.eventBuffer?.map(d => d.dedupeKey));
+    const subscription = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
+    const buffered = new Set(subscription?.eventBuffer?.map(d => d.dedupeKey));
+    const seen = new Set([...(subscription?.eventSourceSeen ?? []), ...(subscription?.eventSeen ?? [])]);
     for (const pending of backlog) {
       if (buffered.has(pending.id)) continue;
       const reported = await this.deps.engineStore.getQueueItemByDispatchId(watch.parentSessionId,
         namespaceInternalDispatchId(watch.childSessionId, pending.id));
-      if (reported) await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, pending.id));
-      else {
+      const resultItem = pending.event.key === "child.settled" && pending.event.refs?.child_queue_item_id
+        ? await this.deps.engineStore.getQueueItem(watch.childSessionId, pending.event.refs.child_queue_item_id) : null;
+      if (reported || seen.has(pending.id) || resultItem?.childResultDelivery === "denied" || resultItem?.childResultDelivery === "delivered") {
+        if (resultItem) await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, resultItem.id, reported ? "delivered" : "denied");
+        await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, pending.id));
+      } else {
         try {
           await this.ingest(watchRowToArgs(watch), pending.event);
           const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
@@ -1236,7 +1244,15 @@ export class ChildWatcher {
             await this.ensureSubscriptionUnlocked(watchRowToArgs(watch));
             await this.ingest(watchRowToArgs(watch), pending.event);
           }
-          if (!(await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`))?.eventBuffer?.some((d) => d.dedupeKey === pending.id)) break;
+          const current = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
+          if (current?.eventSourceSeen?.includes(pending.id) || current?.eventSeen?.includes(pending.id)) {
+            if (pending.event.key === "child.settled" && pending.event.refs?.child_queue_item_id) {
+              await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, pending.event.refs.child_queue_item_id, "denied");
+            }
+            await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, pending.id));
+            continue;
+          }
+          if (!current?.eventBuffer?.some((d) => d.dedupeKey === pending.id)) break;
         } catch (error) {
           // The outbox survives ingestion failures even when no buffered digest can nudge WakeWatcher.
           console.error(`ChildWatcher: ingestion deferred for ${pending.id}:`, error);
@@ -1291,9 +1307,16 @@ export class ChildWatcher {
     if (row.eventsStartedAt === null) return;
     const turns = await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1);
     for (const turn of turns) {
+      if (turn.childResultDelivery === "denied" || turn.childResultDelivery === "delivered") continue;
       if (turn.updatedAt < row.eventsStartedAt || !isSignalSubmission(turn)
-        || turn.outcome?.outcome === "merged" || turn.outcome?.outcome === "superseded") continue;
-      if (await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, settledReplyId(row.childSessionId, turn.id))) continue;
+        || turn.outcome?.outcome === "merged" || turn.outcome?.outcome === "superseded") {
+        if (turn.childResultDelivery === "pending") await this.deps.engineStore.resolveChildResultDelivery(row.childSessionId, turn.id, "denied");
+        continue;
+      }
+      if (await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, settledReplyId(row.childSessionId, turn.id))) {
+        await this.deps.engineStore.resolveChildResultDelivery(row.childSessionId, turn.id, "delivered");
+        continue;
+      }
       const [pending] = await this.deps.db.select({ id: childEventOutbox.id }).from(childEventOutbox)
         .where(eq(childEventOutbox.id, `settled:${row.childSessionId}:${turn.id}`)).limit(1);
       if (pending) continue;
@@ -1313,12 +1336,20 @@ export class ChildWatcher {
         await this.deps.db.insert(eventDropLog).values({ id: `child-cancelled:${event.dedupeKey}`, orgId: watch.orgId,
           reason: "child_delivery_cancelled", conversationKey: watch.childSessionId, detail: `Suppressed ${event.dedupeKey} after cancellation.`, createdAt: Date.now() }).onConflictDoNothing();
         await discardChildDelivery(this.deps.db, this.deps.engineStore, watch.childSessionId, `Child event ${event.dedupeKey} was suppressed because delivery is cancelled.`);
-        if (event.key === "child.settled") await this.markSettled(watch.childSessionId, watch.queueItemId);
+        if (event.key === "child.settled") {
+          await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, event.refs?.child_queue_item_id ?? watch.queueItemId, "denied");
+          await this.markSettled(watch.childSessionId, watch.queueItemId);
+        }
         return;
       }
       const reported = await this.deps.engineStore.getQueueItemByDispatchId(watch.parentSessionId,
         namespaceInternalDispatchId(watch.childSessionId, event.dedupeKey));
-      if (reported) return;
+      const result = event.key === "child.settled" && event.refs?.child_queue_item_id
+        ? await this.deps.engineStore.getQueueItem(watch.childSessionId, event.refs.child_queue_item_id) : null;
+      if (reported || result?.childResultDelivery === "denied" || result?.childResultDelivery === "delivered") {
+        if (reported && result) await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, result.id, "delivered");
+        return;
+      }
       await this.deps.db.transaction(async (tx) => {
         const [last] = await tx.select({ at: childEventOutbox.createdAt }).from(childEventOutbox)
           .where(eq(childEventOutbox.childSessionId, watch.childSessionId)).orderBy(sql`${childEventOutbox.createdAt} DESC`).limit(1);
@@ -1353,12 +1384,20 @@ export class ChildWatcher {
     const [stored] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, child)).limit(1);
     if (!stored || stored.parentSessionId !== row.sessionId || stored.parentThreadId !== row.threadId) return;
     const watch = { ...watchRowToArgs(stored), queueItemId: digest.refs.watch_queue_item_id ?? digest.refs.child_queue_item_id ?? stored.queueItemId };
+    if (digest.key === "child.settled") {
+      const result = await this.deps.engineStore.getQueueItem(child, digest.refs.child_queue_item_id ?? watch.queueItemId);
+      if (result?.childResultDelivery === "denied" || result?.childResultDelivery === "delivered") {
+        await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, digest.dedupeKey));
+        return;
+      }
+    }
     try {
       if (digest.key === "child.gate_opened") {
         const gate = await this.deps.engineStore.getDecisionGate(child, digest.refs.gate_id ?? "");
         if (gate?.status === "pending") await this.deliverGate(watch, gate);
       } else if (digest.key === "child.settled") {
         await this.attempt({ ...watch, resultItemId: digest.refs.child_queue_item_id }, digest);
+        await this.deps.engineStore.resolveChildResultDelivery(child, digest.refs.child_queue_item_id ?? watch.queueItemId, "delivered");
       }
     } catch (error) {
       const classification = classifyWatcherError(error);
@@ -1380,7 +1419,10 @@ export class ChildWatcher {
       await this.deps.db.update(childReplyDeliveries).set({ failedAt: Date.now(), lastError: String(error).slice(0, 1_000) })
         .where(and(eq(childReplyDeliveries.id, settledReplyId(child, digest.refs.child_queue_item_id ?? watch.queueItemId)),
           eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
-      if (digest.key === "child.settled") await this.markSettled(child, watch.queueItemId);
+      if (digest.key === "child.settled") {
+        await this.deps.engineStore.resolveChildResultDelivery(child, digest.refs.child_queue_item_id ?? watch.queueItemId, "denied");
+        await this.markSettled(child, watch.queueItemId);
+      }
     }
     await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, digest.dedupeKey));
   }
@@ -1665,6 +1707,7 @@ export class ChildWatcher {
         sql`${childWatches.childSessionId} IN (
           SELECT child_session_id FROM child_watches WHERE delivery_active = true OR settled = false
           UNION SELECT child_session_id FROM child_event_outbox
+          UNION SELECT session_id FROM engine_queue_items WHERE child_result_delivery = 'pending'
         )`
       )).orderBy(childWatches.childSessionId).limit(100);
       if (!rows.length) break;

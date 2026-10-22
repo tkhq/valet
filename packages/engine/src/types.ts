@@ -238,6 +238,8 @@ export interface QueueItem {
   /** Role name to apply for this one prompt (system-prompt overlay + optional model override). */
   role?: string;
   metadata?: Record<string, unknown>;
+  /** Host delivery state for a claimed child signal turn. The claim records pending before execution. */
+  childResultDelivery?: "pending" | "delivered" | "denied";
   // Durable execution lifecycle
   status: SubmissionStatus;
   outcome?: SubmissionOutcome;
@@ -2142,6 +2144,8 @@ export interface SessionStore {
    * thread continuation ceilings/focuses into metadata.toolScope atomically.
    */
   claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
+  /** Resolves a child result without changing its execution outcome or activity clock. First resolution wins. */
+  resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void>;
   /** CAS: install a new attempt on a running/blocked item whose lease expired. Null when the CAS loses. */
   replaceSubmissionAttempt(
     sessionId: string,

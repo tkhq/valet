@@ -60,6 +60,17 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM child_watches WHERE child_session_id IN ('repair-child', 'repair-done')");
   });
 
+  it("repairs durable child-result outcomes and their pending index on an existing database", async () => {
+    await db.query("ALTER TABLE engine_queue_items DROP COLUMN child_result_delivery");
+    await applyAppMigrations(db);
+    await applyAppMigrations(db);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'engine_queue_items' AND column_name = 'child_result_delivery'")).rows)
+      .toEqual([{ column_name: "child_result_delivery" }]);
+    expect((await db.query("SELECT indexname FROM pg_indexes WHERE indexname = 'engine_queue_items_child_delivery'")).rows)
+      .toEqual([{ indexname: "engine_queue_items_child_delivery" }]);
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

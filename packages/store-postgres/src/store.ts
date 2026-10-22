@@ -91,6 +91,7 @@ function queueItemRowToItem(row: QueueItemRow): QueueItem {
     role: row.role ?? undefined,
     metadata: parseJson(row.metadata),
     status: row.status as QueueItem["status"],
+    childResultDelivery: row.childResultDelivery,
     outcome: row.outcome
       ? { outcome: row.outcome as SubmissionOutcome["outcome"], error: row.error ?? undefined }
       : undefined,
@@ -193,14 +194,18 @@ const STEER_CANDIDATES_SQL = `
 // time spent queued does not count against timeout_at. Succeeds
 // only when itemId IS the thread's runnable head (oldest 'queued',
 // not-superseded item) — the subquery re-derives the head so a concurrent
-// claim of a different item (or of a non-head item) loses (rowCount=0). No
-// transaction/row-lock needed: this is one atomic UPDATE statement, and
-// Postgres's own MVCC serializes concurrent UPDATEs against the same rows.
+// claim of a different item (or of a non-head item) loses (rowCount=0).
+// claimSubmission runs this CAS in a transaction, then locks the thread row
+// to capture continuation provenance before execution starts.
 const CLAIM_SQL = `
   UPDATE engine_queue_items
   SET status = 'running', attempt_id = $1, owner_id = $2,
       lease_expires_at = $3, attempt_count = attempt_count + 1,
       timeout_at = CASE WHEN attempt_count = 0 THEN $4::bigint + $8::bigint ELSE timeout_at END,
+      child_result_delivery = CASE WHEN child_result_delivery IS NULL
+        AND content::jsonb->>'kind' = 'signal'
+        AND EXISTS (SELECT 1 FROM engine_sessions WHERE id = $6 AND parent_session_id IS NOT NULL)
+        THEN 'pending' ELSE child_result_delivery END,
       updated_at = $4
   WHERE id = $5 AND session_id = $6 AND thread_id = $7
     AND status = 'queued' AND superseded_by_item_id IS NULL
@@ -1058,6 +1063,12 @@ export class PgSessionStore implements SessionStore {
       }
       return item;
     });
+  }
+
+  async resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void> {
+    await this.db.query(`UPDATE engine_queue_items SET child_result_delivery = $3
+      WHERE session_id = $1 AND id = $2 AND (child_result_delivery IS NULL OR child_result_delivery = 'pending')`,
+      [sessionId, itemId, outcome]);
   }
 
   async replaceSubmissionAttempt(

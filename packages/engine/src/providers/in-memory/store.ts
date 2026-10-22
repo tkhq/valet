@@ -640,6 +640,9 @@ export class InMemorySessionStore implements SessionStore {
         thread.metadata = { ...thread.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
       }
     }
+    if (r.data.parentSessionId && typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal") {
+      item.childResultDelivery ??= "pending";
+    }
     // The execution clock starts when the item first runs, not at admission.
     if (item.attemptCount === 0) item.timeoutAt = now + SUBMISSION_TIMEOUT_MS;
     item.status = "running";
@@ -649,6 +652,11 @@ export class InMemorySessionStore implements SessionStore {
     item.attemptCount += 1;
     item.updatedAt = now;
     return { ...item };
+  }
+
+  async resolveChildResultDelivery(sessionId: string, itemId: string, outcome: "delivered" | "denied"): Promise<void> {
+    const item = this.rows.get(sessionId)?.queueItems.get(itemId);
+    if (item && (item.childResultDelivery === undefined || item.childResultDelivery === "pending")) item.childResultDelivery = outcome;
   }
 
   async replaceSubmissionAttempt(

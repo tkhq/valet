@@ -93,6 +93,7 @@ CREATE TABLE "engine_queue_items" (
 	"thread_id" text NOT NULL,
 	"dispatch_id" text,
 	"status" text NOT NULL,
+	"child_result_delivery" text,
 	"outcome" text,
 	"error" text,
 	"superseded_by_item_id" text,
@@ -125,6 +126,8 @@ CREATE TABLE "engine_queue_items" (
 CREATE INDEX "engine_queue_items_thread" ON "engine_queue_items" ("session_id","thread_id","status");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "engine_queue_items_dispatch" ON "engine_queue_items" ("session_id","dispatch_id") WHERE "dispatch_id" IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX "engine_queue_items_child_delivery" ON "engine_queue_items" ("session_id") WHERE "child_result_delivery" = 'pending';
 --> statement-breakpoint
 CREATE TABLE "engine_attempt_markers" (
 	"item_id" text NOT NULL,

@@ -12,6 +12,7 @@ import type {
   LeaseOwnerKind,
   LeaseReleaseCause,
   MessageEntry,
+  QueueItem,
   SessionEntry,
   SettlePatchRef,
   Wakeup,
@@ -456,6 +457,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
 
 /** Raw column shape of a `SELECT * FROM engine_queue_items` row. */
 export interface QueueItemRow {
+  childResultDelivery: QueueItem["childResultDelivery"];
   id: string;
   sessionId: string;
   threadId: string;
@@ -487,7 +489,12 @@ export interface QueueItemRow {
 }
 
 export function rawToQueueItemRow(raw: Record<string, unknown>): QueueItemRow {
+  const delivery = raw.child_result_delivery;
+  if (delivery != null && delivery !== "pending" && delivery !== "delivered" && delivery !== "denied") {
+    throw new Error(`invalid child result delivery state: ${String(delivery)}`);
+  }
   return {
+    childResultDelivery: delivery ?? undefined,
     id: asString(raw.id, "id"),
     sessionId: asString(raw.session_id, "session_id"),
     threadId: asString(raw.thread_id, "thread_id"),
