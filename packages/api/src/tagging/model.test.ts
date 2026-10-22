@@ -6,6 +6,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { ensureEnvProviders } from "../proxy/upstream.js";
+import { getUsageBreakdown } from "../services/usage.js";
 import { taggingModel } from "./model.js";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -29,5 +30,8 @@ it("uses the configured XS provider and projects billed tokens with user and tea
     expect(rows.rows).toHaveLength(2);
     expect(rows.rows).toEqual(expect.arrayContaining([expect.objectContaining({ user_id: "alice", owner_type: "user", owner_id: "alice" }), expect.objectContaining({ user_id: "bob", owner_type: "team", owner_id: "team" })]));
     expect(rows.rows.reduce((sum, row) => sum + Number(row.total_tokens), 0)).toBeGreaterThan(0);
+    const breakdown = await getUsageBreakdown(db, { scope: { scope: "me", orgId: "org", userId: "alice" }, windowMs: 86400000 });
+    expect(breakdown.totalTokens).toBeGreaterThan(0);
+    expect(breakdown.activeAgents).toBe(0);
   } finally { faux.unregister(); }
 });
