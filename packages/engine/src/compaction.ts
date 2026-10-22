@@ -594,7 +594,10 @@ export function planPrune(opts: PruneOptions): PruneResult {
       if (part.type !== "tool_call") continue;
       if (part.status !== "completed") continue;
       if (part.elided) continue;
-      if (protectedTools.has(part.toolName)) continue;
+      // Skill bodies are instructions. Companion reads are ordinary file output.
+      const skillFileRead = part.toolName === "skill" && part.args !== null && typeof part.args === "object" &&
+        "path" in part.args && typeof part.args.path === "string";
+      if (protectedTools.has(part.toolName) && !skillFileRead) continue;
       const size = estimateToolResultTokens(part.result);
       cumulative += size;
       if (cumulative <= protectTokens) continue;

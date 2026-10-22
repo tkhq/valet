@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { bashTool, type SkillSource, type ToolDef, type ToolResult } from "@valet/engine";
@@ -18,10 +19,7 @@ function quote(value: string): string {
 
 function interpreter(bytes: Uint8Array, path: string): string[] {
   const first = new TextDecoder().decode(bytes).split(/\r?\n/, 1)[0] ?? "";
-  if (first.startsWith("#!")) {
-    const match = /^#!\s*(\S+)(?:\s+(.*?))?\s*$/.exec(first);
-    if (match?.[1]) return match[2] ? [match[1], match[2]] : [match[1]];
-  }
+  if (first.startsWith("#!")) return first.slice(2).trim().split(/\s+/);
   if (path.endsWith(".py")) return ["python3"];
   if (path.endsWith(".sh")) return ["bash"];
   if (path.endsWith(".js") || path.endsWith(".mjs")) return ["node"];
@@ -66,23 +64,25 @@ export function buildSkillScriptTool(
       }
       try {
         const sandbox = ctx.sandbox;
-        const home = await sandbox.exec('printf "%s" "$HOME"', { signal: ctx.signal, maxOutputBytes: 4096 });
-        if (home.exitCode !== 0 || !posix.isAbsolute(home.stdout) || home.stdout.includes("\0")) {
-          return { text: "[skill_script_failed] The sandbox has no absolute home directory. Set HOME, then call skill_script again." };
+        const cwd = await sandbox.exec("pwd -P", { signal: ctx.signal, maxOutputBytes: 4096 });
+        const workingDirectory = cwd.stdout.replace(/\r?\n$/, "");
+        if (cwd.exitCode !== 0 || !posix.isAbsolute(workingDirectory) || workingDirectory.includes("\0")) {
+          return { text: "[skill_script_failed] The sandbox has no absolute working directory. Check the sandbox, then call skill_script again." };
         }
         const sha = skillWithFilesSha(skill.content, skill.files ?? []);
-        const directory = posix.join(home.stdout, ".valet", "skills", `${skill.name}@${sha}`);
+        const directory = posix.join(workingDirectory, ".valet", "skills", `${skill.name}@${sha}`);
         let scriptBytes: Uint8Array | undefined;
-        // Rewriting avoids trusting files the agent or an earlier script can edit.
+        // Publish complete files by rename. Concurrent calls must never see a truncated script.
         for (const file of skill.files ?? []) {
           if (!file.path.startsWith("scripts/") || !validSkillPath(file.path)) continue;
           const bytes = file.bytes ?? await skill.readFile?.(file);
           if (!bytes) throw new Error(`Stored script ${file.path} changed or was removed`);
           const path = `${directory}/${file.path}`;
           await sandbox.mkdir(posix.dirname(path));
-          await sandbox.writeBinary(path, bytes);
-          const chmod = await sandbox.exec(`chmod ${file.mode === "100755" ? "755" : "644"} ${quote(path)}`, { signal: ctx.signal });
-          if (chmod.exitCode !== 0) throw new Error(`Cannot set script permissions: ${chmod.stderr}`);
+          const temporary = `${path}.tmp-${randomUUID()}`;
+          await sandbox.writeBinary(temporary, bytes);
+          const chmod = await sandbox.exec(`chmod ${file.mode === "100755" ? "755" : "644"} ${quote(temporary)} && mv -f -- ${quote(temporary)} ${quote(path)}`, { signal: ctx.signal });
+          if (chmod.exitCode !== 0) throw new Error(`Cannot publish script: ${chmod.stderr}`);
           if (file.path === args.script) scriptBytes = bytes;
         }
         if (!scriptBytes) throw new Error("Stored script is unavailable");

@@ -32,6 +32,7 @@ import {
   SkillRepoListingTruncatedError,
   SkillRepoNotFoundError,
   type SkillRepoReader,
+  type SkillRepoFile,
   type SkillTreeEntry,
 } from "../skill-repo-reader.js";
 import {
@@ -211,10 +212,11 @@ class SkillPass implements CollectorPass {
       size: skillFiles.size, mode: skillFiles.mode }, upstreamPath: skills.upstreamPath })
       .from(skillFiles).innerJoin(skills, eq(skillFiles.skillId, skills.id))
       .where(and(eq(skills.sourceId, ctx.source.id), eq(skills.origin, "repo")));
+    const reads = new Map<string, SkillRepoFile | null>();
     for (const [path, entries] of this.companionFiles) {
       if (!ctx.text.has(path)) continue;
       const result = await readSkillFiles(ctx.reader, ctx.source.repoFullName, ctx.commitSha, path,
-        entries, previous.filter((row) => row.upstreamPath === path).map((row) => row.file));
+        entries, previous.filter((row) => row.upstreamPath === path).map((row) => row.file), reads);
       if (result.warning) {
         this.fileWarnings.push(`${path}: ${result.warning}`);
         this.deferred.push(path);

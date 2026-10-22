@@ -106,8 +106,11 @@ Deleting a skill deletes its files.
 Plugin-bundled skills and UI-authored skills do not support companion files yet.
 
 Sync collects regular blobs below each skill directory.
-It excludes `SKILL.md`, symbolic links, and directories with their own `SKILL.md`.
+It excludes `SKILL.md`, symbolic links, and directories with their own regular `SKILL.md` blob.
+A symlink named `SKILL.md` does not establish a nested-skill boundary.
 Sync reuses stored bytes when a blob SHA is unchanged.
+New companion reads are deduplicated by blob SHA across the whole sync.
+Identical blobs still count as separate files toward the 64-file cap.
 The discovery manifest includes companion paths, blob SHAs, and modes.
 The skill's `contentSha` includes the body and these file identities.
 A script-only edit or executable-bit change therefore updates the skill.
@@ -128,25 +131,37 @@ Session inventories and sync reuse queries load file metadata without bytes.
 A reference read loads one file by stored skill ID, path, and blob SHA.
 A script call loads only `scripts/` bytes.
 
-`skill({ name, path })` reads a stored text file.
+`skill({ name, path, offset?, limit? })` reads a stored text file.
 The path is relative to the skill directory.
 The tool rejects absolute paths, parent segments, unknown paths, binary control bytes, and invalid UTF-8.
 Omitting `path` reads the rendered skill body and a file manifest.
 SKILL.md bodies remain protected from pruning.
-Reference results also remain protected, but each reference read is limited to 4096 bytes.
-Larger references return a corrective error instead of injecting unbounded text.
+Path results are not protected from pruning.
+Each read returns at most 64 KiB, so a 17 KB reference is returned whole.
+`offset` is a zero-based byte offset and defaults to 0.
+`limit` is the maximum returned byte count and defaults to 65536.
+Pages end at UTF-8 character boundaries.
+Add the returned text's UTF-8 byte length to the offset to read the next page.
+An empty page means end of file.
+An offset inside a UTF-8 character returns a corrective error.
 Tool, host, and slash-command body reads include the file manifest.
 Reference reads do not write files to the sandbox.
 
 `skill_script({ name, script, args, timeout })` runs a stored file under `scripts/`.
 Only this call writes the skill's scripts to the sandbox.
-The directory is `$HOME/.valet/skills/<name>@<sha>/scripts/`.
-Each call rewrites stored scripts before execution so agent edits cannot replace their bytes.
+The directory is `<sandbox working directory>/.valet/skills/<name>@<sha>/scripts/`.
+The tool asks the sandbox for its working directory instead of using an API-host path or HOME.
+Docker, Kubernetes, and local providers can write inside this directory.
+Each call writes unique temporary files and sets their stored modes.
+It renames each complete file into place before execution.
+Concurrent calls cannot expose truncated files.
+Each call replaces agent edits with the stored script bytes.
 The tool preserves executable bits.
 It never writes references or assets.
 The script runs in the session's normal working directory.
 `SKILL_DIR` contains the content-addressed skill directory.
 The tool uses the shebang interpreter when present.
+It splits interpreter arguments on whitespace and quotes each argument separately.
 Otherwise, `.py` uses `python3`, `.sh` uses `bash`, and `.js` or `.mjs` uses `node`.
 Other files run directly.
 The tool quotes each argument separately and uses the same native-tool authorization path as `bash`.

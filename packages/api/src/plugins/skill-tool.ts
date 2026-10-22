@@ -8,7 +8,7 @@
  * turn's prompt while leaving all of them reachable.
  *
  * `"skill"` is in the engine's `DEFAULT_PROTECTED_TOOLS`, and the ToolDef
- * sets `protectedFromPruning` — a skill body the model asked for must
+ * sets `protectedFromPruning` for body reads. Path reads are pruneable. A skill body the model asked for must
  * survive compaction, or the turn loses the instructions it is following.
  *
  * This is a plain `ToolDef` built in the API layer. The engine needs no
@@ -23,6 +23,7 @@ import { renderTemplate, skillFileManifest } from "@valet/engine";
 import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
+const MAX_REFERENCE_BYTES = 64 * 1024;
 
 /** Preserves the schema's static type through the ToolDef so `args` in
  * `execute` is typed precisely instead of `unknown` (same idiom as
@@ -37,6 +38,8 @@ const skillParameters = Type.Object({
     description: "Name of the skill to read. Use one of the names listed in this tool's description.",
   }),
   path: Type.Optional(Type.String({ description: "Path of a stored text file, relative to the skill directory. Omit this to read SKILL.md." })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based byte offset for a path read. Default 0. Must start at a UTF-8 character boundary." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_REFERENCE_BYTES, description: "Maximum bytes returned by a path read. Default and maximum 65536." })),
   args: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), {
       description:
@@ -59,6 +62,9 @@ function describeSkills(skills: SkillSource[]): string {
   return [
     "Read an installed skill: a playbook with detailed instructions for one integration or task.",
     "Call this before you use an integration's tools for the first time in a turn.",
+    "Omit path to read the protected SKILL.md body and file manifest. Path reads are not protected from pruning.",
+    "Read references with path, offset (byte offset, default 0), and limit (bytes, default and maximum 65536).",
+    "Pages end at UTF-8 character boundaries. Add the returned text's UTF-8 byte length to offset for the next page. Empty text means end of file.",
     "",
     "Available skills:",
     ...lines,
@@ -75,6 +81,8 @@ async function renderSkillResult(
   name: string,
   args: Record<string, unknown>,
   path?: string,
+  offset = 0,
+  limit = MAX_REFERENCE_BYTES,
 ): Promise<{ text: string; skill?: SkillSource }> {
   const skill = skills.get(name);
   if (!skill) {
@@ -87,10 +95,17 @@ async function renderSkillResult(
     if (!file) return { text: `[skill_file_not_found] There is no stored file "${path}". Read skill({ name: "${name}" }) to see its files.` };
     const bytes = file.bytes ?? await skill.readFile?.(file);
     if (!bytes) return { text: "[skill_file_unavailable] The stored file changed or was removed. Read the skill again to refresh its manifest." };
-    if (bytes.byteLength > 4096) return { text: "[skill_reference_too_large] Reference reads are limited to 4096 bytes. Split this reference into smaller files, then sync again." };
     const text = skillFileText(bytes);
     if (text === null) return { text: "[skill_binary_file] This file is binary. Choose a text file from the skill manifest." };
-    return { text, skill };
+    if (offset < bytes.byteLength && (bytes[offset]! & 0xc0) === 0x80) {
+      return { text: "[skill_bad_range] Offset splits a UTF-8 character. Use the next byte offset from the previous page." };
+    }
+    let end = Math.min(bytes.byteLength, offset + limit);
+    while (end > offset && end < bytes.byteLength && (bytes[end]! & 0xc0) === 0x80) end--;
+    if (end === offset && offset < bytes.byteLength) {
+      return { text: "[skill_bad_range] Limit is too small for the next UTF-8 character. Increase limit to at least 4 bytes." };
+    }
+    return { text: new TextDecoder().decode(bytes.subarray(offset, end)), skill };
   }
   if (skill.argsSchema) {
     const validator = Compile(skill.argsSchema);
@@ -172,8 +187,11 @@ export function buildSkillTool(
           console.error(`skill tool: skill refresh failed while looking up "${args.name}":`, err);
         }
       }
+      if (args.path === undefined && (args.offset !== undefined || args.limit !== undefined)) {
+        return { text: "[skill_bad_range] Supply path when using offset or limit." };
+      }
       let rendered;
-      try { rendered = await renderSkillResult(current(), args.name, args.args ?? {}, args.path); }
+      try { rendered = await renderSkillResult(current(), args.name, args.args ?? {}, args.path, args.offset, args.limit); }
       catch { return { text: "[skill_file_unavailable] The stored file could not be read. Retry the skill call." }; }
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, args.path === undefined ? "model_tool" : "file_read", rendered.text);

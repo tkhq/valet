@@ -395,7 +395,36 @@ describe("skill collector", () => {
     expect(outcome?.warnings.join(" ")).toContain("deploy/references/064.md");
     expect(await db.select().from(skills)).toHaveLength(1);
     expect(await db.select().from(skillFiles)).toHaveLength(MAX_SKILL_FILES);
-    expect(f.calls.filter(call => call.path.includes("/references/"))).toHaveLength(MAX_SKILL_FILES);
+    expect(f.calls.filter(call => call.path.includes("/references/"))).toHaveLength(1);
+  });
+
+  it("ignores symlink SKILL.md boundaries without deleting real scripts", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/scripts/check.py": "print('checked')" } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const service = serviceFor(f);
+    await service.syncOnce(source.id);
+    repo.sha = "c2";
+    repo.extra!["deploy/scripts/SKILL.md"] = "../SKILL.md";
+    repo.modes = { "deploy/scripts/SKILL.md": "120000" };
+    expect((await service.syncOnce(source.id))?.status).toBe("ok");
+    const stored = await db.select().from(skillFiles);
+    expect(stored.map(file => file.path)).toEqual(["scripts/check.py"]);
+    expect(Buffer.from(stored[0]!.bytes).toString()).toBe("print('checked')");
+  });
+
+  it("fetches identical empty blobs once across every skill in one sync", async () => {
+    const extra = Object.fromEntries(["deploy", "other"].flatMap(name =>
+      Array.from({ length: MAX_SKILL_FILES + 1 }, (_, i) => [`${name}/references/${String(i).padStart(3, "0")}.md`, ""])));
+    const f = serve({ sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it."), other: skillMd("other", "Other skill.") }, extra });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const result = await serviceFor(f).syncOnce(source.id);
+    expect(result?.status).toBe("warning");
+    expect(result?.warnings.join(" ")).toContain("deploy/references/064.md");
+    expect(result?.warnings.join(" ")).toContain("other/references/064.md");
+    expect(await db.select().from(skillFiles)).toHaveLength(2 * MAX_SKILL_FILES);
+    expect(f.calls.filter(call => call.path.includes("/references/"))).toHaveLength(1);
   });
 
   it("retries unchanged omitted blobs when they fit the cap on a later pass", async () => {

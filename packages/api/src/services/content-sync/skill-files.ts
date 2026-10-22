@@ -3,6 +3,7 @@ import type { SkillFile } from "@valet/engine";
 import type { SkillCandidate } from "../skill-discovery.js";
 import {
   type SkillRepoReader,
+  type SkillRepoFile,
   type SkillTreeEntry,
 } from "../skill-repo-reader.js";
 
@@ -21,7 +22,8 @@ export function validSkillPath(path: string): boolean {
 export function companionEntries(candidate: SkillCandidate, tree: SkillTreeEntry[]): SkillTreeEntry[] {
   if (candidate.kind !== "skill") return [];
   const prefix = candidate.path.slice(0, -"SKILL.md".length);
-  const nested = tree.filter((entry) => entry.path.startsWith(prefix) &&
+  const nested = tree.filter((entry) => entry.type === "blob" &&
+    (entry.mode === "100644" || entry.mode === "100755") && entry.path.startsWith(prefix) &&
     entry.path !== candidate.path && entry.path.endsWith("/SKILL.md"))
     .map((entry) => entry.path.slice(0, -"SKILL.md".length));
   return tree.filter((entry) => entry.type === "blob" &&
@@ -48,6 +50,7 @@ export async function readSkillFiles(
   skillPath: string,
   entries: SkillTreeEntry[],
   previous: SkillFile[],
+  reads: Map<string, SkillRepoFile | null>,
 ): Promise<{ files: SkillFile[]; warning?: string; unread?: boolean }> {
   const files: SkillFile[] = [];
   const cached = new Map(previous.map((file) => [`${file.path}:${file.blobSha}`, file]));
@@ -61,7 +64,11 @@ export async function readSkillFiles(
       warnings.push(`${entry.path} exceeds a companion cap (${MAX_SKILL_FILES} files, ${MAX_SKILL_FILE_BYTES} bytes per file, ${MAX_SKILL_BYTES} bytes per skill).`);
       continue;
     }
-    const read = old ? null : await reader.readFile(repo, entry.path, ref);
+    let read = old ? null : reads.get(entry.sha);
+    if (read === undefined) {
+      read = await reader.readFile(repo, entry.path, ref);
+      reads.set(entry.sha, read);
+    }
     if (!old && (read === null || read.bytes === undefined)) {
       return { files: [], unread: true, warning: `${entry.path} could not be read. Sync again to retry. The stored skill is unchanged.` };
     }
