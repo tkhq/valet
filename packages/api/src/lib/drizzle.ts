@@ -828,6 +828,21 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
   },
   {
+    describe: "child_event_outbox table",
+    probe: { kind: "table", table: "child_event_outbox" },
+    sql: 'CREATE TABLE IF NOT EXISTS "child_event_outbox" ("id" text PRIMARY KEY NOT NULL, "child_session_id" text NOT NULL, "event" jsonb NOT NULL, "created_at" bigint NOT NULL)',
+  },
+  {
+    describe: "child_event_outbox_child index",
+    probe: { kind: "index", index: "child_event_outbox_child" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_event_outbox_child" ON "child_event_outbox" ("child_session_id", "created_at")',
+  },
+  {
+    describe: "child_watches.events_started_at column",
+    probe: { kind: "column", table: "child_watches", column: "events_started_at" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "events_started_at" bigint',
+  },
+  {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
     // keep the old no-origin behavior.
@@ -1849,6 +1864,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "engine_wakeups_due index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_due" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    describe: "engine_wakeups_event_buffer_due index",
+    probe: { kind: "index", index: "engine_wakeups_event_buffer_due" },
+    sql: `CREATE INDEX IF NOT EXISTS "engine_wakeups_event_buffer_due" ON "engine_wakeups" ("created_at", "id") WHERE "kind" = 'event' AND "status" = 'running' AND COALESCE("event_buffer", '[]') <> '[]'`,
   },
   {
     // After the subjects column repair, which it indexes (spec 2026-10-15, Part C).

@@ -7,7 +7,7 @@ import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { cancelAllWorkAsHuman, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork, type BackgroundWorkGate } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
@@ -1248,6 +1248,8 @@ sessionsRouter.patch("/:id", async (c) => {
       updatedAt: now,
     };
   }
+
+  if (nextOwner !== undefined) await endChildSubscriptions(engineStore, id);
 
   // Drop the cached session so the next build reads the new row: the
   // profile is frozen into the sandbox opts, and the owner binds the skills

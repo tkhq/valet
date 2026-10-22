@@ -322,8 +322,13 @@ describe("buildRunThreadArchive", () => {
     // The settled run reported before it stopped: its turn is over, so the
     // thread has nothing left to show and the archive may take it.
     await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+    await engineStore.createWakeup({ id: "wk_child_events:run-child", sessionId: done.sessionId, threadId: done.threadId,
+      kind: "event", status: "running", reason: "Child updates", subjects: ["valet:session:run-child"],
+      eventMatch: { childSessionId: "run-child", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
 
     await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
+    expect((await engineStore.getWakeup("wk_child_events:run-child"))?.status).toBe("cancelled");
 
     const rows = await db.select().from(sessionThreads);
     expect(rows).toEqual([

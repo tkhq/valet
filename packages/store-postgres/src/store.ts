@@ -1537,7 +1537,7 @@ export class PgSessionStore implements SessionStore {
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1 OR match_json::jsonb ? 'childSessionId')))${keyset}
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
@@ -1554,8 +1554,9 @@ export class PgSessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null> {
-    const r = await this.db.query(`${TRANSITION_SQL} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
+    const r = await this.db.query(`${TRANSITION_SQL}${condition?.eventBufferEmpty ? " AND COALESCE(event_buffer, '[]') = '[]'" : ""} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
   }
 
@@ -1586,7 +1587,8 @@ export class PgSessionStore implements SessionStore {
             SET event_buffer = (COALESCE(event_buffer, '[]')::jsonb || jsonb_build_array($2::jsonb))::text,
                 updated_at = $3
           WHERE id = $1 AND kind = 'event' AND status = 'running'
-            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) < $4
+            AND jsonb_array_length(COALESCE(event_buffer, '[]')::jsonb) <
+                CASE WHEN match_json::jsonb ? 'childSessionId' AND $2::jsonb->>'key' = 'child.settled' THEN $4 - 10 ELSE $4 END
             AND ($2::jsonb ? 'derive' OR jsonb_array_length(COALESCE(event_seen, '[]')::jsonb) +
                  (SELECT count(*) FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e WHERE NOT e ? 'derive') < $5)
             AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(event_buffer, '[]')::jsonb) e

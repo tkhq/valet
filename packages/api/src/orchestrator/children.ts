@@ -49,7 +49,7 @@ import {
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childEventOutbox, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -131,6 +131,7 @@ export interface ChildrenDeps {
    * refusal as `[task_resources] <message>`, never a partial spawn.
    */
   scratchCaps: ScratchCaps;
+  nudgeChildEvents?: (ids: string[]) => void;
 }
 
 /** Thrown when a spawn would exceed a decision-21 limit. Message is what the `task` tool surfaces verbatim as error text. */
@@ -154,9 +155,13 @@ async function cleanupFailedSpawn(
   workspace: string,
   error: unknown,
 ): Promise<never> {
-  await deps.engineStore.deleteWakeupRows((await deps.engineStore.getSession(childSessionId))?.parentSessionId ?? "", {
-    wakeupId: `wk_child_events:${childSessionId}`,
-  });
+  try {
+    await deps.engineStore.deleteWakeupRows((await deps.engineStore.getSession(childSessionId))?.parentSessionId ?? "", {
+      wakeupId: `wk_child_events:${childSessionId}`,
+    });
+  } catch (cleanupError) {
+    console.error(`buildChildSpawner: failed to delete partial child waiter ${childSessionId}:`, cleanupError);
+  }
   await deps.engineHost.destroy(childSessionId).catch((cleanupError: unknown) => {
     console.error(`buildChildSpawner: failed to destroy partial child ${childSessionId}:`, cleanupError);
   });
@@ -205,11 +210,17 @@ async function enforceLimits(
   parentSessionId: string,
   orgId: string,
   orgSessionCeiling: number = DEFAULT_ORG_ACTIVE_SESSION_CEILING,
+  engineStore: SessionStore,
+  engineHost: EngineHost,
+  excludeChildId?: string,
 ): Promise<void> {
-  const runningChildren = await db
-    .select({ childSessionId: childWatches.childSessionId })
-    .from(childWatches)
-    .where(and(eq(childWatches.parentSessionId, parentSessionId), eq(childWatches.settled, false)));
+  const candidates = await db.select().from(childWatches).where(eq(childWatches.orgId, orgId));
+  const active = [];
+  for (const row of candidates) {
+    if (row.childSessionId === excludeChildId) continue;
+    if (!row.settled || await childConsumesCapacity(engineStore, row, engineHost)) active.push(row);
+  }
+  const runningChildren = active.filter((row) => row.parentSessionId === parentSessionId);
 
   if (runningChildren.length >= MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR) {
     const ids = runningChildren.map((r) => r.childSessionId).join(", ");
@@ -223,20 +234,6 @@ async function enforceLimits(
     throw new ChildLimitError("child_cap", message);
   }
 
-  const [{ n: unsettledChildrenOrgWide }] = await db
-    .select({ n: count() })
-    .from(childWatches)
-    .where(and(eq(childWatches.orgId, orgId), eq(childWatches.settled, false)));
-  // Child sessions are counted through their watch rows above — a running
-  // child once (unsettled watch), a settled child zero. Their agent_sessions
-  // rows outlive settlement, so counting them here would double-count every
-  // running child and hold a settled child's slot forever.
-  //
-  // Only `active` rows count. A `hibernated` session is parked (the idle
-  // sweep suspended its sandbox) and an `archived` session is shelved by the
-  // user — neither consumes compute, so neither may consume capacity. The
-  // old `!= deleted` filter made the ceiling a lifetime session counter:
-  // every org eventually hit it through accumulation alone.
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
@@ -254,12 +251,22 @@ async function enforceLimits(
         ),
       ),
     );
-  const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
+  const total = active.length + Number(liveSessionsOrgWide ?? 0);
   if (total >= orgSessionCeiling) {
     const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + active sessions), limit ${orgSessionCeiling}. Archive or delete idle sessions, or raise VALET_ORG_SESSION_CEILING.`;
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }
+}
+
+/** Notification does not release capacity while compute or background work remains. */
+async function childConsumesCapacity(store: SessionStore, row: ChildWatchRow, host: EngineHost): Promise<boolean> {
+  if (await store.countActiveLeases(row.childSessionId) > 0) return true;
+  const wakeups = await store.listWakeups(row.childSessionId, ["pending", "running"]);
+  if (wakeups.some((w) => w.eventMatch?.childSessionId === undefined)) return true;
+  if (host.liveSession(row.childSessionId)?.attachment.sandboxId !== undefined) return true;
+  const data = await store.getSession(row.childSessionId);
+  return row.sandboxReclaimedAt === null && (row.parkedSandboxId !== null || data?.sandboxId !== undefined);
 }
 
 /** The unsettled watch for a child session: its parent thread and the
@@ -506,7 +513,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       recordScratchRequested("task", parseResourceQuantity(scratch) ?? 0);
     }
 
-    await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
+    await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling, deps.engineStore, deps.engineHost);
     const warnings: string[] = [];
     if (deps.sandboxBacked ?? deps.prebuildService.builderBackend === "kubernetes") {
       try {
@@ -653,6 +660,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         actorUserId: ctx.actorUserId,
         orgId,
         settled: false,
+        eventsStartedAt: now,
         createdAt: now,
         // Durable: the settlement can arrive after a restart (rearm), and
         // the child.settled signal must still inherit this origin.
@@ -760,7 +768,7 @@ export class ChildWatcher {
       dedupeKey: `gate-opened:${childSessionId}:${gate.id}`,
       occurredAt: new Date().toISOString(),
       subjects: [`valet:session:${childSessionId}`],
-      refs: { child_session_id: childSessionId, child_queue_item_id: watch.queueItemId, gate_id: gate.id },
+      refs: { child_session_id: childSessionId, child_queue_item_id: watch.queueItemId, watch_queue_item_id: watch.queueItemId, gate_id: gate.id },
       summary: `Child ${childSessionId} is paused on a ${gate.type} request: "${gate.title}".`,
       payload: { gate },
     });
@@ -775,7 +783,8 @@ export class ChildWatcher {
       this.deps.engineStore.getThread(childSessionId, gate.threadId),
     ]);
     const toolScope = submission && thread
-      ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]))
+      ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]),
+        readToolScope((await this.deps.engineStore.getQueueItem(childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY]))
       : { tools: [], actions: [] };
     await admitSignal(this.deps, {
       from: { sessionId: childSessionId, owner: childData.owner },
@@ -931,7 +940,7 @@ export class ChildWatcher {
       .where(eq(childWatches.childSessionId, watch.childSessionId))
       .limit(1);
     const row = rows[0];
-    if (!row || row.queueItemId !== watch.queueItemId) {
+    if (!row || (!digest && row.queueItemId !== watch.queueItemId)) {
       // The watch moved to later work, so no new attempt admits this one.
       await this.resolveOrphanIntent(settledReplyId(watch.childSessionId, watch.queueItemId), watch.orgId);
       return;
@@ -993,7 +1002,8 @@ export class ChildWatcher {
         occurredAt: new Date().toISOString(),
         subjects: [`valet:session:${watch.childSessionId}`],
         refs: { child_session_id: watch.childSessionId, child_queue_item_id: itemId, watch_queue_item_id: watch.queueItemId,
-          background_work: JSON.stringify(work) },
+          background_work: JSON.stringify(work),
+          origin_json: row.originJson ?? "", reply_route: row.replyRoute ?? "" },
         status: result.outcome,
         summary: body + (work.length ? `\n\nOutstanding background work:\n${work.map((w) =>
           `- ${w.kind} ${w.id}: ${w.reason}. Deadline: ${w.deadline ?? "none"}.`).join("\n")}` : ""),
@@ -1021,14 +1031,14 @@ export class ChildWatcher {
 
     // Private input in this result's transcript downgrades an automatic
     // route to manual for good. Parent work never restores `origin`.
-    let replyRoute = row.replyRoute;
+    let replyRoute = digest.refs?.reply_route ?? row.replyRoute;
     if (replyRoute === "origin" && await privateInputBefore(this.deps.engineStore, watch.childSessionId, itemId,
       { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey })) {
       replyRoute = "manual" satisfies ChildReplyRoute;
       await this.deps.db.update(childWatches).set({ replyRoute })
         .where(and(eq(childWatches.childSessionId, watch.childSessionId), eq(childWatches.replyRoute, "origin")));
     }
-    const origin = settlementOrigin(row.originJson, replyRoute);
+    const origin = settlementOrigin(digest.refs?.origin_json ?? row.originJson, replyRoute);
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${itemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
@@ -1053,7 +1063,8 @@ export class ChildWatcher {
         // Preserve the spawning turn's route and reply policy for the parent's update.
         ...(origin !== undefined ? { origin } : {}),
       },
-      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY])),
+      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, itemId))?.metadata?.[TOOL_SCOPE_KEY]),
+        readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
       dispatchId: `settled:${watch.childSessionId}:${itemId}`,
     });
 
@@ -1117,17 +1128,25 @@ export class ChildWatcher {
     return [
       ...leases.map((lease) => ({ id: lease.id, kind: lease.ownerKind, reason: lease.reason,
         deadline: new Date(lease.deadlineAt).toISOString() })),
-      ...wakeups.filter((w) => w.kind === "timer" || w.kind === "event").map((w) => ({
+      ...wakeups.filter((w) => w.eventMatch?.childSessionId === undefined && (w.kind === "timer" || w.kind === "event")).map((w) => ({
         id: w.id, kind: w.kind, reason: w.reason,
         ...((w.fireAt ?? w.deadlineAt) !== undefined ? { deadline: new Date(w.fireAt ?? w.deadlineAt ?? 0).toISOString() } : {}),
       })),
     ];
   }
 
-  /** A cancelled subscription stays cancelled when child_send reopens the child. */
-  async ensureSubscription(watch: Pick<ArmArgs, "childSessionId" | "parentSessionId" | "parentThreadId">): Promise<void> {
+  /** Only an explicit child_send restores a cancelled subscription. */
+  async ensureSubscription(watch: Pick<ArmArgs, "childSessionId" | "parentSessionId" | "parentThreadId">, reactivate = false): Promise<void> {
+    await this.deps.db.update(childWatches).set({ eventsStartedAt: Date.now() })
+      .where(and(eq(childWatches.childSessionId, watch.childSessionId), isNull(childWatches.eventsStartedAt)));
     const id = `wk_child_events:${watch.childSessionId}`;
-    if (await this.deps.engineStore.getWakeup(id)) return;
+    const existing = await this.deps.engineStore.getWakeup(id);
+    if (existing) {
+      if (existing.status === "done" || reactivate) {
+        await this.deps.engineStore.transitionWakeup(id, [existing.status], "running", {}, Date.now());
+      }
+      return;
+    }
     const now = Date.now();
     await this.deps.engineStore.createWakeup({
       id, sessionId: watch.parentSessionId, threadId: watch.parentThreadId,
@@ -1141,26 +1160,81 @@ export class ChildWatcher {
     });
   }
 
-  /** The subscription follows the child's lifetime, including idle periods. */
+  /** Idle child subscriptions are checked only on delivery or retention, not on every wake pass. */
   async subscriptionActive(row: Wakeup): Promise<boolean> {
     const child = row.eventMatch?.childSessionId;
     if (!child) return false;
     const [session] = await this.deps.db.select({ status: agentSessions.status }).from(agentSessions)
       .where(eq(agentSessions.id, child)).limit(1);
-    return session?.status !== "archived" && session?.status !== "deleted"
-      && (await this.deps.engineStore.getSession(child)) !== null;
+    if (session?.status === "archived" || session?.status === "deleted" || !(await this.deps.engineStore.getSession(child))) return false;
+    const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, child)).limit(1);
+    if (!watch) return false;
+    const backlog = await this.deps.db.select().from(childEventOutbox)
+      .where(eq(childEventOutbox.childSessionId, child))
+      .orderBy(sql`CASE WHEN ${childEventOutbox.event}->>'key' = 'child.gate_opened' THEN 0 ELSE 1 END`, childEventOutbox.createdAt).limit(200);
+    for (const pending of backlog) {
+      const reported = await this.deps.engineStore.getQueueItemByDispatchId(watch.parentSessionId,
+        namespaceInternalDispatchId(child, pending.id));
+      if (reported) await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, pending.id));
+      else await this.ingest(watchRowToArgs(watch), pending.event);
+    }
+    const current = await this.deps.engineStore.getWakeup(row.id);
+    return !watch.settled || (current?.eventBuffer?.length ?? 0) > 0
+      || (await this.deps.engineStore.listUnsettledSubmissions(child)).length > 0
+      || await this.holdsBackgroundWork(child);
+  }
+
+  /** Recovers turns that stopped before their observer persisted an event. Boot only. */
+  private async recoverTurns(row: ChildWatchRow): Promise<void> {
+    if (row.eventsStartedAt === null) return;
+    const turns = await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1);
+    for (const turn of turns) {
+      if (turn.updatedAt < row.eventsStartedAt || !isSignalSubmission(turn)
+        || turn.outcome?.outcome === "merged" || turn.outcome?.outcome === "superseded") continue;
+      if (await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, settledReplyId(row.childSessionId, turn.id))) continue;
+      const [pending] = await this.deps.db.select({ id: childEventOutbox.id }).from(childEventOutbox)
+        .where(eq(childEventOutbox.id, `settled:${row.childSessionId}:${turn.id}`)).limit(1);
+      if (pending) continue;
+      const current = await this.deps.engineStore.getQueueItem(row.childSessionId, row.queueItemId);
+      if (turn.createdAt < (current?.createdAt ?? 0)) continue;
+      await this.ensureSubscription(watchRowToArgs(row));
+      await this.attempt({ ...watchRowToArgs(row), resultItemId: turn.id });
+    }
   }
 
   private async publish(watch: ArmArgs, event: NormalizedEvent): Promise<void> {
-    const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
+    let waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
+    if (waiter?.status === "done") {
+      await this.ensureSubscription(watch);
+      waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${watch.childSessionId}`);
+    }
     if (waiter?.status !== "running") {
       if (event.key !== "child.settled") return;
       await this.markSettled(watch.childSessionId, watch.queueItemId);
       await this.parkChildSandbox(watch.childSessionId);
       return;
     }
+    const reported = await this.deps.engineStore.getQueueItemByDispatchId(watch.parentSessionId,
+      namespaceInternalDispatchId(watch.childSessionId, event.dedupeKey));
+    if (reported) {
+      await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, event.dedupeKey));
+      return;
+    }
+    await this.deps.db.insert(childEventOutbox).values({
+      id: event.dedupeKey, childSessionId: watch.childSessionId, event, createdAt: Date.now(),
+    }).onConflictDoNothing();
+    await this.ingest(watch, event);
+    const buffered = await this.deps.engineStore.getWakeup(waiter.id);
+    if (buffered?.status === "done") {
+      // The prior turn's idle check can finish while this turn publishes.
+      await this.ensureSubscription(watch);
+      await this.ingest(watch, event);
+    }
+  }
+
+  private async ingest(watch: ArmArgs, event: NormalizedEvent): Promise<void> {
     await ingestEvent({ db: this.deps.db, plugins: [], waiters: {
-      engineStore: this.deps.engineStore, plugins: [], now: Date.now,
+      engineStore: this.deps.engineStore, plugins: [], now: Date.now, nudge: this.deps.nudgeChildEvents,
       sessionOrg: async (id) => {
         const data = await this.deps.engineStore.getSession(id);
         if (data) return { orgId: data.orgId, ownerType: data.owner.type, ownerId: data.owner.id };
@@ -1172,11 +1246,6 @@ export class ChildWatcher {
       resolvePreviousStatus: async () => null,
       slackBotUserId: async () => undefined,
     } }, { orgId: watch.orgId, service: "valet", event });
-    const buffered = await this.deps.engineStore.getWakeup(waiter.id);
-    if (buffered?.status === "running" && ![...(buffered.eventBuffer ?? []).map((d) => d.dedupeKey),
-      ...(buffered.eventSourceSeen ?? [])].includes(event.dedupeKey)) {
-      throw new Error(`Child event ${event.dedupeKey} was not buffered. Retry ingestion.`);
-    }
   }
 
   /** Called only by WakeWatcher after ingest matched this child subscription. */
@@ -1184,9 +1253,8 @@ export class ChildWatcher {
     const child = row.eventMatch?.childSessionId;
     if (!child || digest.refs?.child_session_id !== child) return;
     const [stored] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, child)).limit(1);
-    if (!stored || stored.parentSessionId !== row.sessionId || stored.parentThreadId !== row.threadId ||
-      stored.queueItemId !== (digest.refs.watch_queue_item_id ?? digest.refs.child_queue_item_id)) return;
-    const watch = watchRowToArgs(stored);
+    if (!stored || stored.parentSessionId !== row.sessionId || stored.parentThreadId !== row.threadId) return;
+    const watch = { ...watchRowToArgs(stored), queueItemId: digest.refs.watch_queue_item_id ?? digest.refs.child_queue_item_id ?? stored.queueItemId };
     try {
       if (digest.key === "child.gate_opened") {
         const gate = await this.deps.engineStore.getDecisionGate(child, digest.refs.gate_id ?? "");
@@ -1197,10 +1265,10 @@ export class ChildWatcher {
     } catch (error) {
       const classification = classifyWatcherError(error);
       if (classification.kind === "retryable") {
-        if (classification.pendingCap) await writeDropLog(this.deps.db, {
-          orgId: watch.orgId, reason: "pending_cap", conversationKey: watch.queueItemId,
-          detail: `Child event delivery deferred on parent thread ${row.threadId}: pending cap reached.`,
-        });
+        if (classification.pendingCap) await this.deps.db.insert(eventDropLog).values({
+          id: `child-pending:${row.id}`, orgId: watch.orgId, reason: "pending_cap", conversationKey: watch.queueItemId,
+          detail: `Child event delivery deferred on parent thread ${row.threadId}: pending cap reached.`, createdAt: Date.now(),
+        }).onConflictDoNothing();
         throw error;
       }
       if (!classification.alreadyLogged) await writeDropLog(this.deps.db, {
@@ -1209,8 +1277,9 @@ export class ChildWatcher {
       await this.deps.db.update(childReplyDeliveries).set({ failedAt: Date.now(), lastError: String(error).slice(0, 1_000) })
         .where(and(eq(childReplyDeliveries.id, settledReplyId(child, digest.refs.child_queue_item_id ?? watch.queueItemId)),
           eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
-      await this.markSettled(child, watch.queueItemId);
+      if (digest.key === "child.settled") await this.markSettled(child, watch.queueItemId);
     }
+    await this.deps.db.delete(childEventOutbox).where(eq(childEventOutbox.id, digest.dedupeKey));
   }
 
   /** Later signal turns retain the delegation generation used by the stale-watch guard. */
@@ -1244,24 +1313,18 @@ export class ChildWatcher {
   }
 
   private async markSettled(childSessionId: string, queueItemId: string): Promise<void> {
-    // Conditioned on the queueItemId this watcher tracked: a sender
-    // re-point that landed after this watcher's row check must not be
-    // clobbered back to settled, or the re-pointed submission's watcher
-    // goes silent and the settlement is lost. `settledAt` starts (or
-    // restarts) the retention clock; clearing `sandboxReclaimedAt` opens a
-    // fresh reclaim cycle for a re-opened child. `parkedSandboxId` is
-    // deliberately kept — it is the only durable handle to a sandbox a
-    // prior cycle parked, and the next park overwrites it anyway.
+    // Only the reported delegation can acknowledge this generation.
+    // A boot retry must not restart retention or reopen a reclaimed sandbox.
     await this.deps.db
       .update(childWatches)
-      .set({ settled: true, settledAt: Date.now(), sandboxReclaimedAt: null })
-      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId)));
+      .set({ settled: true, settledAt: Date.now() })
+      .where(and(eq(childWatches.childSessionId, childSessionId), eq(childWatches.queueItemId, queueItemId), eq(childWatches.settled, false)));
   }
 
   private async markReclaimed(childSessionId: string, now: number): Promise<void> {
     await this.deps.db
       .update(childWatches)
-      .set({ sandboxReclaimedAt: now })
+      .set({ sandboxReclaimedAt: now, parkedSandboxId: null })
       .where(eq(childWatches.childSessionId, childSessionId));
   }
 
@@ -1278,6 +1341,8 @@ export class ChildWatcher {
    */
   private async parkChildSandbox(childSessionId: string): Promise<void> {
     try {
+      const [watch] = await this.deps.db.select().from(childWatches).where(eq(childWatches.childSessionId, childSessionId)).limit(1);
+      if (watch?.sandboxReclaimedAt != null) return;
       const live = this.deps.engineHost.liveSession(childSessionId);
       if (!live) return;
       // A user can wake a settled child from the Sessions page. A prompt
@@ -1332,8 +1397,8 @@ export class ChildWatcher {
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
       // `EngineHost.destroy` does.
-      await revokeSandboxTokens(this.deps.db, childSessionId);
       await this.markReclaimed(childSessionId, Date.now());
+      await revokeSandboxTokens(this.deps.db, childSessionId);
     } catch (err) {
       console.error(`ChildWatcher: sandbox park failed for settled child ${childSessionId}:`, err);
     }
@@ -1374,6 +1439,10 @@ export class ChildWatcher {
       );
     for (const row of rows) {
       try {
+        const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
+        if (waiter?.status === "running" && !(await this.subscriptionActive(waiter))) {
+          await this.deps.engineStore.transitionWakeup(waiter.id, ["running"], "done", { endedAt: now }, now);
+        }
         const unsettled = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
         if (unsettled.length > 0) continue;
         const activityAt = await this.deps.engineStore.latestActivityAt(row.childSessionId);
@@ -1403,8 +1472,8 @@ export class ChildWatcher {
             `ChildWatcher: retention reclaim for ${row.childSessionId} found no live session and no parked sandbox id; stamping reclaimed without a destroy`,
           );
         }
-        await revokeSandboxTokens(this.deps.db, row.childSessionId);
         await this.markReclaimed(row.childSessionId, now);
+        await revokeSandboxTokens(this.deps.db, row.childSessionId);
       } catch (err) {
         console.error(`ChildWatcher: retention reclaim failed for child ${row.childSessionId}:`, err);
       }
@@ -1424,7 +1493,7 @@ export class ChildWatcher {
     // "pending" (spec 2026-10-15, F2), so it needs its own count.
     const open = leases > 0 ? [] : await store.listWakeups(childSessionId, ["pending", "running"]);
     const timers = open.filter((w) => w.kind === "timer" && w.status === "pending").length;
-    const events = open.filter((w) => w.kind === "event" && w.status === "running").length;
+    const events = open.filter((w) => w.kind === "event" && w.status === "running" && w.eventMatch?.childSessionId === undefined).length;
     if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);
       return false;
@@ -1466,18 +1535,26 @@ export class ChildWatcher {
     }
     const rows = await this.deps.db.select().from(childWatches);
     for (const row of rows) {
-      await this.ensureSubscription(watchRowToArgs(row));
-      const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
-      if (!waiter || !(await this.subscriptionActive(waiter))) continue;
-      const current = await this.deps.engineStore.getQueueItem(row.childSessionId, row.queueItemId);
-      const turns = await this.deps.engineStore.listSettledSubmissionsBefore(row.childSessionId, Date.now() + 1);
-      for (const turn of turns) {
-        if (turn.createdAt < (current?.createdAt ?? 0) || !isSignalSubmission(turn)) continue;
-        const dispatchId = settledReplyId(row.childSessionId, turn.id);
-        if (!(await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, dispatchId))) {
-          await this.observeTurn(row.childSessionId, turn.id);
-        }
+      if (row.eventsStartedAt === null) {
+        row.eventsStartedAt = Date.now();
+        await this.deps.db.update(childWatches).set({ eventsStartedAt: row.eventsStartedAt })
+          .where(and(eq(childWatches.childSessionId, row.childSessionId), isNull(childWatches.eventsStartedAt)));
       }
+      if (row.settled) {
+        const [pending] = await this.deps.db.select({ id: childEventOutbox.id }).from(childEventOutbox)
+          .where(eq(childEventOutbox.childSessionId, row.childSessionId)).limit(1);
+        if (pending || await this.holdsBackgroundWork(row.childSessionId)) await this.ensureSubscription(watchRowToArgs(row));
+        await this.recoverTurns(row);
+        const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
+        if (waiter?.status === "running") {
+          if (!(await this.subscriptionActive(waiter))) await this.deps.engineStore.transitionWakeup(waiter.id, ["running"], "done", { endedAt: Date.now() }, Date.now());
+        }
+        continue;
+      }
+      await this.ensureSubscription(watchRowToArgs(row));
+      await this.recoverTurns(row);
+      const waiter = await this.deps.engineStore.getWakeup(`wk_child_events:${row.childSessionId}`);
+      if (waiter?.status === "running") await this.subscriptionActive(waiter);
       const replyId = settledReplyId(row.childSessionId, row.queueItemId);
       const admitted = await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, replyId);
       if (admitted) {
@@ -1754,7 +1831,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
     // still-running child changes no counts and pays nothing.
     if (watchRow.settled) {
-      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling);
+      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling, deps.engineStore, deps.engineHost, req.childSessionId);
     }
 
     const childData = await deps.engineStore.getSession(req.childSessionId);
@@ -1776,6 +1853,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]));
     const promptOptions = childSendPromptOptions({ ...ctx, toolScope,
       ...(ctx.unattendedWorkflow ? { workflowStep: await submissionWorkflowStep(deps.engineStore, ctx.parentSessionId, ctx.parentQueueItemId) } : {}) }, req.queue === true);
+    await watcher.ensureSubscription(watchRowToArgs(watchRow), true);
     const receipt = await childSession.prompt(req.message, promptOptions);
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
@@ -1799,6 +1877,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         .set({
           queueItemId: receipt.queueItemId,
           settled: false,
+          sandboxReclaimedAt: null,
           dismissedAt: null,
           ...(current && replyRoute !== current.replyRoute ? { replyRoute } : {}),
         })

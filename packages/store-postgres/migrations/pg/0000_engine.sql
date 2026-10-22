@@ -260,6 +260,8 @@ CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status"
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at");
 --> statement-breakpoint
+CREATE INDEX "engine_wakeups_event_buffer_due" ON "engine_wakeups" ("created_at", "id") WHERE "kind" = 'event' AND "status" = 'running' AND COALESCE("event_buffer", '[]') <> '[]';
+--> statement-breakpoint
 CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups" USING gin ("subjects") WHERE "kind" = 'event' AND "status" = 'running';
 --> statement-breakpoint
 CREATE TABLE "engine_leases" (

@@ -821,7 +821,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.getWakeup("wk_ev")).toEqual(full);
       });
 
-      it("round-trips a lifetime child subscription and makes its lifecycle due without a buffer", async () => {
+      it("round-trips a child subscription without scanning idle or ended rows", async () => {
         const child = eventWaiter({
           subjects: ["valet:session:child-1"],
           deadlineAt: undefined,
@@ -831,7 +831,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         const restored = await store.getWakeup(child.id);
         expect(restored?.eventMatch?.childSessionId).toBe("child-1");
         expect(restored?.deadlineAt).toBeUndefined();
-        expect((await store.listDueWakeups(0, 10)).rows.map((w) => w.id)).toContain(child.id);
+        expect((await store.listDueWakeups(0, 10)).rows).toEqual([]);
         expect(await store.appendEventMatch(child.id, digest({
           key: "child.settled", summary: "x".repeat(16_000),
           refs: { child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]" },
@@ -840,6 +840,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
           child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]",
         });
         expect((await store.getWakeup(child.id))?.eventBuffer?.[0]?.summary).toHaveLength(16_000);
+        expect((await store.listDueWakeups(0, 10)).rows.map((w) => w.id)).toContain(child.id);
+        await store.transitionWakeup(child.id, ["running"], "done", {}, 2);
+        expect((await store.listDueWakeups(0, 10)).rows).toEqual([]);
       });
 
       it("round-trips a match spec's primarySubject and finds the waiter by its repository subject", async () => {
@@ -866,6 +869,14 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         const rows = await store.findEventWaiters(["github:acme/lean-proofs", "github:acme/lean-proofs#42"]);
         expect(rows.map((r) => r.id)).toEqual(["wk_ev"]);
         expect(await store.findEventWaiters([])).toEqual([]);
+      });
+
+      it("does not end a child waiter after a concurrent append", async () => {
+        await store.createWakeup(eventWaiter());
+        await store.appendEventMatch("wk_ev", digest(), 20);
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", {}, 21, { eventBufferEmpty: true })).toBeNull();
+        await store.removeEventMatches("wk_ev", ["d-1"], 22, "source");
+        expect(await store.transitionWakeup("wk_ev", ["running"], "done", {}, 23, { eventBufferEmpty: true })).not.toBeNull();
       });
 
       it("appendEventMatch appends once per dedupeKey and only while running", async () => {

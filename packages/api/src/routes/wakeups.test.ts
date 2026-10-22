@@ -638,6 +638,26 @@ describe("profile change honors leases (fix wave 3, M3)", () => {
   });
 });
 
+describe("host child subscriptions", () => {
+  it.each(["archive", "move"])("does not require force for %s", async (action) => {
+    api = await bootTestApi();
+    await seedSession(api, "host-child-parent");
+    await seedTeam(api, "host-child-team", [{ userId: "local-user", role: "admin" }]);
+    const session = await warmSession(api, "host-child-parent");
+    const thread = await session.ensureDefaultThread();
+    const now = Date.now();
+    await api.providers.engineStore.createWakeup({ id: "wk_child_events:child-1", sessionId: session.id, threadId: thread.id,
+      kind: "event", status: "running", reason: "Child updates: child-1", subjects: ["valet:session:child-1"],
+      eventMatch: { childSessionId: "child-1", clauses: [{ key: "child.*" }], self: [], once: false },
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    const url = action === "archive" ? `/api/sessions/${session.id}/threads/${thread.id}` : `/api/sessions/${session.id}`;
+    const res = await fetch(api.baseUrl + url, { method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action === "archive" ? { archived: true } : { teamId: "host-child-team" }) });
+    expect(res.status).toBe(200);
+    expect((await api.providers.engineStore.getWakeup("wk_child_events:child-1"))?.status).toBe("cancelled");
+  });
+});
+
 describe("thread archive refuses while the thread has background work (fix wave 3, H1)", () => {
   it("409s naming the work, then force stops it and tells the agent on the main thread", async () => {
     const provider = new LeaseTestProvider();

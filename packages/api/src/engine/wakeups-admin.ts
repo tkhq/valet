@@ -65,6 +65,14 @@ export async function listBackgroundWork(engineStore: SessionStore, sessionId: s
   return { wakeups, leases };
 }
 
+/** Stops delivery subscriptions without treating them as agent-owned work. */
+export async function endChildSubscriptions(store: Pick<SessionStore, "listWakeups" | "transitionWakeup">, sessionId: string, threadId?: string): Promise<void> {
+  for (const row of await store.listWakeups(sessionId, ["running"])) {
+    if (row.eventMatch?.childSessionId === undefined || (threadId !== undefined && row.threadId !== threadId)) continue;
+    await store.transitionWakeup(row.id, ["running"], "cancelled", { endedAt: Date.now() }, Date.now());
+  }
+}
+
 /** One piece of open background work, as a refusal names it and a cancel targets it. */
 export interface BlockingWork {
   /** `wk_` for a wakeup, `ls_` for a hold. A process or watch lease shows as its wakeup. */
@@ -104,7 +112,7 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
   const inThread = (threadId: string | undefined) => filter.threadId === undefined || threadId === filter.threadId;
   const picked = (id: string) => filter.ids === undefined || filter.ids.has(id);
   const wakeups: BlockingWork[] = work.wakeups
-    .filter((w) => inThread(w.threadId) && !(filter.leasedOnly && (w.kind === "timer" || w.kind === "event")) && picked(w.id))
+    .filter((w) => w.eventMatch?.childSessionId === undefined && inThread(w.threadId) && !(filter.leasedOnly && (w.kind === "timer" || w.kind === "event")) && picked(w.id))
     .map((w) => ({
       id: w.id,
       kind: w.kind,

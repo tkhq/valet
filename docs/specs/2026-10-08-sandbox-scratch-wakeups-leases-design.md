@@ -506,6 +506,14 @@ A child with an unsettled submission or outstanding background work keeps its sa
 The retention sweep keeps its activity, lease, timer, and event-waiter guards.
 `settled_at` starts the retention clock after notification.
 Background work keeps the sandbox even when that clock expires.
+Boot retries do not reset `settled_at` or `sandbox_reclaimed_at`.
+`child_send` opens a new reclaim cycle.
+A reclaim stamp prevents another sandbox destroy or destroy metric for that cycle.
+
+Notification does not release child capacity.
+A child with background work or a live sandbox still counts toward child and org limits.
+Reopening an idle child checks both limits before admission.
+The check excludes the reopened child from the existing population.
 
 ### C5. Pod eviction
 
@@ -1502,11 +1510,10 @@ with an earlier entry, the entry below wins.
   not offer a larger deadline when the deadline was `leaseMaxHours`. The
   child `wake_at` sentence uses the resolved
   `VALET_CHILD_SANDBOX_RETENTION_HOURS`, the bound the ChildWatcher holds.
-- **A4: child replace.** The ChildWatcher keeps waiting while the child's
-  attachment is `provisioning`, and `parkChildSandbox` leaves a
-  provisioning sandbox alone. A forced replace or profile change sends its
-  deferred signals only after the new sandbox is up. A settle during the
-  replace was stale, and it destroyed the sandbox the route was building.
+- **A4: child replace.** Notification does not wait for provisioning.
+  `parkChildSandbox` leaves a provisioning sandbox alone.
+  A forced replace or profile change defers its cancellation signals until replacement finishes.
+  Each later signal turn still notifies the parent.
 - **A4: kickoff prune.** The prune passes names through `find -exec`, so a
   workload-chosen name is never split or globbed. A job counts once, and
   only when its `.exit` and `.dead` are both gone after the `rm`.

@@ -68,7 +68,7 @@ import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engi
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { canReadWorkflowRun } from "../workflows/service.js";
-import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, endChildSubscriptions } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
@@ -847,6 +847,8 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       });
     }
   }
+
+  if (body.archived === true) await endChildSubscriptions(c.var.providers.engineStore, sessionId, thread.id);
 
   // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;

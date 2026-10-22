@@ -2399,6 +2399,8 @@ export interface SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    /** Prevents an idle close from hiding a concurrent event append. */
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null>;
   /**
    * `transitionWakeup`, and when the CAS matches, the release of the row's

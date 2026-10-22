@@ -14,6 +14,7 @@ import {
   numeric,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { NormalizedEvent } from "@valet/engine";
 import type { ParamMatcher } from "../policies/matchers.js";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 
@@ -616,6 +617,7 @@ export const childWatches = pgTable(
     parentThreadId: text("parent_thread_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
+    eventsStartedAt: bigint("events_started_at", { mode: "number" }),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     // The spawning submission's ChannelOrigin as JSON, inherited by the
@@ -631,14 +633,14 @@ export const childWatches = pgTable(
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
-    // Retention clock: stamped by markSettled, re-stamped on every settle.
+    // Retention starts once per delegated submission, not on boot retries.
     // The retention sweep destroys a parked sandbox once this is older
     // than the retention window.
     settledAt: bigint("settled_at", { mode: "number" }),
     // Set once the child's sandbox is actually destroyed (eagerly on a
     // non-hibernating backend, by the retention sweep on a hibernating
     // one). NULL on a settled row means a reclaim is still owed;
-    // markSettled clears it so a re-opened child starts a fresh cycle.
+    // child_send clears it when the child starts a fresh reclaim cycle.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     // Provider sandbox id recorded at park time. The retention sweep needs
     // it for a child evicted from the host cache (an api restart) — the
@@ -657,6 +659,14 @@ export const childWatches = pgTable(
       .where(sql`${t.settled} = true AND ${t.sandboxReclaimedAt} IS NULL`),
   ],
 );
+
+/** Internal events waiting for ingestion or acknowledgement. This is not an org event receipt. */
+export const childEventOutbox = pgTable("child_event_outbox", {
+  id: text("id").primaryKey(),
+  childSessionId: text("child_session_id").notNull(),
+  event: jsonb("event").$type<NormalizedEvent>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [index("child_event_outbox_child").on(t.childSessionId, t.createdAt)]);
 
 // ─── Notifications + preferences ────────────────────────────────────────────
 

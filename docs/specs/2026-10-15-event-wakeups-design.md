@@ -774,37 +774,59 @@ The normalized keys are `child.settled` and `child.gate_opened`.
 
 Spawning a child creates an engine event waiter on the parent's spawning thread.
 The waiter has no deadline.
-Host-created child subscriptions do not consume the agent background-work quota.
 `wakeup_list` shows it as `Child updates: <child session id>`.
-`wakeup_cancel` stops notifications from that child.
-It leaves the child's turns and background work running.
-`child_send` keeps a cancelled subscription cancelled.
-Archive or deletion ends the waiter on the next WakeWatcher pass.
+Host-created subscriptions do not consume the agent background-work quota.
+They do not block archive, owner move, busy checks, or workflow run archive.
+Archiving the parent thread or moving its session cancels these subscriptions.
+
+`wakeup_cancel` stops notifications without stopping the child.
+`child_send` restores delivery after cancellation or archive.
+A notified child with no remaining work ends its subscription.
+Later signal turns and pending gates can reopen an ended subscription.
+They do not reopen a cancelled subscription.
+Pending gates reach the parent even when the watch is already settled.
+The retention sweep ends idle subscriptions after background work stops without another turn.
 
 Child events use `ingestEvent`, subject matching, `appendEventMatch`, and WakeWatcher delivery.
+Internal events do not create org event receipts or match user subscriptions.
+Ingestion nudges the matched waiter for immediate delivery.
 The digest keeps the bounded result and internal string refs.
-Delivery checks the delegation generation again.
-A `child_send` re-point makes an older generation silent.
-Later signal turns keep that generation and use their own submission ids.
+Published events retain their delegation generation and reply route.
+A later `child_send` does not discard an earlier truthful result or its automatic reply.
+Only the reported generation can mark its watch settled.
+
+The internal `child_event_outbox` stores each event before ingestion.
+Its child index supports replay after a buffer drain or restart.
+The buffer holds at most 200 digests.
+Child results leave ten slots for gates.
+Overflow stays in the outbox until delivery succeeds or a permanent denial ends delivery.
+No result is coalesced or abandoned at the buffer limit.
+Gate delivery runs before result delivery.
+One retryable result does not block another digest.
+Pending-cap diagnostics use one durable row per child subscription.
 
 WakeWatcher admits each child signal before removing its digest.
 `admitSignal` enforces edge authorization and the engine hop budget at delivery.
 The dispatch id uses `namespaceInternalDispatchId(child, settled:<child>:<turn>)`.
-A retry after a restart therefore returns the same parent submission.
-Transient delivery errors keep the digest for the next pass.
+A retry returns the same parent submission.
+Transient delivery errors keep the event for the next pass.
 Permanent denials write the existing drop-log reasons.
 
-The waiter id starts with `wk_` so the standard cancel tool can stop it.
-Internal subscriptions use a bounded source history instead of the external waiter output budget.
-The parent's durable dispatch ids provide lifetime replay protection.
-Boot recovery recreates missing subscriptions and publishes unreported signal turns.
-It also completes reply intents whose parent admissions already landed.
+Internal subscriptions use bounded source history instead of the external output budget.
+The parent's durable dispatch ids provide replay protection.
+Due-row scans exclude idle and ended subscriptions.
+A partial buffer index supports ready event rows.
+Boot recovery restores subscriptions that still owe work.
+`child_watches.events_started_at` separates pipeline turns from legacy history.
+Legacy rows start this boundary at their first pipeline boot.
+Boot recovery never republishes older signal turns.
+The old per-item dispatch id still acknowledges a watched legacy submission.
+Boot acknowledgement does not reset settled retention or reclaim stamps.
 
-The delivered signal types stay `child.settled` and `child.gate_opened`.
-Settlement preserves automatic channel reply intents and the current reply route.
-Private input permanently downgrades an automatic route.
+The delivered types stay `child.settled` and `child.gate_opened`.
+Private transcript input permanently downgrades an automatic reply route.
 Gate updates use manual replies.
-Delivery intersects the child's session and submission tool scopes.
+Delivery intersects the child session, result submission, and delegation submission tool scopes.
 Gate delivery also intersects the gate thread's scope.
 
 ## Part G: Subscriptions

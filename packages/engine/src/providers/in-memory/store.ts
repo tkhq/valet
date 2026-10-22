@@ -367,7 +367,7 @@ export class InMemorySessionStore implements SessionStore {
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
           (w.status === "running" &&
             w.kind === "event" &&
-            (w.eventMatch?.childSessionId !== undefined || (w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
+            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -383,9 +383,10 @@ export class InMemorySessionStore implements SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+    condition?: { eventBufferEmpty: true },
   ): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
-    if (!w || !from.includes(w.status)) return null;
+    if (!w || !from.includes(w.status) || (condition?.eventBufferEmpty && (w.eventBuffer?.length ?? 0) > 0)) return null;
     const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
     this.wakeups.set(id, next);
     return copyWakeup(next);
@@ -412,7 +413,10 @@ export class InMemorySessionStore implements SessionStore {
       console.warn("Event waiter output budget exhausted; create a new waiter for more outputs", { waiterId: id });
       return false;
     }
-    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+    // Child results leave ten slots for gates. The host retains overflow in its outbox.
+    const bufferLimit = w.eventMatch?.childSessionId && bounded.key === "child.settled"
+      ? EVENT_BUFFER_MAX_DIGESTS - 10 : EVENT_BUFFER_MAX_DIGESTS;
+    if (buffer.length >= bufferLimit) {
       recordEventWaiterBufferFull();
       return false;
     }

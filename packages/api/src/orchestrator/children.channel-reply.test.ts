@@ -671,6 +671,48 @@ describe("delegated child completion over a channel", () => {
     expect(watch?.replyRoute).toBe("origin");
   });
 
+  it("restores gates, results, and automatic replies after cancellation and child_send", async () => {
+    const run = await bootDelegation("child-cancel-resume");
+    const { engineStore } = api!.providers;
+    await run.watcher.ensureSubscription({ childSessionId: run.child.id, parentSessionId: run.parentId, parentThreadId: run.parentThread.id });
+    await engineStore.transitionWakeup(`wk_child_events:${run.child.id}`, ["running"], "cancelled", {}, Date.now());
+    const next = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: run.child.id, message: "resume with approval" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN });
+    const gate = { id: "resumed-gate", sessionId: run.child.id, threadId: run.childThreadId, queueItemId: next!.queueItemId,
+      resumeKey: "rk", ordinal: 0, type: "approval" as const, title: "Continue?", actions: [], status: "pending" as const,
+      createdAt: Date.now(), updatedAt: Date.now() };
+    await engineStore.saveDecisionGate(run.child.id, run.childThreadId, gate);
+    await run.watcher.reportGateOpened(run.child.id, gate);
+    await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
+      expect(await engineStore.getQueueItemByDispatchId(run.parentId, `${run.child.id}:gate-opened:${run.child.id}:${gate.id}`)).not.toBeNull();
+    });
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, next!.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, run.child.id, next!.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+  });
+
+  it("posts a buffered completion after child_send moves the watch", async () => {
+    const run = await bootDelegation("child-buffered-reply");
+    const { engineStore } = api!.providers;
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await vi.waitFor(async () => expect((await engineStore.getWakeup(`wk_child_events:${run.child.id}`))?.eventBuffer).toHaveLength(1));
+    const next = await buildChildSender(run.deps, run.watcher)(
+      { childSessionId: run.child.id, message: "more work" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID });
+    await parentUpdateSettled(run, run.child.id, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect((await api!.providers.db.select().from(childWatches))[0]).toMatchObject({ queueItemId: next!.queueItemId, settled: false });
+    await engineStore.settleUnclaimed(run.child.id, run.childThreadId, next!.queueItemId, { outcome: "completed" });
+    await vi.waitFor(async () => {
+      await api!.providers.wakeWatcher.sweep();
+      expect((await api!.providers.db.select().from(childWatches))[0]?.settled).toBe(true);
+    });
+  });
+
   it("posts a completion whose admission was still in flight when the parent sent more work", async () => {
     const run = await bootDelegation("child-admit-race");
     const { db, engineStore } = api!.providers;
@@ -698,11 +740,10 @@ describe("delegated child completion over a channel", () => {
         { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
       );
       if (!resumed) throw new Error("child_send did not admit the follow-up");
-      // A dispatcher pass while the admission is in flight posts nothing. The
-      // watcher may end the orphaned intent meanwhile; the landing admission
-      // re-opens it, so the reply still posts once below.
+      // An in-flight admission keeps its reply intent open.
+      // No reply can post before the admission returns its receipt.
       await api!.providers.channelHost.retryChildReplies();
-      expect(await intent()).toMatchObject({ queueItemId: null, failedAt: null });
+      expect(await intent()).toMatchObject({ queueItemId: null, completedAt: null, failedAt: null });
       expect(run.transport.sent).toHaveLength(0);
     } finally {
       release();

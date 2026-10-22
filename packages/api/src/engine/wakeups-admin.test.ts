@@ -89,6 +89,13 @@ describe("backgroundWorkRefusal", () => {
 });
 
 describe("selectWork", () => {
+  it("does not treat host child subscriptions as blocking work", () => {
+    const child = event("wk_child_events:child-1", "valet:session:child-1");
+    child.eventMatch = { childSessionId: "child-1", clauses: [{ key: "child.*" }], once: false, self: [] };
+    expect(selectWork({ wakeups: [child], leases: [] }, {})).toEqual([]);
+    expect(selectWork({ wakeups: [child], leases: [] }, { threadId: "th-1" })).toEqual([]);
+  });
+
   it("ships pending for a process that is still starting, and running for a hold", () => {
     const picked = selectWork(
       { wakeups: [process("wk_a", "pending"), process("wk_b", "running")], leases: [hold("ls_h", "th-1")] },

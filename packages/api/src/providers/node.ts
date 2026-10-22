@@ -569,6 +569,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     retentionMs: resolveChildRetentionMs(process.env),
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
     scratchCaps,
+    nudgeChildEvents: (ids: string[]) => wakeWatcher.nudge(ids),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);

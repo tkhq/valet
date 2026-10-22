@@ -450,14 +450,24 @@ export class WakeWatcher {
         await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now);
         return;
       }
-      for (const digest of row.eventBuffer ?? []) {
+      for (const digest of [...(row.eventBuffer ?? [])].sort((a, b) => Number(b.key === "child.gate_opened") - Number(a.key === "child.gate_opened"))) {
         const current = await this.deps.engineStore.getWakeup(row.id);
         if (current?.status !== "running") return;
         // Admission precedes removal. A retry uses the event's stable dispatch id.
-        await childEvents.deliver(current, digest);
+        try {
+          await childEvents.deliver(current, digest);
+        } catch (error) {
+          // One blocked result must not starve a later approval notification.
+          console.error(`WakeWatcher: child digest ${digest.dedupeKey} stays buffered:`, error);
+          continue;
+        }
         // Internal dispatch ids retain replay protection in the queue store.
         // The bounded source history keeps a lifetime subscription's buffer small.
         await this.deps.engineStore.removeEventMatches(row.id, [digest.dedupeKey], this.clock(), "source");
+      }
+      if (!(await childEvents.active(row))) {
+        // An ingest that appended after the idle check keeps the waiter running.
+        await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now, { eventBufferEmpty: true });
       }
       return;
     }
