@@ -1,11 +1,12 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
 import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
-import type { ThreadAddress } from "../wire/types.js";
+import type { ActiveViewersResponse, ThreadAddress } from "../wire/types.js";
+import { activeViewers } from "../services/active-viewers.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { threadEntry, threadsVisibleTo } from "./_thread-access.js";
+import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
@@ -36,6 +37,29 @@ async function inWorkspace(c: Context<AppEnv>, operation: (c: Context<AppEnv>, s
 threadsRouter.get("/", c => inWorkspace(c, listThreads));
 threadsRouter.post("/", c => inWorkspace(c, createThread));
 threadsRouter.post("/read", c => inWorkspace(c, readThreads));
+
+/** Who has each thread of a workspace open now, for the thread list. Only
+ * threads the caller may open are listed. */
+threadsRouter.get("/viewers", async (c) => {
+  const owner = await authorizedWorkspaceOwner(c, c.req.query("workspace") ?? (c.var.principal.type === "team" ? c.var.principal.id : "user"));
+  if (!owner) return c.json({ error: "Workspace not found." }, 404);
+  const body: ActiveViewersResponse = { threads: {} };
+  const active = activeViewers.activeThreads();
+  if (active.size === 0) return c.json(body);
+  const rows = await c.var.providers.db
+    .select({ id: agentSessions.id, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, userId: agentSessions.userId })
+    .from(agentSessions)
+    .where(and(inArray(agentSessions.id, [...active.keys()]), eq(agentSessions.orgId, c.var.user.orgId)));
+  // A personal session's owner id can be empty on older rows; its user is the owner.
+  const owned = new Set(rows.filter((row) => row.ownerType === owner.type
+    && (row.ownerId || (row.ownerType === "user" ? row.userId : "")) === owner.id).map((row) => row.id));
+  const items = [...active].flatMap(([sessionId, threadIds]) =>
+    owned.has(sessionId) ? [...threadIds].map((threadId) => ({ sessionId, threadId })) : []);
+  for (const item of await keepVisibleThreads(c, owner, items)) {
+    body.threads[item.threadId] = activeViewers.viewersOf(item.sessionId, item.threadId);
+  }
+  return c.json(body);
+});
 
 type ThreadOperation = (c: Context<AppEnv>, sessionId: string, threadId: string) => Promise<Response>;
 

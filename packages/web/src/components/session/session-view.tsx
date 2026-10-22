@@ -8,7 +8,7 @@ import {
   useSession,
   useThreads,
 } from "~/api/queries";
-import { useSessionWebSocket } from "~/api/ws";
+import { useAnnounceThreadView, useSessionWebSocket } from "~/api/ws";
 import {
   queueBusy,
   useSessionStream,
@@ -28,6 +28,8 @@ import {
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
 import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
+import { TypingLine } from "~/components/session/viewer-faces";
+import { useActiveViewers } from "~/api/active-viewers";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
@@ -173,6 +175,9 @@ export function SessionView({
   // Viewer identity, for message attribution: the list renders another
   // member's user messages under their name instead of "You".
   const me = useMe();
+  // Who else has this thread open; this view reports it on the session socket.
+  useAnnounceThreadView(sessionId, effectiveThreadId);
+  const viewers = useActiveViewers(sessionId, effectiveThreadId, me.data?.id);
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
@@ -318,6 +323,7 @@ export function SessionView({
       messages={stream.messages}
       summaryControl={summaryControl}
       onOpenView={hideBrowser ? undefined : changeTab}
+      viewers={viewers}
     />
   );
   const sandboxTabs = !hideBrowser && (
@@ -388,6 +394,7 @@ export function SessionView({
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
+          <TypingLine viewers={viewers} />
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}

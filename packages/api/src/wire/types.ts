@@ -1892,6 +1892,15 @@ export type WireEvent =
       seq: number;
       ts: number;
       offset?: string;
+      /** Everyone with the thread open now, the reader included; live only. */
+      type: "thread.viewers";
+      threadId: string;
+      viewers: ActiveViewer[];
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
       type: "sandbox.status";
       state: string;
       epoch: number;
@@ -1956,7 +1965,38 @@ export interface ClientPong {
   type: "pong";
 }
 
-export type ClientFrame = ClientHello | ClientPong;
+/** The threads this tab shows on the session's socket, and whether the tab is
+ * visible. Sent on connect and on every change; it replaces the last one. */
+export interface ClientViewing {
+  type: "viewing";
+  threadIds: string[];
+  visible: boolean;
+}
+
+/** The person is typing in a thread this tab shows. Sent at most every two
+ * seconds while they type, and with `active: false` when they send. Never
+ * carries the text. */
+export interface ClientTyping {
+  type: "typing";
+  threadId: string;
+  active: boolean;
+}
+
+export type ClientFrame = ClientHello | ClientPong | ClientViewing | ClientTyping;
+
+/** A person with a thread open in a web tab. */
+export interface ActiveViewer {
+  userId: string;
+  name: string;
+  avatarUrl?: string;
+  typing: boolean;
+}
+
+/** `GET /api/threads/viewers?workspace=` — the people in each thread of the
+ * workspace that the caller may open, for the thread list. */
+export interface ActiveViewersResponse {
+  threads: Record<string, ActiveViewer[]>;
+}
 
 // ── REST: admin ──────────────────────────────────────────────────────────
 //

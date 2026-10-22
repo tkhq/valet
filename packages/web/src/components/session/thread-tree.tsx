@@ -1,4 +1,6 @@
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
+import { useWorkspaceViewers } from "~/api/active-viewers";
+import { RowFaces } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
@@ -36,6 +38,7 @@ import {
   X,
 } from "lucide-react";
 import type {
+  ActiveViewer,
   DecisionGate,
   ChildWorkSummary,
   ThreadPullRequest,
@@ -47,6 +50,7 @@ import {
   useRenameThread,
   useReplaceSandbox,
   useMarkThreadsRead,
+  useSession,
   useSetThreadArchived,
   useSessionWakeups,
   useSidebarThreads,
@@ -285,8 +289,13 @@ export interface ThreadTreeProps {
   showChildren?: boolean;
 }
 
+const NO_VIEWERS: ActiveViewer[] = [];
+
 function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
   const viewer = useMe();
+  // Who is in which thread now: faces on the rows.
+  const owner = useSession(sessionId).data?.owner;
+  const workspaceViewers = useWorkspaceViewers(owner?.type === "team" ? owner.id : owner?.type === "user" ? "user" : undefined);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
@@ -592,6 +601,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               onRename={(threadId, title) =>
                 void renameThread.mutateAsync({ threadId, title })
               }
+              viewers={(workspaceViewers.data?.threads[t.id] ?? NO_VIEWERS).filter((person) => person.userId !== viewer.data?.id)}
             />
 
   );
@@ -818,7 +828,10 @@ function ThreadNode({
   organizingDisabled,
   timerFireAt,
   eventWait,
+  viewers,
 }: {
+  /** The other people with this thread open now. */
+  viewers: ActiveViewer[];
   organizingDisabled: boolean;
   /** When the thread's soonest timer fires. Only timers get a row line. */
   timerFireAt?: number;
@@ -977,6 +990,7 @@ function ThreadNode({
               <ThreadOriginIcon thread={thread} />
               <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
               {thread.share && <Share2 className="mx-1 h-3.5 w-3.5 shrink-0 text-muted" role="img" aria-label="Shared" />}
+              <RowFaces viewers={viewers} />
               {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
               {question
                 ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>

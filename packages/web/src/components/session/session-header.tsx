@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import type { Message, SessionDetail } from "@valet/api/wire";
+import { ViewerFaces } from "./viewer-faces";
+import type { ActiveViewer, Message, SessionDetail } from "@valet/api/wire";
 import {
   Check,
   ClipboardCopy,
@@ -159,6 +160,7 @@ export function SessionHeader({
   messages,
   summaryControl,
   onOpenView,
+  viewers = [],
 }: {
   session: SessionDetail;
   agentStatus: AgentStatus;
@@ -172,6 +174,8 @@ export function SessionHeader({
    * menu lists the views instead. Omit it when the thread has no sandbox views.
    */
   onOpenView?: (view: Exclude<SandboxTabId, "chat">) => void;
+  /** The other people with this thread open now. */
+  viewers?: ActiveViewer[];
 }) {
   const navigate = useNavigate();
   const sessionMenu = useResponsiveOverlay("sm");
@@ -484,6 +488,7 @@ export function SessionHeader({
           )}
         </div>
       </Tooltip>
+      <ViewerFaces viewers={viewers} />
       {place && (
         <div className="basis-full min-w-0 -mt-1">
           <Link

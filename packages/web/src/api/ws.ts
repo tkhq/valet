@@ -9,12 +9,15 @@
  */
 import { useEffect } from "react";
 import { useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
-import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
+import type { ClientFrame, ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
+import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
 
 const MAX_RETRY_MS = 8_000;
+/** `WebSocket.OPEN`. */
+const SOCKET_OPEN = 1;
 const INITIAL_RETRY_MS = 500;
 
 function isSettingsWrite(toolName: string, args: unknown): boolean {
@@ -96,8 +99,73 @@ function wsUrl(sessionId: string, fromOffset: string | undefined, threadId: stri
   return query ? `${base}?${query}` : base;
 }
 
+interface SharedSocket {
+  sessionId: string;
+  views: number;
+  close: () => void;
+  send: (frame: ClientFrame) => void;
+  /** The thread each mounted view shows on this socket (`thread.viewers`). */
+  viewing: Map<symbol, string>;
+}
+
 /** Open sockets by session id and shared thread id, with their view count. */
-const sockets = new Map<string, { views: number; close: () => void }>();
+const sockets = new Map<string, SharedSocket>();
+
+/** Tells the server which threads this tab shows on the socket, and whether the tab is visible. */
+function announceViewing(socket: SharedSocket): void {
+  socket.send({ type: "viewing", threadIds: [...new Set(socket.viewing.values())], visible: document.visibilityState === "visible" });
+}
+
+let visibilityListening = false;
+function listenForVisibility(): void {
+  if (visibilityListening || typeof document === "undefined") return;
+  visibilityListening = true;
+  document.addEventListener("visibilitychange", () => {
+    for (const socket of sockets.values()) announceViewing(socket);
+  });
+}
+
+/**
+ * Reports the thread a view shows, so the people in it see this person
+ * (`useActiveViewers`). Call it after `useSessionWebSocket` for the same
+ * session, from the view that shows the thread.
+ */
+export function useAnnounceThreadView(sessionId: string, threadId: string | undefined, sharedThreadId?: string) {
+  useEffect(() => {
+    const socket = sockets.get(JSON.stringify([sessionId, sharedThreadId ?? null]));
+    if (!socket || !threadId) return;
+    const token = Symbol(threadId);
+    socket.viewing.set(token, threadId);
+    announceViewing(socket);
+    return () => {
+      socket.viewing.delete(token);
+      if (sockets.get(JSON.stringify([sessionId, sharedThreadId ?? null])) === socket) announceViewing(socket);
+    };
+  }, [sessionId, threadId, sharedThreadId]);
+}
+
+/** The last typing signal sent per `sessionId threadId`. */
+const typingSentAt = new Map<string, number>();
+/** A typing signal goes out at most this often while the person types. */
+const TYPING_SIGNAL_MS = 2_000;
+
+/**
+ * Tells the people in a thread that this person is typing there, or stopped
+ * (after a send). Carries no text. Repeated calls while typing are throttled.
+ */
+export function announceTyping(sessionId: string, threadId: string, active: boolean): void {
+  const key = `${sessionId} ${threadId}`;
+  const now = Date.now();
+  if (active && now - (typingSentAt.get(key) ?? 0) < TYPING_SIGNAL_MS) return;
+  if (!active && !typingSentAt.has(key)) return;
+  if (active) typingSentAt.set(key, now);
+  else typingSentAt.delete(key);
+  for (const socket of sockets.values()) {
+    if (socket.sessionId === sessionId && [...socket.viewing.values()].includes(threadId)) {
+      socket.send({ type: "typing", threadId, active });
+    }
+  }
+}
 
 /** `sharedThreadId` opens the stream of one shared thread for a person who
  * is not the session's owner: the server sends that thread's frames only. */
@@ -109,7 +177,12 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
     const key = JSON.stringify([sessionId, sharedThreadId ?? null]);
     let shared = sockets.get(key);
     if (!shared) {
-      shared = { views: 0, close: connect(qc, sessionId, sharedThreadId) };
+      listenForVisibility();
+      const created: SharedSocket = { sessionId, views: 0, close: () => {}, send: () => {}, viewing: new Map() };
+      const connection = connect(qc, sessionId, sharedThreadId, () => announceViewing(created));
+      created.close = connection.close;
+      created.send = connection.send;
+      shared = created;
       sockets.set(key, shared);
     }
     shared.views += 1;
@@ -126,8 +199,8 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
   }, [sessionId, sharedThreadId]);
 }
 
-/** Opens one socket and returns the function that closes it. */
-function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | undefined): () => void {
+/** Opens one socket. `onOpen` runs on every connect and reconnect. */
+function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | undefined, onOpen: () => void): { close: () => void; send: (frame: ClientFrame) => void } {
   const { setConnection, ingest, reset } = useStreamStore.getState();
   // Per-connection cancellation flag. Must be a closure local, NOT a
   // shared ref: under StrictMode's double effect run, a shared ref gets
@@ -167,6 +240,7 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
     socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
     socket.onopen = () => {
       setConnection(sessionId, "open");
+      onOpen();
     };
     socket.onmessage = (ev) => {
       try {
@@ -201,6 +275,9 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
             queryKey: wire.threadId ? qkThreadContext.thread(sessionId, wire.threadId) : qkThreadContext.session(sessionId),
           });
         }
+        if (wire.type === "thread.viewers") {
+          useActiveViewersStore.getState().set(sessionId, wire.threadId, wire.viewers);
+        }
         if (wire.type === "thread.activity") {
           qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
             thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
@@ -212,6 +289,9 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
         if (wire.type === "init") {
           retryDelay = INITIAL_RETRY_MS;
+          // The server sends current viewer lists again for the threads this
+          // tab reports; lists from before a reconnect may be stale.
+          useActiveViewersStore.getState().clear(sessionId);
           // title.updated is ephemeral. Refresh both persisted title views
           // after every initial connection or reconnect to recover a frame
           // missed while this client was disconnected.
@@ -242,7 +322,10 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
 
   open();
 
-  return () => {
+  const send = (frame: ClientFrame) => {
+    if (socket?.readyState === SOCKET_OPEN) socket.send(JSON.stringify(frame));
+  };
+  const close = () => {
     cancelled = true;
     if (retryTimer) clearTimeout(retryTimer);
     socket?.close();
@@ -253,4 +336,5 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
     // stale gate set.
     setConnection(sessionId, "closed");
   };
+  return { close, send };
 }
