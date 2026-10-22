@@ -685,15 +685,61 @@ describe("always allow for the session's owner", () => {
     expect(await db.select().from(actionPolicyOverrides)).toEqual([]);
   });
 
-  it("lets a team admin allow it for the team and refuses a team member", async () => {
+  it("lets any team member stop the asking for the whole team, without the session option", async () => {
     await teamSession();
     const teamInput = { ...input, teamId: TEAM };
     const decision = await resolver.resolve(teamInput);
     expect(ownerOption(decision)?.label).toBe("Always allow for this team");
-    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION }, MEMBER)).toBe("Only a team admin can always allow this for the team. Approve it once, or ask a team admin.");
-    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("Only a team admin");
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toEqual([GATE_ACTION_ALWAYS_ALLOW_OWNER, GATE_ACTION_ALWAYS_ALLOW]);
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high", service: "slack", actionId: SEND }, MEMBER)).toBeUndefined();
+    // A gate that does not name its action is refused, since the team's rules cannot be checked.
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high" }, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
+    await resolver.onResolution?.(teamInput, decision, resolution(MEMBER));
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
+  it("keeps a critical action's team allow for team admins, and refuses someone outside the team", async () => {
+    await teamSession();
+    const OUTSIDER = "user_outsider";
+    await db.insert(users).values({ id: OUTSIDER, name: "Outsider", email: "o@x.co", emailVerified: true, createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(orgMembers).values({ orgId: ORG, userId: OUTSIDER, role: "member", createdAt: 1 }).onConflictDoNothing();
+    const critical = { orgId: ORG, sessionId: SESSION, riskLevel: "critical" as const };
+    expect(await ownerAlwaysAllowRefusal(db, critical, MEMBER)).toBe("Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin.");
+    expect(await ownerAlwaysAllowRefusal(db, critical, TEAM_ADMIN)).toBeUndefined();
+    expect(await ownerAlwaysAllowRefusal(db, { orgId: ORG, sessionId: SESSION, riskLevel: "high" }, OUTSIDER)).toBe("Only a member of this team can always allow this for the team. Approve it once instead.");
+    const teamInput = { ...input, teamId: TEAM, riskLevel: "critical" as const };
+    const decision = await resolver.resolve(teamInput);
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("Only a team admin can always allow a critical action");
+  });
+
+  it("keeps a team admin's rule that asks for team admins to loosen", async () => {
+    await teamSession();
+    await db.insert(actionPolicies).values({ id: "team-ask", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const teamInput = { ...input, teamId: TEAM };
+    const decision = await resolver.resolve(teamInput);
+    expect(decision.provenance.source).toBe("team_policy");
+    expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    // The member keeps a lasting choice they may pick.
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
+    const action = { orgId: ORG, sessionId: SESSION, riskLevel: "high" as const, service: "slack", actionId: SEND };
+    expect(await ownerAlwaysAllowRefusal(db, action, MEMBER)).toBe("A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.");
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
     await resolver.onResolution?.(teamInput, decision, resolution(TEAM_ADMIN));
     expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
+  it("reads the team's current rules when a member answers an older card", async () => {
+    await teamSession();
+    const teamInput = { ...input, teamId: TEAM };
+    // The card opened while no team rule named the action.
+    const decision = await resolver.resolve(teamInput);
+    expect(decision.provenance.source).not.toBe("team_policy");
+    expect(ownerOption(decision)).toBeDefined();
+    // A team admin adds a rule before the member clicks.
+    await db.insert(actionPolicies).values({ id: "team-late", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 2, updatedAt: 2 });
+    await expect(resolver.onResolution?.(teamInput, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "require_approval", provenance: { source: "team_policy" } });
   });
 
   it("leaves the team option out when a conditional team rule would still ask for this call", async () => {
@@ -706,6 +752,9 @@ describe("always allow for the session's owner", () => {
     const otherChannel = { ...teamInput, params: { channel: "C2", text: "promoted" } };
     const decision = await resolver.resolve(otherChannel);
     expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    // A member's allow would outrank the C1 rule, so only a team admin may write it.
+    await expect(resolver.onResolution?.(otherChannel, decision, resolution(MEMBER))).rejects.toThrow("only a team admin can change it");
+    expect((decision.extraGateActions ?? []).map((action) => action.id)).toContain(GATE_ACTION_APPROVE_SESSION);
     await resolver.onResolution?.(otherChannel, decision, resolution(TEAM_ADMIN));
     expect(await resolver.resolve(otherChannel)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
   });

@@ -26,9 +26,9 @@ The deciding rule appears as `provenance.source` on the approval and in `get_per
 
 A chat approval offers these choices. Explain what each one does before the person picks:
 
-- **Approve** allows this one call.
-- **Approve for this session** allows the same action for the rest of this session.
-- **Always allow for me** (personal session) or **Always allow for this team** (team session) saves a setting for the session's owner. It is the same setting as the Integrations and team permission pages. Valet shows it only where that setting can allow the action. In a team session, only a team admin can pick it.
+- **Approve once** allows this one call.
+- **Always allow for me** (personal session) or **Always allow for this team** (team session) saves a setting for the session's owner. It is the same setting as the Integrations and team permission pages. Valet shows it only where that setting can allow the action. In a team session, any team member can pick it. For a `critical` action, or an action that a team rule covers, only a team admin can.
+- **Approve for this session** allows the same action for the rest of this session. The card shows it when a member cannot use the always-allow option: an org rule hides it, the action is `critical`, or a team rule covers it.
 - **Always allow (org)** saves an organization policy. Only an organization admin can pick it.
 - **Deny** stops the call.
 
