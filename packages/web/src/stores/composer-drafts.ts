@@ -34,6 +34,12 @@ export interface ComposerDraft {
    * an edit in one composer ends the recall in all of them.
    */
   recall?: number;
+  /**
+   * The idempotency key of a send that failed (`SendPromptRequest.clientMessageId`).
+   * A resend with the same text and attachment count reuses it, so the api
+   * does not post the message twice when the first try landed after all.
+   */
+  sendKey?: { id: string; text: string; attachments: number };
 }
 
 /**
@@ -86,6 +92,7 @@ interface ComposerDraftStore {
   setFiles(key: string, update: ListUpdate<ComposerFile>): void;
   setImageErrors(key: string, update: ListUpdate<string>): void;
   setFileErrors(key: string, update: ListUpdate<string>): void;
+  setSendKey(key: string, sendKey: ComposerDraft["sendKey"]): void;
   /** Drop the whole draft (a successful send). */
   clear(key: string): void;
   /**
@@ -152,6 +159,7 @@ export const useComposerDraftStore = create<ComposerDraftStore>((set) => {
       patch(key, (d) => ({ ...d, imageErrors: resolve(update, d.imageErrors) })),
     setFileErrors: (key, update) =>
       patch(key, (d) => ({ ...d, fileErrors: resolve(update, d.fileErrors) })),
+    setSendKey: (key, sendKey) => patch(key, (d) => ({ ...d, sendKey })),
     clear: (key) =>
       set((state) => {
         if (!key.startsWith(state.owner + "\u0000") || state.byKey[key] === undefined) return state;

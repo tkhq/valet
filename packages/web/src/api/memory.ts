@@ -6,7 +6,8 @@
  */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type { GetMemoryTreeResponse } from "@valet/api/wire";
-import { api, ApiError, type OwnerFilter } from "./client";
+import { api, type OwnerFilter } from "./client";
+import { retryUnlessNotFound } from "~/lib/not-found";
 import type { GetMemoryDocResponse, SearchMemoryResponse } from "./memory-types";
 
 /** Every key carries the workspace, so switching refetches instead of
@@ -52,10 +53,7 @@ export function useMemoryDoc(
   return useQuery<GetMemoryDocResponse>({
     queryKey: qkMemory.doc(path, owner),
     queryFn: () => api.getMemoryDoc(path, owner),
-    retry: (failureCount, error) => {
-      if (error instanceof ApiError && error.status === 404) return false;
-      return failureCount < 2;
-    },
+    retry: retryUnlessNotFound,
     ...opts,
   });
 }

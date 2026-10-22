@@ -1590,6 +1590,14 @@ export interface SendPromptRequest {
    * second user entry. `text` may be empty.
    */
   promoteItemId?: string;
+  /**
+   * Idempotency key for this message, 8 to 64 letters, digits, `-` or `_`.
+   * A resend with the same key returns the first admission instead of
+   * posting the message twice. The web composer reuses the key when it
+   * resends a message whose answer was lost (an api restart, a gateway
+   * error). Slash commands that run at once do not use it.
+   */
+  clientMessageId?: string;
 }
 
 export interface SendPromptResponse {

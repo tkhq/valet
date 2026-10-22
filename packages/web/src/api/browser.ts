@@ -20,6 +20,7 @@ import type {
   BrowserSettings,
 } from "@valet/shared";
 import { ApiError } from "./client";
+import { isServerUnavailable, reportServerUnavailable, waitForOutageEnd } from "./connection";
 
 export const qkBrowser = {
   session: (sessionId: string) => ["sessions", sessionId, "browser"] as const,
@@ -47,30 +48,39 @@ async function request<T>(
   method = body === undefined ? "GET" : "POST",
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch(`${endpoint(sessionId)}${path}`, {
-    method,
-    credentials: "same-origin",
-    signal,
-    ...(body === undefined
-      ? {}
-      : {
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-  });
-  const result: unknown = await response.json();
-  if (!response.ok) {
-    const message =
-      typeof result === "object" &&
-      result !== null &&
-      "error" in result &&
-      typeof result.error === "string"
-        ? result.error
-        : "The browser request failed. Refresh browser status and try again.";
-    throw new ApiError(response.status, message, result);
+  try {
+    const response = await fetch(`${endpoint(sessionId)}${path}`, {
+      method,
+      credentials: "same-origin",
+      signal,
+      ...(body === undefined
+        ? {}
+        : {
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+    });
+    if (!response.ok) {
+      // A gateway answers for a stopped api with HTML, not JSON. Keep the
+      // text, so `isServerUnavailable` can tell the two apart.
+      const text = await response.text();
+      let result: unknown = text;
+      try { result = JSON.parse(text); } catch { /* not the api's JSON error */ }
+      const message =
+        typeof result === "object" &&
+        result !== null &&
+        "error" in result &&
+        typeof result.error === "string"
+          ? result.error
+          : "The browser request failed. Refresh browser status and try again.";
+      throw new ApiError(response.status, message, result);
+    }
+    // The API wire contract owns this response shape, as in the shared REST client.
+    return (await response.json()) as T;
+  } catch (err) {
+    if (isServerUnavailable(err)) reportServerUnavailable();
+    throw err;
   }
-  // The API wire contract owns this response shape, as in the shared REST client.
-  return result as T;
 }
 
 async function command(
@@ -288,7 +298,8 @@ export async function fetchBrowserFrame(
   }
   const receivedAt = Date.now();
   if (!response.ok)
-    throw new Error(
+    throw new ApiError(
+      response.status,
       response.status === 401 || response.status === 403
         ? "Browser viewing permission expired. Retry to request access."
         : "The browser frame is unavailable. Refresh browser status and retry.",
@@ -425,7 +436,17 @@ export function useBrowserFrame(
         });
       },
       abort.signal,
-    ).catch((failure: unknown) => {
+    ).catch(async (failure: unknown) => {
+      if (abort.signal.aborted) return;
+      // An api restart stops the feed. Start it again when the api returns,
+      // instead of asking the person to press Retry (`connection.ts`).
+      if (isServerUnavailable(failure)) {
+        reportServerUnavailable();
+        if (await waitForOutageEnd(abort.signal)) {
+          setRevision((value) => value + 1);
+          return;
+        }
+      }
       if (!abort.signal.aborted)
         setError(
           failure instanceof Error

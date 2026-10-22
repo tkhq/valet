@@ -1699,6 +1699,50 @@ function makeLive() {
   return { engine, store, stream, events };
 }
 
+describe("stuck-head alarm on startup reconciliation", () => {
+  async function restoreAndCollectStuck(store: SessionStore, provider: string): Promise<BusEvent[]> {
+    const faux = registerFauxProvider({ provider });
+    faux.setResponses([fauxAssistantMessage("resumed and done")]);
+    const bus = new InMemoryEventStream();
+    const stuck: BusEvent[] = [];
+    bus.subscribe({ eventTypes: ["submission_stuck"] }, (e) => stuck.push(e));
+    const engine = new Engine({ providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() } });
+    const session = await engine.restoreSession({ sessionId: SESSION,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [spyTool().def] } });
+    try {
+      await waitForAsync(async () => (await store.getQueueItem(SESSION, "q-crash"))?.status === "settled", 4000);
+    } finally { session.suspendTimers(); faux.unregister(); }
+    return stuck;
+  }
+
+  it("does not flag a first-attempt turn older than 15 minutes that a restart interrupted", async () => {
+    const store = new InMemorySessionStore();
+    await seedCrashedRunningTurn(store, { at: Date.now() - 30 * 60_000 });
+
+    expect(await restoreAndCollectStuck(store, "stuck-long-turn")).toEqual([]);
+    expect(await store.getQueueItem(SESSION, "q-crash")).toMatchObject({ outcome: { outcome: "completed" } });
+  });
+
+  it("flags a head that crashed on three attempts", async () => {
+    const store = new InMemorySessionStore();
+    const { itemId, attemptId } = await seedCrashedRunningTurn(store);
+    // Two earlier restarts each resumed the turn on a new attempt, then died.
+    let expected = attemptId;
+    for (const next of ["att-crash-2", "att-crash-3"]) {
+      const replaced = await store.replaceSubmissionAttempt(SESSION, THREAD, itemId,
+        { sessionId: SESSION, threadId: THREAD, itemId, attemptId: next, ownerId: "dead-owner" },
+        { expectedAttemptId: expected });
+      if (!replaced) throw new Error("seed: replace failed");
+      expected = next;
+    }
+
+    const stuck = await restoreAndCollectStuck(store, "stuck-crash-loop");
+    expect(stuck.map((e) => e.event)).toEqual([expect.objectContaining({
+      type: "submission_stuck", queueItemId: itemId, attemptCount: 3,
+    })]);
+  });
+});
+
 async function settledEventsFor(
   stream: InMemoryEventStream,
   sessionId: string,

@@ -12,6 +12,7 @@ import { TooltipProvider } from "~/components/primitives/tooltip";
 import { ErrorRow, LoadingRow } from "~/components/primitives/query-state";
 import { ProductAnnouncement } from "~/components/product-announcement";
 import { AppShell } from "~/components/layout/app-shell";
+import { ReconnectingBanner } from "~/components/layout/reconnecting-banner";
 import { TopNav } from "~/components/layout/top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { AssistantRail } from "~/components/session/assistant-rail";
@@ -137,7 +138,7 @@ function RootLayout() {
   if (UiStressShell && gallery) {
     return <Suspense fallback={null}><UiStressShell><TooltipProvider>{app}</TooltipProvider></UiStressShell></Suspense>;
   }
-  return <TooltipProvider><DraftAccountBoundary>{app}</DraftAccountBoundary></TooltipProvider>;
+  return <TooltipProvider><ReconnectingBanner /><DraftAccountBoundary>{app}</DraftAccountBoundary></TooltipProvider>;
 }
 
 /**
@@ -200,8 +201,5 @@ export function DraftAccountBoundary({ children }: { children: ReactNode }) {
   // Centered on the page background: these show for a moment on every load.
   if (unauthorized || (me.error && verifiedOwner !== owner)) return <div className="grid min-h-dvh place-items-center bg-paper px-4"><ErrorRow>Could not load your account. Reload the page to try again.</ErrorRow></div>;
   if (!owner || activeOwner !== owner || verifiedOwner !== owner) return <div role="status" className="grid min-h-dvh place-items-center bg-paper"><LoadingRow label="Loading your account…" /></div>;
-  return <>
-    {me.error && <p role="status">Connection interrupted. Reconnect to sync your work.</p>}
-    <div key={owner} className="contents">{children}</div>
-  </>;
+  return <div key={owner} className="contents">{children}</div>;
 }

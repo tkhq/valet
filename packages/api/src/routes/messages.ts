@@ -252,6 +252,8 @@ function authorFromEntry(
  * onto the user entry, never onto assistant output.
  */
 const REPLY_METADATA_KEY = "replyTo";
+/** `SendPromptRequest.clientMessageId`: a client-minted key, short enough to sit inside a dispatch id. */
+const CLIENT_MESSAGE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const REPLY_EXCERPT_CHARS = 280;
 
 function replyReferenceFromMetadata(
@@ -1134,6 +1136,8 @@ export async function submitSessionPrompt(
     inheritToolScope?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
+    /** Admission key. Two submits with the same key queue one prompt (`QueueItem.dispatchId`). */
+    dispatchId?: string;
   },
 ): Promise<SendPromptResponse | null> {
   const { threadId, attachments, fileRefs, author, recordUserActivity = true, replyTo } = opts ?? {};
@@ -1280,6 +1284,7 @@ export async function submitSessionPrompt(
           })
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(opts?.dispatchId ? { dispatchId: opts.dispatchId } : {}),
             metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
             ...(outcome?.kind === "expand" && outcome.skill
               ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
@@ -1382,6 +1387,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   if (!promoteItemId && !body.text.trim() && !body.attachments?.length && !body.fileRefs?.length) {
     return c.json({ error: "Add a message or an attachment." }, 400);
   }
+  if (body.clientMessageId !== undefined && (typeof body.clientMessageId !== "string" || !CLIENT_MESSAGE_ID.test(body.clientMessageId))) {
+    return c.json({ error: "clientMessageId must be 8 to 64 letters, digits, '-' or '_'. Omit it to send without a key." }, 400);
+  }
   if (row.ownerType === "team" && body.threadId !== undefined) {
     const loaded = await loadEngineSession(c, sessionId);
     if ("error" in loaded) return loaded.error;
@@ -1432,6 +1440,19 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
+    const author = promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia);
+    // A resend after a lost answer (an api restart, a gateway error) carries
+    // the first try's key. Answer with that admission before any single-use
+    // attachment ref is spent, so the message is never posted twice. The
+    // sender's id scopes the key, because a team thread has several senders.
+    const dispatchId = body.clientMessageId && !promoteItemId ? `web:${author.id}:${body.clientMessageId}` : undefined;
+    if (dispatchId) {
+      const admitted = await c.var.providers.engineStore.getQueueItemByDispatchId(row.id, dispatchId);
+      if (admitted) {
+        const replay: SendPromptResponse = { messageId: admitted.id, threadId: admitted.threadId, activityAt: admitted.createdAt };
+        return c.json(replay, 202);
+      }
+    }
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
       threadId: body.threadId,
       appPageHint: readAppPageHint(body.appPageHint),
@@ -1439,8 +1460,9 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
-      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
+      author,
       ...(replyTo ? { replyTo } : {}),
+      ...(dispatchId ? { dispatchId } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);

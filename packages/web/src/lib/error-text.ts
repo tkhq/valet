@@ -1,16 +1,24 @@
 import { ApiError } from "~/api/client";
+import { isServerUnavailable } from "~/api/connection";
 
-/** Server-side messages carry the corrective action; a network failure does
- * not, so it gets one here. */
+/** What the person sees when no api answered a request (`connection.ts`). The request may or may not have run. */
+export const UNAVAILABLE_TEXT = "Valet did not respond. If the result is missing after Valet reconnects, try again.";
+
+/**
+ * The one message for a failed request. The api's own message comes first:
+ * its `corrective` field when it sends one, then its `error`. A request
+ * that no api answered gets `UNAVAILABLE_TEXT`.
+ */
 export function errorText(err: unknown, fallback = "The request failed. Try again."): string {
   if (err instanceof ApiError) {
     const payload = err.payload;
-    if (typeof payload === "object" && payload !== null && "error" in payload) {
-      const message = (payload as { error: unknown }).error;
-      if (typeof message === "string") return message;
+    if (typeof payload === "object" && payload !== null) {
+      if ("corrective" in payload && typeof payload.corrective === "string") return payload.corrective;
+      if ("error" in payload && typeof payload.error === "string") return payload.error;
     }
-    return err.message;
   }
+  if (isServerUnavailable(err)) return UNAVAILABLE_TEXT;
+  if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return `${err.message}. Check the server is running, then try again.`;
   return fallback;
 }
