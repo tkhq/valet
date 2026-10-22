@@ -196,7 +196,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   const text = `${provenanceHeader(deps.env)}\n\n${doc}`;
   let sent: SendPromptResponse;
   try {
-    sent = await deps.client.sendPrompt(sessionId, { text, ...(threadFlag ? { threadId: threadFlag } : {}) });
+    sent = await deps.client.sendPrompt(sessionId, { text, queueMode: "inject", ...(threadFlag ? { threadId: threadFlag } : {}) });
   } catch (err) {
     if (newSession) {
       printErr(`session ${sessionId} was created but the handoff was not delivered.`);

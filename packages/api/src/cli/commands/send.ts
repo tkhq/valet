@@ -112,14 +112,22 @@ interface ConsumeCtx {
  * treated as terminal: we keep consuming for a short grace window so the
  * settle's real outcome (completed vs failed/aborted) decides the exit code.
  * The OK fallback only fires when the settle frame never arrives (stream
- * close or grace expiry) — turns are sequential per thread, so a turn_end on
- * our thread does mean our turn ended.
+ * close or grace expiry).
+ *
+ * The prompt is sent with `inject`, so on a busy thread it either waits
+ * behind the running turn or joins it. A turn_end counts only while the
+ * answering item is the thread's active item (`queue.state`, which the
+ * socket seeds on connect): the turn our prompt waited behind ends first.
+ * A `merged` settle means our prompt joined a running turn, so we follow
+ * that turn's item (`mergedIntoItemId`) to its own settle.
  */
 export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCtx): Promise<number> {
   const stream = deps.stream({ url: deps.url, apiKey: deps.apiKey, sessionId: ctx.sessionId });
   const graceMs = ctx.settleGraceMs ?? 3_000;
   const iter = stream[Symbol.asyncIterator]();
   let turnEnded = false;
+  let answering = ctx.messageId;
+  let activeItemId: string | undefined;
 
   const endTurnOutput = (): void => {
     if (!ctx.json) printLine("");
@@ -169,8 +177,16 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
       }
     }
 
+    if (ev.type === "queue.state" && ev.threadId === ctx.threadId) activeItemId = ev.state.activeItemId;
+
+    // Our prompt joined a running turn: that turn's settle is ours now.
+    if (ev.type === "submission.settled" && ev.queueItemId === answering && ev.outcome === "merged" && ev.mergedIntoItemId) {
+      answering = ev.mergedIntoItemId;
+      continue;
+    }
+
     // Terminal: our submission settled → map outcome to an exit code.
-    if (ev.type === "submission.settled" && ev.queueItemId === ctx.messageId) {
+    if (ev.type === "submission.settled" && ev.queueItemId === answering) {
       if (!turnEnded) endTurnOutput();
       return outcomeToExit(ev.outcome);
     }
@@ -182,7 +198,7 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
     }
 
     // Our turn ended: not terminal — enter the settle grace window.
-    if (ev.type === "turn_end" && ev.threadId === ctx.threadId && !turnEnded) {
+    if (ev.type === "turn_end" && ev.threadId === ctx.threadId && activeItemId === answering && !turnEnded) {
       turnEnded = true;
       endTurnOutput();
     }
@@ -210,7 +226,7 @@ export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<numbe
   }
   const sessionId = resolved?.sessionId ?? (typeof sessionOverride === "string" ? sessionOverride : (await deps.client.ensureOrchestrator()).sessionId);
 
-  const sent = await deps.client.sendPrompt(sessionId, { text, threadId: threadOverride });
+  const sent = await deps.client.sendPrompt(sessionId, { text, threadId: threadOverride, queueMode: "inject" });
   // A null messageId means the text ran as a slash command: it executed
   // immediately, took no queue item, and its result arrives as a
   // command_result entry — there is no turn to follow.

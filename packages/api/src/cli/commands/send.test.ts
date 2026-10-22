@@ -54,6 +54,16 @@ function gateEvent(threadId = "t1"): WireEvent {
 function turnEnd(threadId = "t1"): WireEvent {
   return { seq: 1, ts: 1, type: "turn_end", threadId, reason: "end_turn" };
 }
+/** The thread's queue, as the socket seeds it on connect and sends on each change. */
+function queueState(activeItemId: string | undefined, threadId = "t1"): WireEvent {
+  return {
+    seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId,
+    state: { mode: "steer", status: activeItemId ? "running" : "idle", ...(activeItemId ? { activeItemId } : {}), pendingIds: [], collectingIds: [] },
+  };
+}
+function mergedInto(queueItemId: string, mergedIntoItemId: string): WireEvent {
+  return { seq: 1, ts: 1, type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId, outcome: "merged", mergedIntoItemId };
+}
 
 function makeStream(events: WireEvent[]): StreamFn {
   return () =>
@@ -179,8 +189,34 @@ describe("consumeSend", () => {
   });
 
   it("returns OK on turn_end for our thread (fallback when the settle frame is missed)", async () => {
-    const { deps } = stubDeps([textDelta("hi"), turnEnd()]);
+    const { deps } = stubDeps([queueState("q1"), textDelta("hi"), turnEnd()]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("does not end on the turn_end of a turn the prompt waited behind", async () => {
+    // Our prompt queued behind turn r0. r0 ends, and our own turn takes longer
+    // than the grace window to send its first frame.
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield queueState("r0");
+        yield turnEnd();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        yield queueState("q1");
+        yield textDelta("ours");
+        yield turnEnd();
+        yield settled("failed");
+      })();
+    const { deps } = stubDeps([]);
+    expect(await consumeSend({ ...deps, stream }, { ...ctx, settleGraceMs: 20 })).toBe(ExitCode.TurnError);
+    expect(stdout()).toContain("ours");
+  });
+
+  it("follows a prompt that joined the running turn to that turn's settle", async () => {
+    const { deps } = stubDeps([
+      queueState("r0"), textDelta("before "), mergedInto("q1", "r0"), textDelta("answer"), turnEnd(), settled("failed", "r0"),
+    ]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
+    expect(stdout()).toContain("before answer");
   });
 
   it("waits past turn_end for the settle frame and maps its outcome", async () => {
@@ -201,6 +237,7 @@ describe("consumeSend", () => {
     const hang = new Promise<never>(() => {});
     const stream: StreamFn = () =>
       (async function* () {
+        yield queueState("q1");
         yield turnEnd();
         await hang;
       })();
@@ -249,7 +286,7 @@ describe("runSend", () => {
     const code = await runSend(bundle.deps, parseGlobalFlags(["write", "hello.txt"]));
     expect(code).toBe(ExitCode.OK);
     expect(bundle.ensureCalls).toBe(1);
-    expect(bundle.sent).toEqual([{ id: "orch_1", body: { text: "write hello.txt", threadId: undefined } }]);
+    expect(bundle.sent).toEqual([{ id: "orch_1", body: { text: "write hello.txt", threadId: undefined, queueMode: "inject" } }]);
   });
 
   it("resolves --thread without creating a runtime", async () => {
@@ -257,7 +294,7 @@ describe("runSend", () => {
     const code = await runSend(bundle.deps, parseGlobalFlags(["--thread", "t1", "--text", "hi"]));
     expect(code).toBe(ExitCode.OK);
     expect(bundle.ensureCalls).toBe(0);
-    expect(bundle.sent).toEqual([{ id: "s1", body: { text: "hi", threadId: "t1" } }]);
+    expect(bundle.sent).toEqual([{ id: "s1", body: { text: "hi", threadId: "t1", queueMode: "inject" } }]);
   });
 
   it("rejects a session that does not own the selected thread", async () => {

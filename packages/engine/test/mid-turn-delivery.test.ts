@@ -20,6 +20,7 @@ import {
   InMemorySessionStore,
   MID_TURN_DELIVERY_KEY,
   VirtualSandboxProvider,
+  type BusEvent,
   type MessageEntry,
   type QueueItem,
   type ToolDef,
@@ -70,7 +71,10 @@ async function setup(provider: string, responses: FauxResponseStep[], tools: Too
   const faux = registerFauxProvider({ provider });
   faux.setResponses(responses);
   const store = new InMemorySessionStore();
-  const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+  const stream = new InMemoryEventStream();
+  const events: BusEvent[] = [];
+  stream.subscribe({}, (e) => events.push(e));
+  const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
   const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools });
   const thread = await session.ensureDefaultThread();
   const settled = async (id: string) => (await store.getQueueItem(session.id, id))?.status === "settled";
@@ -78,7 +82,7 @@ async function setup(provider: string, responses: FauxResponseStep[], tools: Too
   const userEntries = async () => (await session.readEntries(thread.key)).filter(
     (e): e is MessageEntry => e.type === "message" && e.role === "user",
   );
-  return { faux, store, session, thread, settled, outcome, userEntries };
+  return { faux, store, session, thread, settled, outcome, userEntries, events };
 }
 
 describe("mid-turn delivery", () => {
@@ -114,6 +118,9 @@ describe("mid-turn delivery", () => {
     expect((await h.userEntries())[1]?.queueItemId).toBe(second.queueItemId);
     // The merged item's result is the turn that answered it.
     expect(await h.thread.awaitResult(second.queueItemId)).toMatchObject({ outcome: "completed" });
+    // Its settle event names that turn, so a live follower can wait on it.
+    expect(h.events.map((e) => e.event).find((e) => e.type === "submission_settled" && e.queueItemId === second.queueItemId))
+      .toMatchObject({ outcome: { outcome: "merged" }, mergedIntoItemId: first.queueItemId });
     h.faux.unregister();
   });
 

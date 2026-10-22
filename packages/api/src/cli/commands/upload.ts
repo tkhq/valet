@@ -269,6 +269,7 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
         threadId: args.threadId,
         text: args.message,
         fileRefs,
+        queueMode: "inject",
       });
 
       if (sent.messageId === null) {

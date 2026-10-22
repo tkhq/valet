@@ -164,10 +164,16 @@ async function driveGate(deps: ChatTurnDeps, sessionId: string, gate: DecisionGa
  * `turn_end` on our thread, an `error`, a cancelled gate, or the stream closing
  * (clean close / abort). A `decision_gate` on our thread pauses rendering,
  * reads a selection, resolves it, and resumes the SAME stream.
+ *
+ * The prompt is sent with `inject`, like `valet send` (`consumeSend`): a
+ * turn_end counts only while the answering item is active, and a `merged`
+ * settle moves the wait to the turn our prompt joined.
  */
 export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promise<ChatTurnResult> {
-  const sent = await deps.client.sendPrompt(input.sessionId, { text: input.text, threadId: input.threadId });
+  const sent = await deps.client.sendPrompt(input.sessionId, { text: input.text, threadId: input.threadId, queueMode: "inject" });
   const { threadId, messageId } = sent;
+  let answering = messageId;
+  let activeItemId: string | undefined;
 
   const stream = deps.stream({
     url: deps.url,
@@ -200,16 +206,22 @@ export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promis
       case "error":
         deps.write(`\nerror: ${ev.message}\n`);
         return { exit: ExitCode.TurnError, threadId };
+      case "queue.state":
+        if (ev.threadId === threadId) activeItemId = ev.state.activeItemId;
+        break;
       case "submission.settled":
-        if (ev.queueItemId === messageId) {
+        if (ev.queueItemId === answering && ev.outcome === "merged" && ev.mergedIntoItemId) {
+          answering = ev.mergedIntoItemId;
+        } else if (ev.queueItemId === answering) {
           deps.write("\n");
           return { exit: outcomeToExit(ev.outcome), threadId };
         }
         break;
       case "turn_end":
-        // Fallback terminal: the REPL is sequential per thread, so a turn_end on
-        // our thread ends our turn even if the settle frame is missed.
-        if (ev.threadId === threadId) {
+        // Fallback terminal for a missed settle frame. A turn our prompt
+        // waited behind ends on the same thread, so only the answering
+        // item's turn counts.
+        if (ev.threadId === threadId && activeItemId === answering) {
           deps.write("\n");
           return { exit: ExitCode.OK, threadId };
         }

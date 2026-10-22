@@ -442,8 +442,13 @@ async function deliverToAssistantThreadInner(
     ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
+  // `inject`, not the thread default: a personal assistant thread defaults
+  // to `steer`, which would abort the person's running turn and drop the
+  // items queued behind it. The engine admits the delivery into the running
+  // turn only when it adds no authority; otherwise it waits as a followup.
   const receipt = await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
+    queueMode: "inject",
     ...(Object.keys(metadata).length ? { metadata } : {}),
     author: args.author ?? { id: args.actorUserId },
   });

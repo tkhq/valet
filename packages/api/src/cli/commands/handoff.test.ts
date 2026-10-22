@@ -287,7 +287,7 @@ describe("runHandoff", () => {
 it("hands off to the requested thread without creating a runtime", async () => {
   const bundle = stubDeps({ files: { "doc.md": DOC } });
   expect(await runHandoff(bundle.deps, parseGlobalFlags(["doc.md", "--thread", "t1"]))).toBe(ExitCode.OK);
-  expect(bundle.sent[0]).toMatchObject({ id: "s1", body: { threadId: "t1" } });
+  expect(bundle.sent[0]).toMatchObject({ id: "s1", body: { threadId: "t1", queueMode: "inject" } });
   expect(bundle.ensureCalls()).toBe(0);
   expect(bundle.created).toEqual([]);
   expect(stdout()).toContain("http://inst/threads/t1");

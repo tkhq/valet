@@ -113,6 +113,14 @@ describe("busEventToWire", () => {
     expect(out).toEqual([{ type: "message_end", threadId: "t1", messageId: "m1", reason: "tool_use" }]);
   });
 
+  it("forwards the item a merged submission joined", () => {
+    const out = busEventToWire(ev({
+      type: "submission_settled", sessionId: "s1", threadId: "t1", queueItemId: "q2",
+      outcome: { outcome: "merged" }, mergedIntoItemId: "q1",
+    }));
+    expect(out).toEqual([{ type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId: "q2", outcome: "merged", error: undefined, mergedIntoItemId: "q1" }]);
+  });
+
   it("forwards text_delta with empty messageId placeholder", () => {
     const out = busEventToWire(ev({ type: "text_delta", threadId: "t1", text: "hello" }));
     expect(out).toEqual([{ type: "text_delta", threadId: "t1", messageId: "", delta: "hello" }]);
