@@ -60,6 +60,7 @@ The purpose chart retains its full distribution while a key is selected.
 Surface, period, and personal/team/org filters still apply.
 Individual intents retain the existing team-admin visibility rule.
 Registry edits and merges require the existing organization-settings admin permission.
+The merge editor uses the shared Select primitive.
 No examples or classifier input text are exposed by the registry API.
 
 ## Validation limits

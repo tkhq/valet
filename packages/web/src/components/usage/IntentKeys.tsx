@@ -1,6 +1,6 @@
 import type { ToolIntentKeyUsage, ToolIntentUsage } from "@valet/api/wire";
 import { useEditTagKey, useMergeTagKey } from "~/api/tagging";
-import { Badge, Button, Card, CardHeader, CardTitle, CardBody, Input } from "~/components/primitives";
+import { Badge, Button, Card, CardHeader, CardTitle, CardBody, Input, Select } from "~/components/primitives";
 
 function KeyEditor({ row, keys }: { row: ToolIntentKeyUsage; keys: ToolIntentKeyUsage[] }) {
   const edit = useEditTagKey();
@@ -17,9 +17,9 @@ function KeyEditor({ row, keys }: { row: ToolIntentKeyUsage; keys: ToolIntentKey
     {row.key !== "other" && <form className="mt-3 flex flex-wrap items-center gap-2" onSubmit={event => {
       event.preventDefault(); const data = new FormData(event.currentTarget); merge.mutate({ key: row.key, into: String(data.get("into")) });
     }}>
-      <label className="text-xs text-muted">Merge into <select name="into" aria-label={`Merge ${row.label} into`} className="rounded border border-line bg-paper p-2 text-ink" defaultValue="other">
+      <label className="text-xs text-muted">Merge into <Select name="into" aria-label={`Merge ${row.label} into`} defaultValue="other">
         {keys.filter(key => key.status !== "merged" && key.key !== row.key).map(key => <option key={key.key} value={key.key}>{key.label}</option>)}
-      </select></label>
+      </Select></label>
       <Button type="submit" size="sm" disabled={merge.isPending}>Merge key</Button>
     </form>}
     {(edit.isError || merge.isError) && <p role="alert" className="mt-2 text-xs text-danger-600">The registry could not be changed. Reload it and retry after the current tagging batch.</p>}
