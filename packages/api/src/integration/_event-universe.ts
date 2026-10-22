@@ -18,13 +18,14 @@
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   type FauxProviderRegistration,
   type FauxResponseFactory,
   type JsonObject,
   type JsonValue,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";

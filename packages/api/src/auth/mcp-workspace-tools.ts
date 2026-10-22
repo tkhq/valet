@@ -1,3 +1,4 @@
+import { registerTool } from "./mcp-intent.js";
 /**
  * MCP tools for the rest of a workspace: skills, memory, workflows, the
  * approvals inbox, and artifacts
@@ -170,7 +171,7 @@ function memoryView(res: MemoryReadBody) {
 export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): void {
   // ── Skills ────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool(server,
     "list_skills",
     {
       description:
@@ -199,7 +200,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }, "Set a smaller limit or a query to see fewer skills."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "get_skill",
     {
       description:
@@ -224,7 +225,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
 
   // ── Memory ────────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool(server,
     "search_memory",
     {
       description: "Searches Valet memory: the notes, decisions, and context your Valet agents and your team saved.",
@@ -241,7 +242,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }, "Set a smaller limit to see fewer results. Use read_memory with a result's path to read that file."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "read_memory",
     {
       description: "Reads one memory file, or a directory's index when the path is a directory. Use an empty path for the root index.",
@@ -258,7 +259,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "write_memory",
     {
       description:
@@ -283,7 +284,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "patch_memory",
     {
       description:
@@ -305,7 +306,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "move_memory",
     {
       description: "Moves or renames a memory file. The destination must not exist; to merge two files, patch one and delete the other.",
@@ -322,7 +323,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "delete_memory",
     {
       description:
@@ -342,7 +343,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
 
   // ── Workflows ─────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool(server,
     "list_workflows",
     {
       description: `Lists the Valet workflows (saved automations) you can run, with each one's latest run. ${RUN_STATUSES}`,
@@ -362,7 +363,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "run_workflow",
     {
       description:
@@ -381,7 +382,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "get_workflow_run",
     {
       description: `Reads a workflow run's status, outcome, and pending approvals. With wait_seconds, it waits for the run to finish first. ${RUN_STATUSES}`,
@@ -394,7 +395,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     run(async ({ run_id, wait_seconds }: { run_id: string; wait_seconds?: number }) => waitForRun(deps, run_id, wait_seconds ?? 0)),
   );
 
-  server.registerTool(
+  registerTool(server,
     "cancel_workflow_run",
     {
       description: `Cancels a workflow run that has not finished, and waits briefly for it to stop. Steps that already ran are not undone. ${RUN_STATUSES}`,
@@ -408,7 +409,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "retry_workflow_run",
     {
       description:
@@ -433,7 +434,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
 
   // ── Approvals inbox ───────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool(server,
     "list_inbox",
     {
       description:
@@ -471,7 +472,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
 
   // ── Artifacts ─────────────────────────────────────────────────────────
 
-  server.registerTool(
+  registerTool(server,
     "list_artifacts",
     {
       description: "Lists published Valet artifacts (shareable pages and documents) in a workspace, newest update first.",
@@ -507,7 +508,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }, "Set a smaller limit or a query to see fewer artifacts."),
   );
 
-  server.registerTool(
+  registerTool(server,
     "publish_artifact",
     {
       description:
@@ -537,7 +538,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
-  server.registerTool(
+  registerTool(server,
     "unpublish_artifact",
     {
       description:

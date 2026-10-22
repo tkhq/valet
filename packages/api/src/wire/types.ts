@@ -6626,3 +6626,17 @@ export interface AgentAccessResponse {
   mcp_apps: Array<{ client_id: string; name: string; connected_at: number | null; expires_at: number | null }>;
   cli_devices: Array<{ id: string; device: string; signed_in_at: number; last_used_at: number | null }>;
 }
+
+/** External MCP and CLI facts. Arguments and results are never included. */
+export interface ExternalUsageResponse {
+  daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
+  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
+  detailsVisible: boolean;
+  recent: {
+    id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
+    clientVersion: string | null; userId: string; userName: string | null; outcome: "ok" | "error" | "denied";
+    intent: string | null; createdAt: number;
+  }[];
+  hasMore: boolean;
+}

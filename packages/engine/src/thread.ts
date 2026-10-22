@@ -1,6 +1,7 @@
 import { ThinkingTiming } from "./thinking-timing.js";
 import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
+import { requiresToolIntent, stripToolIntent, type ToolUsageFact } from "@valet/shared";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
@@ -551,6 +552,7 @@ export class Thread {
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private thinkingTiming = new ThinkingTiming();
+  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name">>();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -6495,8 +6497,8 @@ export class Thread {
     return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
       ? actionInScope(this.effectiveToolScope(), def.scopeAction)
       : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
-      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
-        this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
+      toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs, toolIntent }) =>
+        this.buildToolContext({ signal, toolCallId, toolName, toolArgs, toolIntent }), includeRestricted,
       ),
     );
   }
@@ -6612,8 +6614,9 @@ export class Thread {
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
+    toolIntent?: string;
   }): ToolContext {
-    const { signal, toolCallId, toolName, toolArgs } = args;
+    const { signal, toolCallId, toolName, toolArgs, toolIntent } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
     const presence = mergeAppearance(readAppearance(this.runningItem?.metadata?.presence));
@@ -6679,6 +6682,7 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+        if (toolIntent) req = { ...req, body: [req.body, `Intent: ${toolIntent}`].filter(Boolean).join("\n\n") };
         // A channel sender with no Valet account may not put an approval or a
         // question in front of a teammate: the request is refused here, before
         // any gate opens, so a newcomer cannot flood the team with requests.
@@ -6737,7 +6741,8 @@ export class Thread {
         });
         await prevCycle;
         try {
-          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName,
+            toolArgs: toolIntent ? { ...toolArgs, intent: toolIntent } : toolArgs });
         } finally {
           releaseCycle();
         }
@@ -7000,6 +7005,14 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
+        if (requiresToolIntent(event.toolName)) {
+          let intent: string | null = null;
+          try { intent = stripToolIntent(event.toolName, event.args ?? {}).intent; } catch { /* Invalid calls still count. */ }
+          this.toolUsageStarts.set(event.toolCallId, {
+            createdAt: Date.now(), intent,
+            name: event.toolName === "call_tool" && typeof event.args?.tool_id === "string" ? event.args.tool_id : event.toolName,
+          });
+        }
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
@@ -7019,6 +7032,22 @@ export class Thread {
         );
         break;
       case "tool_execution_end": {
+        const usage = this.toolUsageStarts.get(event.toolCallId);
+        this.toolUsageStarts.delete(event.toolCallId);
+        if (usage) {
+          const owner = this.session.owner;
+          const details = event.result?.details;
+          const status = readToolUsageOutcome(details, event.isError);
+          const fact: ToolUsageFact = {
+            ...usage, ...status, id: `${this.session.id}:${event.toolCallId}`,
+            orgId: this.session.options.orgId, userId: this.runningItem?.author?.id ?? this.defaultActorId(),
+            sessionId: this.session.id, threadId: this.id,
+            ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
+            durationMs: Math.max(0, Date.now() - usage.createdAt),
+          };
+          try { this.session.options.recordToolUsage?.(fact); }
+          catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+        }
         const part = this.currentToolCalls.get(event.toolCallId);
         const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
@@ -8183,4 +8212,17 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
 function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
   const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
   return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
+}
+
+function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsageFact, "outcome" | "errorCode"> {
+  if (details && typeof details === "object") {
+    if ("usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object") {
+      const status = details.usageOutcome;
+      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied")) {
+        return { outcome: status.outcome, errorCode: "errorCode" in status && typeof status.errorCode === "string" ? status.errorCode : null };
+      }
+    }
+    if ("ok" in details && details.ok === false) return { outcome: "error", errorCode: "tool_error" };
+  }
+  return { outcome: isError ? "error" : "ok", errorCode: isError ? "tool_error" : null };
 }

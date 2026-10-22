@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
-  fauxToolCall,
+
   registerFauxProvider,
   Type,
 } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "./tool-intent.js";
 import {
   Engine,
   InMemoryEventStream,
@@ -100,7 +101,7 @@ export function runRestartSafeGatesContract(
       expect(persistedGates).toHaveLength(1);
       const suspended = await store.getSuspendedTurn(SESSION_ID, gate.threadId);
       expect(suspended?.toolName).toBe("do_thing");
-      expect(suspended?.toolArgs).toEqual({ arg: "x" });
+      expect(suspended?.toolArgs).toEqual({ arg: "x", intent: "Exercise do_thing in this test." });
       expect(suspended?.resumeKey).toBe("do_thing:x");
       expect(suspended?.ordinal).toBe(0);
 

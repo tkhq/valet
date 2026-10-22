@@ -309,3 +309,17 @@ This produces `dist/valet[-<os>-<arch>]`: a single file that embeds the
 compiled server, the web client's static build, and migrations. During
 development, the same CLI runs un-compiled via the package's dev entry
 (`packages/api/src/cli.ts`).
+
+## Usage analytics
+
+CLI requests identify the command, CLI version, and invocation UUID in headers.
+One invocation produces one usage fact, even when it sends several HTTP requests.
+Positional arguments and option values do not enter these headers.
+The server derives identity and ownership from its authorization checks.
+CLI commands do not require intent.
+
+MCP tools require a top-level `intent` string of 1 to 500 trimmed characters.
+Use one plain-language sentence about your purpose and reason.
+For `call_tool`, put intent beside `tool_id`, not inside `params`.
+The server removes intent before provider execution.
+Usage > Tool usage shows hosted, MCP, and CLI facts with a surface filter.

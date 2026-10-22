@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type SessionEntry } from "../src/index.js";
 import { entriesToAgentMessages } from "../src/thread.js";
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
@@ -10,9 +11,8 @@ afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 it("defers an older tail turn when the generated summary needs its space", async () => {
   // The window leaves about 1k tokens of headroom over the system prompt and
   // tool definitions. The bash and task tools describe background processes
-  // (wakeups), and update_plan adds its own definition, so the fixture is
-  // 21.5k; at 24.5k the older tail fits and nothing is deferred.
-  const faux = registerFauxProvider({ provider: "summary-tail-budget", models: [{ id: "tiny", name: "tiny", contextWindow: 21_500, maxTokens: 5 }] });
+  // Wakeups, update_plan, and intent schemas leave roughly 1k tokens of headroom.
+  const faux = registerFauxProvider({ provider: "summary-tail-budget", models: [{ id: "tiny", name: "tiny", contextWindow: 23_000, maxTokens: 5 }] });
   cleanups.push(() => faux.unregister());
   const model = faux.getModel("tiny");
   if (!model) throw new Error("Missing fixture model");

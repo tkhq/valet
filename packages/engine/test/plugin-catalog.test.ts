@@ -2,7 +2,8 @@ import { decode } from "@toon-format/toon";
 import { describe, it, expect, vi } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   pluginCatalogTools,
   buildPluginCatalog,

@@ -1,3 +1,4 @@
+import { cliUsage } from "./middleware/cli-usage.js";
 import { threadsRouter } from "./routes/threads.js";
 /**
  * Hono app factory. Wiring lives here; main.ts only handles boot + listen.
@@ -173,6 +174,7 @@ export function createApp(
     }),
   );
   app.use("*", providersMiddleware(providers));
+  app.use("/api/*", cliUsage());
 
   // LLM recording proxy — /proxy/anthropic/* and /proxy/openai/*. Uses its
   // own vlt_ key auth (resolveProxyPrincipal); intentionally outside /api/*
@@ -242,7 +244,11 @@ export function createApp(
   // Public agent onboarding pages (`/agent-setup.md`, `/agent-skill.md`).
   mountOnboardingRoutes(app);
 
-  app.get("/api/health", (c) => {
+  app.get("/api/health", async (c) => {
+    // Health stays public. Valid CLI credentials supply optional telemetry identity.
+    if (c.req.header("x-valet-cli-invocation")) {
+      await buildAuthMiddleware({ auth: auth ?? null, db: providers.db })(c, async () => {});
+    }
     const body: HealthResponse = {
       ok: true,
       service: "valet-api",

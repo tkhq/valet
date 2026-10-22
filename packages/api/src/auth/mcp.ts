@@ -1,3 +1,6 @@
+import { bestEffortTelemetry, externalCallOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
+import { intentSchema } from "./mcp-intent.js";
+import { registerTool } from "./mcp-intent.js";
 /**
  * MCP endpoint (auth-v2 design, Task 9): a single `app.all("/mcp", ...)`
  * mount, public (outside `/api/*`, not behind `authMiddleware`) — guarded
@@ -29,11 +32,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { withMcpAuth } from "better-auth/plugins";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
 import type { Providers } from "../providers/types.js";
-import { users } from "../schema/index.js";
+import { mcpClientInfo, users } from "../schema/index.js";
 import type { ValetAuth } from "./index.js";
 import { attachMcpCaller } from "./mcp-caller.js";
 import { hasMcpConsent } from "../routes/oauth-consent.js";
@@ -65,11 +68,28 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         { status: 401, headers: { "WWW-Authenticate": challenge, "Access-Control-Expose-Headers": "WWW-Authenticate" } },
       );
     }
+    const started = Date.now();
+    const orgId = await resolveOrgId(db);
+    const identity = { orgId, userId: session.userId, clientId: session.clientId };
+    const body: unknown = req.method === "POST" ? await req.clone().json().catch(() => null) : null;
+    const rpc = object(body);
+    const params = object(rpc?.params);
+    const args = object(params?.arguments);
+    const clientInfo = object(params?.clientInfo);
+    if (rpc?.method === "initialize" && typeof clientInfo?.name === "string" && typeof clientInfo.version === "string") {
+      await saveMcpClientInfo(db, identity, { name: clientInfo.name, version: clientInfo.version });
+    }
+    let outcome: "ok" | "error" | "denied" = "ok";
+    let errorCode: string | null = null;
+    let resolvedSessionId: string | undefined;
+    let resolvedThreadId: string | undefined;
+    let resolvedTeamId: string | undefined;
+    let resolvedActionId: string | undefined;
     const server = new McpServer({ name: "valet", version: "1.0.0" });
 
     const [row] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
     if (row) {
-      const caller = { id: row.id, email: row.email, name: row.name ?? undefined, role: row.role, orgId: await resolveOrgId(db) };
+      const caller = { id: row.id, email: row.email, name: row.name ?? undefined, role: row.role, orgId };
       const api: ApiCaller = async (method, path, body) => {
         const inner = attachMcpCaller(new Request(`${origin}${path}`, {
           method,
@@ -83,6 +103,24 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           parsed = text ? JSON.parse(text) : null;
         } catch {
           // Keep the raw text; the tool reports the status.
+        }
+        if (!res.ok) {
+          outcome = res.status === 403 ? "denied" : "error";
+          errorCode = `http_${res.status}`;
+        }
+        const action = object(parsed);
+        if (action?.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
+        if (action?.status === "approval_required") { outcome = "denied"; errorCode = "approval_required"; }
+        // IDs come only from routes that admitted this user. Never retain the response.
+        if (res.ok) {
+          const url = new URL(inner.url);
+          const pathParts = url.pathname.split("/");
+          const team = url.searchParams.get("workspace") ?? (url.searchParams.get("ownerType") === "team" ? url.searchParams.get("ownerId") : null);
+          if (team && team !== "user") resolvedTeamId = team;
+          if (typeof action?.tool_id === "string") resolvedActionId = action.tool_id;
+          if (pathParts[2] === "threads") resolvedThreadId = typeof action?.id === "string" ? action.id : pathParts[3];
+          if (typeof action?.threadId === "string") resolvedThreadId = action.threadId;
+          if (typeof action?.sessionId === "string") resolvedSessionId = action.sessionId;
         }
         return { status: res.status, body: parsed };
       };
@@ -99,7 +137,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       registerWorkspaceTools(server, deps);
     }
 
-    server.registerTool(
+    registerTool(server,
       "whoami",
       { description: "Returns the authenticated user's identity: userId, email, role." },
       async () => {
@@ -115,7 +153,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       },
     );
 
-    server.registerTool(
+    registerTool(server,
       "list_sessions",
       { description: "Lists the authenticated user's sessions: id, title, status." },
       async () => {
@@ -133,6 +171,45 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       enableJsonResponse: true,
     });
     await server.connect(transport);
-    return transport.handleRequest(req);
+    try {
+      const response = await transport.handleRequest(req);
+      if (rpc?.method === "tools/call") {
+        const responseBody: unknown = await response.clone().json().catch(() => null);
+        const result = object(object(responseBody)?.result);
+        const error = object(object(responseBody)?.error);
+        if (error || result?.isError === true) {
+          if (outcome === "ok") outcome = "error";
+          errorCode ??= typeof error?.code === "number" ? String(error.code) : "tool_error";
+        }
+      }
+      return response;
+    } catch (error) {
+      outcome = "error";
+      errorCode = "internal_error";
+      throw error;
+    } finally {
+      if (rpc?.method === "tools/call" && typeof params?.name === "string") {
+        const toolName = params.name;
+        const durationMs = Date.now() - started;
+        void bestEffortTelemetry(async () => {
+          const [client] = await db.select().from(mcpClientInfo).where(and(
+            eq(mcpClientInfo.orgId, orgId), eq(mcpClientInfo.userId, session.userId), eq(mcpClientInfo.clientId, session.clientId),
+          )).limit(1);
+          const intent = intentSchema.safeParse(args?.intent);
+          await recordExternalCall(db, {
+            id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: toolName === "call_tool" && resolvedActionId ? resolvedActionId : toolName.slice(0, 200),
+            clientName: client?.name, clientVersion: client?.version,
+            ...await externalCallOwner(db, orgId, session.userId, resolvedThreadId, resolvedSessionId, resolvedTeamId),
+            outcome, errorCode, durationMs,
+            intent: intent.success && typeof intent.data === "string" ? intent.data.trim() : null, createdAt: started,
+          });
+        });
+      }
+      await server.close();
+    }
   });
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }

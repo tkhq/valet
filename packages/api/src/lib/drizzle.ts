@@ -408,6 +408,21 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   "bytes" bytea NOT NULL,
   PRIMARY KEY ("skill_id", "path")
 );` },
+  { describe: "external_calls", probe: { kind: "table", table: "external_calls" }, sql: `CREATE TABLE IF NOT EXISTS "external_calls" (
+  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "user_id" text NOT NULL,
+  "surface" text NOT NULL, "name" text NOT NULL, "client_name" text, "client_version" text,
+  "session_id" text, "persona" text, "thread_id" text, "owner_type" text NOT NULL, "owner_id" text NOT NULL,
+  "outcome" text NOT NULL, "error_code" text, "duration_ms" integer NOT NULL,
+  "intent" text, "created_at" bigint NOT NULL,
+  CONSTRAINT "external_calls_intent_length" CHECK (length("intent") <= 500)
+)` },
+  { describe: "external_calls_org_created", probe: { kind: "index", index: "external_calls_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_org_created" ON "external_calls" ("org_id", "created_at", "id")` },
+  { describe: "external_calls_user_created", probe: { kind: "index", index: "external_calls_user_created" }, sql: `CREATE INDEX IF NOT EXISTS "external_calls_user_created" ON "external_calls" ("org_id", "user_id", "created_at")` },
+  { describe: "mcp_client_info", probe: { kind: "table", table: "mcp_client_info" }, sql: `CREATE TABLE IF NOT EXISTS "mcp_client_info" (
+  "org_id" text NOT NULL, "user_id" text NOT NULL, "client_id" text NOT NULL,
+  "name" text NOT NULL, "version" text NOT NULL, PRIMARY KEY ("org_id", "user_id", "client_id")
+)` },
+
   { describe: "attention channel grace", probe: { kind: "column", table: "user_notification_preferences", column: "channel_grace_seconds" }, sql: 'ALTER TABLE user_notification_preferences ADD COLUMN channel_grace_seconds integer' },
   { describe: "personal attention outbox", probe: { kind: "table", table: "pending_channel_deliveries" }, sql: `CREATE TABLE pending_channel_deliveries (
     id text PRIMARY KEY NOT NULL, user_id text NOT NULL, tier_id text NOT NULL, notification_id text,

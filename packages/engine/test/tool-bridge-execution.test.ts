@@ -92,7 +92,7 @@ describe("tool bridge: empty-result marker (TKAI-318)", () => {
       }),
       buildCtx,
     );
-    const result = await tool.execute("tc-1", {}, new AbortController().signal, () => {});
+    const result = await tool.execute("tc-1", { intent: "Check the empty tool result." }, new AbortController().signal, () => {});
     expect(result.content).toEqual([{ type: "text", text: "(quiet completed with no output)" }]);
   });
 
@@ -106,7 +106,7 @@ describe("tool bridge: empty-result marker (TKAI-318)", () => {
       }),
       buildCtx,
     );
-    const result = await tool.execute("tc-2", {}, new AbortController().signal, () => {});
+    const result = await tool.execute("tc-2", { intent: "Check the tool result." }, new AbortController().signal, () => {});
     expect(result.content).toEqual([{ type: "text", text: "hello" }]);
   });
 });
@@ -126,5 +126,33 @@ describe("tool bridge: terminal outcomes", () => {
     );
     const result = await tool.execute("tc-pr", {}, new AbortController().signal, () => {});
     expect(result.details).toEqual({ outcome: { kind: "pull_request_created", url: "https://github.com/acme/repo/pull/42" } });
+  });
+});
+
+describe("shared tool intent", () => {
+  it("requires intent before execution and strips it before context or policy work", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const tool = toAgentTool(defineTool({
+      name: "call_tool", description: "Test the broker boundary", parameters: Type.Object({ tool_id: Type.String(), params: Type.Object({ x: Type.Number() }) }),
+      execute: async args => { seen.push(args); return { text: "ok" }; },
+    }), input => {
+      seen.push(input.toolArgs);
+      return buildCtx();
+    });
+    expect(tool.parameters.required).toContain("intent");
+    const missing = await tool.execute("missing", { tool_id: "demo.echo", params: { x: 1 } });
+    expect(missing.content).toEqual([{ type: "text", text: expect.stringContaining("Add intent") }]);
+    expect(seen).toEqual([{}]);
+    seen.length = 0;
+    await tool.execute("valid", { tool_id: "demo.echo", params: { x: 1 }, intent: "  Read the demo value to check the connection.  " });
+    expect(seen).toEqual([{ tool_id: "demo.echo", params: { x: 1 } }, { tool_id: "demo.echo", params: { x: 1 } }]);
+  });
+
+  it("does not change or record exempt primitives", async () => {
+    const def = defineTool({ name: "bash", description: "Shell", parameters: Type.Object({ command: Type.String() }), execute: async () => ({ text: "done" }) });
+    const tool = toAgentTool(def, buildCtx);
+    expect(tool.parameters).toBe(def.parameters);
+    expect(tool.parameters.properties).not.toHaveProperty("intent");
+    await tool.execute("shell", { command: "pwd" });
   });
 });

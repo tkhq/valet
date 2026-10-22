@@ -377,7 +377,7 @@ it("reports a saved path even if the turn aborts immediately after its write", a
   if (!path) throw new Error("missing saved path in abort error");
   // The thread persists an aborted message's text, not its error. The path must be in the text.
   expect(final.content).toContainEqual({ type: "text", text: expect.stringContaining(path) });
-  expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path, image_id: "img_1" } }));
+  expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: NATIVE_IMAGE_RESULT_TOOL, arguments: expect.objectContaining({ path, image_id: "img_1" }) }));
   expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
   expect(bridge.savedInRequest).toBe(true);
   // Pi drops the aborted message from the next request. The saved path must still arrive.

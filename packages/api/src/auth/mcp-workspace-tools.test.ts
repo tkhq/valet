@@ -4,7 +4,8 @@
  * uses two users so it proves the route ownership rules hold for MCP
  * callers, and one test proves an MCP agent cannot approve an approval gate.
  */
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxToolCall } from "@valet/engine/test-helpers";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -57,7 +58,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
   const res = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: args } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { intent: "Exercise this tool in the integration test.", ...args } } }),
   });
   expect(res.status).toBe(200);
   const { result, error } = (await res.json()) as { result?: { isError?: boolean; content: Array<{ text: string }> }; error?: unknown };

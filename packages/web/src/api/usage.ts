@@ -1,3 +1,4 @@
+import type { ExternalUsageResponse } from "@valet/api/wire";
 /**
  * TanStack Query hooks for the unified spend dashboard.
  * Consumes `GET /api/usage/breakdown`, `GET /api/usage/items`.
@@ -17,6 +18,8 @@ import { api } from "~/api/client";
 import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkUsage = {
+  external: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: string) =>
+    ["usage", "external", period, scope, teamId, search, offset, surface] as const,
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
     ["usage", "breakdown", period, scope, teamId] as const,
   items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
@@ -81,5 +84,14 @@ export function useUsageItems(
     queryFn: ({ signal }) => api.usageItems(period, scope, useCase, teamId, signal),
     staleTime: 60_000,
     ...opts,
+  });
+}
+
+export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined,
+  search: string, offset: number, surface?: "hosted" | "mcp" | "cli") {
+  return useCancellableQuery<ExternalUsageResponse>({
+    queryKey: qkUsage.external(period, scope, teamId, search, offset, surface),
+    queryFn: ({ signal }) => api.externalUsage(period, scope, teamId, search, offset, surface, signal),
+    staleTime: 30_000,
   });
 }

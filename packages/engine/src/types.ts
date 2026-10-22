@@ -1,3 +1,4 @@
+import type { ToolUsageFact } from "@valet/shared";
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
@@ -757,6 +758,7 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
+  usageOutcome?: { outcome: "ok" | "error" | "denied"; errorCode: string | null };
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
@@ -2830,6 +2832,7 @@ export interface CreateSessionOptions {
   resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /** Optional durable skill usage telemetry sink supplied by the host. */
   skillTelemetry?: SkillTelemetrySink;
+  recordToolUsage?: (fact: ToolUsageFact) => void;
   /**
    * Optional host-provided org-policy resolver. Absent === the engine's
    * built-in fallback: `call_tool` derives approval from each action's

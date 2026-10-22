@@ -1,3 +1,4 @@
+import { withCliInvocation } from "./cli/telemetry.js";
 /**
  * `valet` CLI entry point / dispatcher.
  *
@@ -111,7 +112,7 @@ async function main(): Promise<number> {
   // Commands that call an instance get a fresh device sign-in first.
   if (!NO_INSTANCE_COMMANDS.has(first)) config = await refreshSelectedProfile(config, rest);
   const mod = await importer();
-  return await mod.run(rest, { command: first, config });
+  return await withCliInvocation(first, rest, () => mod.run(rest, { command: first, config }));
 }
 
 main()

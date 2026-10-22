@@ -1,3 +1,4 @@
+import { cliTelemetryHeaders } from "./telemetry.js";
 /**
  * `InstanceClient` — the CLI's typed HTTP client for a single valet instance.
  *
@@ -72,6 +73,7 @@ export class InstanceClient {
 
   private headers(json: boolean): Record<string, string> {
     return {
+      ...cliTelemetryHeaders(),
       // A FormData body sets its own multipart content-type (with boundary);
       // only JSON bodies get one here.
       ...(json ? { "content-type": "application/json" } : {}),

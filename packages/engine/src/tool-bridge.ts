@@ -1,4 +1,4 @@
-import { actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
+import { requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
@@ -20,13 +20,23 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     toolCallId: string;
     toolName: string;
     toolArgs: Record<string, unknown>;
+    toolIntent?: string;
   }) => ToolContext,
+  replay = false,
 ): AgentTool<TParams> {
   return {
     name: def.name,
     label: def.name,
     description: def.description,
-    parameters: def.parameters,
+    parameters: withToolIntentSchema(def.name, def.parameters),
+    ...(requiresToolIntent(def.name) ? {
+      prepareArguments: (value: unknown) => {
+        const args = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        const parsed = stripToolIntent(def.name, args);
+        // The SDK validates the original tool fields immediately after preparation.
+        return { ...parsed.args, intent: parsed.intent } as import("typebox").Static<TParams>;
+      },
+    } : {}),
     // Sequential unless the tool opts in (TKAI-318). One sequential tool
     // serializes its whole batch in pi-agent-core, so a response mixing a
     // read with a write runs fully in model order — mutations never race
@@ -37,15 +47,28 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     executionMode:
       def.concurrencySafe && !def.requiresApproval ? "parallel" : "sequential",
     execute: async (toolCallId, params, signal) => {
+      const provided = params as Record<string, unknown>;
+      // Old suspended calls predate intent. This path is never used for a fresh call.
+      const original = replay && provided.intent === undefined && requiresToolIntent(def.name)
+        ? { ...provided, intent: "Resume the previously suspended tool call." } : provided;
+      let intent: string | null = null;
+      let clean = original;
+      let validationError: Error | undefined;
+      try { const parsed = stripToolIntent(def.name, original); clean = parsed.args; intent = parsed.intent; }
+      catch (error) { validationError = error instanceof Error ? error : new Error("Add a valid intent and retry the tool."); clean = {}; }
       const ctx = buildContext({
         signal: signal ?? new AbortController().signal,
         toolCallId,
         toolName: def.name,
-        toolArgs: params as Record<string, unknown>,
+        toolArgs: clean,
+        ...(intent ? { toolIntent: intent } : {}),
       });
+      if (validationError) {
+        return toAgentToolResult({ text: validationError.message, ok: false }, def.name);
+      }
       if (def.name !== "focus_tools" && !(def.scopeAction
         ? actionInScope(ctx.toolScope, def.scopeAction) : toolInScope(ctx.toolScope, def.name))) {
-        return toAgentToolResult({ text: scopeRefusal(def.scopeAction ?? def.name), ok: false }, def.name);
+        return toAgentToolResult({ text: scopeRefusal(def.scopeAction ?? def.name), ok: false, usageOutcome: { outcome: "denied", errorCode: "tool_scope" } }, def.name);
       }
       // Every engine tool call funnels through this bridge — one span per
       // execution, a child of the running agent.turn via the active context.
@@ -54,20 +77,20 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
       // Sizes, not content: args/result text can be huge and/or sensitive.
       // `path` is the one arg surfaced verbatim — file tools all take it and
       // it is the highest-value single attribute when debugging a tool call.
-      const argsRecord = params as Record<string, unknown>;
+      const argsRecord = clean;
       const path = typeof argsRecord.path === "string" ? argsRecord.path : undefined;
       return withSpan(
         `tool.${def.name}`,
         {
           "valet.tool.name": def.name,
           "valet.tool.call_id": toolCallId,
-          "valet.tool.args_chars": JSON.stringify(params ?? {}).length,
+          "valet.tool.args_chars": JSON.stringify(clean).length,
           ...(path !== undefined ? { "valet.tool.path": attrTruncate(path) } : {}),
         },
         async (span) => {
           const startedAt = Date.now();
           try {
-            const result = await def.execute(params as never, ctx);
+            const result = await def.execute(clean as never, ctx);
             recordToolExecution(def.name, Date.now() - startedAt, true);
             span.setAttribute("valet.tool.result_chars", result.text?.length ?? 0);
             if (result.attachments?.length) {
@@ -103,6 +126,7 @@ function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResul
   // Action success and recognized terminal side effects ride in details so
   // both survive transcript persistence without changing model-visible text.
   const details = {
+    ...(result.usageOutcome ? { usageOutcome: result.usageOutcome } : {}),
     ...(result.ok === undefined ? {} : { ok: result.ok }),
     ...(result.outcome === undefined ? {} : { outcome: result.outcome }),
   };

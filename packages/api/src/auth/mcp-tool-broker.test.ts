@@ -133,7 +133,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
   const res = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: args } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { intent: "Exercise this tool in the integration test.", ...args } } }),
   });
   expect(res.status).toBe(200);
   const { result } = (await res.json()) as { result: { isError?: boolean; content: Array<{ text: string }> } };
@@ -351,7 +351,7 @@ describe("MCP tool broker", () => {
     const res = await fetch(`${testApi.baseUrl}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice}` },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: "call_tool", arguments: { tool_id: "demo.ping", params: { text: "x".repeat(60_000) } } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: "call_tool", arguments: { intent: "Run the test action.", tool_id: "demo.ping", params: { text: "x".repeat(60_000) } } } }),
     });
     const { result } = (await res.json()) as { result: { content: Array<{ text: string }>; structuredContent: Record<string, unknown> } };
     const structured = result.structuredContent;

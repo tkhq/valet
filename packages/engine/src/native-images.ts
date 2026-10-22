@@ -197,7 +197,7 @@ export class NativeImageBridge {
     const output = createAssistantMessageEventStream();
     const receipts: Array<{ path: string; image_id: string; callId: string }> = [];
     const receiptCall = (receipt: { path: string; image_id: string; callId: string }) =>
-      ({ type: "toolCall" as const, id: receipt.callId, name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path: receipt.path, image_id: receipt.image_id } });
+      ({ type: "toolCall" as const, id: receipt.callId, name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path: receipt.path, image_id: receipt.image_id, intent: "Save the image generated for the user request." } });
     const seen = new Map<string, string>();
     // Function calls the provider marked completed with parseable arguments, by call_id.
     // Pi also ends an incomplete item, so only the provider's status counts.

@@ -409,3 +409,47 @@ The read decides which teams a row can name:
 - Every org member reads the home ranking. It names every team for an org admin, and only the viewer's own teams for anyone else.
 
 `byUser[].isTeam` and `org.members[].isTeam` mark a team row. The Usage page and the home usage card show the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.
+
+## Tool intent and surface usage (TKAI-656)
+
+The shared tool contract lives in `@valet/shared`.
+Hosted tools and every external MCP tool require `intent`.
+The server trims this string and accepts 1 to 500 characters.
+The schema asks for one plain-language sentence about the purpose and reason.
+It does not infer sentence boundaries.
+Intent is metadata, not a provider argument.
+The bridges remove it before policy matching, approval parameter comparison, execution, and idempotency hashing.
+Suspended hosted calls retain intent for replay and approval explanations.
+
+The explicit primitive exemptions are `bash`, `shell`, `read`, `write`, `edit`, `read_file`, `write_file`, `edit_file`, `list_files`, and `search_files`.
+These high-volume file and shell operations keep their existing schemas.
+They do not produce usage facts.
+This avoids repeated model output and schema tokens for low-level I/O.
+
+The `external_calls` table stores all three surfaces: `hosted`, `mcp`, and `cli`.
+Facts contain identity, ownership, tool or command name, outcome, duration, timestamp, and optional intent.
+Hosted facts also contain session, thread, and persona context.
+No fact contains arguments, results, or credentials.
+Telemetry failures are reported without their payload and cannot fail execution.
+Recording promises are not awaited by tool or request execution.
+Hosted lifecycle events include SDK validation failures.
+The test fixtures use a deterministic provider and do not measure live model latency.
+
+CLI requests carry an invocation UUID, normalized command path, and version in headers.
+Command paths exclude positional values and option values.
+The server derives user and organization from authentication.
+An upsert keeps one row per invocation across its HTTP requests.
+Later completion timestamps win when requests finish out of order.
+MCP initialization metadata is stored by organization, user, and OAuth client ID.
+No bearer token is retained in that metadata.
+
+`GET /api/usage/external` uses the existing period and personal, team, or organization scope rules.
+The optional `surface` filter applies to daily counts, tools, clients, and recent intents.
+Daily counts include zero days.
+Recent intents use literal text search and offset pagination.
+Team members can see aggregates.
+Team admins can also see individual intents.
+The Usage page adds a Tool usage view with the same scope and period controls.
+
+Classification is not part of this change.
+The telemetry table has no `intent_category` or `taxonomy_version` columns.

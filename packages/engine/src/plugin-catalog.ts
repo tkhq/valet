@@ -1500,6 +1500,13 @@ function makeCallTool(catalog: Catalog): ToolDef {
  * two routes.
  */
 function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
+  const result = renderInvokeResult(outcome, toolId);
+  const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
+    : outcome.kind.startsWith("denied") || outcome.kind.endsWith("approval") ? "denied" : "error";
+  return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind } };
+}
+
+function renderInvokeResult(outcome: InvokeActionResult, toolId: string): ToolResult {
   switch (outcome.kind) {
     case "ok":
       return actionResultToToolResult(outcome.result, toolId);
