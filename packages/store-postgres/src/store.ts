@@ -1537,7 +1537,7 @@ export class PgSessionStore implements SessionStore {
       `SELECT * FROM engine_wakeups
        WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
-          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1)))${keyset}
+          OR (kind = 'event' AND status = 'running' AND (COALESCE(event_buffer, '[]') <> '[]' OR deadline_at <= $1 OR match_json::jsonb ? 'childSessionId')))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );

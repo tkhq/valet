@@ -427,6 +427,7 @@ export async function bootUniverse(): Promise<Universe> {
   // The WakeWatcher on a fake clock, with the production derive step.
   const clock = { now: Date.now() };
   const watcher = new WakeWatcher({
+    childEvents: { active: (row) => p.childWatcher.subscriptionActive(row), deliver: (row, digest) => p.childWatcher.deliverEvent(row, digest) },
     db: p.db,
     engineStore: p.engineStore,
     engineHost: p.engineHost,

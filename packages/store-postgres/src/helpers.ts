@@ -895,6 +895,7 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
     throw new Error(`${field}.primarySubject is not a string`);
   }
   return {
+    ...(typeof parsed.childSessionId === "string" ? { childSessionId: parsed.childSessionId } : {}),
     clauses: parsed.clauses.map((c, i) => toEventClause(c, `${field}.clauses[${i}]`)),
     once: parsed.once,
     self: parsed.self,
@@ -915,6 +916,9 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
     occurredAt: reqString(v, "occurredAt", field),
     dedupeKey: reqString(v, "dedupeKey", field),
   };
+  if (isRecord(v.refs) && Object.values(v.refs).every((value) => typeof value === "string")) {
+    out.refs = Object.fromEntries(Object.entries(v.refs).map(([key, value]) => [key, String(value)]));
+  }
   for (const key of optional) {
     const value = optString(v, key, field);
     if (value !== undefined) out[key] = value;

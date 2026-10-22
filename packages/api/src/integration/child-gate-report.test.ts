@@ -43,6 +43,7 @@ it("signals the parent thread once when its child opens a gate", async () => {
       resumeKey: "rk", ordinal: 0, type: "approval", title: "Push to main?",
       actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
     };
+    await p.engineStore.saveDecisionGate(childId, gate.threadId, gate);
     for (const attempt of ["first", "repeat"]) {
       await p.eventStream.append(
         { sessionId: childId, threadId: gate.threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId: gate.threadId, gate } },
@@ -52,6 +53,7 @@ it("signals the parent thread once when its child opens a gate", async () => {
     // The signal is a queued submission on the parent thread. Whether the
     // parent has run it yet depends on its model, so read the queue itself.
     await vi.waitFor(async () => {
+      await p.wakeWatcher.sweep();
       const items = [
         ...await p.engineStore.listUnsettledSubmissions(parent.id),
         ...await p.engineStore.listSettledSubmissionsBefore(parent.id, Date.now() + 1),

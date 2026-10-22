@@ -132,6 +132,11 @@ interface WakeWatcherBaseDeps {
    * marked digest stays buffered until the waiter ends, and each tick logs it.
    */
   deriveEvent?: EventWaiterDerive;
+  /** Internal child subscriptions use the same buffer and delivery owner as external waits. */
+  childEvents?: {
+    active(row: Wakeup): Promise<boolean>;
+    deliver(row: Wakeup, digest: EventMatchDigest): Promise<void>;
+  };
   /** Rows per `listDueWakeups` page. Defaults to `WAKE_WATCHER_BATCH`. */
   batchSize?: number;
   metrics?: Partial<WakeWatcherMetrics>;
@@ -438,6 +443,24 @@ export class WakeWatcher {
    * probe, lease, or kill.
    */
   private async decideEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    if (row.eventMatch?.childSessionId !== undefined) {
+      const childEvents = this.deps.childEvents;
+      if (!childEvents) throw new Error(`No child event delivery configured for ${row.id}`);
+      if (!(await childEvents.active(row))) {
+        await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now);
+        return;
+      }
+      for (const digest of row.eventBuffer ?? []) {
+        const current = await this.deps.engineStore.getWakeup(row.id);
+        if (current?.status !== "running") return;
+        // Admission precedes removal. A retry uses the event's stable dispatch id.
+        await childEvents.deliver(current, digest);
+        // Internal dispatch ids retain replay protection in the queue store.
+        // The bounded source history keeps a lifetime subscription's buffer small.
+        await this.deps.engineStore.removeEventMatches(row.id, [digest.dedupeKey], this.clock(), "source");
+      }
+      return;
+    }
     const decision = decideEventWaiter(now, row, this.decideOptions);
     if (!decision) return;
     if (decision.badRow) {

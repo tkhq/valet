@@ -821,6 +821,27 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.getWakeup("wk_ev")).toEqual(full);
       });
 
+      it("round-trips a lifetime child subscription and makes its lifecycle due without a buffer", async () => {
+        const child = eventWaiter({
+          subjects: ["valet:session:child-1"],
+          deadlineAt: undefined,
+          eventMatch: { childSessionId: "child-1", clauses: [{ key: "child.*" }], once: false, self: [] },
+        });
+        await store.createWakeup(child);
+        const restored = await store.getWakeup(child.id);
+        expect(restored?.eventMatch?.childSessionId).toBe("child-1");
+        expect(restored?.deadlineAt).toBeUndefined();
+        expect((await store.listDueWakeups(0, 10)).rows.map((w) => w.id)).toContain(child.id);
+        expect(await store.appendEventMatch(child.id, digest({
+          key: "child.settled", summary: "x".repeat(16_000),
+          refs: { child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]" },
+        }), 1)).toBe(true);
+        expect((await store.getWakeup(child.id))?.eventBuffer?.[0]?.refs).toEqual({
+          child_session_id: "child-1", child_queue_item_id: "turn-1", background_work: "[]",
+        });
+        expect((await store.getWakeup(child.id))?.eventBuffer?.[0]?.summary).toHaveLength(16_000);
+      });
+
       it("round-trips a match spec's primarySubject and finds the waiter by its repository subject", async () => {
         const indexed = eventWaiter({
           subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],

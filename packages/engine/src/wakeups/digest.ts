@@ -51,6 +51,7 @@ export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
     const value = digest[field];
     if (value !== undefined) out[field] = stripNul(value);
   }
+  if (digest.refs !== undefined) out.refs = Object.fromEntries(Object.entries(digest.refs).map(([key, value]) => [stripNul(key), stripNul(value)]));
   if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
   return out;
 }

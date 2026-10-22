@@ -29,7 +29,8 @@ import type { ToolContext, ToolResult } from "../types.js";
  */
 async function assertUnderLimit(seam: WakeupsSeam, threadId: string): Promise<string | null> {
   const { wakeups, leases } = await seam.list(threadId);
-  const nonTerminal = wakeups.filter((w) => w.status === "pending" || w.status === "running").length;
+  // Host-owned child subscriptions do not consume the agent's background-work quota.
+  const nonTerminal = wakeups.filter((w) => !w.eventMatch?.childSessionId && (w.status === "pending" || w.status === "running")).length;
   const n = nonTerminal + leases.filter((l) => l.ownerKind === "hold").length;
   return n >= seam.limits.perSession ? wakeupsLimitRefusal(n, seam.limits.perSession) : null;
 }

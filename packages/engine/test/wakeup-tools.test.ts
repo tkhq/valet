@@ -311,6 +311,18 @@ describe("per-session limit", () => {
     );
   });
 
+  it("lists host-owned child subscriptions without charging the agent's quota", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 20 }, (_, i) => ({ ...baseWakeup, id: `wk_child_${i}`, kind: "event" as const,
+        eventMatch: { childSessionId: `child-${i}`, clauses: [{ key: "child.*" }], once: false, self: [] } })),
+      leases: [], otherThreads: 0,
+    }));
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_timer", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const ctx = makeCtx({ list, create });
+    expect((await wakeupListTool.execute({}, ctx)).text).toContain("wk_child_19");
+    expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toContain("scheduled wakeup wk_timer");
+  });
+
   it("counts a process wakeup once, not again for its lease", async () => {
     const list = vi.fn(async () => ({
       wakeups: Array.from({ length: 10 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),

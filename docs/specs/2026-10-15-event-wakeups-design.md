@@ -756,9 +756,56 @@ An event waiter follows the rule for timers:
   as a timer.
 - Owner move and thread archive stop it through the 409 and `force`
   contract, with the human-cancel signal: neither filters by lease.
-- In a child session, an event waiter whose deadline falls within the child
-  timer bound keeps the child unsettled.
+- A child publishes `child.settled` after each completed turn.
+  The event lists its outstanding leases, timers, and event waiters.
+  A later signal turn publishes another event when it ends.
+  Parent notification does not wait for background work.
+- Sandbox retention checks background work separately from parent notification.
+  A child with an active lease, pending timer, or running event waiter keeps its sandbox.
+  The reclaim sweep also runs when warm retention is off.
+  It reclaims after cancelled background work stops owing turns.
 - Event waiters on hidden threads are counted and never named.
+
+### F3. Internal child events (TKAI-657)
+
+Valet is an internal event producer with service `valet`.
+The child subject is `valet:session:<child session id>`.
+The normalized keys are `child.settled` and `child.gate_opened`.
+
+Spawning a child creates an engine event waiter on the parent's spawning thread.
+The waiter has no deadline.
+Host-created child subscriptions do not consume the agent background-work quota.
+`wakeup_list` shows it as `Child updates: <child session id>`.
+`wakeup_cancel` stops notifications from that child.
+It leaves the child's turns and background work running.
+`child_send` keeps a cancelled subscription cancelled.
+Archive or deletion ends the waiter on the next WakeWatcher pass.
+
+Child events use `ingestEvent`, subject matching, `appendEventMatch`, and WakeWatcher delivery.
+The digest keeps the bounded result and internal string refs.
+Delivery checks the delegation generation again.
+A `child_send` re-point makes an older generation silent.
+Later signal turns keep that generation and use their own submission ids.
+
+WakeWatcher admits each child signal before removing its digest.
+`admitSignal` enforces edge authorization and the engine hop budget at delivery.
+The dispatch id uses `namespaceInternalDispatchId(child, settled:<child>:<turn>)`.
+A retry after a restart therefore returns the same parent submission.
+Transient delivery errors keep the digest for the next pass.
+Permanent denials write the existing drop-log reasons.
+
+The waiter id starts with `wk_` so the standard cancel tool can stop it.
+Internal subscriptions use a bounded source history instead of the external waiter output budget.
+The parent's durable dispatch ids provide lifetime replay protection.
+Boot recovery recreates missing subscriptions and publishes unreported signal turns.
+It also completes reply intents whose parent admissions already landed.
+
+The delivered signal types stay `child.settled` and `child.gate_opened`.
+Settlement preserves automatic channel reply intents and the current reply route.
+Private input permanently downgrades an automatic route.
+Gate updates use manual replies.
+Delivery intersects the child's session and submission tool scopes.
+Gate delivery also intersects the gate thread's scope.
 
 ## Part G: Subscriptions
 

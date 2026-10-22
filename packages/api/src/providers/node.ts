@@ -613,6 +613,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // expires hold leases, and keeps leased pods out of autoscaler eviction
   // (spec 2026-10-08, B5, C5). `start()`/`stop()` are called from `main.ts`.
   const wakeWatcher = new WakeWatcher({
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest) },
     db,
     engineStore,
     engineHost,

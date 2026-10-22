@@ -367,7 +367,7 @@ export class InMemorySessionStore implements SessionStore {
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
           (w.status === "running" &&
             w.kind === "event" &&
-            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
+            (w.eventMatch?.childSessionId !== undefined || (w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))

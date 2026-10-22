@@ -34,6 +34,8 @@ export interface EventClause {
 
 /** What an event waiter matches, stored as `match_json`. */
 export interface EventMatchSpec {
+  /** Host-created child subscription. It ends with the child or an explicit cancel. */
+  childSessionId?: string;
   clauses: EventClause[];
   /** True: the first match ends the waiter. False: stream mode. */
   once: boolean;
@@ -68,6 +70,8 @@ export const EVENT_SOURCE_SEEN_MAX_KEYS = 256;
 /** The bounded record of one matched event that an event waiter holds until delivery. */
 export interface EventMatchDigest {
   key: string;
+  /** Internal producer refs. Child delivery resolves authority from durable session state. */
+  refs?: Record<string, string>;
   /** The commit evaluated by a derived completion. */
   head_sha?: string;
   status?: string;

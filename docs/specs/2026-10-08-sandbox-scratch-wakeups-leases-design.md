@@ -493,11 +493,19 @@ The in-memory `pendingJobCount` check stays for foreground job-mode bash.
 
 ### C4. Child settle
 
-A child session with an active lease is not settled. `ChildWatcher` MUST
-NOT emit `child.settled` while `countActiveLeases(childSessionId) > 0`.
-The child's 24h retention clock starts at its settle, as today. So the
-clock starts after the last lease releases and after the turn that handles
-the terminal signal ends.
+A child publishes `child.settled` when its turn ends.
+The event lists outstanding leases, timers, and event waiters.
+Background work does not delay parent notification.
+Each later signal turn publishes its own result.
+The event-wakeups spec, F3, defines the shared event delivery path.
+
+Parent notification and sandbox reclaim are separate decisions.
+`child_watches.settled` records the watched delegation's notification state.
+`child_status` reads the child's durable turn state.
+A child with an unsettled submission or outstanding background work keeps its sandbox.
+The retention sweep keeps its activity, lease, timer, and event-waiter guards.
+`settled_at` starts the retention clock after notification.
+Background work keeps the sandbox even when that clock expires.
 
 ### C5. Pod eviction
 
@@ -737,7 +745,7 @@ Unit (vitest):
   - running watch, over rate → `expired`, `rate`.
   - pending timer, due → `done`, `fired`.
   - pending timer before `fire_at` → `null`.
-- Idle sweeps (INV-2), `ChildWatcher` settle hold (C4), pod reconcile
+- Idle sweeps (INV-2), `ChildWatcher` reclaim guard (C4), pod reconcile
   (C5) against fakes.
 - `bash` background validation and the sleep refusal; every tool's
   refusal text.
@@ -779,7 +787,7 @@ A v1 implementation MUST NOT ship these under this spec's label.
 1. Engine: tables, store contract, conformance suite, `decideWakeup`,
    tools, `ToolContext.wakeups` seam. No behavior change until the host
    injects the seam.
-2. api: WakeWatcher, idle predicates, `ChildWatcher` settle hold,
+2. api: WakeWatcher, idle predicates, `ChildWatcher` reclaim guard,
    `resolveRepoPrebuildFlags` scratch, routes, `SCHEMA_REPAIRS`.
 3. sandbox-kubernetes: manifest, pod patch api, `execJob` uncapped.
    sandbox-docker: `/scratch` bind, uncapped job output.
@@ -872,10 +880,8 @@ Implementation gaps become errata to this file in the same PR.
   `[process_read]` and names the next step.
 - **Part D, agent cap off.** `VALET_SANDBOX_SCRATCH_AGENT_MAX="0"` sets no
   agent cap. Only the deploy cap then bounds `task.resources.scratch`.
-- **C4, child settle grace.** The WakeWatcher releases a lease before it
-  submits the terminal signal. After the last lease releases, `ChildWatcher`
-  waits a bounded grace window (`leaseSettleGraceMs`, default 90 seconds).
-  The engine then admits the signal turn before the child settles.
+- **C4, child notification.** Child notification uses the event pipeline.
+  Background work keeps the sandbox without delaying the notification.
 - **B5 and B6, watch log tail.** `watch` carries `logTail` across ticks,
   the same as `process`. The rate-expiry signal body names the limit that
   the watch exceeded.
@@ -897,10 +903,8 @@ Implementation gaps become errata to this file in the same PR.
 - **C2 and INV-6, session delete.** `deleteSession` releases leases with
   its own SQL inside the store. It does not call `releaseLease`. The INV-6
   grep test allows the stores for this reason.
-- **C4, settle result.** After a lease wait, `child.settled` carries the
-  result of the last turn the ChildWatcher awaited. That is the turn that
-  handled the terminal signal. A superseded turn does not replace the
-  result.
+- **C4, settle result.** Each `child.settled` event carries its own turn result.
+  Later signal turns publish new events.
 - **A4 and Part G, REST scratch refusal.** A REST session has no parent
   to receive a startup warning. When its `.valet/prebuild.yaml` scratch
   request is dropped, the host writes the warning once as a `system`
@@ -989,16 +993,9 @@ with an earlier entry, the entry below wins.
   Crash windows occur in normal operation, so CLAUDE.md permits this
   repair. `valet.leases.orphan_released{owner_kind}` counts each release.
   C6 and INV-6 therefore name a third release path inside the WakeWatcher.
-- **C4, settle on facts.** `ChildWatcher` waits while a lease is active,
-  bounded at the latest lease deadline plus one poll. Past the bound it
-  logs, records `valet.leases.settle_over_deadline`, and settles. It also
-  waits while a timer is pending and fires inside the retention window
-  (24 hours when no window is set). Then it awaits the terminal signal
-  turn (`wakeup:<id>:terminal`) of each wakeup that ended after the
-  watched submission was admitted, whether or not a lease was ever seen.
-  It waits at most `leaseSettleGraceMs` after the wakeup ended for that
-  turn to be admitted. An agent cancel sends no signal and owes no turn.
-  This supersedes the "C4, child settle grace" entry.
+- **C4, settle on facts.** Parent notification and sandbox reclaim use separate checks.
+  Background work holds the sandbox.
+  It does not hold the parent notification.
 - **B5, watch rate.** The limit counts `watch.event` signals. A tick emits
   at most one, whatever its line count. `window_start_at` and `window_count` on the row
   hold the count. The window starts at the first signal after the
@@ -1345,10 +1342,9 @@ with an earlier entry, the entry below wins.
   forced owner move or profile change selects the work again with the
   gate's own filter. Work set while the cancel ran returns 409 with the
   "background work started" text, and the deferred signals still go out.
-- **PR review 2, holds in child settlement.** The ChildWatcher remembers
-  the holds it saw active. Once one is released, it awaits the
-  `lease:<id>:expired` or `lease:<id>:released` turn under the same
-  admission grace as a wakeup's terminal turn.
+- **PR review 2, holds in child settlement.** A child reports active holds in its settlement event.
+  A hold release can start another turn.
+  That turn publishes a new settlement event.
 - **PR review 2, length-preserving decode.** The kubernetes job poll
   replaces each byte of ill-formed UTF-8 with one `?`. The decoded text
   then has the same byte length as the raw range `nextOffset`

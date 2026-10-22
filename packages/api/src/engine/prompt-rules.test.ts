@@ -9,9 +9,7 @@ import {
   MODEL_SWITCH_CORE,
   SECRETS_RULES,
   TOOL_USE_RULES,
-  childTimerBoundMs,
   codingSystemPrompt,
-  resolveChildTimerHours,
   SECRETS_RULES_NO_CLI,
   threadLinkContext,
 } from "./prompt-rules.js";
@@ -134,24 +132,11 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("`watch`");
     expect(CODING_SYSTEM_PROMPT).toContain("`hold_sandbox`");
     expect(CODING_SYSTEM_PROMPT).not.toContain("Use `wake_at` to pause instead of `sleep`");
-    expect(CODING_SYSTEM_PROMPT).toContain(
-      "In a child session, a pending `wake_at` that fires within 24 hours keeps the child unsettled until that turn ends",
-    );
-    expect(CODING_SYSTEM_PROMPT).toContain("A later timer does not hold the parent");
+    expect(CODING_SYSTEM_PROMPT).toContain("A child notifies its parent whenever a turn ends");
+    expect(CODING_SYSTEM_PROMPT).not.toContain("keeps the child unsettled");
   });
 
-  // Fix wave 4 (UX N10): the child timer bound is the deploy's retention.
-  it("builds the child wake_at bound from the resolved retention hours", () => {
-    const six = codingSystemPrompt({ secretsCli: true, childTimerHours: 6 });
-    expect(six).toContain("a pending `wake_at` that fires within 6 hours keeps the child unsettled");
-    expect(six).not.toContain("24 hours");
-    expect(codingSystemPrompt({ secretsCli: true, childTimerHours: 1 })).toContain("fires within 1 hour keeps");
-    expect(childTimerBoundMs(0)).toBe(24 * 3_600_000);
-    expect(childTimerBoundMs(6 * 3_600_000)).toBe(6 * 3_600_000);
-    expect(resolveChildTimerHours({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "6" })).toBe(6);
-    expect(resolveChildTimerHours({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "0" })).toBe(24);
-    expect(resolveChildTimerHours({})).toBe(24);
-  });
+
 
   it("composes the secrets paragraph from whether prep installs the CLI", () => {
     const withCli = codingSystemPrompt({ secretsCli: true });

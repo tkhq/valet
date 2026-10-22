@@ -536,7 +536,10 @@ describe("acceptance scenario B: api restart is a non-event", () => {
       // watch, and the re-armed watcher wakes the runner. Abort stands in
       // for the child's own settle, as everywhere in these suites.
       await engineHost.liveSession(child2)?.abort();
-      await waitFor(() => watchSettled(db, child2), 20_000, "post-restart watch settle");
+      await waitFor(async () => {
+        await api!.providers.wakeWatcher.sweep();
+        return watchSettled(db, child2);
+      }, 20_000, "post-restart watch settle");
 
       const unsettled = await engineStore.listUnsettledSubmissions(sessionId);
       const child2Signals = unsettled.filter(

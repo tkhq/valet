@@ -40,6 +40,10 @@ describe("boundEventDigest", () => {
     const out = boundEventDigest({ ...base, key: "k\u0000", summary: "s\u0000um", subjects: ["a\u0000"], dedupeKey: "d\u0000", actor: "\u0000ada", text: "x\u0000y" });
     expect(out).toEqual({ ...base, key: "k", summary: "sum", subjects: ["a"], dedupeKey: "d", actor: "ada", text: "xy" });
   });
+  it("strips NUL from internal producer refs", () => {
+    expect(boundEventDigest({ ...base, refs: { "child_session_id\u0000": "child-1\u0000" } }).refs)
+      .toEqual({ child_session_id: "child-1" });
+  });
   it("cuts text to EVENT_DIGEST_TEXT_MAX_BYTES", () => {
     const out = boundEventDigest({ ...base, text: "a".repeat(EVENT_DIGEST_TEXT_MAX_BYTES + 10) });
     expect(out.text).toHaveLength(EVENT_DIGEST_TEXT_MAX_BYTES);
