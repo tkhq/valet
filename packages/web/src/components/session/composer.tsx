@@ -17,6 +17,8 @@ import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useCancelQueuedItem, useResumeThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
+import { isServerUnavailable } from "~/api/connection";
+import { errorText } from "~/lib/error-text";
 import {
   queueBusy,
   useStreamStore,
@@ -575,7 +577,7 @@ export function Composer({
     try {
       await cancelQueued.mutateAsync({ threadId, itemId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "Could not cancel the queued message. Try again."));
+      setSubmitError(errorText(err, "Could not cancel the queued message. Try again."));
     }
   }
 
@@ -599,7 +601,7 @@ export function Composer({
       }
     } catch (err) {
       setSubmitError(
-        apiErrorDetail(
+        errorText(
           err,
           "The message was not sent. Send a new message, or wait for the current turn to finish.",
         ),
@@ -636,6 +638,12 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
+    // One key per message, kept across a failed send (`ComposerDraft.sendKey`).
+    const attachmentCount = pendingImages.length + fileRefs.length;
+    const failed = useComposerDraftStore.getState().byKey[slot]?.sendKey;
+    const clientMessageId = failed && failed.text === t && failed.attachments === attachmentCount
+      ? failed.id
+      : crypto.randomUUID();
     useComposerDraftStore.getState().clear(slot);
     announceTyping(sessionId, threadId, false);
     // Optimistic local add — the engine doesn't emit a wire event for the
@@ -656,6 +664,7 @@ export function Composer({
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
         ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
         ...(working ? { queueMode: "inject" as const } : {}),
+        clientMessageId,
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
@@ -721,17 +730,13 @@ export function Composer({
           )
         : pendingFiles;
       drafts.setFiles(slot, (prev) => [...restored, ...prev]);
+      drafts.setSendKey(slot, { id: clientMessageId, text: t, attachments: attachmentCount });
       // The failure must be visible — a console-only error reads as a dead
-      // send button.
-      const detail =
-        typeof payload?.corrective === "string"
-          ? payload.corrective
-          : typeof payload?.error === "string"
-            ? payload.error
-            : err instanceof Error
-              ? err.message
-              : "Unknown error.";
-      drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
+      // send button. With no answer from the api the message may have
+      // landed, and the kept key makes a resend safe.
+      drafts.setFileErrors(slot, [isServerUnavailable(err)
+        ? "Valet did not respond, so your message is back in the box. Send it again after Valet reconnects. Valet does not post it twice."
+        : `The message did not send. ${errorText(err, "Unknown error.")}`]);
       console.error("send failed:", err);
     } finally {
       submitting.current = false;
@@ -746,7 +751,7 @@ export function Composer({
       setSubmitError(null);
       await abort.mutateAsync({ threadId, targetItemId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again."));
+      setSubmitError(errorText(err, "Could not stop the agent. Try Stop again."));
     }
   }
 
@@ -756,7 +761,7 @@ export function Composer({
     try {
       await resume.mutateAsync({ threadId });
     } catch (err) {
-      setSubmitError(apiErrorDetail(err, "The queue did not start. Try again."));
+      setSubmitError(errorText(err, "The queue did not start. Try again."));
     }
   }
 
@@ -785,7 +790,7 @@ export function Composer({
       setSubmitError(null);
       abortMutate(
         { threadId, targetItemId },
-        { onError: (err) => setSubmitError(apiErrorDetail(err, "Could not stop the agent. Try Stop again.")) },
+        { onError: (err) => setSubmitError(errorText(err, "Could not stop the agent. Try Stop again.")) },
       );
     }
     // With focus on the body, the page's turn stops first: a page composer
@@ -1182,17 +1187,6 @@ export function Composer({
 let lastUsedComposer: object | undefined;
 /** Mounted composers outside the Ask Valet dock. See the Escape effect. */
 let pageComposers = 0;
-
-function apiErrorDetail(err: unknown, fallback: string): string {
-  const payload =
-    err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
-      ? (err.payload as Record<string, unknown>)
-      : undefined;
-  if (typeof payload?.corrective === "string") return payload.corrective;
-  if (typeof payload?.error === "string") return payload.error;
-  if (err instanceof Error && err.message.length > 0) return err.message;
-  return fallback;
-}
 
 /**
  * Small text indicator above the composer for the thread's submission
