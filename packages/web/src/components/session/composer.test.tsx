@@ -692,6 +692,7 @@ describe("Composer — mid-turn submit affordance", () => {
         text: "also update the runbook",
         threadId: "thread-1",
         queueMode: "inject",
+        clientMessageId: expect.any(String),
       }),
     );
     expect(addUserMessage).toHaveBeenCalled();
@@ -761,6 +762,7 @@ describe("Composer — mid-turn submit affordance", () => {
         text: "second followup",
         threadId: "thread-1",
         queueMode: "inject",
+        clientMessageId: expect.any(String),
       }),
     );
   });
@@ -782,6 +784,7 @@ describe("Composer — mid-turn submit affordance", () => {
       expect(sendMutateAsync).toHaveBeenCalledWith({
         text: "hello from idle",
         threadId: "thread-1",
+        clientMessageId: expect.any(String),
       }),
     );
     expect(sendMutateAsync.mock.calls[0][0]).not.toHaveProperty("queueMode");
@@ -972,6 +975,29 @@ describe("Composer beside the Ask Valet dock", () => {
     act(() => useComposerDraftStore.getState().setImageErrors(draftKey("orchestrator:user-1", "shared"), ["That image is too large."]));
     await act(async () => fail(new Error("connection lost")));
     expect(page.value).toBe("first question");
+  });
+
+  it("keeps the idempotency key when Valet does not respond, so the resend cannot post twice", async () => {
+    sendMutateAsync.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const { page, dock } = renderPageAndDock({ status: "idle", pageThread: "shared", dockThread: "shared" });
+    fireEvent.change(page, { target: { value: "deploy the fix" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(page.value).toBe("deploy the fix"));
+    // Both composers on the thread show the shared draft and its error.
+    expect(screen.getAllByText(/Valet did not respond, so your message is back in the box/)).toHaveLength(2);
+    const firstKey = sendMutateAsync.mock.calls[0]?.[0].clientMessageId;
+    expect(firstKey).toEqual(expect.any(String));
+
+    // The other composer on the thread resends the same text with the same key.
+    fireEvent.keyDown(dock, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(2));
+    expect(sendMutateAsync.mock.calls[1]?.[0].clientMessageId).toBe(firstKey);
+
+    // A new message gets a new key.
+    fireEvent.change(page, { target: { value: "and tell me when it is out" } });
+    fireEvent.keyDown(page, { key: "Enter" });
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(3));
+    expect(sendMutateAsync.mock.calls[2]?.[0].clientMessageId).not.toBe(firstKey);
   });
 
   it("returns focus to the composer used last when sends overlap", () => {
