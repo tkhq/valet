@@ -1,20 +1,21 @@
 import { gte, sql } from "drizzle-orm";
-import type { CredentialStore } from "@valet/engine";
+import type { CredentialStore, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { tagJobs } from "../schema/index.js";
 import { recordTaggingDeadLetter } from "../observability/tagging-metrics.js";
 import { configureTaggingAvailability } from "./availability.js";
+import { sessionOutcomeDimension, sessionOutcomeRenderer } from "./session-outcome.js";
 import { Tagger } from "./tagger.js";
 import { taggingModel } from "./model.js";
 import { toolIntentDimension, toolIntentRenderer } from "./tool-intent.js";
 
-export function createTagger(db: AppDb, credentials: CredentialStore, orgId: string): Tagger {
-  return new Tagger({ db, orgId, dimensions: [toolIntentDimension], classify: taggingModel(db, credentials, orgId),
-    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)]]) });
+export function createTagger(db: AppDb, credentials: CredentialStore, orgId: string, store: SessionStore): Tagger {
+  return new Tagger({ db, orgId, dimensions: [toolIntentDimension, sessionOutcomeDimension], classify: taggingModel(db, credentials, orgId),
+    renderers: new Map([["external_call", toolIntentRenderer(db, orgId)], ["session", sessionOutcomeRenderer(db, store, orgId)]]) });
 }
 
 /** Uses EventDispatcher's existing retry rail. No timer or session reader lives here. */
-export function taggingDrain(db: AppDb, credentials: CredentialStore): () => Promise<void> {
+export function taggingDrain(db: AppDb, credentials: CredentialStore, store: SessionStore): () => Promise<void> {
   configureTaggingAvailability(db, credentials);
   let inFlight: Promise<void> | undefined;
   return () => {
@@ -23,7 +24,7 @@ export function taggingDrain(db: AppDb, credentials: CredentialStore): () => Pro
       const dead = await db.delete(tagJobs).where(gte(tagJobs.attempts, 5)).returning({ dimension: tagJobs.dimension });
       for (const job of dead) recordTaggingDeadLetter(job.dimension);
       const dimensions = await dueTagDimensions(db);
-      await Promise.all(dimensions.map(({ orgId, dimension }) => createTagger(db, credentials, orgId).drain(dimension)));
+      await Promise.all(dimensions.map(({ orgId, dimension }) => createTagger(db, credentials, orgId, store).drain(dimension)));
     })().finally(() => { inFlight = undefined; });
     return inFlight;
   };

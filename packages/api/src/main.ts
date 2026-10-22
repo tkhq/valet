@@ -9,6 +9,7 @@
  * only boots when this file is run as the direct entry (`tsx src/main.ts`), or
  * when a caller (e.g. the `valet serve` command) invokes `startServer()`.
  */
+import { wireSessionOutcomeTagging } from "./tagging/session-outcome.js";
 import { configureSlackIngress } from "./channels/slack-inbox.js";
 import { eq } from "drizzle-orm";
 import { homedir } from "node:os";
@@ -338,6 +339,8 @@ wireHomeTaskReports(providers.eventStream, providers);
 // An event delivery is marked failed when the turn it queued fails. Restored
 // work can settle in the boot chain, so this subscribes before it.
 wireDeliveryTurnFailures(providers.eventStream, providers.db);
+// Subscribe to outcome tagging before restored submissions can settle.
+wireSessionOutcomeTagging(providers.eventStream, providers.db);
 // Subscribe to automatic naming before restored submissions can settle.
 providers.autoTitleHost.start();
 

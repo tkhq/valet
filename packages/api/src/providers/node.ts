@@ -842,7 +842,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
-    drainTagging: taggingDrain(db, engineCredentials),
+    drainTagging: taggingDrain(db, engineCredentials, engineStore),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,

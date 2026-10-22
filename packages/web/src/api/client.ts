@@ -6,6 +6,7 @@
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
+import type { SessionOutcomeUsage } from "@valet/api/wire";
 import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
   HomeConversationResponse,
@@ -1281,6 +1282,10 @@ export const api = {
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
+  },
+  sessionOutcomeUsage: (period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string, signal?: AbortSignal) => {
+    const qs = usagePeriodSearchParams(period); qs.set("scope", scope); if (teamId) qs.set("teamId", teamId);
+    return request<SessionOutcomeUsage>("GET", `/usage/session-outcomes?${qs}`, undefined, signal);
   },
   editTagKey: (dimension: string, key: string, change: { label: string; definition: string }) => request<{ ok: boolean }>("PATCH", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}`, change),
   mergeTagKey: (dimension: string, key: string, into: string) => request<{ ok: boolean }>("POST", `/org/tag-keys/${encodeURIComponent(dimension)}/${encodeURIComponent(key)}/merge`, { into }),

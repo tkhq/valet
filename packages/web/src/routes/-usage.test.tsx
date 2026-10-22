@@ -350,6 +350,7 @@ let itemCalls: unknown[][] = [];
 let requestFilters: unknown;
 
 vi.mock("~/api/usage", () => ({
+  useSessionOutcomeUsage: () => ({ data: { outcomes: [] }, isPending: false }),
   useExternalUsage: () => ({ data: { daily: [], tools: [], clients: [], recent: [], hasMore: false, detailsVisible: true }, isPending: false }),
   useUsageBreakdown: (...args: unknown[]) => {
     breakdownCalls.push(args);

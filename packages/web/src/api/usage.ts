@@ -5,6 +5,7 @@
  */
 import { keepPreviousData, type UseQueryOptions } from "@tanstack/react-query";
 import type {
+  SessionOutcomeUsage,
   ExternalUsageResponse,
   UsageDrillResponse,
   UsagePeriodSelection,
@@ -95,4 +96,9 @@ export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScope
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });
+}
+
+export function useSessionOutcomeUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId?: string) {
+  return useCancellableQuery<SessionOutcomeUsage>({ queryKey: ["usage", "session-outcomes", period, scope, teamId],
+    queryFn: ({ signal }) => api.sessionOutcomeUsage(period, scope, teamId, signal), staleTime: 30_000 });
 }

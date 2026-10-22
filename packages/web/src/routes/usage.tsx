@@ -18,6 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
+import { SessionOutcomes } from "~/components/usage/SessionOutcomes";
 import { ToolUsage } from "~/components/usage/ToolUsage";
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
@@ -528,6 +529,7 @@ export function UsagePage() {
           <>
             {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}
             <div hidden={view !== "overview"} className="space-y-8">
+            {view === "overview" && scopeKnown && <SessionOutcomes period={period} scope={scope} teamId={teamId} />}
             <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-5 gap-3">
               <StatCard label="Active agents" value={fmt(breakdown.activeAgents)} sub="Unique agents with token usage in this period." />
               <StatCard label="Total cost" value={formatUsdPrecise(breakdown.totalCostUsd)} />

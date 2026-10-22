@@ -9,6 +9,7 @@
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import { wireSessionOutcomeTagging } from "../tagging/session-outcome.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
@@ -390,6 +391,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventStream,
     namer: async () => "Test conversation",
   });
+  const stopOutcomeTagging = wireSessionOutcomeTagging(eventStream, db);
   autoTitleHost.start();
 
   const prebuildService = new SourceService({
@@ -559,7 +561,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const eventDispatcher = new EventDispatcher({
     db,
     retainExternalUsage: externalUsageRetention(db),
-    drainTagging: taggingDrain(db, engineCredentials),
+    drainTagging: taggingDrain(db, engineCredentials, engineStore),
     drainAttention: () => drainAttentionDeliveries({ db, channels: channelHost.attentionDeliverers(), access: { engineCredentials, onePassword } }),
     workflowRunHost,
     workflowStore,
@@ -662,6 +664,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       stopChildReports();
       await childWatcher.stopRetentionSweep();
       autoTitleHost.stop();
+      stopOutcomeTagging();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();
       rmSync(blobsRoot, { recursive: true, force: true });

@@ -6653,3 +6653,7 @@ export interface ToolIntentUsage {
   emergingCalls?: number;
   keys: ToolIntentKeyUsage[]; consolidationDue: boolean; canManage: boolean;
 }
+
+export interface SessionOutcomeUsage {
+  outcomes: { key: string; label: string; definition: string; sessions: number }[];
+}
