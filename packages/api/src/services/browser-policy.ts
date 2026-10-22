@@ -24,14 +24,10 @@ export class BrowserPolicy implements BrowserPolicyService {
     const stored = await this.options.store
       .session(sessionId)
       .get<BrowserSettings>("settings", "browser");
-    return (
-      stored?.doc ?? {
-        enabled: true,
-        audience: "owner",
-        policyVersion: "default",
-        grants: [],
-      }
-    );
+    if (!stored) return { enabled: true, policyVersion: "default", grants: [] };
+    // Older rows also store an audience. The session owner now decides access, so drop it.
+    const { enabled, policyVersion, grants } = stored.doc;
+    return { enabled, policyVersion, grants };
   }
 
   private async requireOwner(identity: BrowserIdentity): Promise<Principal> {
@@ -50,19 +46,23 @@ export class BrowserPolicy implements BrowserPolicyService {
       throw new Error(
         "The browser is disabled. Ask the session owner to enable it.",
       );
-    if (owner.type === "user" && identity.actorId !== owner.id)
-      throw new Error(
-        "Browser access denied. Ask the session owner to use the browser.",
-      );
-    if (owner.type !== "user") {
-      if (owner.type !== "team" || settings.audience !== "team")
+    if (owner.type === "user") {
+      if (identity.actorId !== owner.id)
         throw new Error(
-          "The team browser is private by default. A team admin must enable shared browser access.",
+          "Browser access denied. Ask the session owner to use the browser.",
         );
+    } else if (owner.type === "team") {
+      // Same rule as the team sandbox and its credentials: current members act
+      // in a team session, and a nonmember actor (an organization-audience Slack
+      // mention) does not reach what members signed in to.
       if (!(await this.options.isMember(owner, identity.actorId)))
         throw new Error(
-          "Browser access denied. Ask a team admin to restore your membership.",
+          "Browser access denied. Only members of the owning team can use this browser. Ask a team admin to add you.",
         );
+    } else {
+      throw new Error(
+        "This session has no personal or team owner. Use the browser from a personal or team session.",
+      );
     }
     return { policyVersion: settings.policyVersion };
   }
@@ -76,8 +76,6 @@ export class BrowserPolicy implements BrowserPolicyService {
       throw new Error(
         "Only the owner or team admin can change browser access. Ask an admin.",
       );
-    if (owner.type !== "team" && update.audience === "team")
-      throw new Error("This is a personal session. Select the owner audience.");
     for (const grant of update.grants) {
       let origin: URL;
       try {

@@ -611,57 +611,22 @@ export function BrowserPane({ sessionId }: { sessionId: string }) {
           Browser access and capabilities
         </summary>
         <div className="space-y-3 py-3">
-          {data.canAdminister ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <span>Who can view:</span>
+          {data.canAdminister && data.settings.enabled ? (
+            <div>
               <Button
                 size="sm"
-                variant={
-                  data.settings.audience === "owner" ? "primary" : "ghost"
-                }
-                disabled={
-                  changing || data.settings.audience === "owner"
-                }
+                variant="ghost"
+                disabled={changing}
                 onClick={() =>
                   void run(() =>
-                    actions.settings.mutateAsync({ audience: "owner" }),
+                    actions.settings.mutateAsync({ enabled: false }),
                   )
                 }
               >
-                Owner
+                Disable browser access
               </Button>
-              <Button
-                size="sm"
-                variant={
-                  data.settings.audience === "team" ? "primary" : "ghost"
-                }
-                disabled={changing || data.settings.audience === "team"}
-                onClick={() =>
-                  void run(() =>
-                    actions.settings.mutateAsync({ audience: "team" }),
-                  )
-                }
-              >
-                Team
-              </Button>
-              {data.settings.enabled ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={changing}
-                  onClick={() =>
-                    void run(() =>
-                      actions.settings.mutateAsync({ enabled: false }),
-                    )
-                  }
-                >
-                  Disable browser access
-                </Button>
-              ) : null}
             </div>
-          ) : (
-            <p>Viewing access: {data.settings.audience}.</p>
-          )}
+          ) : null}
           {data.settings.grants.map((grant) => (
             <div key={grant.id} className="flex items-center gap-2">
               <span className="min-w-0 flex-1 break-all">
