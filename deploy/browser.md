@@ -63,6 +63,25 @@ CR replacement and suspension retain that PVC.
 Final session deletion flushes the audit records before deleting it.
 A missing adopted PVC is an error; the provider does not silently replace it.
 
+## Prepare AppArmor Docker hosts
+
+Docker's default AppArmor profile denies the mounts that Bubblewrap needs.
+Ubuntu 24.04 also removes capabilities from new unprivileged user namespaces.
+On such a host, the preflight fails with `Failed to make / slave` or `Failed RTM_NEWADDR`.
+The `valet-browser` profile removes AppArmor confinement from browser containers and permits user namespaces.
+This matches the AppArmor profile that Ubuntu ships for Chrome.
+
+1. Copy `deploy/apparmor/valet-browser` to `/etc/apparmor.d/valet-browser` on the Docker host.
+2. Run `sudo apparmor_parser -r /etc/apparmor.d/valet-browser`.
+3. Set `VALET_BROWSER_APPARMOR_PROFILE=valet-browser` for the API.
+4. Set `VALET_BROWSER_ENABLED=1` and restart the API.
+
+The provider applies the profile to single-container browser sandboxes and to browser companions.
+Other sandboxes keep Docker's default profile.
+The reviewed seccomp profile still applies to browser containers.
+If the variable is unset, Docker applies its default profile.
+Hosts without AppArmor do not need this step.
+
 ## Docker state and identities
 
 Docker stores inventory and private state beneath `~/.valet/docker-runtime` by default.

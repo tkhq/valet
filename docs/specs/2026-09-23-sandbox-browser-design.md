@@ -1198,6 +1198,8 @@ Trusted browser RPC, evidence transfers, and lifecycle probes select `target: "b
 Providers reject an invalid browser target instead of falling back to the workload.
 The API grants browser availability independently of the session's Docker and nested-Kubernetes flags.
 Deployment requires the Localhost seccomp profile on each Kubernetes node.
+AppArmor Docker hosts, such as Ubuntu 24.04, also need the `valet-browser` host profile.
+`VALET_BROWSER_APPARMOR_PROFILE` applies it to browser containers, and other sandboxes keep Docker's default profile.
 See [browser deployment](../../deploy/browser.md) for installation and identity details.
 
 ### Viewer and evidence

@@ -25,6 +25,9 @@ describe('browser companion arguments and ownership', () => {
     expect(args).not.toContain('-p');
     expect(args.join(' ')).toContain('/browser-preflight.sh');
     expect(args.join(' ')).toContain('/usr/bin/tini');
+    expect(args.join(' ')).not.toContain('apparmor=');
+    const confined = buildBrowserCompanionArgs({ owner: record(), seccompProfile: '/profiles/browser.json', appArmorProfile: 'valet-browser', uid: 501, gid: 20 });
+    expect(confined.join(' ')).toContain('--security-opt apparmor=valet-browser');
   });
   it('validates each role, pinned image, exact network owner, and the exclusive private mount', () => {
     const saved = record();

@@ -596,6 +596,7 @@ export function buildSandboxProvider(
         browserEnabled: env.VALET_BROWSER_ENABLED === '1',
         browserImage: env.VALET_FULL_BASE_IMAGE ?? env.VALET_SANDBOX_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),
+        ...(env.VALET_BROWSER_APPARMOR_PROFILE ? { browserAppArmorProfile: env.VALET_BROWSER_APPARMOR_PROFILE } : {}),
       });
     case "local":
       return new LocalSandboxProvider();
