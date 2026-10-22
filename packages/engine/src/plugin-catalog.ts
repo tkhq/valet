@@ -842,7 +842,9 @@ export async function invokeAction(
       ...baseReq,
       ...borrowed,
       actions: [
-        { id: "approve", label: decision.approver ? "Allow" : "Approve", style: "primary" },
+        // A policy approval covers this one call, so it says so. A borrow
+        // approval also covers later calls, so it keeps "Allow".
+        { id: "approve", label: decision.approver ? "Allow" : "Approve once", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],

@@ -172,7 +172,7 @@ it("lets the run's members read a workflow step's messages for its logs, read-on
 });
 
 describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
-  it("lets the session's owner choose it and refuses a team member who is not a team admin", async () => {
+  it("lets a team member choose it for the team and keeps a critical action for a team admin", async () => {
     api = await bootTestApi();
     const p = api.providers;
     const now = Date.now();
@@ -191,15 +191,32 @@ describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
     await p.workflowStore.createRun("owner-run", { workflowId: "owner-workflow", definitionVersionId: "v1" },
       { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "owner-team" });
     const sessionId = "wf:owner-run:notify";
-    await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    const session = await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
       host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
-    const url = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions/nonexistent-gate/resolve`;
-    const refused = await fetch(url, { method: "POST", headers: member, body });
+    const threadId = session.thread().id;
+    const gate = (id: string, riskLevel: string) => p.engineStore.saveDecisionGate(sessionId, threadId, {
+      id, sessionId, threadId, queueItemId: "q", resumeKey: id, ordinal: 0, type: "approval", title: `Approve ${id}?`,
+      actions: [{ id: "approve", label: "Approve once" }, { id: "always_allow_owner", label: "Always allow for this team", approves: true }],
+      context: { riskLevel }, status: "pending", createdAt: now, updatedAt: now,
+    });
+    await gate("send", "high");
+    await gate("drop", "critical");
+    const url = (gateId: string) => `${api!.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions/${gateId}/resolve`;
+
+    // A member who is not a team admin may stop the team's asks for a high-risk action.
+    const sent = await fetch(url("send"), { method: "POST", headers: member, body });
+    expect(sent.status).toBe(200);
+    expect(await p.engineStore.getDecisionGate(sessionId, "send")).toMatchObject({ status: "resolved", resolution: { actionId: "always_allow_owner", resolvedBy: "test-member" } });
+
+    // A critical action stays with a team admin.
+    const refused = await fetch(url("drop"), { method: "POST", headers: member, body });
     expect(refused.status).toBe(403);
-    expect(await refused.json()).toEqual({ error: "Only a team admin can always allow this for the team. Approve it once, or ask a team admin." });
-    // An org admin holds team authority, so the check passes.
-    const admin = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
-    expect(admin.status).toBe(404);
+    expect(await refused.json()).toEqual({ error: "Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin." });
+    expect(await p.engineStore.getDecisionGate(sessionId, "drop")).toMatchObject({ status: "pending" });
+    // A team admin may.
+    await p.db.insert(teamMembers).values({ teamId: "owner-team", userId: "local-user", role: "admin" });
+    const admin = await fetch(url("drop"), { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    expect(admin.status).toBe(200);
   });
 });
 

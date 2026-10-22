@@ -287,7 +287,7 @@ describe("policyResolver seam: require_approval gate", () => {
     // Default approve/deny plus the extra. `approves` rides along so the
     // gate row can classify host actions for denial stickiness.
     expect(gateReq?.actions).toEqual([
-      { id: "approve", label: "Approve", style: "primary" },
+      { id: "approve", label: "Approve once", style: "primary" },
       { id: "deny", label: "Deny", style: "danger" },
       { id: "approve_always", label: "Always allow", style: "primary", approves: true },
     ]);

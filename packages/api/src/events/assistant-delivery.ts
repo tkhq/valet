@@ -26,6 +26,7 @@ import { recordChannelMessage, type InboundChannelMessage } from "../services/ch
 import type { DestinationReason } from "./destination.js";
 import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
 import { CONVERSATIONAL_THREAD_KEY, isAutomatedThreadKey } from "./automated-threads.js";
+import { answerOpenQuestion } from "../channels/open-question-reply.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -128,6 +129,12 @@ export interface AssistantDeliveryArgs {
   inbound?: InboundChannelMessage;
   /** Who wrote the message, when that is not `actorUserId` (`newcomerAuthor`). */
   author?: PromptAuthor;
+  /**
+   * A person's reply in the channel thread. It answers the thread's open
+   * question, when one waits, instead of queueing behind the turn that asked
+   * it (`channels/open-question-reply.ts`). Automated deliveries never set it.
+   */
+  answer?: { userId: string; text: string; channelType: string; channelId: string };
   /** The Slack channel this delivery's content came from. The thread records
    * it, so the channel's privacy gates reads of the thread whatever its key
    * (`services/thread-access.ts`). */
@@ -442,6 +449,16 @@ async function deliverToAssistantThreadInner(
     ...(args.appearance ? { presence: args.appearance } : {}),
     ...(args.unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}),
   };
+  if (args.answer && await answerOpenQuestion(deps.db, {
+    session, thread, ...args.answer, dispatchId: args.dispatchId, now: Date.now(),
+  })) {
+    if (args.inbound) {
+      await recordChannelMessage(deps.db, {
+        ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
+      });
+    }
+    return { sessionId: session.id, threadId: thread.id };
+  }
   // `inject`, not the thread default: a personal assistant thread defaults
   // to `steer`, which would abort the person's running turn and drop the
   // items queued behind it. The engine admits the delivery into the running

@@ -70,7 +70,7 @@ import { workflowRequestContext } from "../workflows/request-context.js";
 import { canReadWorkflowRun } from "../workflows/service.js";
 import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork } from "./wakeups.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
 import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
@@ -1723,17 +1723,8 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
   }
-  // The owner's lasting allow follows the same rule: refuse it here, before
-  // the engine consumes the gate, when the caller may not set it.
-  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
-    if (c.var.principal.type === "team") {
-      return c.json({ error: "A team API key cannot always allow an action. Sign in to apply it." }, 403);
-    }
-    const refusal = await ownerAlwaysAllowRefusal(c.var.providers.db, {
-      orgId: session.orgId, sessionId,
-      ...(session.ownerType === "team" ? { teamId: session.ownerId } : { userId: session.ownerId }),
-    }, c.var.user.id);
-    if (refusal) return c.json({ error: refusal }, 403);
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER && c.var.principal.type === "team") {
+    return c.json({ error: "A team API key cannot always allow an action. Sign in to apply it." }, 403);
   }
 
   // Confirm the gate is actually pending in this session before resolving.
@@ -1741,6 +1732,17 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  // The owner's lasting allow follows the same rule: refuse it here, before
+  // the engine consumes the gate, when the caller may not set it. A critical
+  // action or a team rule needs a team admin, so the check reads what the
+  // gate recorded about both.
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
+    const refusal = await ownerAlwaysAllowRefusal(c.var.providers.db, {
+      orgId: session.orgId, sessionId, ...gatePolicyFacts(gate),
+      ...(session.ownerType === "team" ? { teamId: session.ownerId } : { userId: session.ownerId }),
+    }, c.var.user.id);
+    if (refusal) return c.json({ error: refusal }, 403);
+  }
   // An MCP client or a `valet login` key is an agent. It may answer a
   // question, but an approval or a credential request needs a person, or
   // require_approval policy would let one agent approve another's actions.

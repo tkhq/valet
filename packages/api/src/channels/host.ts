@@ -52,13 +52,14 @@ import {
 } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { answerOpenQuestion, cardForReply } from "./open-question-reply.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
 import type { AttentionChannelDeliverer, AttentionDeliveryRef, AttentionEvent } from "../orchestrator/attention.js";
 import { activeChildWatch } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, gatePolicyFacts, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { resolveOrgChannelCredentialRead } from "../services/credential-resolution.js";
@@ -137,7 +138,7 @@ const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run 
 const GATE_WITHDRAWN_LABEL =
   "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
 
-const OPEN_QUESTION_NOTE = "Answer this question in Valet. A reply here does not reach it.";
+const OPEN_QUESTION_NOTE = "Reply in this thread to answer.";
 
 const LOCALDEV_SUFFIX = ".localdev";
 
@@ -499,6 +500,66 @@ export class ChannelHost {
 
   gateForRef(ref: GatePromptRef): { gateId: string; sessionId: string } | null {
     return this.gateRefs.get(`${ref.conversationKey}#${ref.messageId}`) ?? null;
+  }
+
+  /**
+   * The gate whose card this Slack conversation hangs under. A reply under a
+   * card carries the card's own timestamp as its thread root, so the
+   * conversation key ends with the card's message id.
+   */
+  private gateForReplyRoot(channelType: string, conversationKey: string): { gateId: string; sessionId: string } | null {
+    return channelType === "slack" ? cardForReply(this.gateRefs, conversationKey) ?? null : null;
+  }
+
+  /** Builds the session a gate lives on, for a resolution from a channel. */
+  private async gateSession(sessionId: string, sessionRow: typeof agentSessions.$inferSelect, userId: string, orgId: string): Promise<Session> {
+    // Assistant sessions must wake through `assistantSessionFor`: rows
+    // migrated from orchestrator_identities keep legacy `orchestrator:*`
+    // ids that `sessionFor`'s prefix parse cannot recognize, and a generic
+    // build cached under that id would serve later assistant wakes without
+    // persona or memory.
+    const assistant = await loadAssistantBySessionId(this.deps.db, sessionId);
+    return assistant
+      ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, { sessionId })
+      : await this.deps.engineHost.sessionFor(sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+  }
+
+  /**
+   * A reply under an open question's card answers that question, wherever
+   * its thread lives (an attention DM card names another session's gate).
+   * It needs the same rights as a button click. Returns false when the reply
+   * is not an answer, so the caller handles it as a message.
+   */
+  private async answerCardReply(
+    card: { gateId: string; sessionId: string },
+    event: InboundChannelEvent,
+    userId: string,
+    orgId: string,
+    channelType: string,
+  ): Promise<boolean> {
+    const text = (event.text ?? "").trim();
+    // Workflow runs never ask questions; a file reply goes in as a message.
+    if (!text || event.media?.length || card.sessionId.startsWith("wf:")) return false;
+    const [row] = await this.deps.db.select().from(agentSessions).where(eq(agentSessions.id, card.sessionId)).limit(1);
+    if (!row || row.orgId !== orgId || !(await canResolveSessionGate(this.deps.db, row, userPrincipal(userId)))) return false;
+    const stored = await this.deps.engineStore.getDecisionGate(card.sessionId, card.gateId);
+    if (!stored || stored.type !== "question" || stored.actions.length > 0 || !answersGate(stored, userPrincipal(userId))) return false;
+    // A replayed delivery of the reply that answered it is already handled.
+    if (stored.status === "resolved") return stored.resolution?.source?.messageId === event.dispatchId;
+    if (stored.status !== "pending") return false;
+    try {
+      const session = await this.gateSession(card.sessionId, row, userId, orgId);
+      await session.resolveDecision(card.gateId, {
+        value: text,
+        resolvedBy: userId,
+        resolvedAt: this.now(),
+        source: { channelType, channelId: event.conversationKey, messageId: event.dispatchId },
+      });
+      return true;
+    } catch (err) {
+      console.warn(`[channels] reply could not answer question ${card.gateId}; it goes in as a message`, err);
+      return false;
+    }
   }
 
   async start(): Promise<void> {
@@ -1262,8 +1323,8 @@ export class ChannelHost {
     signal?.throwIfAborted();
     const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId, signal);
     signal?.throwIfAborted();
-    // A channel reply cannot answer an open question (one with no options),
-    // so the card says where the answer goes instead of showing no control.
+    // An open question (one with no options) has no button, so the card says
+    // how to answer it: a reply under the card (`answerCardReply`).
     const body = prompt.actions.length > 0 ? prompt.body
       : [prompt.body, OPEN_QUESTION_NOTE].filter((part): part is string => part !== undefined).join("\n\n");
     const ref = await transport.sendGatePrompt(conversationKey, {
@@ -1582,6 +1643,10 @@ export class ChannelHost {
     // download attachments again: their filenames or contents may have changed.
     if (await alreadyAdmitted()) return;
 
+    // A reply under an open question's card answers it.
+    const card = this.gateForReplyRoot(channelType, event.conversationKey);
+    if (card && await this.answerCardReply(card, event, userId, orgId, channelType)) return;
+
     // Ask the transport for the thread key when it owns the mapping, so this
     // half and `channelThreadFor`'s inverse cannot drift apart. The default
     // below is the same derivation Telegram has always used.
@@ -1593,6 +1658,12 @@ export class ChannelHost {
       orgId,
       workspace: session.options.workspace,
     });
+    // A text reply in this conversation answers the open question its thread
+    // waits on, instead of queueing behind the turn that asked it.
+    if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
+      session, thread, userId, text: event.text ?? "", channelType,
+      channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
+    })) return;
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
@@ -1846,10 +1917,12 @@ export class ChannelHost {
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
       return;
     }
+    // A gate asking to use a member's shared account answers to that member alone.
+    const stored = await this.deps.engineStore.getDecisionGate(mapped.sessionId, mapped.gateId);
     if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER && sessionOrgId) {
       const owner = sessionRow ?? (workflow?.ok ? workflow.owner : undefined);
       const refusal = await ownerAlwaysAllowRefusal(this.deps.db, {
-        orgId: sessionOrgId, sessionId: mapped.sessionId,
+        orgId: sessionOrgId, sessionId: mapped.sessionId, ...(stored ? gatePolicyFacts(stored) : {}),
         ...(owner?.ownerType === "team" ? { teamId: owner.ownerId ?? undefined } : { userId: owner?.ownerId ?? undefined }),
       }, userId);
       if (refusal) {
@@ -1858,8 +1931,6 @@ export class ChannelHost {
         return;
       }
     }
-    // A gate asking to use a member's shared account answers to that member alone.
-    const stored = await this.deps.engineStore.getDecisionGate(mapped.sessionId, mapped.gateId);
     if (stored && !answersGate(stored, userPrincipal(userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`);
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the account's owner may answer this gate");
@@ -1896,10 +1967,7 @@ export class ChannelHost {
         session = await this.workflowGateSessionFor(mapped.sessionId);
       } else {
         if (!sessionRow) throw new Error("missing session row for channel gate callback");
-        const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
-        session = assistant
-          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, { sessionId: mapped.sessionId })
-          : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+        session = await this.gateSession(mapped.sessionId, sessionRow, userId, orgId);
       }
     } catch (err) {
       console.error("[channels] gate resolve wake failed", err);
