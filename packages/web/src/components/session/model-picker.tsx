@@ -14,7 +14,7 @@ import {
   useModels,
   useOrgReasoning,
 } from "~/api/settings";
-import { curatedForCatalogId, sameModelSpec } from "~/lib/models";
+import { curatedForCatalogId } from "~/lib/models";
 import {
   SIZE_TIERS,
   TIER_LABELS,
@@ -101,16 +101,10 @@ export interface ModelPickerProps {
 export interface NewThreadDefault {
   model: string;
   reasoning?: string;
-  /** Saves the current model and reasoning as the default. Omitted when the
-   * viewer cannot change the default, or a change would not reach new threads. */
+  /** Saves the thread's choice as the default. Present only when the viewer
+   * may change the default and the save would change what new threads get. */
   onMakeDefault?: () => void;
   saving?: boolean;
-}
-
-/** True when the current choice differs from the new-thread default. */
-export function differsFromDefault(currentId: string | undefined, currentReasoning: string | undefined, preset: NewThreadDefault): boolean {
-  if (currentId === undefined) return false;
-  return !sameModelSpec(currentId, preset.model) || (currentReasoning !== undefined && currentReasoning !== preset.reasoning);
 }
 
 function isAnthropic(id: string): boolean {
@@ -312,6 +306,8 @@ export function ModelPicker({
       e.preventDefault();
       setHighlightIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
+      // A footer button handles its own Enter; only the list commits a row.
+      if (e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       commitHighlighted();
     } else if (e.key === "/" && document.activeElement !== searchRef.current) {
@@ -539,7 +535,7 @@ export function ModelPicker({
                 New threads: {selectionLabel(newThreadDefault.model, tierMapQ.data, models)}
                 {newThreadDefault.reasoning ? ` · ${reasoningLabelFor(newThreadDefault.reasoning)}` : ""}
               </span>
-              {newThreadDefault.onMakeDefault && differsFromDefault(currentId, currentReasoning, newThreadDefault) && (
+              {newThreadDefault.onMakeDefault && (
                 <button
                   type="button"
                   disabled={newThreadDefault.saving}

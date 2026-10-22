@@ -3973,15 +3973,16 @@ export class EngineHost {
   }
 
   /**
-   * What a new thread gets now, and which default sets the model. A carried
-   * assistant model outranks the personal and team defaults while it still
-   * resolves, so a change to either would not reach new threads.
+   * What a new thread gets now, and where a saved default goes for each
+   * field. A carried assistant model outranks the personal and team defaults
+   * while it still resolves, and any carried reasoning outranks them too, so
+   * a default for that field would not reach new threads.
    */
   async newThreadDefaults(
     sessionId: string,
     meta: SessionMeta,
     actorUserId: string,
-  ): Promise<{ model: string; reasoning: ReasoningLevel; scope: "personal" | "team" | null }> {
+  ): Promise<{ model: string; reasoning: ReasoningLevel; scope: "personal" | "team" | null; reasoningScope: "personal" | "team" | null }> {
     const settings = await this.resolveFreshThreadSettings(sessionId, meta, actorUserId);
     const { userId, ownerTeamId, legacy } = await this.freshThreadPrefs(sessionId, meta, actorUserId);
     let carried = false;
@@ -3993,8 +3994,10 @@ export class EngineHost {
         // The carried model no longer resolves, so the next default applies.
       }
     }
-    const scope = carried ? null : userId ? "personal" : ownerTeamId ? "team" : null;
-    return { ...settings, scope };
+    const owner = userId ? "personal" : ownerTeamId ? "team" : null;
+    // `resolveReasoningForBuild` puts any carried level ahead of both defaults.
+    const reasoningCarried = legacy.reasoning !== undefined && legacy.reasoning !== null;
+    return { ...settings, scope: carried ? null : owner, reasoningScope: reasoningCarried ? null : owner };
   }
 
   /**

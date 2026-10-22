@@ -31,7 +31,7 @@ import {
   useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, usePatchMe, usePatchTeam, useTeams } from "~/api/settings";
-import { qkThreadDefaults, useThreadDefaults } from "~/api/thread-defaults";
+import { defaultSaveBody, useThreadDefaults } from "~/api/thread-defaults";
 import {
   Badge,
   Button,
@@ -370,13 +370,14 @@ export function SessionHeader({
   const teamId = owner.type === "team" ? owner.id : null;
   const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
   const isWorkspaceRuntime = session.isWorkspaceRuntime === true;
-  // The default a change applies to comes from the server: a carried
-  // assistant model outranks both personal and team defaults (scope null).
+  // The server says where each saved field goes; a field the assistant
+  // carries outranks both defaults, so a save never offers it.
   const defaults = threadDefaults.data;
-  const makeDefault = defaults?.scope && configuredModel ? () => {
-    const body = { defaultModel: configuredModel, ...(configuredReasoning ? { defaultReasoning: configuredReasoning } : {}) };
-    if (defaults.scope === "personal") patchMe.mutate(body);
-    else if (owner.type === "team") patchTeam.mutate({ id: owner.id, body });
+  const saveBody = defaults ? defaultSaveBody(defaults, { model: configuredModel, reasoning: configuredReasoning }) : undefined;
+  const saveTo = defaults?.scope ?? defaults?.reasoningScope ?? null;
+  const makeDefault = saveBody && saveTo ? () => {
+    if (saveTo === "personal") patchMe.mutate(saveBody);
+    else if (owner.type === "team") patchTeam.mutate({ id: owner.id, body: saveBody });
   } : undefined;
   const newThreadDefault: NewThreadDefault | undefined = defaults ? {
     model: defaults.model,

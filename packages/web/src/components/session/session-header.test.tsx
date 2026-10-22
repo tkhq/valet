@@ -92,8 +92,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
 let threadDefaultsData: ThreadDefaultsResponse | undefined;
 const patchMeMutate = vi.fn();
 const patchTeamMutate = vi.fn();
-vi.mock("~/api/thread-defaults", () => ({
-  qkThreadDefaults: { all: ["thread-defaults"], session: (id: string) => ["thread-defaults", id] },
+vi.mock("~/api/thread-defaults", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/thread-defaults")>()),
   useThreadDefaults: () => ({ data: threadDefaultsData }),
 }));
 
@@ -278,7 +278,7 @@ describe("SessionHeader — thread-scoped model picker", () => {
   it("saves the thread's model and reasoning as the personal default for new threads", async () => {
     const user = userEvent.setup();
     isWorkspaceRuntime = true;
-    threadDefaultsData = { model: "s", reasoning: "medium", scope: "personal" };
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: "personal", reasoningScope: "personal" };
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "high" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
@@ -287,10 +287,21 @@ describe("SessionHeader — thread-scoped model picker", () => {
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
   });
 
-  it("offers no save when the assistant's own model outranks the defaults", async () => {
+  it("saves only the model when the assistant carries its own reasoning", async () => {
     const user = userEvent.setup();
     isWorkspaceRuntime = true;
-    threadDefaultsData = { model: "s", reasoning: "medium", scope: null };
+    threadDefaultsData = { model: "s", reasoning: "high", scope: "personal", reasoningScope: null };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "low" }];
+    renderHeader(undefined, "th-1");
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
+    await user.click(screen.getByRole("button", { name: "Make default" }));
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7" });
+  });
+
+  it("offers no save when the assistant's own settings outrank the defaults", async () => {
+    const user = userEvent.setup();
+    isWorkspaceRuntime = true;
+    threadDefaultsData = { model: "s", reasoning: "medium", scope: null, reasoningScope: null };
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));

@@ -1080,10 +1080,13 @@ export interface ThreadDefaultsResponse {
   /** Model spec: a catalog id or a size tier token. */
   model: string;
   reasoning: string;
-  /** The default a change applies to: the session owner's personal default
+  /** Where a saved model default goes: the session owner's personal default
    * or the team default. Null when the assistant's own carried model
-   * outranks both, so a default change would not reach new threads. */
+   * outranks both, so a model default would not reach new threads. */
   scope: "personal" | "team" | null;
+  /** The same for reasoning. Null when the assistant carries its own
+   * reasoning level, which outranks both defaults. */
+  reasoningScope: "personal" | "team" | null;
 }
 
 /** A channel as a thread names it. */

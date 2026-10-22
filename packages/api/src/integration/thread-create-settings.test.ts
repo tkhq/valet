@@ -142,7 +142,7 @@ describe("POST /api/sessions/:id/threads settings", () => {
 
     const read = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/thread-defaults`);
     expect(read.status).toBe(200);
-    expect((await read.json()) as ThreadDefaultsResponse).toEqual({ model: "l", reasoning: "medium", scope: "personal" });
+    expect((await read.json()) as ThreadDefaultsResponse).toEqual({ model: "l", reasoning: "medium", scope: "personal", reasoningScope: "personal" });
     const created = (await (await createThread(api.baseUrl, sessionId)).json()) as CreateThreadResponse;
     expect(created).toMatchObject({ model: "l", reasoning: "medium" });
 
