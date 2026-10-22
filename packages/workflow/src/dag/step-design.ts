@@ -28,9 +28,11 @@ const NEGATED = /\b(?:not|never|no|without|don't|doesn't|do not|does not)\b[^.,;
  * also with options such as `git -C <dir> push`, and commit-then-push or
  * push-to-a-branch phrasing. A period inside a word, as in a file name, does
  * not end the phrase. "Push the update to the main Slack channel" is not git.
+ * Every repeat has a fixed bound, so a long prompt such as `git -C ` many
+ * times over cannot make the match backtrack for seconds.
  */
 const GIT_PUSH =
-  /\bgit(?:\s+-\S+(?:\s+[^\s-]\S*)?)*?\s+(?:commit|push)\b|\bcommit(?:s|ted|ting)?\b(?:[^.\n]|\.(?=\S)){0,60}?\bpush(?:es|ed|ing)?\b|\bpush(?:es|ed|ing)?\b(?:[^.\n]|\.(?=\S)){0,30}?\b(?:to|into)\s+(?:the\s+)?(?:main|master|origin|remote|default branch|branch|repo|repository)\b(?![ \t]+(?:\w+[ \t]+)?channel\b)/gi;
+  /\bgit(?:\s+-\S{1,40}(?:\s+[^\s-]\S{0,200})?){0,4}?\s+(?:commit|push)\b|\bcommit(?:s|ted|ting)?\b(?:[^.\n]|\.(?=\S)){0,60}?\bpush(?:es|ed|ing)?\b|\bpush(?:es|ed|ing)?\b(?:[^.\n]|\.(?=\S)){0,30}?\b(?:to|into)\s+(?:the\s+)?(?:main|master|origin|remote|default branch|branch|repo|repository)\b(?![ \t]+(?:\w+[ \t]+)?channel\b)/gi;
 
 /** Words that tell an agent to open a pull request. */
 const OPENS_PULL_REQUEST = /\b(?:open|create|file|raise|submit)(?:s|ed|ing)?\s+(?:a|an|the)\s+(?:new\s+|draft\s+)?(?:pull request|PR)\b|\bgh\s+pr\s+create\b/gi;

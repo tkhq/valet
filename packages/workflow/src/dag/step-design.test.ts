@@ -36,6 +36,14 @@ describe('pushesGitCommits', () => {
     expect(pushesGitCommits(session('Skip the pull request, never wait: git push origin main'))).toBe(true);
   });
 
+  it('reads a long prompt of repeated git options in linear time', () => {
+    // Before the option loop was bounded, 200 KB of this took seconds.
+    const prompt = 'git -C '.repeat(30_000);
+    const started = performance.now();
+    expect(pushesGitCommits(session(prompt))).toBe(false);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
   it('stays quiet for a step that opens a pull request for a person to merge', () => {
     expect(pushesGitCommits(session('Create a branch, commit the fix, push the branch and open a pull request.'))).toBe(false);
     expect(pushesGitCommits(session('git push origin fix-branch, then gh pr create'))).toBe(false);
