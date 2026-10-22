@@ -1,3 +1,5 @@
+import type { AppDb } from "../lib/drizzle.js";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { recordWakeupEnded } from "@valet/engine";
 import type {
   ArmEventRequest,
@@ -44,6 +46,7 @@ export interface WakeupsSeamSession {
 }
 
 export interface WakeupsSeamDeps {
+  db?: AppDb;
   engineStore: SessionStore;
   limits: WakeupLimits;
   /** Restores a lease's sandbox for a best-effort kill or a log read when the session holds no ready handle. */
@@ -473,6 +476,11 @@ export function buildWakeupsSeam(
       if (id.startsWith("wk_")) {
         const wakeup = await ownWakeup(id);
         if (!wakeup) return null;
+        if (wakeup.eventMatch?.childSessionId && deps.db) {
+          await cancelChildDelivery(deps.db, engineStore, wakeup.eventMatch.childSessionId, "The child-updates subscription was cancelled.");
+          recordEnded(wakeup.kind, "cancelled");
+          return { kind: "wakeup" as const };
+        }
         // Read the lease before the release: the kill needs its sandbox id.
         const lease = await activeLease(wakeup.leaseId);
         // CAS first, with the lease release in the same statement (spec B5,

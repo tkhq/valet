@@ -511,7 +511,12 @@ Boot retries do not reset `settled_at` or `sandbox_reclaimed_at`.
 A reclaim stamp prevents another sandbox destroy or destroy metric for that cycle.
 
 Notification does not release child capacity.
-A child with background work or a live sandbox still counts toward child and org limits.
+An unsettled child still counts toward child and org limits.
+Active leases, timers, and bounded event waits also consume capacity.
+A running sandbox consumes capacity even after notification.
+An idle parked or suspended sandbox does not consume child capacity.
+Retention can keep that sandbox without blocking another task.
+Capacity checks use bounded database reads instead of per-child engine-store queries.
 Reopening an idle child checks both limits before admission.
 The check excludes the reopened child from the existing population.
 

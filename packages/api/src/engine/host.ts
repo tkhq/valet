@@ -2593,6 +2593,7 @@ export class EngineHost {
       wakeups: buildWakeupsSeam(
         {
           ...wakeupsSeamDeps(this.opts),
+          db: this.opts.db,
           scratchBytes: () => sessionScratchBytes(getSession),
           ...(checkArm ? { checkArm } : {}),
         },
@@ -3474,6 +3475,11 @@ export class EngineHost {
    */
   sessionsWithActiveRuns(): string[] {
     return [...this.cache].filter(([, entry]) => entry.session.listThreads().some(thread => thread.hasActiveRun)).map(([id]) => id);
+  }
+
+  runningSandboxSessionIds(): string[] {
+    return [...this.cache].filter(([, { session }]) => session.attachment.sandboxId !== undefined
+      && session.attachment.state !== "suspended" && session.attachment.state !== "released").map(([id]) => id);
   }
 
   liveSession(sessionId: string): Session | null {

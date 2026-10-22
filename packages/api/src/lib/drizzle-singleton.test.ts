@@ -41,6 +41,25 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM pending_channel_deliveries WHERE id = 'repair-job'");
   });
 
+  it("backfills active child subscriptions once without reactivating finished history", async () => {
+    await db.query(`INSERT INTO child_watches (child_session_id, queue_item_id, parent_session_id, parent_thread_id, actor_user_id, org_id, settled, created_at)
+      VALUES ('repair-child', 'q', 'parent', 't', 'u', 'o', true, 1), ('repair-done', 'q', 'parent', 't', 'u', 'o', true, 1)`);
+    await db.query(`INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, log_offset, log_tail, event_count, created_at, updated_at)
+      VALUES ('wk_child_events:repair-child', 'parent', 't', 'event', 'running', 'updates', 0, '', 0, 1, 1)`);
+    await db.query('ALTER TABLE child_watches DROP COLUMN delivery_active, DROP COLUMN pending_cap_incident');
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT child_session_id, delivery_active, pending_cap_incident FROM child_watches ORDER BY child_session_id")).rows).toEqual([
+      { child_session_id: "repair-child", delivery_active: true, pending_cap_incident: null },
+      { child_session_id: "repair-done", delivery_active: false, pending_cap_incident: null },
+    ]);
+    await db.query("UPDATE child_watches SET delivery_active = false WHERE child_session_id = 'repair-child'");
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT delivery_active FROM child_watches WHERE child_session_id = 'repair-child'")).rows).toEqual([{ delivery_active: false }]);
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    await db.query("DELETE FROM engine_wakeups WHERE id = 'wk_child_events:repair-child'");
+    await db.query("DELETE FROM child_watches WHERE child_session_id IN ('repair-child', 'repair-done')");
+  });
+
   /** dev-v2's assistants table: several rows per owner, with a default flag. */
   async function restorePreviousSchema() {
     await db.query("DROP INDEX assistants_workspace");

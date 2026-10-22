@@ -347,6 +347,8 @@ CREATE TABLE "assistant_executions" (
 CREATE UNIQUE INDEX "assistant_executions_conversation" ON "assistant_executions" ("assistant_id", "conversation_key");
 --> statement-breakpoint
 CREATE TABLE "child_watches" (
+ "delivery_active" boolean NOT NULL DEFAULT false,
+ "pending_cap_incident" text,
 	"events_started_at" bigint,
 	"child_session_id" text PRIMARY KEY NOT NULL,
 	"queue_item_id" text NOT NULL,
@@ -363,6 +365,8 @@ CREATE TABLE "child_watches" (
 	"origin_json" text,
 	"reply_route" text
 );
+--> statement-breakpoint
+CREATE INDEX "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false;
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
 --> statement-breakpoint

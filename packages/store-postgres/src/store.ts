@@ -14,7 +14,7 @@ import {
   ValidationError,
   withSpan,
 } from "@valet/engine";
-import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -50,6 +50,7 @@ import { isPgUniqueViolation } from "./db.js";
 import type { PgDb, PgQueryable } from "./db.js";
 import {
   asString,
+  asStringOrNull,
   entryToRow,
   jsonOrNull,
   parseJson,
@@ -1041,6 +1042,18 @@ export class PgSessionStore implements SessionStore {
         const threads = await tx.query("SELECT * FROM engine_threads WHERE session_id = $1", [claim.sessionId]);
         const scope = continuationToolScope(item.metadata, threads.rows.map((thread) => rowToThread(rawToThreadRow(thread))));
         item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+        await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
+      }
+      if (item.attemptCount === 1) {
+        const thread = await tx.query("SELECT metadata FROM engine_threads WHERE session_id = $1 AND id = $2 FOR UPDATE", [claim.sessionId, claim.threadId]);
+        const metadata = parseJson<Record<string, unknown>>(asStringOrNull(thread.rows[0]?.metadata, "thread.metadata")) ?? {};
+        const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+        if (signal) {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: metadata[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
+        } else {
+          item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+          await tx.query("UPDATE engine_threads SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull({ ...metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id }), claim.sessionId, claim.threadId]);
+        }
         await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
       }
       return item;

@@ -2206,7 +2206,7 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.answered.some((a) => a.callbackId === "cb2" && a.text === undefined)).toBe(true);
   });
 
-  it("posts a child's approval card in the channel thread that spawned it (TKAI-564)", async () => {
+  it.each([false, true])("posts a child's approval card in its spawning channel with settled=%s", async (settled) => {
     const parent = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const childId = `child-origin-${randomUUID()}`;
     await testDb.appDb.insert(agentSessions).values({
@@ -2220,7 +2220,7 @@ describe("ChannelHost outbound delivery", () => {
     // What the spawner records when a channel message started the work.
     await testDb.appDb.insert(childWatches).values({
       childSessionId: childId, queueItemId: "qi-origin", parentSessionId: parent.id,
-      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled: false,
+      parentThreadId: parent.thread().id, actorUserId: USER_ID, orgId: ORG_ID, settled,
       originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:C-origin", reply: "auto" }), createdAt: Date.now(),
     });
     faux.setResponses([

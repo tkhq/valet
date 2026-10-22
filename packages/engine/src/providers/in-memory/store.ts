@@ -1,6 +1,6 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { countPendingForCap, SUBMISSION_TIMEOUT_MS } from "../../submission.js";
-import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -629,6 +629,16 @@ export class InMemorySessionStore implements SessionStore {
     if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
       const scope = continuationToolScope(item.metadata, [...r.threads.values()]);
       item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+    }
+    if (item.attemptCount === 0) {
+      const thread = r.threads.get(claim.threadId);
+      const signal = typeof item.content === "object" && item.content !== null && "kind" in item.content && item.content.kind === "signal";
+      if (signal) {
+        item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: thread?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY] ?? null };
+      } else if (thread) {
+        item.metadata = { ...item.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+        thread.metadata = { ...thread.metadata, [CONTINUATION_SOURCE_ITEM_KEY]: item.id };
+      }
     }
     // The execution clock starts when the item first runs, not at admission.
     if (item.attemptCount === 0) item.timeoutAt = now + SUBMISSION_TIMEOUT_MS;

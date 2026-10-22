@@ -21,7 +21,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
+import { childWatches, eventDropLog, agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
 import type {
   BackgroundWorkConflict,
   CancelSessionWakeupResponse,
@@ -650,11 +650,14 @@ describe("host child subscriptions", () => {
       kind: "event", status: "running", reason: "Child updates: child-1", subjects: ["valet:session:child-1"],
       eventMatch: { childSessionId: "child-1", clauses: [{ key: "child.*" }], self: [], once: false },
       logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now });
+    await api.providers.db.insert(childWatches).values({ childSessionId: "child-1", queueItemId: "owed-child-result",
+      parentSessionId: session.id, parentThreadId: thread.id, actorUserId: "local-user", orgId: "local-org", createdAt: now });
     const url = action === "archive" ? `/api/sessions/${session.id}/threads/${thread.id}` : `/api/sessions/${session.id}`;
     const res = await fetch(api.baseUrl + url, { method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(action === "archive" ? { archived: true } : { teamId: "host-child-team" }) });
     expect(res.status).toBe(200);
     expect((await api.providers.engineStore.getWakeup("wk_child_events:child-1"))?.status).toBe("cancelled");
+    expect(await api.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "child_delivery_cancelled"))).toHaveLength(1);
   });
 });
 

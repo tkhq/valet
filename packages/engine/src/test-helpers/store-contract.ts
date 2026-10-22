@@ -1,3 +1,4 @@
+import { CONTINUATION_SOURCE_ITEM_KEY, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY } from "@valet/shared";
 import { describe, it, expect, beforeEach } from "vitest";
 import { EVENT_DELIVERED_MAX_KEYS } from "../index.js";
 import type {
@@ -1234,6 +1235,28 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       await store.saveSession(newSession({ id: "without-ref" }));
       expect((await store.getSession("with-ref"))?.startRef).toEqual(startRef);
       expect((await store.getSession("without-ref"))?.startRef).toBeUndefined();
+    });
+
+    it("snapshots a continuation's source and scope before a queued delegation can replace them", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const claim = (id: string) => ({ sessionId: "sess-1", threadId: "th-1", itemId: id, attemptId: `attempt-${id}`, ownerId: "test" });
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("send1", 100, 100), metadata: { toolScope: { tools: ["read"] } } });
+      expect((await store.claimSubmission(claim("send1")))?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY]).toBe("send1");
+      const thread = await store.getThread("sess-1", "th-1");
+      if (!thread) throw new Error("thread missing");
+      // The engine writes the started turn's scope to the durable continuation metadata.
+      await store.saveThread("sess-1", { ...thread, metadata: { ...thread.metadata, [CONTINUATION_TOOL_SCOPE_KEY]: { tools: ["read"] } } });
+      const fence = { itemId: "send1", attemptId: "attempt-send1" };
+      await store.reserveSettlement("sess-1", "th-1", "send1", { outcome: "completed" }, fence);
+      await store.finalizeSettlement("sess-1", "th-1", "send1", fence);
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("sig", 200, 200),
+        content: { kind: "signal", signalType: "lease.released", body: "done" }, metadata: { [INHERIT_TOOL_SCOPE_KEY]: true } });
+      const signal = await store.claimSubmission(claim("sig"));
+      expect(signal?.metadata).toMatchObject({ [CONTINUATION_SOURCE_ITEM_KEY]: "send1", toolScope: { tools: ["read"] } });
+      await store.admitSubmission("sess-1", "th-1", { ...queueItem("send2", 300, 300), metadata: { toolScope: { tools: ["read", "bash"] } } });
+      expect((await store.getQueueItem("sess-1", "sig"))?.metadata).toEqual(signal?.metadata);
+      expect((await store.getThread("sess-1", "th-1"))?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY]).toBe("send1");
     });
 
     it("finalizeSettlement(patchRef) lands the settle-patch record on the item", async () => {

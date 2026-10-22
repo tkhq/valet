@@ -4,6 +4,8 @@
 // background work (fix wave 2, group C): the listing the routes show, and
 // the human cancel of spec B6.
 
+import type { AppDb } from "../lib/drizzle.js";
+import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import {
   recordWakeupSignalLost,
   SandboxEvictedError,
@@ -66,10 +68,10 @@ export async function listBackgroundWork(engineStore: SessionStore, sessionId: s
 }
 
 /** Stops delivery subscriptions without treating them as agent-owned work. */
-export async function endChildSubscriptions(store: Pick<SessionStore, "listWakeups" | "transitionWakeup">, sessionId: string, threadId?: string): Promise<void> {
+export async function endChildSubscriptions(store: Pick<SessionStore, "listWakeups" | "getWakeup" | "transitionWakeup">, sessionId: string, threadId: string | undefined, db: AppDb): Promise<void> {
   for (const row of await store.listWakeups(sessionId, ["running"])) {
     if (row.eventMatch?.childSessionId === undefined || (threadId !== undefined && row.threadId !== threadId)) continue;
-    await store.transitionWakeup(row.id, ["running"], "cancelled", { endedAt: Date.now() }, Date.now());
+    await cancelChildDelivery(db, store, row.eventMatch.childSessionId, "The parent thread was archived or its session moved.");
   }
 }
 

@@ -1249,7 +1249,7 @@ sessionsRouter.patch("/:id", async (c) => {
     };
   }
 
-  if (nextOwner !== undefined) await endChildSubscriptions(engineStore, id);
+  if (nextOwner !== undefined) await endChildSubscriptions(engineStore, id, undefined, db);
 
   // Drop the cached session so the next build reads the new row: the
   // profile is frozen into the sandbox opts, and the owner binds the skills

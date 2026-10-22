@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { DecisionGate } from "@valet/engine";
 import { InMemoryWorkflowStore, type NodeCheckpoint, type RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { childWatches, eventDropLog, assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -327,7 +327,10 @@ describe("buildRunThreadArchive", () => {
       eventMatch: { childSessionId: "run-child", clauses: [{ key: "child.*" }], self: [], once: false },
       logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1 });
 
+    await db.insert(childWatches).values({ childSessionId: "run-child", queueItemId: "owed-result", parentSessionId: done.sessionId,
+      parentThreadId: done.threadId, actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id, createdAt: 1 });
     await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_done", "wf_archive"));
+    expect((await db.select().from(eventDropLog)).some(row => row.reason === "child_delivery_cancelled")).toBe(true);
     expect((await engineStore.getWakeup("wk_child_events:run-child"))?.status).toBe("cancelled");
 
     const rows = await db.select().from(sessionThreads);

@@ -617,6 +617,8 @@ export const childWatches = pgTable(
     parentThreadId: text("parent_thread_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     orgId: text("org_id").notNull(),
+    deliveryActive: boolean("delivery_active").notNull().default(false),
+    pendingCapIncident: text("pending_cap_incident"),
     eventsStartedAt: bigint("events_started_at", { mode: "number" }),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -649,6 +651,7 @@ export const childWatches = pgTable(
     parkedSandboxId: text("parked_sandbox_id"),
   },
   (t) => [
+    index("child_watches_delivery").on(t.childSessionId).where(sql`${t.deliveryActive} = true OR ${t.settled} = false`),
     index("child_watches_parent").on(t.parentSessionId),
     index("child_watches_settled").on(t.settled),
     // Partial index for the retention sweep: rows are never deleted and

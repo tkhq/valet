@@ -427,7 +427,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
   // Behavior is tested in engine/wake-watcher.test.ts.
   const wakeWatcher = new WakeWatcher({
-    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest) },
+    childEvents: { active: (row) => childWatcher.subscriptionActive(row), deliver: (row, digest) => childWatcher.deliverEvent(row, digest), close: (row) => childWatcher.closeSubscription(row), finish: (row, blocked) => childWatcher.finishDeliveryPass(row, blocked) },
     db,
     engineStore,
     engineHost,
@@ -656,6 +656,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       await eventDispatcher.stop();
       await channelHost.stop();
       stopChildReports();
+      await childWatcher.stopRetentionSweep();
       autoTitleHost.stop();
       if (!opts.workflowRunHost) await realWorkflowRunHost.stopHost();
       await engineHost.destroyAll();

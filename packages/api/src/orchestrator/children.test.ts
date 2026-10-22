@@ -6,7 +6,7 @@
  * so the admitted `child.settled` signal stays observable in the queue.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
+import { CONTINUATION_SOURCE_ITEM_KEY, INHERIT_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY, WORKFLOW_STEP_KEY } from "@valet/shared";
 import { RegistryCapacityError } from "../bakes/registry-health.js";
 import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +25,7 @@ import type {
   SessionStore,
   Wakeup,
 } from "@valet/engine";
+import { cancelChildDelivery } from "./child-delivery.js";
 import { buildWakeupsSeam } from "../engine/wakeups-seam.js";
 import { WakeWatcher } from "../engine/wake-watcher.js";
 import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
@@ -57,11 +58,13 @@ import { SignalEdgeDeniedError } from "./signals.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
 
+const watchers: ChildWatcher[] = [];
 let api: TestApi | undefined;
 let childDelivery: WakeWatcher | undefined;
 let githubFixture: ReturnType<typeof startGithubFixture> | undefined;
 
 afterEach(async () => {
+  await Promise.all(watchers.splice(0).map(w => w.stopRetentionSweep()));
   childDelivery = undefined;
   await api?.cleanup();
   api = undefined;
@@ -83,11 +86,12 @@ function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): Childr
 
 function testChildWatcher(deps: ChildrenDeps): ChildWatcher {
   const watcher = new ChildWatcher(deps);
+  watchers.push(watcher);
   if (!api) throw new Error("Boot the test API before creating a watcher.");
   childDelivery = new WakeWatcher({
     db: deps.db, engineHost: deps.engineHost, engineStore: deps.engineStore,
     provider: api.providers.sandboxProvider, limits: resolveWakeupLimits(process.env),
-    childEvents: { active: (row) => watcher.subscriptionActive(row), deliver: (row, digest) => watcher.deliverEvent(row, digest) },
+    childEvents: { active: (row) => watcher.subscriptionActive(row), deliver: (row, digest) => watcher.deliverEvent(row, digest), close: (row) => watcher.closeSubscription(row), finish: (row, blocked) => watcher.finishDeliveryPass(row, blocked) },
   });
   return watcher;
 }
@@ -1230,16 +1234,16 @@ describe("ChildWatcher", () => {
     }
 
 
-    it.each(["hold", "timer", "event", "sandbox"] as const)("counts notified children with %s work against child and org capacity", async (kind) => {
+    it.each(["hold", "timer", "event"] as const)("counts notified children with %s work against child and org capacity", async (kind) => {
       const c = await armedChild(`capacity-${kind}`);
       const db = api!.providers.db;
       const now = Date.now();
       for (let n = 0; n < MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR; n++) {
         const childSessionId = `busy-${n}`;
         await db.insert(childWatches).values({ ...c.watch, childSessionId, queueItemId: `busy-qi-${n}`, settled: true, createdAt: now,
-          ...(kind === "sandbox" ? { parkedSandboxId: `sandbox-${n}` } : {}) });
+ });
         if (kind === "hold") await c.engineStore.createLease({ id: `ls_busy-${n}`, sessionId: childSessionId, ownerKind: "hold", reason: "busy", createdAt: now, deadlineAt: now + 60_000 });
-        else if (kind !== "sandbox") await c.engineStore.createWakeup({
+        else await c.engineStore.createWakeup({
           id: `wk_busy-${n}`, sessionId: childSessionId, threadId: `busy-th-${n}`, kind, status: kind === "timer" ? "pending" : "running", reason: "busy",
           ...(kind === "timer" ? { fireAt: now + 60_000, prompt: "wake" } : { deadlineAt: now + 60_000, subjects: ["github:acme/repo#1"],
             eventMatch: { clauses: [{ key: "github.check_run.completed" }], self: [], once: true } }),
@@ -1255,6 +1259,158 @@ describe("ChildWatcher", () => {
         actorUserId: "local-user", owner: { type: "user", id: "local-user" } })).rejects.toMatchObject({ code: "org_ceiling" });
       await expect(buildChildSender(limited, c.watcher)({ childSessionId: c.child.id, message: "resume" }, {
         parentSessionId: c.parent.id, parentThreadId: c.parentThread.id, actorUserId: "local-user" })).rejects.toMatchObject({ code: "org_ceiling" });
+    });
+
+    it("does not charge parked or suspended sandboxes against task capacity", async () => {
+      const c = await armedChild("parked-capacity");
+      const db = api!.providers.db;
+      for (let n = 0; n < MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR; n++) {
+        await db.insert(agentSessions).values({ id: `parked-${n}`, userId: "local-user", orgId: "local-org", workspace: "/tmp",
+          status: "hibernated", createdAt: 1, updatedAt: 1 });
+        await db.insert(childWatches).values({ ...c.watch, childSessionId: `parked-${n}`, queueItemId: `parked-qi-${n}`,
+          settled: true, parkedSandboxId: `sandbox-${n}`, createdAt: 1 });
+      }
+      const result = await buildChildSpawner(c.deps, c.watcher)({ prompt: "more" }, { parentSessionId: c.parent.id,
+        parentThreadId: c.parentThread.id, actorUserId: "local-user", owner: { type: "user", id: "local-user" } });
+      expect(result.childSessionId).toBeTruthy();
+    });
+
+    it("keeps a running signal's generation and narrow scope when queue:true admits send2", async () => {
+      const c = await armedChild("running-signal-generation");
+      await c.engineStore.createLease({ id: "running-signal-hold", sessionId: c.child.id, threadId: c.childThread.id,
+        ownerKind: "hold", reason: "keep the fixture's live session", createdAt: Date.now(), deadlineAt: Date.now() + 60_000 });
+      // The store owns the claimed test turn. Keep the live Thread from reconciling a claim it did not start.
+      const prompt = vi.spyOn(c.child, "prompt").mockImplementation(async (content, options) => {
+        expect(options?.queueMode).toBeDefined();
+        const item = { ...queuedItem(`send-${options?.queueMode}`, c.childThread.id, ""), content, metadata: options?.metadata };
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, item);
+        return { queueItemId: item.id, sessionId: c.child.id, threadId: c.childThread.id, status: "queued" };
+      });
+      const first = await buildChildSender(c.deps, c.watcher)({ childSessionId: c.child.id, message: "narrow work" },
+        { parentSessionId: c.parent.id, parentThreadId: c.parentThread.id, actorUserId: "local-user", toolScope: { tools: ["read"] } });
+      const claim = (id: string) => ({ sessionId: c.child.id, threadId: c.childThread.id, itemId: id, attemptId: `attempt-${id}`, ownerId: "test" });
+      const finish = async (id: string) => {
+        const fence = { itemId: id, attemptId: `attempt-${id}`, ownerId: "test" };
+        await c.engineStore.reserveSettlement(c.child.id, c.childThread.id, id, { outcome: "completed" }, fence);
+        await c.engineStore.finalizeSettlement(c.child.id, c.childThread.id, id, fence);
+      };
+      expect(await c.engineStore.claimSubmission(claim(first!.queueItemId))).not.toBeNull();
+      await finish(first!.queueItemId);
+      await waitFor(c.settled);
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("sig-running", c.childThread.id, ""),
+        content: { kind: "signal", signalType: "lease.released", body: "hold released" }, metadata: { [INHERIT_TOOL_SCOPE_KEY]: true } });
+      const sig = await c.engineStore.claimSubmission(claim("sig-running"));
+      expect(sig?.metadata?.[CONTINUATION_SOURCE_ITEM_KEY]).toBe(first!.queueItemId);
+      const second = await buildChildSender(c.deps, c.watcher)({ childSessionId: c.child.id, message: "broad work", queue: true },
+        { parentSessionId: c.parent.id, parentThreadId: c.parentThread.id, actorUserId: "local-user", toolScope: { tools: ["read", "bash"] } });
+      await finish("sig-running");
+      await c.watcher.observeTurn(c.child.id, "sig-running");
+      const dispatch = `${c.child.id}:settled:${c.child.id}:sig-running`;
+      await waitFor(async () => (await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch)) !== null);
+      expect((await c.engineStore.getQueueItemByDispatchId(c.parent.id, dispatch))?.metadata?.toolScope).toEqual({ tools: ["read"] });
+      expect((await api!.providers.db.select().from(childWatches))[0]).toMatchObject({ queueItemId: second!.queueItemId, settled: false });
+      expect((await c.engineStore.getQueueItem(c.child.id, second!.queueItemId))?.status).toBe("queued");
+      await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, second!.queueItemId, { outcome: "completed" });
+      await waitFor(c.settled);
+      prompt.mockRestore();
+    });
+
+    it("skips fully-done history and isolates a broken recovery row", async () => {
+      const c = await armedChild("recovery-isolation");
+      const db = api!.providers.db;
+      await db.insert(childWatches).values(Array.from({ length: 200 }, (_, n) => ({ ...c.watch, childSessionId: `history-${n}`,
+        settled: true, deliveryActive: false, sandboxReclaimedAt: 1, createdAt: 1 })));
+      await db.insert(childWatches).values({ ...c.watch, childSessionId: "a-broken", deliveryActive: true, createdAt: 1 });
+      const get = c.engineStore.getSession.bind(c.engineStore);
+      const spy = vi.spyOn(c.engineStore, "getSession").mockImplementation(async (id) => {
+        if (id === "a-broken") throw new Error("bad recovery row");
+        if (id.startsWith("history-")) throw new Error("historical row was read");
+        return get(id);
+      });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await c.watcher.rearm();
+        await waitFor(c.settled);
+        expect(errors.mock.calls.some(args => String(args[0]).includes("a-broken"))).toBe(true);
+        expect(spy.mock.calls.some(([id]) => id.startsWith("history-"))).toBe(false);
+      } finally { spy.mockRestore(); errors.mockRestore(); }
+    });
+
+    it("serializes idle close with publication and checks the empty-buffer CAS", async () => {
+      const c = await armedChild("close-publication");
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      await c.watcher.ensureSubscription(c.watch);
+      const waiter = await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`);
+      if (!waiter) throw new Error("waiter missing");
+      let entered!: () => void;
+      let release!: () => void;
+      const atClose = new Promise<void>(resolve => { entered = resolve; });
+      const hold = new Promise<void>(resolve => { release = resolve; });
+      const transition = c.engineStore.transitionWakeup.bind(c.engineStore);
+      const spy = vi.spyOn(c.engineStore, "transitionWakeup").mockImplementationOnce(async (...args) => {
+        expect(args[5]).toEqual({ eventBufferEmpty: true });
+        entered();
+        await hold;
+        return transition(...args);
+      });
+      const closing = c.watcher.closeSubscription(waiter);
+      try {
+        await atClose;
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("closing-sig", c.childThread.id, ""),
+          content: { kind: "signal", signalType: "lease.released", body: "release" } });
+        await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, "closing-sig", { outcome: "failed", error: "racing result" });
+        const publishing = c.watcher.observeTurn(c.child.id, "closing-sig");
+        release();
+        await closing;
+        await publishing;
+        await waitFor(async () => (await c.settledSignal())?.body === "racing result");
+        expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+      } finally { release(); await closing; spy.mockRestore(); }
+    });
+
+    it("does not overtake an older outbox result and retries empty-buffer ingestion failures", async () => {
+      const c = await armedChild("outbox-order", { retryDelayMs: 10 });
+      c.watcher.arm(c.watch);
+      const find = vi.spyOn(c.engineStore, "findEventWaiters").mockRejectedValue(new Error("ingest offline"));
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await vi.waitFor(async () => expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(1));
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("newer-sig", c.childThread.id, ""),
+          content: { kind: "signal", signalType: "lease.released", body: "newer" } });
+        await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, "newer-sig", { outcome: "failed", error: "newer result" });
+        await c.watcher.observeTurn(c.child.id, "newer-sig");
+        await vi.waitFor(async () => expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(2));
+        expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventBuffer ?? []).toEqual([]);
+        find.mockRestore();
+        // The retry timer must fill the empty buffer without another event or boot.
+        await vi.waitFor(async () => {
+          const buffer = (await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventBuffer;
+          expect(buffer?.map(d => d.refs?.child_queue_item_id)).toEqual([c.watch.queueItemId, "newer-sig"]);
+        }, { timeout: 5000 });
+        await waitFor(c.settled);
+      } finally { find.mockRestore(); errors.mockRestore(); }
+    });
+
+    it("cancellation removes the outbox and logs the abandoned reply before a new send", async () => {
+      const c = await armedChild("cancel-outbox");
+      c.watcher.arm(c.watch);
+      await vi.waitFor(async () => expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(1));
+      await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("cancelled-history", c.childThread.id, ""),
+        content: { kind: "signal", signalType: "lease.released", body: "old work" } });
+      await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, "cancelled-history", { outcome: "failed", error: "old result" });
+      await cancelChildDelivery(api!.providers.db, c.engineStore, c.child.id, "Parent thread archived.");
+      expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
+      expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventBuffer).toEqual([]);
+      expect(await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "child_delivery_cancelled"))).toHaveLength(1);
+      const next = await buildChildSender(c.deps, c.watcher)({ childSessionId: c.child.id, message: "new cycle" },
+        { parentSessionId: c.parent.id, parentThreadId: c.parentThread.id, actorUserId: "local-user" });
+      await c.watcher.rearm();
+      await childDelivery!.sweep();
+      expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:cancelled-history`)).toBeNull();
+      expect(await c.engineStore.getQueueItemByDispatchId(c.parent.id, `${c.child.id}:settled:${c.child.id}:${c.watch.queueItemId}`)).toBeNull();
+      await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, next!.queueItemId, { outcome: "completed" });
+      await waitFor(c.settled);
     });
 
     it("does not replay legacy turns or reset retention after an automatic channel reply", async () => {
@@ -1375,6 +1531,41 @@ describe("ChildWatcher", () => {
         const drops = await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "pending_cap"));
         expect(drops).toHaveLength(1);
       } finally { errors.mockRestore(); warns.mockRestore(); }
+    });
+
+    it("writes one pending-cap diagnostic per incident instead of per subscription", async () => {
+      const c = await armedChild("pending-incidents");
+      c.watcher.arm(c.watch);
+      await vi.waitFor(async () => expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventBuffer).toHaveLength(1));
+      const get = c.engineStore.admitSubmission.bind(c.engineStore);
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const blocked = vi.spyOn(c.engineStore, "admitSubmission").mockImplementation(async (...args) => {
+        if (args[0] === c.parent.id) throw new PendingCapError(c.parentThread.id, 20);
+        return get(...args);
+      });
+      try {
+        await childDelivery!.sweep();
+        await childDelivery!.sweep();
+        expect(await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "pending_cap"))).toHaveLength(1);
+        blocked.mockRestore();
+        await waitFor(c.settled);
+        expect((await api!.providers.db.select().from(childWatches))[0]?.pendingCapIncident).toBeNull();
+        await c.engineStore.admitSubmission(c.child.id, c.childThread.id, { ...queuedItem("incident2", c.childThread.id, ""),
+          content: { kind: "signal", signalType: "event.matched", body: "more work" } });
+        await c.engineStore.settleUnclaimed(c.child.id, c.childThread.id, "incident2", { outcome: "failed", error: "new result" });
+        await c.watcher.observeTurn(c.child.id, "incident2");
+        await vi.waitFor(async () => expect((await c.engineStore.getWakeup(`wk_child_events:${c.child.id}`))?.eventBuffer).toHaveLength(1));
+        const blockedAgain = vi.spyOn(c.engineStore, "admitSubmission").mockImplementation(async (...args) => {
+          if (args[0] === c.parent.id) throw new PendingCapError(c.parentThread.id, 20);
+          return get(...args);
+        });
+        try {
+          await childDelivery!.sweep();
+          await childDelivery!.sweep();
+          expect(await api!.providers.db.select().from(eventDropLog).where(eq(eventDropLog.reason, "pending_cap"))).toHaveLength(2);
+        } finally { blockedAgain.mockRestore(); }
+        await childDelivery!.sweep();
+      } finally { blocked.mockRestore(); errors.mockRestore(); }
     });
 
     it("reports deferred cancellation after a forced replacement starts provisioning", async () => {
@@ -1586,7 +1777,8 @@ describe("ChildWatcher", () => {
       await api!.providers.db.update(agentSessions).set({ status }).where(eq(agentSessions.id, c.watch.childSessionId));
       await c.watcher.rearm();
       c.watcher.arm(c.watch);
-      await waitFor(async () => (await c.engineStore.getWakeup(`wk_child_events:${c.watch.childSessionId}`))?.status === "done");
+      await waitFor(async () => (await c.engineStore.getWakeup(`wk_child_events:${c.watch.childSessionId}`))?.status === "cancelled");
+      expect(await api!.providers.db.select().from(childEventOutbox)).toHaveLength(0);
     });
 
     it("keeps an explicit cancellation across child turns and restart recovery", async () => {

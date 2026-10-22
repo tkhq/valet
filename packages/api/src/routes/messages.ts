@@ -848,7 +848,7 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     }
   }
 
-  if (body.archived === true) await endChildSubscriptions(c.var.providers.engineStore, sessionId, thread.id);
+  if (body.archived === true) await endChildSubscriptions(c.var.providers.engineStore, sessionId, thread.id, db);
 
   // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;

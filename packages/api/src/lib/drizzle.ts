@@ -828,6 +828,25 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
   },
   {
+    describe: "child_watches.delivery_active column",
+    probe: { kind: "column", table: "child_watches", column: "delivery_active" },
+    sql: `DO $$ BEGIN
+      ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "delivery_active" boolean NOT NULL DEFAULT false;
+      UPDATE "child_watches" c SET "delivery_active" = true WHERE EXISTS
+        (SELECT 1 FROM engine_wakeups w WHERE w.id = 'wk_child_events:' || c.child_session_id AND w.status = 'running');
+      END $$`,
+  },
+  {
+    describe: "child_watches.pending_cap_incident column",
+    probe: { kind: "column", table: "child_watches", column: "pending_cap_incident" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "pending_cap_incident" text',
+  },
+  {
+    describe: "child_watches_delivery index",
+    probe: { kind: "index", index: "child_watches_delivery" },
+    sql: 'CREATE INDEX IF NOT EXISTS "child_watches_delivery" ON "child_watches" ("child_session_id") WHERE "delivery_active" = true OR "settled" = false',
+  },
+  {
     describe: "child_event_outbox table",
     probe: { kind: "table", table: "child_event_outbox" },
     sql: 'CREATE TABLE IF NOT EXISTS "child_event_outbox" ("id" text PRIMARY KEY NOT NULL, "child_session_id" text NOT NULL, "event" jsonb NOT NULL, "created_at" bigint NOT NULL)',

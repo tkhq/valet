@@ -778,6 +778,12 @@ The waiter has no deadline.
 Host-created subscriptions do not consume the agent background-work quota.
 They do not block archive, owner move, busy checks, or workflow run archive.
 Archiving the parent thread or moving its session cancels these subscriptions.
+Workflow run archive also cancels them.
+Cancellation removes buffered events and outbox rows.
+It advances the recovery boundary so a later send does not replay cancelled history.
+A drop-log row records owed results that cancellation discards.
+Unadmitted automatic replies receive a failure record.
+Deleted children lose their pending delivery state on the next delivery or recovery pass.
 
 `wakeup_cancel` stops notifications without stopping the child.
 `child_send` restores delivery after cancellation or archive.
@@ -786,6 +792,12 @@ Later signal turns and pending gates can reopen an ended subscription.
 They do not reopen a cancelled subscription.
 Pending gates reach the parent even when the watch is already settled.
 The retention sweep ends idle subscriptions after background work stops without another turn.
+Publication, cancellation, and idle close share a per-child host lock.
+An idle close checks the outbox under that lock.
+Its store transition also requires an empty buffer.
+A publication after the close restores the ended waiter before ingestion.
+Gate Slack cards resolve the stored origin even after settlement notification.
+Private input and reply-route restrictions still apply.
 
 Child events use `ingestEvent`, subject matching, `appendEventMatch`, and WakeWatcher delivery.
 Internal events do not create org event receipts or match user subscriptions.
@@ -794,16 +806,25 @@ The digest keeps the bounded result and internal string refs.
 Published events retain their delegation generation and reply route.
 A later `child_send` does not discard an earlier truthful result or its automatic reply.
 Only the reported generation can mark its watch settled.
+At claim, a signal captures the delegation source from its thread's last started turn.
+The claim also persists the inherited tool scope.
+A queued `child_send` cannot replace that source or widen that scope.
+Unknown legacy provenance cannot acknowledge a newer queued delegation.
 
 The internal `child_event_outbox` stores each event before ingestion.
 Its child index supports replay after a buffer drain or restart.
+Publication drains older pending results before newer results.
+Creation timestamps increase per child to preserve result order.
+Gates retain delivery priority.
+An ingestion failure starts retries even when the buffer is empty.
 The buffer holds at most 200 digests.
 Child results leave ten slots for gates.
 Overflow stays in the outbox until delivery succeeds or a permanent denial ends delivery.
 No result is coalesced or abandoned at the buffer limit.
 Gate delivery runs before result delivery.
 One retryable result does not block another digest.
-Pending-cap diagnostics use one durable row per child subscription.
+Pending-cap diagnostics use one durable row per blocking incident.
+A successful delivery pass clears the incident marker.
 
 WakeWatcher admits each child signal before removing its digest.
 `admitSignal` enforces edge authorization and the engine hop budget at delivery.
@@ -817,6 +838,12 @@ The parent's durable dispatch ids provide replay protection.
 Due-row scans exclude idle and ended subscriptions.
 A partial buffer index supports ready event rows.
 Boot recovery restores subscriptions that still owe work.
+The indexed `child_watches.delivery_active` marker identifies subscriptions that can still owe delivery.
+Recovery pages unsettled rows, delivery-active rows, and children with outbox entries.
+Fully-done historical rows require no engine-store reads.
+Each recovery row has its own error handler.
+Recovery runs in the background without delaying WakeWatcher or readiness.
+Shutdown drains recovery and delivery retry work before closing the stores.
 `child_watches.events_started_at` separates pipeline turns from legacy history.
 Legacy rows start this boundary at their first pipeline boot.
 Boot recovery never republishes older signal turns.

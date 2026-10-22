@@ -316,7 +316,7 @@ export interface RunThreadArchiveDeps {
    * and for the state of the submission the node dispatched onto it. */
   engineStore: Pick<
     SessionStore,
-    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases" | "transitionWakeup"
+    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases" | "getWakeup" | "transitionWakeup"
   >;
   engineHost?: Pick<EngineHost, "liveSession" | "evictCache">;
 }
@@ -410,7 +410,7 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
           );
           continue;
         }
-        await endChildSubscriptions(deps.engineStore, dispatch.sessionId, thread.id);
+        await endChildSubscriptions(deps.engineStore, dispatch.sessionId, thread.id, deps.db);
         await deps.db
           .insert(sessionThreads)
           .values({

@@ -136,6 +136,8 @@ interface WakeWatcherBaseDeps {
   childEvents?: {
     active(row: Wakeup): Promise<boolean>;
     deliver(row: Wakeup, digest: EventMatchDigest): Promise<void>;
+    close(row: Wakeup): Promise<void>;
+    finish(row: Wakeup, blocked: boolean): Promise<void>;
   };
   /** Rows per `listDueWakeups` page. Defaults to `WAKE_WATCHER_BATCH`. */
   batchSize?: number;
@@ -447,9 +449,10 @@ export class WakeWatcher {
       const childEvents = this.deps.childEvents;
       if (!childEvents) throw new Error(`No child event delivery configured for ${row.id}`);
       if (!(await childEvents.active(row))) {
-        await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now);
+        await childEvents.close(row);
         return;
       }
+      let blocked = false;
       for (const digest of [...(row.eventBuffer ?? [])].sort((a, b) => Number(b.key === "child.gate_opened") - Number(a.key === "child.gate_opened"))) {
         const current = await this.deps.engineStore.getWakeup(row.id);
         if (current?.status !== "running") return;
@@ -458,6 +461,7 @@ export class WakeWatcher {
           await childEvents.deliver(current, digest);
         } catch (error) {
           // One blocked result must not starve a later approval notification.
+          blocked = true;
           console.error(`WakeWatcher: child digest ${digest.dedupeKey} stays buffered:`, error);
           continue;
         }
@@ -465,10 +469,8 @@ export class WakeWatcher {
         // The bounded source history keeps a lifetime subscription's buffer small.
         await this.deps.engineStore.removeEventMatches(row.id, [digest.dedupeKey], this.clock(), "source");
       }
-      if (!(await childEvents.active(row))) {
-        // An ingest that appended after the idle check keeps the waiter running.
-        await this.deps.engineStore.transitionWakeup(row.id, ["running"], "done", { endedAt: now }, now, { eventBufferEmpty: true });
-      }
+      await childEvents.finish(row, blocked);
+      await childEvents.close(row);
       return;
     }
     const decision = decideEventWaiter(now, row, this.decideOptions);
