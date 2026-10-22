@@ -210,7 +210,8 @@ it("matches the 12-intent golden set through the mocked batch model", async () =
 
 it("repairs deployed databases without replaying 0000 and keeps steady-state boot lock-free", async () => {
   const fixture = await freshTestPgDb();
-  await fixture.pgdb.query("DROP VIEW tag_resolved_labels; DROP TABLE tag_keys, tag_labels, tag_subjects, tag_jobs, tag_dimension_state");
+  await fixture.pgdb.query("DROP VIEW tag_resolved_labels");
+  await fixture.pgdb.query("DROP TABLE tag_keys, tag_labels, tag_subjects, tag_jobs, tag_dimension_state");
   await applyAppMigrations(fixture.pgdb);
   expect(await missingSchemaRepairs(fixture.pgdb)).toEqual([]);
   await setup().tagger.tag("tool_intent", [subject("repaired")]);
