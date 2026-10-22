@@ -9,7 +9,7 @@ import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
-import { resolvePolicyDecision, restrictivePolicyAnywhere, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
+import { resolvePolicyDecision, restrictivePolicyAnywhere, winningOverride, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
 import { parsePath } from "../policies/matchers.js";
 import { isRiskLevel } from "../policies/admin.js";
@@ -285,13 +285,16 @@ export function needsGrant(node: Pick<WorkflowNodePermissionWire, "mode" | "agen
 
 const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
 
-/** Whether a saved grant covers an agent step's dynamic action, as the run
- * resolves it (`resolution.ts`: no explicit rule may gate it). The action's
- * risk is unknown before a run, so a rule at any risk level counts. */
+/** Whether a saved grant covers a step's dynamic action, as the run
+ * resolves it (`resolution.ts`): no explicit rule may gate it, and a personal
+ * override, which wins over the grant, must not hold or deny it. The action's
+ * risk is unknown before a run, so a rule or override at any risk level counts. */
 function dynamicActionGranted(rows: PolicyResolutionRows, service: string, actionId: string, now: number): boolean {
   if (!rows.workflowGrants?.some((grant) => grant.actionId === actionId)) return false;
-  return !RISK_LEVELS.some((riskLevel) => restrictivePolicyAnywhere(rows,
-    { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }));
+  return !RISK_LEVELS.some((riskLevel) => {
+    const input: PolicyResolutionInput = { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now };
+    return restrictivePolicyAnywhere(rows, input) !== undefined || (winningOverride(rows, input)?.mode ?? "allow") !== "allow";
+  });
 }
 
 /** The Tool step action a run is parked on, with the risk the run read and

@@ -17,9 +17,10 @@ import {
   orderNodes,
   staticShape,
 } from "./workflow-preview.js";
-import { encodeToolOutput, type PluginAction, type PluginActionContext } from "@valet/engine";
+import { encodeToolOutput, type PluginAction, type PluginActionContext, type ValetPlugin } from "@valet/engine";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/types.js";
+import { workflowActionGrants } from "../schema/index.js";
 
 let api: TestApi | undefined;
 
@@ -324,6 +325,25 @@ describe("POST /api/workflows/:id/preview — step design", () => {
     expect(scheduled.status).toBe(201);
     const refresh = nodeNamed(await preview(api.baseUrl, created.id), "refresh");
     expect(refresh.warnings.join(" ")).toContain("{{trigger.data.input.push || trigger.data.push}}");
+  });
+
+  it("does not count a saved grant for a draft whose steps the save would change", async () => {
+    // An MCP-style service: a run learns its actions, and their risk, when it calls one.
+    const dynamic: ValetPlugin = { name: "mcp-fixture", version: "0.0.1", actions: [{ service: "mcpish", actions: [], resolveActions: async () => [] }] };
+    api = await bootTestApi({ plugins: [dynamic] });
+    const step = (params: Record<string, unknown>) => ({
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "mystery", type: "tool", service: "mcpish", action: "thing", params }],
+      edges: [{ from: "trigger", to: "mystery" }],
+    });
+    const created = await createWorkflow(api.baseUrl, step({}));
+    await api.providers.db.insert(workflowActionGrants).values({
+      id: "grant-mystery", orgId: "local-org", workflowId: created.id, ownerType: "user", ownerId: "local-user",
+      actionId: "mcpish.thing", grantedBy: "local-user", createdAt: Date.now(),
+    });
+    const warned = async (body: unknown) => nodeNamed(await preview(api!.baseUrl, created.id, body), "mystery").warnings.join(" ");
+    expect(await warned({})).not.toContain("Allow for this workflow");
+    expect(await warned({ definition: step({ note: "changed" }) })).toContain("Allow for this workflow");
   });
 });
 

@@ -253,6 +253,11 @@ function matchesOverrideRow(row: ActionPolicyOverrideRow, input: PolicyResolutio
   return matchesParams(row, input);
 }
 
+/** The personal override that decides this call at rung 2, if one matches. */
+export function winningOverride(rows: PolicyResolutionRows, input: PolicyResolutionInput): ActionPolicyOverrideRow | undefined {
+  return mostSpecific(rows.overrides.filter((r) => matchesOverrideRow(r, input)));
+}
+
 function matchesGrantRow(row: RuntimeGrantRow, input: PolicyResolutionInput): boolean {
   if (row.revokedAt !== null) return false;
   if (row.policyKey !== grantPolicyKey(input.service, input.actionId)) return false;
@@ -339,7 +344,7 @@ export function resolvePolicyDecision(
   }
 
   // Rung 2: per-user override (any mode).
-  const override = mostSpecific(rows.overrides.filter((r) => matchesOverrideRow(r, input)));
+  const override = winningOverride(rows, input);
   if (override) {
     return {
       mode: override.mode,

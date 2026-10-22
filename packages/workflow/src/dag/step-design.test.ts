@@ -26,6 +26,8 @@ describe('pushesGitCommits', () => {
     expect(pushesGitCommits(session('If {{trigger.data.push}} is true, commit and push data/dashboard.json to main.'))).toBe(true);
     expect(pushesGitCommits(session('Run `git push origin HEAD` when the tests pass.'))).toBe(true);
     expect(pushesGitCommits({ type: 'orchestrator', prompt: 'Push the changes to the main branch.' })).toBe(true);
+    expect(pushesGitCommits(session('Commit dashboard.json and push.'))).toBe(true);
+    expect(pushesGitCommits(session('Run `git -C /workspace/repo push origin main`.'))).toBe(true);
   });
 
   it('flags a push that follows a negation in an earlier clause', () => {
@@ -75,6 +77,13 @@ describe('scheduledRunMisses', () => {
       ],
     };
     expect([...scheduledRunMisses(definition)]).toEqual([['start', [{ field: 'push', sites: ['expression'] }]]]);
+  });
+
+  it('lets a nested input read cover a top-level read only inside the same expression', () => {
+    const definition = {
+      nodes: [{ id: 'refresh', type: 'session', prompt: 'Scheduled push setting: {{trigger.data.input.push}}. If {{trigger.data.push}} is true, save the report.' }],
+    };
+    expect([...scheduledRunMisses(definition)]).toEqual([['refresh', [{ field: 'push', sites: ['template'] }]]]);
   });
 
   it('reports a field read both in a template and in a condition once, with both sites', () => {

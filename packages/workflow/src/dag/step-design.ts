@@ -10,7 +10,7 @@
  * template walk finds the trigger fields that a scheduled run leaves empty.
  */
 
-import { collectExpressionValuePaths, collectTemplateValuePaths } from './expression.js';
+import { collectExpressionValuePaths, parseTemplate } from './expression.js';
 
 /** Words that tell an agent to get a person's approval or sign-off. */
 const APPROVAL_REQUEST =
@@ -23,9 +23,14 @@ const APPROVAL_REQUEST =
  */
 const NEGATED = /\b(?:not|never|no|without|don't|doesn't|do not|does not)\b[^.,;:!?\n]{0,24}$/i;
 
-/** Words that tell an agent to make git commits and push them. "Push the update to the main Slack channel" is not git. */
+/**
+ * Words that tell an agent to make git commits and push them: `git push`,
+ * also with options such as `git -C <dir> push`, and commit-then-push or
+ * push-to-a-branch phrasing. A period inside a word, as in a file name, does
+ * not end the phrase. "Push the update to the main Slack channel" is not git.
+ */
 const GIT_PUSH =
-  /\bgit\s+(?:commit|push)\b|\bcommit(?:s|ted|ting)?\b[^.\n]{0,60}?\bpush(?:es|ed|ing)?\b|\bpush(?:es|ed|ing)?\b[^.\n]{0,30}?\b(?:to|into)\s+(?:the\s+)?(?:main|master|origin|remote|default branch|branch|repo|repository)\b(?![ \t]+(?:\w+[ \t]+)?channel\b)/gi;
+  /\bgit(?:\s+-\S+(?:\s+[^\s-]\S*)?)*?\s+(?:commit|push)\b|\bcommit(?:s|ted|ting)?\b(?:[^.\n]|\.(?=\S)){0,60}?\bpush(?:es|ed|ing)?\b|\bpush(?:es|ed|ing)?\b(?:[^.\n]|\.(?=\S)){0,30}?\b(?:to|into)\s+(?:the\s+)?(?:main|master|origin|remote|default branch|branch|repo|repository)\b(?![ \t]+(?:\w+[ \t]+)?channel\b)/gi;
 
 /** Words that tell an agent to open a pull request. */
 const OPENS_PULL_REQUEST = /\b(?:open|create|file|raise|submit)(?:s|ed|ing)?\s+(?:a|an|the)\s+(?:new\s+|draft\s+)?(?:pull request|PR)\b|\bgh\s+pr\s+create\b/gi;
@@ -109,7 +114,8 @@ export function scheduledRunMisses(definition: unknown): Map<string, ScheduledRu
     for (const edge of definition.edges) {
       if (!isRecord(edge) || typeof edge.from !== 'string' || typeof edge.when !== 'string') continue;
       const fields: FieldReads = reads.get(edge.from) ?? new Map();
-      addMisses(edge.when.includes('{{') ? collectTemplateValuePaths(edge.when) : collectExpressionValuePaths(edge.when), fields, 'expression');
+      const expressions = edge.when.includes('{{') ? templateExpressionPaths(edge.when) : [collectExpressionValuePaths(edge.when)];
+      for (const paths of expressions) addMisses(paths, fields, 'expression');
       reads.set(edge.from, fields);
     }
   }
@@ -123,7 +129,7 @@ export function scheduledRunMisses(definition: unknown): Map<string, ScheduledRu
 /** Every template string in `value`, and an `if` condition's bare `left` expression. */
 function collectMisses(value: unknown, fields: FieldReads): void {
   if (typeof value === 'string') {
-    if (value.includes('{{')) addMisses(collectTemplateValuePaths(value), fields, 'template');
+    if (value.includes('{{')) for (const paths of templateExpressionPaths(value)) addMisses(paths, fields, 'template');
     return;
   }
   if (Array.isArray(value)) {
@@ -139,6 +145,20 @@ function collectMisses(value: unknown, fields: FieldReads): void {
   for (const entry of Object.values(value)) collectMisses(entry, fields);
 }
 
+/**
+ * The value paths of each `{{ }}` expression in `source`, one list per
+ * expression, so a fallback in one expression covers only that expression.
+ * Empty when the template does not parse: the validator reports that.
+ */
+function templateExpressionPaths(source: string): string[][][] {
+  try {
+    return parseTemplate(source).segments.filter((segment) => segment.kind === 'expr').map((segment) => collectExpressionValuePaths(segment.text));
+  } catch {
+    return [];
+  }
+}
+
+/** Adds the fields one expression reads, unless it also reads them under `trigger.data.input`. */
 function addMisses(paths: string[][], fields: FieldReads, site: TriggerReadSite): void {
   const isData = (path: string[]) => path[0] === 'trigger' && path[1] === 'data';
   const covered = new Set(paths.filter((path) => isData(path) && path[2] === 'input' && path[3] !== undefined).map((path) => path[3]));
