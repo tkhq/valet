@@ -73,8 +73,9 @@ const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
  * The script locates the real binary by skipping /usr/local/bin. */
 const GH_SHIM_PATH = "/usr/local/bin/gh";
 
-const DEFAULT_USER_NAME = "Valet Agent";
-const DEFAULT_USER_EMAIL = "agent@valet.local";
+/** The git identity when the session owner has no name or email, as for a team or organization run. */
+export const DEFAULT_USER_NAME = "Valet Agent";
+export const DEFAULT_USER_EMAIL = "agent@valet.local";
 
 
 /** POSIX single-quote escaping for values interpolated into `sh` command

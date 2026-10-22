@@ -168,6 +168,28 @@ describe("GET /api/workflows/:id/permissions", () => {
     expect(nodes.has("human")).toBe(false);
   });
 
+  // "Allow for this workflow" on a parked run's card saves this grant. The
+  // review shows it, so the step-design warning about the step goes quiet.
+  it("shows the saved grant on a tool step's dynamic action", async () => {
+    api = await bootTestApi({ plugins: [widgetsPlugin()] });
+    const wfId = await insertWorkflow(api);
+    const mystery = async () => ((await (await fetch(`${api!.baseUrl}/api/workflows/${wfId}/permissions`)).json()) as GetWorkflowPermissionsResponse)
+      .nodes.find((n) => n.nodeId === "mystery");
+    expect(await mystery()).not.toHaveProperty("granted");
+    await api.providers.db.insert(workflowActionGrants).values({
+      id: "grant-mystery", orgId: "local-org", workflowId: wfId, ownerType: "user", ownerId: "local-user",
+      actionId: "unplugged.thing", grantedBy: "local-user", createdAt: Date.now(),
+    });
+    expect(await mystery()).toMatchObject({ actionId: null, mode: "unknown", granted: true });
+
+    // A personal override wins over the workflow grant when a run resolves the call.
+    await api.providers.db.insert(actionPolicyOverrides).values({
+      id: "personal-hold", orgId: "local-org", userId: "local-user", actionId: "unplugged.thing",
+      mode: "require_approval", paramMatchers: [], createdAt: 1, updatedAt: 1,
+    });
+    expect(await mystery()).not.toHaveProperty("granted");
+  });
+
   it("an org deny surfaces as mode deny with org_policy provenance", async () => {
     api = await bootTestApi({ plugins: [widgetsPlugin()] });
     const wfId = await insertWorkflow(api);

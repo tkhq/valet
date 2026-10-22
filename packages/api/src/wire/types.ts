@@ -2231,7 +2231,9 @@ export interface MemoryTreeEntry {
 // one owner, and an owner the caller cannot reach 404s.
 
 /** `GET /api/workflows/step-check` (organization admins): workflows whose
- * steps expect a person's approval in a way a run cannot deliver. */
+ * steps a run cannot carry out as written. Examples: an approval a run cannot
+ * deliver, a trigger read a schedule leaves empty, or team commits that a
+ * deploy check blocks. */
 export interface WorkflowStepCheckResponse {
   /** Workflows read in the organization. */
   scanned: number;
@@ -2620,9 +2622,11 @@ export interface WorkflowNodePermissionWire {
    * chooses when to call it and which values to send, so `mode` assumes any
    * values. A dynamic action is `unknown` here and can still be granted. */
   agentStep?: true;
-  /** An agent step's dynamic action that the workflow's saved permissions
-   * allow. Its `mode` stays `unknown` because its risk is unknown before a
-   * run. Set only when no org or team rule could gate it at any risk level. */
+  /** A dynamic action that the workflow's saved permissions allow: listed by
+   * an agent step, or called by a tool step whose run card saved "Allow for
+   * this workflow". Its `mode` stays `unknown` because its risk is unknown
+   * before a run. Set only when no org or team rule could gate it at any
+   * risk level. */
   granted?: true;
 }
 

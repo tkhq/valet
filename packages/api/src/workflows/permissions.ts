@@ -9,7 +9,7 @@ import { credentials, teams, workflowActionGrants } from "../schema/index.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
-import { resolvePolicyDecision, restrictivePolicyAnywhere, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
+import { resolvePolicyDecision, restrictivePolicyAnywhere, winningOverride, type PolicyResolutionInput, type PolicyResolutionRows } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
 import { parsePath } from "../policies/matchers.js";
 import { isRiskLevel } from "../policies/admin.js";
@@ -181,7 +181,7 @@ function dependsOnTemplates(
 export async function analyzeDefinitionPermissions(
   deps: WorkflowPermissionDeps,
   owner: WorkflowOwner,
-  summary: WorkflowDefinitionSummary,
+  summary: Pick<WorkflowDefinitionSummary, "id" | "ownerType" | "ownerId" | "definition">,
 ): Promise<WorkflowNodePermissionWire[]> {
   const refs = [...toolNodeRefs(summary.definition), ...agentStepRefs(summary.definition)];
   if (refs.length === 0) return [];
@@ -229,11 +229,14 @@ export async function analyzeDefinitionPermissions(
     const action = entry ? findAction(entry.actionPlugin.actions, ref.service, ref.action) : undefined;
     const agentStep = ref.agentStep ? { agentStep: true as const } : {};
     if (!entry || !action) {
-      // An agent step names a dynamic action exactly, so its id is known.
+      // An agent step names a dynamic action exactly, so its id is known. A
+      // tool step's grant comes from a parked run's card, under the id the
+      // run read (`isParkedDynamicStep`); the row keeps a null actionId.
       const actionId = ref.agentStep ? `${ref.service}.${ref.action}` : null;
+      const grantId = actionId ?? (ref.action.includes(".") ? ref.action : `${ref.service}.${ref.action}`);
       nodes.push({ nodeId: ref.nodeId, service: ref.service, action: ref.action, actionId,
         mode: "unknown", ...agentStep, ...(sharedAccount ? { sharedAccount: true as const } : {}),
-        ...(actionId !== null && dynamicActionGranted(rows, ref.service, actionId, now) ? { granted: true as const } : {}) });
+        ...(dynamicActionGranted(rows, ref.service, grantId, now) ? { granted: true as const } : {}) });
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
@@ -282,13 +285,16 @@ export function needsGrant(node: Pick<WorkflowNodePermissionWire, "mode" | "agen
 
 const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
 
-/** Whether a saved grant covers an agent step's dynamic action, as the run
- * resolves it (`resolution.ts`: no explicit rule may gate it). The action's
- * risk is unknown before a run, so a rule at any risk level counts. */
+/** Whether a saved grant covers a step's dynamic action, as the run
+ * resolves it (`resolution.ts`): no explicit rule may gate it, and a personal
+ * override, which wins over the grant, must not hold or deny it. The action's
+ * risk is unknown before a run, so a rule or override at any risk level counts. */
 function dynamicActionGranted(rows: PolicyResolutionRows, service: string, actionId: string, now: number): boolean {
   if (!rows.workflowGrants?.some((grant) => grant.actionId === actionId)) return false;
-  return !RISK_LEVELS.some((riskLevel) => restrictivePolicyAnywhere(rows,
-    { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now }));
+  return !RISK_LEVELS.some((riskLevel) => {
+    const input: PolicyResolutionInput = { service, actionId, riskLevel, params: {}, appliesIn: "session", partialParams: true, agentStep: true, now };
+    return restrictivePolicyAnywhere(rows, input) !== undefined || (winningOverride(rows, input)?.mode ?? "allow") !== "allow";
+  });
 }
 
 /** The Tool step action a run is parked on, with the risk the run read and

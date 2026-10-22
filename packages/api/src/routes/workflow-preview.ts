@@ -62,8 +62,9 @@ import {
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import { workflowRequestContext } from "../workflows/request-context.js";
+import { sameWorkflowSteps } from "../workflows/definition-version.js";
 import { analyzeDefinitionPermissions } from "../workflows/permissions.js";
-import { stepDesignWarnings } from "../workflows/step-design.js";
+import { stepDesignWarnings, workflowScheduleNames } from "../workflows/step-design.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   PreviewField,
@@ -888,11 +889,15 @@ export async function previewWorkflow(
     }
   }
 
-  // Approval a run cannot deliver: an agent step that asks, or an action it
-  // lists that policy holds for approval.
+  // What a run cannot carry out as written: an approval it cannot deliver,
+  // a trigger read its schedule leaves empty, or commits a deploy check blocks.
+  // A save that changes the steps revokes the saved grants, so a changed
+  // draft reads none: an empty id reads no saved permissions (`loadPolicyRows`).
   const summary = await getWorkflowDefinition(deps, owner, workflowId);
-  const permissions = summary ? await analyzeDefinitionPermissions(deps, owner, { ...summary, definition }) : [];
-  const design = stepDesignWarnings(definition, permissions);
+  const draft = summary ? { ...summary, id: sameWorkflowSteps(summary.definition, definition) ? summary.id : "", definition } : undefined;
+  const permissions = draft ? await analyzeDefinitionPermissions(deps, owner, draft) : [];
+  const schedules = await workflowScheduleNames(deps.db, row.orgId, [workflowId]);
+  const design = stepDesignWarnings(definition, permissions, { ownerType: row.ownerType, schedules: schedules.get(workflowId) });
   for (const node of nodes) node.warnings.push(...(design.get(node.nodeId) ?? []));
 
   const response: PreviewWorkflowResponse = {

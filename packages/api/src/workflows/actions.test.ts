@@ -21,7 +21,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, slackChannelPrivacy, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, slackChannelPrivacy, workflowActionGrants, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
@@ -277,6 +277,20 @@ describe("validate_definition", () => {
       nodes: [{ id: "start", type: "trigger" }, { id: "done", type: "stop", outcome: "success" }],
       edges: [{ from: "start", to: "done" }],
     };
+    expect(await validate.execute({ definition }, ctx())).toEqual({ success: true, data: { valid: true } });
+  });
+
+  it("returns the design warnings for a valid draft, without blocking it", async () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "Commit and push data/dashboard.json to main." },
+      ],
+      edges: [{ from: "start", to: "refresh" }],
+    };
+    const checked = await validate.execute({ definition }, ctx({ owner: { type: "team", id: "team1" } }));
+    expect(checked).toMatchObject({ success: true, data: { valid: true, warnings: [{ nodeId: "refresh", warnings: [expect.stringContaining("Valet Agent <agent@valet.local>")] }] } });
     expect(await validate.execute({ definition }, ctx())).toEqual({ success: true, data: { valid: true } });
   });
 });
@@ -1894,6 +1908,82 @@ describe("update actions", () => {
     if (!found) throw new Error(`${id} action missing`);
     return found;
   }
+
+  it("validate_definition reads the schedules of the saved workflow it names", async () => {
+    await db.insert(workflowSchedules).values({
+      id: "sched_validate_draft",
+      orgId: DB_USER.orgId,
+      ownerType: "user",
+      ownerId: DB_USER.id,
+      targetKind: "workflow",
+      workflowId: "wf_actions_1",
+      prompt: null,
+      name: "Nightly refresh",
+      cron: "0 18 * * *",
+      timezone: "UTC",
+      input: { push: true },
+      enabled: true,
+      nextFireAt: NOW + 3600_000,
+      lastFiredAt: null,
+      createdBy: DB_USER.id,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "refresh", type: "session", mode: "start", prompt: "If {{trigger.data.push}} is true, save the report." },
+      ],
+      edges: [{ from: "start", to: "refresh" }],
+    };
+    const validate = findAction("workflows.validate_definition");
+    const person = ctx({ orgId: DB_USER.orgId, userId: DB_USER.id });
+    try {
+      expect(await validate.execute({ definition, workflow_id: "wf_actions_1" }, person)).toMatchObject({
+        success: true,
+        data: { valid: true, warnings: [{ nodeId: "refresh", warnings: [expect.stringContaining("{{trigger.data.input.push || trigger.data.push}}")] }] },
+      });
+      // A new draft has no schedule yet.
+      expect(await validate.execute({ definition }, person)).toEqual({ success: true, data: { valid: true } });
+      expect(await validate.execute({ definition, workflow_id: "wf_missing" }, person)).toMatchObject({ success: false, error: expect.stringContaining("wf_missing") });
+    } finally {
+      await db.delete(workflowSchedules).where(eq(workflowSchedules.id, "sched_validate_draft"));
+    }
+  });
+
+  it("validate_definition counts saved permissions only for a draft that keeps the saved steps", async () => {
+    const finish = (prompt: string) => ({
+      version: "dag/v1",
+      nodes: [
+        { id: "start", type: "trigger" },
+        { id: "finish", type: "session", mode: "start", prompt, toolScope: { actions: ["linear.save_milestone"] } },
+      ],
+      edges: [{ from: "start", to: "finish" }],
+    });
+    await db.insert(workflowDefinitions).values({
+      id: "wf_actions_granted", orgId: DB_USER.orgId, ownerType: "user", ownerId: DB_USER.id, name: "granted workflow",
+      definition: finish("Add the milestones."), createdAt: NOW, updatedAt: NOW,
+    });
+    await db.insert(workflowActionGrants).values({
+      id: "grant_validate_draft", orgId: DB_USER.orgId, workflowId: "wf_actions_granted", ownerType: "user", ownerId: DB_USER.id,
+      actionId: "linear.save_milestone", grantedBy: DB_USER.id, createdAt: NOW,
+    });
+    const validate = findAction("workflows.validate_definition");
+    const person = ctx({ orgId: DB_USER.orgId, userId: DB_USER.id });
+    try {
+      expect(await validate.execute({ definition: finish("Add the milestones."), workflow_id: "wf_actions_granted" }, person))
+        .toEqual({ success: true, data: { valid: true } });
+      // A save of changed steps revokes the grant, so the draft warns.
+      expect(await validate.execute({ definition: finish("Add the milestones and the issues."), workflow_id: "wf_actions_granted" }, person)).toMatchObject({
+        success: true,
+        data: { valid: true, warnings: [{ nodeId: "finish", warnings: [expect.stringContaining("linear.save_milestone")] }] },
+      });
+    } finally {
+      await db.delete(workflowActionGrants).where(eq(workflowActionGrants.id, "grant_validate_draft"));
+      await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf_actions_granted"));
+    }
+  });
 
   it("update_schedule updates an existing schedule and returns the summary", async () => {
     const schedId = `sched_act_${Date.now()}`;
