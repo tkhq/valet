@@ -20,6 +20,10 @@ function settled(
 ): WireEvent {
   return { seq: 1, ts: 1, type: "submission.settled", sessionId: "s1", threadId, queueItemId, outcome };
 }
+/** The thread's queue with `activeItemId` running, as the socket seeds it. */
+function queueState(activeItemId: string, threadId = "t1"): WireEvent {
+  return { seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId, state: { mode: "steer", status: "running", activeItemId, pendingIds: [], collectingIds: [] } };
+}
 function textDelta(delta: string, threadId = "t1"): WireEvent {
   return { seq: 1, ts: 1, type: "text_delta", threadId, messageId: "m1", delta };
 }
@@ -267,7 +271,7 @@ describe("runHandoff", () => {
     it("streams until our submission settles and exits OK", async () => {
       const { deps } = stubDeps({
         files: { "doc.md": DOC },
-        events: [textDelta("on it"), settled("completed")],
+        events: [queueState("q1"), textDelta("on it"), settled("completed")],
       });
       const code = await runHandoff(deps, parseGlobalFlags(["doc.md", "--wait"]));
       expect(code).toBe(ExitCode.OK);
@@ -287,7 +291,7 @@ describe("runHandoff", () => {
 it("hands off to the requested thread without creating a runtime", async () => {
   const bundle = stubDeps({ files: { "doc.md": DOC } });
   expect(await runHandoff(bundle.deps, parseGlobalFlags(["doc.md", "--thread", "t1"]))).toBe(ExitCode.OK);
-  expect(bundle.sent[0]).toMatchObject({ id: "s1", body: { threadId: "t1" } });
+  expect(bundle.sent[0]).toMatchObject({ id: "s1", body: { threadId: "t1", queueMode: "inject" } });
   expect(bundle.ensureCalls()).toBe(0);
   expect(bundle.created).toEqual([]);
   expect(stdout()).toContain("http://inst/threads/t1");

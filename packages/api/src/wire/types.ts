@@ -1868,6 +1868,8 @@ export type WireEvent =
       queueItemId: string;
       outcome: "completed" | "failed" | "aborted" | "superseded" | "merged";
       error?: string;
+      /** For `merged`: the item whose turn answers this one. Follow it for the reply. */
+      mergedIntoItemId?: string;
     }
   | {
       seq: number;

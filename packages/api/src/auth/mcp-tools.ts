@@ -219,7 +219,10 @@ async function sessionOf(deps: McpToolDeps, threadId: string): Promise<string> {
 
 async function sendAndWait(deps: McpToolDeps, threadId: string, prompt: string, waitSeconds: number): Promise<TurnView> {
   const sessionId = await sessionOf(deps, threadId);
-  const sent = await call<SendPromptResponse>(deps, "POST", `/api/threads/${encodeURIComponent(threadId)}/messages`, "Thread", { text: prompt });
+  // `inject`: a message to a busy thread joins its running turn when the
+  // engine allows it, or waits. The thread default on a personal thread is
+  // `steer`, which aborts the running turn; stop_thread is the interrupt.
+  const sent = await call<SendPromptResponse>(deps, "POST", `/api/threads/${encodeURIComponent(threadId)}/messages`, "Thread", { text: prompt, queueMode: "inject" });
   if (sent.messageId === null) {
     return {
       thread_id: threadId,

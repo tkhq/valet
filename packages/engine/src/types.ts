@@ -1927,6 +1927,9 @@ export type EngineEvent =
       /** Patch-capture linkage (engine traces spec, change 3): same record the
        * settle wrote to the queue item, so live consumers need no store read. */
       patch?: SettlePatchRef;
+      /** For a `merged` outcome: the item whose turn answers this one, as
+       * the settle wrote it to the queue item (`QueueItem.mergedIntoItemId`). */
+      mergedIntoItemId?: string;
     }
   | {
       /** Live cache-invalidation hint emitted after automatic title writes. */

@@ -175,6 +175,37 @@ describe("MCP agent tools", () => {
     expect(resolved.data).toMatchObject({ status: "completed", reply: "You picked blue" });
   });
 
+  it("queues a follow-up behind a turn that waits on a question, then joins that turn", async () => {
+    const testApi = await boot();
+    const token = await seedUser(testApi, "alice");
+    let seen: string[] = [];
+    faux?.appendResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which color?", options: ["red", "blue"] }, { id: "tc-question" })], { stopReason: "toolUse" }),
+      (context) => {
+        seen = context.messages.filter((m) => m.role === "user").map((m) =>
+          typeof m.content === "string" ? m.content : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join(""));
+        return fauxAssistantMessage("Blue, and the tests pass");
+      },
+    ]);
+
+    const started = await tool(testApi.baseUrl, token, "start_thread", { prompt: "Ask me for a color.", wait_seconds: 30 });
+    expect(started.data.status).toBe("waiting_for_decision");
+    const [decision] = started.data.pending_decisions as Array<{ gate_id: string; options: Array<{ action_id: string; label: string }> }>;
+
+    // The personal thread defaults to `steer`, which would withdraw the
+    // question and abort the turn. The follow-up waits behind it instead.
+    const followUp = await tool(testApi.baseUrl, token, "send_message", { thread_id: started.data.thread_id, prompt: "Also run the tests.", wait_seconds: 0 });
+    expect(followUp.data).toMatchObject({ status: "waiting_for_decision", pending_decisions: [expect.objectContaining({ gate_id: decision?.gate_id })] });
+
+    const resolved = await tool(testApi.baseUrl, token, "resolve_decision", {
+      thread_id: started.data.thread_id, gate_id: decision?.gate_id,
+      action_id: decision?.options.find((o) => o.label === "blue")?.action_id, wait_seconds: 30,
+    });
+    expect(resolved.data).toMatchObject({ status: "completed", reply: "Blue, and the tests pass" });
+    // The follow-up reached the same turn after the question's tool call.
+    expect(seen).toEqual(["Ask me for a color.", "Also run the tests."]);
+  });
+
   it("does not let an external request use the MCP identity", async () => {
     const testApi = await boot();
     await seedUser(testApi, "alice");

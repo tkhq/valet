@@ -224,7 +224,7 @@ describe("thread-addressed uploads", () => {
     const code = await runUpload({ client: { getThread: async () => ({ sessionId: "s1" }), uploadFiles, sendPrompt }, stream, url: "http://x" }, { threadId: "t1", paths: [file], message: "Read this", json: true });
     expect(code).toBe(ExitCode.OK);
     expect(uploadFiles).toHaveBeenCalledWith("s1", expect.any(Array));
-    expect(sendPrompt).toHaveBeenCalledWith("s1", { threadId: "t1", text: "Read this", fileRefs: [{ ref: "ref:report" }] });
+    expect(sendPrompt).toHaveBeenCalledWith("s1", { threadId: "t1", text: "Read this", fileRefs: [{ ref: "ref:report" }], queueMode: "inject" });
     expect(stream).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1" }));
   });
 

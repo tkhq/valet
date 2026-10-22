@@ -905,7 +905,7 @@ export class Thread {
         { outcome: "merged" },
         { mergedIntoItemId: admittedMerged.id },
       );
-      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" });
+      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" }, { mergedIntoItemId: admittedMerged.id });
     }
     return admittedMerged;
   }
@@ -941,7 +941,7 @@ export class Thread {
           { outcome: "merged" },
           { mergedIntoItemId: digest.id },
         );
-        if (settled) await this.emitSettled(constituentId, { outcome: "merged" });
+        if (settled) await this.emitSettled(constituentId, { outcome: "merged" }, { mergedIntoItemId: digest.id });
       }
     }
   }
@@ -1175,7 +1175,7 @@ export class Thread {
           { outcome: "merged" },
           { mergedIntoItemId: admittedMerged.id },
         );
-        await this.emitSettled(constituent.id, { outcome: "merged" });
+        await this.emitSettled(constituent.id, { outcome: "merged" }, { mergedIntoItemId: admittedMerged.id });
       }
       await this.emitQueueState();
       void this.kick();
@@ -3208,7 +3208,7 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, fence.attemptId);
-    await this.emitSettled(item.id, outcome, patchRef);
+    await this.emitSettled(item.id, outcome, { patch: patchRef });
     await this.emitQueueState();
   }
 
@@ -3317,8 +3317,9 @@ export class Thread {
   private async emitSettled(
     itemId: string,
     outcome: SubmissionOutcome,
-    patch?: SettlePatchRef,
+    link: { patch?: SettlePatchRef; mergedIntoItemId?: string } = {},
   ): Promise<void> {
+    const { patch, mergedIntoItemId } = link;
     await this.clearActiveModelState(itemId);
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
@@ -3332,6 +3333,7 @@ export class Thread {
         queueItemId: itemId,
         outcome,
         ...(patch ? { patch } : {}),
+        ...(mergedIntoItemId ? { mergedIntoItemId } : {}),
       },
       { eventKey: `settled:${itemId}`, queueItemId: itemId },
     );
@@ -3421,7 +3423,7 @@ export class Thread {
       throw err;
     }
     await store.deleteAttemptMarker(item.id, attemptId);
-    await this.emitSettled(item.id, outcome, patchRef);
+    await this.emitSettled(item.id, outcome, { patch: patchRef });
     await this.emitQueueState();
   }
 
@@ -5632,7 +5634,7 @@ export class Thread {
             ...(isSignalContent(item.content) ? {} : { sender: attributedAuthor(this.attributeAuthors, item.author) }),
           });
         }
-        await this.emitSettled(item.id, { outcome: "merged" });
+        await this.emitSettled(item.id, { outcome: "merged" }, { mergedIntoItemId: running.id });
       }
     } finally {
       if (taken.length > before) await this.emitQueueState();

@@ -54,6 +54,48 @@ describe("InstanceClient auth header", () => {
   });
 });
 
+describe("InstanceClient.sendPrompt", () => {
+  function recordBodies(reply: (body: Record<string, unknown>, res: ServerResponse) => void): Array<Record<string, unknown>> {
+    const bodies: Array<Record<string, unknown>> = [];
+    handler = (req, res) => {
+      let raw = "";
+      req.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+      req.on("end", () => {
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        bodies.push(body);
+        reply(body, res);
+      });
+    };
+    return bodies;
+  }
+
+  it("sends again without a queue mode when a server from before inject refuses it", async () => {
+    const bodies = recordBodies((body, res) => {
+      if (body.queueMode === "inject") {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." }));
+        return;
+      }
+      res.writeHead(202, { "content-type": "application/json" });
+      res.end(JSON.stringify({ messageId: "q1", threadId: "t1", activityAt: 1 }));
+    });
+    const client = new InstanceClient({ url: baseUrl });
+    const sent = await client.sendPrompt("s1", { text: "hi", queueMode: "inject" });
+    expect(sent.messageId).toBe("q1");
+    expect(bodies).toEqual([{ text: "hi", queueMode: "inject" }, { text: "hi" }]);
+  });
+
+  it("does not send again for a 400 about anything else", async () => {
+    const bodies = recordBodies((_body, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Add a message or an attachment." }));
+    });
+    const client = new InstanceClient({ url: baseUrl });
+    await expect(client.sendPrompt("s1", { text: "", queueMode: "inject" })).rejects.toBeInstanceOf(ApiError);
+    expect(bodies).toHaveLength(1);
+  });
+});
+
 describe("InstanceClient.ensureOrchestrator", () => {
   it("posts /api/workspaces/user/runtime for a personal identity", async () => {
     const calls: string[] = [];

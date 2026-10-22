@@ -1,6 +1,6 @@
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
-import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
+import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";
 import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
 import { eq, sql } from "drizzle-orm";
@@ -111,7 +111,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(appearance ? { presence: appearance } : null);
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual({ [MID_TURN_DELIVERY_KEY]: true, ...(appearance ? { presence: appearance } : {}) });
     }
   });
 
@@ -125,7 +125,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       });
       const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
       const metadata = result.rows[0]?.metadata;
-      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : null);
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual({ [MID_TURN_DELIVERY_KEY]: true, ...(unattended ? { [UNATTENDED_DELIVERY_KEY]: true } : {}) });
     }
   });
 
@@ -580,6 +580,35 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     } finally {
       await host.destroyAll();
     }
+  });
+
+  it("queues an event behind a busy personal thread instead of aborting its turn", async () => {
+    // A personal assistant thread defaults to `steer`, which would withdraw the
+    // open question below and abort the turn. The delivery queues instead.
+    const deps = { db: testDb.appDb, engineHost };
+    const personal = { type: "user" as const, id: USER };
+    const pending = async () => ((await testDb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_decision_gates
+      WHERE status = 'pending'`)) as { rows: Array<{ n: number }> }).rows[0]!.n;
+    const status = async (dispatchId: string) => ((await testDb.appDb.execute(sql`SELECT status FROM engine_queue_items
+      WHERE dispatch_id = ${dispatchId}`)) as { rows: Array<{ status: string }> }).rows[0]?.status;
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which deploy?" }, { id: "ask-1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Done."),
+    ]);
+    const deliver = (body: string, dispatchId: string) => deliverToAssistantThread(deps, {
+      orgId: ORG, owner: personal, actorUserId: USER, destination: { kind: "key", key: "mentions" },
+      signal: signal(body), dispatchId, mismatchReason: "event_target_mismatch",
+    });
+
+    await deliver("a person asks", "first");
+    await expect.poll(() => pending(), { timeout: 15_000 }).toBe(1);
+    const session = await defaultAssistantSessionFor(deps, personal, { actorUserId: USER, orgId: ORG });
+    expect((await session.threadByKey("mentions"))?.toThreadData().queueMode).toBe("steer");
+
+    await deliver("a second event", "second");
+    expect(await status("second")).toBe("queued");
+    expect(await status("first")).toBe("blocked_on_decision_gate");
+    expect(await pending()).toBe(1);
   });
 
   it("delivers into the owner's singleton and persists the initiating actor", async () => {

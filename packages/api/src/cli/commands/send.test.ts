@@ -9,6 +9,7 @@ import {
   renderToolStart,
   resolvePromptText,
   runSend,
+  submitSubscribed,
   type SendClient,
   type SendDeps,
   type StreamFn,
@@ -53,6 +54,49 @@ function gateEvent(threadId = "t1"): WireEvent {
 }
 function turnEnd(threadId = "t1"): WireEvent {
   return { seq: 1, ts: 1, type: "turn_end", threadId, reason: "end_turn" };
+}
+/** The thread's queue, as the socket seeds it on connect and sends on each change. */
+function queueState(activeItemId: string | undefined, threadId = "t1"): WireEvent {
+  return {
+    seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId,
+    state: { mode: "steer", status: activeItemId ? "running" : "idle", ...(activeItemId ? { activeItemId } : {}), pendingIds: [], collectingIds: [] },
+  };
+}
+function mergedInto(queueItemId: string, mergedIntoItemId: string): WireEvent {
+  return { seq: 1, ts: 1, type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId, outcome: "merged", mergedIntoItemId };
+}
+
+function sandboxStatus(): WireEvent {
+  return { seq: 1, ts: 1, type: "sandbox.status", state: "released", epoch: 0 };
+}
+
+/**
+ * A server socket: it delivers only events published after it subscribed,
+ * and it announces the subscription with `sandbox.status`, as the real
+ * handshake does. A fresh socket replays nothing.
+ */
+function liveStream(): { stream: StreamFn; publish: (...events: WireEvent[]) => void } {
+  const subscribers = new Set<(event: WireEvent) => void>();
+  const stream: StreamFn = () =>
+    (async function* () {
+      const queue: WireEvent[] = [];
+      let wake: (() => void) | undefined;
+      const subscriber = (event: WireEvent) => {
+        queue.push(event);
+        wake?.();
+      };
+      subscribers.add(subscriber);
+      try {
+        yield sandboxStatus();
+        for (;;) {
+          while (queue.length > 0) yield queue.shift()!;
+          await new Promise<void>((resolve) => { wake = resolve; });
+        }
+      } finally {
+        subscribers.delete(subscriber);
+      }
+    })();
+  return { stream, publish: (...events) => events.forEach((event) => subscribers.forEach((s) => s(event))) };
 }
 
 function makeStream(events: WireEvent[]): StreamFn {
@@ -148,7 +192,7 @@ const ctx = { sessionId: "s1", messageId: "q1", threadId: "t1", json: false };
 
 describe("consumeSend", () => {
   it("streams deltas and returns OK on a matching completed settle", async () => {
-    const { deps } = stubDeps([textDelta("hello "), textDelta("world"), settled("completed")]);
+    const { deps } = stubDeps([queueState("q1"), textDelta("hello "), textDelta("world"), settled("completed")]);
     const code = await consumeSend(deps, ctx);
     expect(code).toBe(ExitCode.OK);
     expect(stdout()).toContain("hello world");
@@ -160,7 +204,7 @@ describe("consumeSend", () => {
   });
 
   it("renders tool lifecycle lines", async () => {
-    const { deps } = stubDeps([toolStart("bash"), toolEnd("bash", false), settled("completed")]);
+    const { deps } = stubDeps([queueState("q1"), toolStart("bash"), toolEnd("bash", false), settled("completed")]);
     await consumeSend(deps, ctx);
     expect(stdout()).toContain("bash · running");
     expect(stdout()).toContain("✓ bash");
@@ -178,9 +222,87 @@ describe("consumeSend", () => {
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
   });
 
-  it("returns OK on turn_end for our thread (fallback when the settle frame is missed)", async () => {
-    const { deps } = stubDeps([textDelta("hi"), turnEnd()]);
+  it("returns OK when the item leaves the active slot and its settle frame is missed", async () => {
+    const { deps } = stubDeps([queueState("q1"), textDelta("hi"), turnEnd(), queueState(undefined)]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("keeps waiting through a silent model round after a turn_end until the settle", async () => {
+    // The engine sends a turn_end per model round. The next round may send
+    // nothing for longer than the grace window.
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield queueState("q1");
+        yield toolStart("mem_search");
+        yield toolEnd("mem_search", false);
+        yield turnEnd();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        yield toolStart("bash");
+        yield turnEnd();
+        yield settled("failed");
+      })();
+    const { deps } = stubDeps([]);
+    expect(await consumeSend({ ...deps, stream }, { ...ctx, settleGraceMs: 20 })).toBe(ExitCode.TurnError);
+    expect(stdout()).toContain("bash · running");
+  });
+
+  it("does not end on the turn_end of a turn the prompt waited behind", async () => {
+    // Our prompt queued behind turn r0. r0 ends, and our own turn takes longer
+    // than the grace window to send its first frame.
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield queueState("r0");
+        yield turnEnd();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        yield queueState("q1");
+        yield textDelta("ours");
+        yield turnEnd();
+        yield settled("failed");
+      })();
+    const { deps } = stubDeps([]);
+    expect(await consumeSend({ ...deps, stream }, { ...ctx, settleGraceMs: 20 })).toBe(ExitCode.TurnError);
+    expect(stdout()).toContain("ours");
+  });
+
+  it("reports a gate that blocked the thread before it connected, from the queue snapshot", async () => {
+    // The socket replays no decision_gate: the snapshot names the gate only.
+    const blocked: WireEvent = {
+      seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId: "t1",
+      state: { mode: "steer", status: "blocked_on_decision_gate", activeItemId: "r0", pendingIds: ["q1"], collectingIds: [], blockedGateId: "gate_1" },
+    };
+    const hang = new Promise<never>(() => {});
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield blocked;
+        await hang;
+      })();
+    const { deps } = stubDeps([]);
+    const run = consumeSend({ ...deps, stream, readGates: async () => [GATE] }, ctx);
+    const timeout = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 500).unref());
+    expect(await Promise.race([run, timeout])).toBe(ExitCode.GatePending);
+    expect(stdout()).toContain("Approve write?");
+    expect(stdout()).toContain("valet gates resolve gate_1");
+  });
+
+  it("does not print the output of a turn the prompt waits behind", async () => {
+    const { deps } = stubDeps([
+      queueState("r0"), textDelta("OTHER TURN TEXT. "), toolStart("grep"), turnEnd(),
+      queueState("q1"), textDelta("my answer"), settled("completed"),
+    ]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+    expect(stdout()).toContain("my answer");
+    expect(stdout()).not.toContain("OTHER TURN TEXT");
+    expect(stdout()).not.toContain("grep");
+  });
+
+  it("follows a prompt that joined the running turn to that turn's settle", async () => {
+    const { deps } = stubDeps([
+      queueState("r0"), textDelta("before "), mergedInto("q1", "r0"), textDelta("answer"), turnEnd(), settled("failed", "r0"),
+    ]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
+    // The running turn's output before the join is not our reply.
+    expect(stdout()).toContain("answer");
+    expect(stdout()).not.toContain("before");
   });
 
   it("waits past turn_end for the settle frame and maps its outcome", async () => {
@@ -201,7 +323,9 @@ describe("consumeSend", () => {
     const hang = new Promise<never>(() => {});
     const stream: StreamFn = () =>
       (async function* () {
+        yield queueState("q1");
         yield turnEnd();
+        yield queueState(undefined);
         await hang;
       })();
     const { deps } = stubDeps([]);
@@ -234,6 +358,31 @@ describe("consumeSend", () => {
   });
 });
 
+// ── submitSubscribed ─────────────────────────────────────────────────────
+
+describe("submitSubscribed", () => {
+  it("sends after the wait when the server never announces its subscription, and keeps the frame it was reading", async () => {
+    let release: (() => void) | undefined;
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield queueState("r0");
+        await new Promise<void>((resolve) => { release = resolve; });
+        yield textDelta("late");
+      })();
+    let sentAt = 0;
+    const { sent, events } = await submitSubscribed(stream, { url: "http://x", sessionId: "s1" }, async () => {
+      sentAt = Date.now();
+      return "sent";
+    }, 20);
+    expect(sent).toBe("sent");
+    expect(sentAt).toBeGreaterThan(0);
+    release?.();
+    const seen: string[] = [];
+    for await (const event of events) seen.push(event.type);
+    expect(seen).toEqual(["queue.state", "text_delta"]);
+  });
+});
+
 // ── runSend ──────────────────────────────────────────────────────────────
 
 describe("runSend", () => {
@@ -249,7 +398,7 @@ describe("runSend", () => {
     const code = await runSend(bundle.deps, parseGlobalFlags(["write", "hello.txt"]));
     expect(code).toBe(ExitCode.OK);
     expect(bundle.ensureCalls).toBe(1);
-    expect(bundle.sent).toEqual([{ id: "orch_1", body: { text: "write hello.txt", threadId: undefined } }]);
+    expect(bundle.sent).toEqual([{ id: "orch_1", body: { text: "write hello.txt", threadId: undefined, queueMode: "inject" } }]);
   });
 
   it("resolves --thread without creating a runtime", async () => {
@@ -257,7 +406,22 @@ describe("runSend", () => {
     const code = await runSend(bundle.deps, parseGlobalFlags(["--thread", "t1", "--text", "hi"]));
     expect(code).toBe(ExitCode.OK);
     expect(bundle.ensureCalls).toBe(0);
-    expect(bundle.sent).toEqual([{ id: "s1", body: { text: "hi", threadId: "t1" } }]);
+    expect(bundle.sent).toEqual([{ id: "s1", body: { text: "hi", threadId: "t1", queueMode: "inject" } }]);
+  });
+
+  it("subscribes before sending, so a prompt that joins and settles at once still ends the command", async () => {
+    // The prompt joins the running turn, and that turn settles, before the
+    // send request returns. A socket opened after the send would miss both.
+    const live = liveStream();
+    const bundle = stubDeps([], {
+      sendPrompt: async () => {
+        live.publish(mergedInto("q1", "r0"), settled("failed", "r0"));
+        return { messageId: "q1", threadId: "t1", activityAt: 1 };
+      },
+    });
+    const run = runSend({ ...bundle.deps, stream: live.stream }, parseGlobalFlags(["--thread", "t1", "--text", "hi"]));
+    const timeout = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 1_000).unref());
+    expect(await Promise.race([run, timeout])).toBe(ExitCode.TurnError);
   });
 
   it("rejects a session that does not own the selected thread", async () => {

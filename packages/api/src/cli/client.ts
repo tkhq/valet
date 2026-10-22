@@ -204,13 +204,22 @@ export class InstanceClient {
     );
   }
 
-  /** `POST /api/sessions/:id/messages` — enqueue a prompt (server answers 202). */
-  sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
-    return this.request<SendPromptResponse>(
-      "POST",
-      `/api/sessions/${encodeURIComponent(id)}/messages`,
-      body,
-    );
+  /**
+   * `POST /api/sessions/:id/messages` — enqueue a prompt (server answers 202).
+   * A server from before the `inject` queue mode answers 400 for it. The
+   * prompt is then sent once more without a queue mode, so the thread
+   * default applies.
+   */
+  async sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
+    const path = `/api/sessions/${encodeURIComponent(id)}/messages`;
+    try {
+      return await this.request<SendPromptResponse>("POST", path, body);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 400 || body.queueMode === undefined || !err.body.includes("queueMode")) throw err;
+      const withoutMode: SendPromptRequest = { ...body };
+      delete withoutMode.queueMode;
+      return this.request<SendPromptResponse>("POST", path, withoutMode);
+    }
   }
 
   // ── threads ────────────────────────────────────────────────────────────

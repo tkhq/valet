@@ -464,6 +464,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           queueItemId: e.queueItemId,
           outcome: e.outcome.outcome,
           error: e.outcome.error,
+          ...(e.mergedIntoItemId ? { mergedIntoItemId: e.mergedIntoItemId } : {}),
         },
       ];
 
