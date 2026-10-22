@@ -50,7 +50,6 @@ import {
   useRenameThread,
   useReplaceSandbox,
   useMarkThreadsRead,
-  useSession,
   useSetThreadArchived,
   useSessionWakeups,
   useSidebarThreads,
@@ -251,7 +250,7 @@ export function childStatusDotClassName(status: ChildWorkSummary["status"]): str
  * treatment (moss left rail + soft ink wash), and the full title is
  * recoverable via hover tooltip when truncated.
  */
-export function ThreadTree({ sessionId: override, showChildren = true }: ThreadTreeProps = {}) {
+export function ThreadTree({ sessionId: override, showChildren = true, workspace }: ThreadTreeProps = {}) {
   const info = useWorkspaceRuntimeInfo(override ? undefined : "user");
   // No `override` means the caller's own assistant — the original and still
   // the default behavior.
@@ -259,7 +258,7 @@ export function ThreadTree({ sessionId: override, showChildren = true }: ThreadT
 
   if (!sessionId) return <ThreadTreeWaiting />;
 
-  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} />;
+  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} workspace={workspace} />;
 }
 
 /**
@@ -287,15 +286,17 @@ export interface ThreadTreeProps {
    * caller's personal children.
    */
   showChildren?: boolean;
+  /** The workspace the rows belong to ("user" or a team id), for the faces of
+   * who is in each thread. Without it the rows show no faces. */
+  workspace?: string;
 }
 
 const NO_VIEWERS: ActiveViewer[] = [];
 
-function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
+function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: string; showChildren: boolean; workspace?: string }) {
   const viewer = useMe();
   // Who is in which thread now: faces on the rows.
-  const owner = useSession(sessionId).data?.owner;
-  const workspaceViewers = useWorkspaceViewers(owner?.type === "team" ? owner.id : owner?.type === "user" ? "user" : undefined);
+  const workspaceViewers = useWorkspaceViewers(workspace);
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");

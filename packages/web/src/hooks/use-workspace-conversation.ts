@@ -23,11 +23,15 @@ export function useOwnerConversation(workspace: string | undefined) {
   });
 }
 
-/** Share the same owner-addressed ensure between the thread rail and page. */
-export function useWorkspaceConversation() {
+/** The workspace the page shows: the `workspace` search value, else the switcher's scope. */
+export function useCurrentWorkspace(): string | undefined {
   const scope = useWorkspaceScope();
   const search = useSearch({ strict: false });
-  const workspace = search && "workspace" in search && typeof search.workspace === "string"
+  return search && "workspace" in search && typeof search.workspace === "string"
     ? search.workspace : scope.key;
-  return useOwnerConversation(workspace);
+}
+
+/** Share the same owner-addressed ensure between the thread rail and page. */
+export function useWorkspaceConversation() {
+  return useOwnerConversation(useCurrentWorkspace());
 }
