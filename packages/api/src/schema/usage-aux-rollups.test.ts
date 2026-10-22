@@ -3,7 +3,7 @@ import { pgDbFromPglite, type PgDb, type PgQueryable } from '@valet/store-postgr
 import { drizzle } from 'drizzle-orm/pglite';
 import { afterEach,expect,it } from 'vitest';
 import { applyAppMigrations } from '../lib/drizzle.js';
-import { AUX_USAGE_ROLLUP_SQL,backfillAuxUsageRollups } from '../lib/usage-aux-rollups.js';
+import { AUX_USAGE_ROLLUP_SQL,backfillAuxUsageRollups,prepareSkillCompanionUsage } from '../lib/usage-aux-rollups.js';
 import { getActionToolCalls,getActionOutcomes,getSkillBreakdown } from '../services/usage-aux-rollups.js';
 import * as schema from './index.js';
 let db: PgDb | undefined;
@@ -21,7 +21,7 @@ const period={startMs:0,endMs:4*H,label:'test',kind:'custom' as const};
 const scope={scope:'org' as const,orgId:'o'};
 async function invocation(db:PgQueryable,id:string,session='s',at=H) {
  await db.query(`INSERT INTO skill_invocations (id,created_at,org_id,session_id,thread_id,path,skill_key,skill_name,origin,content_sha,injected_characters,estimated_body_tokens,invoker_user_id)
- VALUES ($1,$2,'o',$3,'t','p','key','Skill','local','sha',10,5,'u')`,[id,at,session]);
+ VALUES ($1,$2,'o',$3,'t','model_tool','key','Skill','local','sha',10,5,'u')`,[id,at,session]);
 }
 async function context(db:PgQueryable,id:string,request:string,at:number,tokens=10) {
  await db.query(`INSERT INTO skill_context_attributions VALUES ($1,$2,'s','t',$3,$4)`,[id,request,at,tokens]);
@@ -31,7 +31,7 @@ it('counts exact skill requests across sessions, hours, and partial boundaries',
  await invocation(db,'i'); await invocation(db,'j','s2');
  await context(db,'i','same',H+10); await context(db,'j','same',2*H+10);
  await context(db,'i','other',3*H+10);
- expect(await getSkillBreakdown(app,period,scope)).toEqual([{skillKey:'key',name:'Skill',origin:'local',invocations:2,uniqueInvokers:1,unassignedInvocations:0,attributedContextTokens:30,carryingCalls:2}]);
+ expect(await getSkillBreakdown(app,period,scope)).toEqual([{skillKey:'key',name:'Skill',origin:'local',invocations:2,uniqueInvokers:1,unassignedInvocations:0,attributedContextTokens:30,carryingCalls:2,fileReads:0,scriptRuns:0}]);
  expect((await getSkillBreakdown(app,{...period,startMs:H+5,endMs:2*H+15},scope))[0]).toMatchObject({invocations:0,attributedContextTokens:20,carryingCalls:1});
  expect((await getSkillBreakdown(app,{...period,startMs:H+15,endMs:2*H+15},scope))[0]).toMatchObject({attributedContextTokens:10,carryingCalls:1});
  await db.query(`DELETE FROM skill_context_attributions WHERE skill_invocation_id='j'`);
@@ -144,4 +144,27 @@ it('invalidates readiness if any auxiliary table is removed',async()=>{
      throw rollback;
    })).rejects.toBe(rollback);
  }
+});
+
+it('counts companion access separately without invocation, token, or carrying-call inflation',async()=>{
+ const {db,app}=await setup();
+ await invocation(db,'body'); await context(db,'body','body-request',H+10,7);
+ for(const [id,path] of [['file','file_read'],['script','script_run']]) {
+   await invocation(db,id!);
+   await db.query('UPDATE skill_invocations SET path=$1 WHERE id=$2',[path,id]);
+   await context(db,id!,`${id}-request`,H+10,1000);
+ }
+ expect((await getSkillBreakdown(app,period,scope))[0]).toMatchObject({
+   invocations:1,uniqueInvokers:1,attributedContextTokens:7,carryingCalls:1,fileReads:1,scriptRuns:1,
+ });
+ expect((await getSkillBreakdown(app,{...period,startMs:H+5,endMs:H+20},scope))[0])
+   .toMatchObject({invocations:0,attributedContextTokens:7,carryingCalls:1,fileReads:0,scriptRuns:0});
+ // Reproduce the pre-release projection and verify the deployed repair removes it.
+ await db.query(`UPDATE usage_skill_facts SET invoked=1 WHERE invocation_id IN ('file','script') AND request_id IS NULL`);
+ await db.query(`UPDATE usage_skill_facts SET tokens=1000,request_id='old-request' WHERE invocation_id IN ('file','script') AND fact_key LIKE '%,%'`);
+ await prepareSkillCompanionUsage(db);
+ await prepareSkillCompanionUsage(db);
+ expect((await getSkillBreakdown(app,period,scope))[0]).toMatchObject({
+   invocations:1,attributedContextTokens:7,carryingCalls:1,fileReads:1,scriptRuns:1,
+ });
 });

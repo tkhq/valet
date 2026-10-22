@@ -119,20 +119,29 @@ A truncated skill subtree fails the sync before any writes.
 
 Each companion file can contain at most 256 KiB.
 The companion files for one skill can contain at most 2 MiB in total.
-If either cap is exceeded, sync warns for that skill and keeps its stored version unchanged.
+One skill can store at most 64 companion files.
+Sync imports the skill body and the files that fit these caps.
+It skips offending files and records per-skill warnings that name them.
+The sync remains incomplete so an unchanged commit retries after a cap increase.
 Other skills still sync.
+Session inventories and sync reuse queries load file metadata without bytes.
+A reference read loads one file by stored skill ID, path, and blob SHA.
+A script call loads only `scripts/` bytes.
 
 `skill({ name, path })` reads a stored text file.
 The path is relative to the skill directory.
 The tool rejects absolute paths, parent segments, unknown paths, binary control bytes, and invalid UTF-8.
 Omitting `path` reads the rendered skill body and a file manifest.
-Body and file results remain protected from pruning.
+SKILL.md bodies remain protected from pruning.
+Reference results also remain protected, but each reference read is limited to 4096 bytes.
+Larger references return a corrective error instead of injecting unbounded text.
+Tool, host, and slash-command body reads include the file manifest.
 Reference reads do not write files to the sandbox.
 
-`skill_script({ name, script, args })` runs a stored file under `scripts/`.
+`skill_script({ name, script, args, timeout })` runs a stored file under `scripts/`.
 Only this call writes the skill's scripts to the sandbox.
 The directory is `$HOME/.valet/skills/<name>@<sha>/scripts/`.
-A completion marker lets later calls reuse the same files for that SHA.
+Each call rewrites stored scripts before execution so agent edits cannot replace their bytes.
 The tool preserves executable bits.
 It never writes references or assets.
 The script runs in the session's normal working directory.
@@ -140,11 +149,17 @@ The script runs in the session's normal working directory.
 The tool uses the shebang interpreter when present.
 Otherwise, `.py` uses `python3`, `.sh` uses `bash`, and `.js` or `.mjs` uses `node`.
 Other files run directly.
-The tool quotes each argument separately and uses the same risk level as `bash`.
+The tool quotes each argument separately and uses the same native-tool authorization path as `bash`.
+It sends no API-host working directory to the sandbox.
+The optional timeout accepts 1 through 3600 seconds and defaults to 120 seconds.
+The tool stays registered so scripts added after session construction can become reachable through skill refresh.
+An unknown script skill triggers at most one extra refresh for that tool instance.
 A session without a sandbox gets a text error.
 The result contains the script path, exit code, stdout, and stderr.
 Each output stream is limited to 32 KiB.
 Telemetry records successful file reads as `file_read` and script executions as `script_run`.
+Usage reports expose separate file-read and script-run counts.
+Only the original body-invocation paths contribute invocation, token, and carrying-call totals.
 
 ## Delivery
 
@@ -207,7 +222,16 @@ Over-exclusion is also reported rather than silent, because the rule is a guess 
 
 **Two files, one name.** A `SKILL.md` outranks a `prompts/<name>.md` of the same name, ranked by kind so the winner never depends on where either file sits. Two files of the SAME kind sharing a name import NEITHER, and the sync warns with both paths. Nothing here can rank them: taking the first by sorted path would make the skill somebody gets depend on the names of unrelated directories, and a file added later could quietly displace the skill they use. A name in that state stays in the upstream set, so the row that already holds it is kept rather than deleted.
 
-**Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. The body costs one contents read per skill. Each new companion blob costs one more read. Unchanged companion blobs reuse stored bytes.
+**Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. The body costs one contents read per skill.
+Each new companion blob costs one more read.
+Unchanged companion blobs reuse stored bytes without loading them into sync memory.
+The fallback also reads one complete subtree per discovered skill.
+All these operations share a 600-read budget, including fallback directory reads.
+A whole-sync 180-second deadline aborts GitHub requests, including directory pagination.
+The per-request timeout stays 15 seconds.
+Budget exhaustion fails before reconciliation and keeps stored skills unchanged.
+The 180-second window leaves time to record failure before the five-minute claim lease expires.
+Discovery rules version 2 forces a first-deploy rescan, which uses these same bounds.
 
 That per-skill read is what the tree read does not bound. A tree that is not cut can carry 100,000 entries, so a whole-repository scan could queue an unbounded run of sequential content reads — which an anonymous read (60 requests per hour per IP) cannot finish, and which can outlast the sweep's five-minute claim lease. `MAX_SKILL_CANDIDATES` caps one sync at 300 skill files on both discovery paths, and a repository past it fails with the subdirectory named as the fix. Importing the first 300 of a longer list is not an option, for the truncation reason below.
 

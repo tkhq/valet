@@ -4285,6 +4285,8 @@ export interface SkillUsageBreakdown {
   /** Estimated skill-body tokens carried across model requests. */
   attributedContextTokens: number;
   carryingCalls: number;
+  fileReads: number;
+  scriptRuns: number;
 }
 
 /** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window

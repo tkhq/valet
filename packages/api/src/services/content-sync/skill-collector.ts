@@ -207,7 +207,8 @@ class SkillPass implements CollectorPass {
 
   async prepareReconcile(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>> {
     if (!ctx.reader) throw new Error("Skill sync needs a repository reader.");
-    const previous = await ctx.db.select({ file: skillFiles, upstreamPath: skills.upstreamPath })
+    const previous = await ctx.db.select({ file: { path: skillFiles.path, blobSha: skillFiles.blobSha,
+      size: skillFiles.size, mode: skillFiles.mode }, upstreamPath: skills.upstreamPath })
       .from(skillFiles).innerJoin(skills, eq(skillFiles.skillId, skills.id))
       .where(and(eq(skills.sourceId, ctx.source.id), eq(skills.origin, "repo")));
     for (const [path, entries] of this.companionFiles) {
@@ -216,11 +217,10 @@ class SkillPass implements CollectorPass {
         entries, previous.filter((row) => row.upstreamPath === path).map((row) => row.file));
       if (result.warning) {
         this.fileWarnings.push(`${path}: ${result.warning}`);
-        this.skippedFiles.add(path);
-        if (result.unread) this.deferred.push(path);
-      } else {
-        this.preparedFiles.set(path, result.files);
+        this.deferred.push(path);
       }
+      if (result.unread) this.skippedFiles.add(path);
+      else this.preparedFiles.set(path, result.files);
     }
     return (db) => this.reconcile({ ...ctx, db });
   }
@@ -413,7 +413,7 @@ async function insertMirror(
     // Keep a handled name collision from aborting the source transaction.
     await db.transaction(async (tx) => {
       await tx.insert(skills).values(row);
-      if (files.length > 0) await tx.insert(skillFiles).values(files.map((file) => ({ ...file, skillId: row.id })));
+      await writeFiles(tx, row.id, files);
     });
     return true;
   } catch (err) {
@@ -422,6 +422,25 @@ async function insertMirror(
     // Neither may be overwritten from here.
     if (isPgUniqueViolation(err)) return false;
     throw err;
+  }
+}
+
+async function writeFiles(db: AppDb, skillId: string, files: SkillFile[]): Promise<void> {
+  const keep = new Set(files.map((file) => file.path));
+  const previous = await db.select({ path: skillFiles.path }).from(skillFiles).where(eq(skillFiles.skillId, skillId));
+  for (const file of previous) {
+    if (!keep.has(file.path)) await db.delete(skillFiles).where(and(eq(skillFiles.skillId, skillId), eq(skillFiles.path, file.path)));
+  }
+  for (const file of files) {
+    if (file.bytes) {
+      await db.insert(skillFiles).values({ ...file, bytes: file.bytes, skillId }).onConflictDoUpdate({
+        target: [skillFiles.skillId, skillFiles.path], set: file,
+      });
+    } else {
+      await db.update(skillFiles).set({ mode: file.mode }).where(and(
+        eq(skillFiles.skillId, skillId), eq(skillFiles.path, file.path), eq(skillFiles.blobSha, file.blobSha),
+      ));
+    }
   }
 }
 
@@ -435,19 +454,14 @@ async function updateMirror(
   now: number,
 ): Promise<boolean> {
   const contentSha = skillWithFilesSha(parsed.body, files);
-  // Compare the whole frontmatter map. An edit that touches only a
-  // frontmatter field this test does not name — `tags`, `license`, anything
-  // an author adds — reads as unchanged and never reaches the mirror, while
-  // the manifest hash moved so every later poll re-reads the file to decide
-  // nothing.
+  // Frontmatter-only edits must update the mirror even when its body is unchanged.
   const unchanged =
     row.contentSha === contentSha &&
     canonicalJson(row.frontmatter) === canonicalJson(parsed.frontmatter) &&
     row.description === parsed.description &&
     row.upstreamPath === entry.path;
   if (unchanged) return false;
-  await db.delete(skillFiles).where(eq(skillFiles.skillId, row.id));
-  if (files.length > 0) await db.insert(skillFiles).values(files.map((file) => ({ ...file, skillId: row.id })));
+  await writeFiles(db, row.id, files);
   await db
     .update(skills)
     .set({

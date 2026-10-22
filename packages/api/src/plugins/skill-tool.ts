@@ -19,7 +19,7 @@
 import { validSkillPath } from "../services/content-sync/skill-files.js";
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
-import { renderTemplate } from "@valet/engine";
+import { renderTemplate, skillFileManifest } from "@valet/engine";
 import type { SkillSource, ToolDef, ToolResult } from "@valet/engine";
 
 export const SKILL_TOOL_NAME = "skill";
@@ -70,12 +70,12 @@ function describeSkills(skills: SkillSource[]): string {
  * including failures — a thrown error would abort the turn, while text
  * lets the model correct itself and call again.
  */
-function renderSkillResult(
+async function renderSkillResult(
   skills: ReadonlyMap<string, SkillSource>,
   name: string,
   args: Record<string, unknown>,
   path?: string,
-): { text: string; skill?: SkillSource } {
+): Promise<{ text: string; skill?: SkillSource }> {
   const skill = skills.get(name);
   if (!skill) {
     const known = [...skills.keys()].join(", ");
@@ -85,7 +85,10 @@ function renderSkillResult(
     if (!validSkillPath(path)) return { text: "[skill_bad_path] Use a relative file path without empty, dot, or parent segments." };
     const file = skill.files?.find((file) => file.path === path);
     if (!file) return { text: `[skill_file_not_found] There is no stored file "${path}". Read skill({ name: "${name}" }) to see its files.` };
-    const text = skillFileText(file.bytes);
+    const bytes = file.bytes ?? await skill.readFile?.(file);
+    if (!bytes) return { text: "[skill_file_unavailable] The stored file changed or was removed. Read the skill again to refresh its manifest." };
+    if (bytes.byteLength > 4096) return { text: "[skill_reference_too_large] Reference reads are limited to 4096 bytes. Split this reference into smaller files, then sync again." };
+    const text = skillFileText(bytes);
     if (text === null) return { text: "[skill_binary_file] This file is binary. Choose a text file from the skill manifest." };
     return { text, skill };
   }
@@ -100,11 +103,7 @@ function renderSkillResult(
       };
     }
   }
-  const manifest = skill.files?.length
-    ? "\n\nStored skill files:\n" + skill.files.map((file) => `- ${file.path} (${file.size} bytes)`).join("\n") +
-      "\nUse skill({ name, path }) to read a text file. Use skill_script({ name, script, args }) to run a scripts/ file."
-    : "";
-  return { text: renderTemplate(skill.content, args) + manifest, skill };
+  return { text: renderTemplate(skill.content, args) + skillFileManifest(skill), skill };
 }
 
 /**
@@ -173,7 +172,9 @@ export function buildSkillTool(
           console.error(`skill tool: skill refresh failed while looking up "${args.name}":`, err);
         }
       }
-      const rendered = renderSkillResult(current(), args.name, args.args ?? {}, args.path);
+      let rendered;
+      try { rendered = await renderSkillResult(current(), args.name, args.args ?? {}, args.path); }
+      catch { return { text: "[skill_file_unavailable] The stored file could not be read. Retry the skill call." }; }
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, args.path === undefined ? "model_tool" : "file_read", rendered.text);
       }

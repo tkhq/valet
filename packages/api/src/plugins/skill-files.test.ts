@@ -1,8 +1,9 @@
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { bashTool, VirtualSandbox, type SkillFile, type SkillSource, type ToolContext } from "@valet/engine";
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, bashTool, VirtualSandbox, type ToolDef, type SkillFile, type SkillSource, type ToolContext } from "@valet/engine";
 import { LocalSandbox } from "@valet/sandbox-local";
 import { buildSkillTool } from "./skill-tool.js";
 import { buildSkillScriptTool } from "./skill-script-tool.js";
@@ -42,6 +43,63 @@ describe("skill companion tools", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it("bounds protected references to 4096 bytes while keeping skill bodies protected", async () => {
+    const source = { ...fixture, files: [file("references/big.md", "x".repeat(4097))] };
+    const tool = buildSkillTool([source])!;
+    expect(tool.protectedFromPruning).toBe(true);
+    expect((await tool.execute({ name: source.name, path: "references/big.md" }, skillContext())).text)
+      .toContain("[skill_reference_too_large]");
+    expect((await tool.execute({ name: source.name }, skillContext())).text).toContain(source.content);
+  });
+
+  it("loads only the requested bytes and refreshes an unknown script name at most once", async () => {
+    const readFile = vi.fn(async () => Buffer.from("reference"));
+    const source = { ...fixture, files: [{ path: "references/x.md", size: 9, mode: "100644", blobSha: "sha" }], readFile };
+    const skill = buildSkillTool([source])!;
+    await skill.execute({ name: source.name }, skillContext());
+    expect(readFile).not.toHaveBeenCalled();
+    await skill.execute({ name: source.name, path: "references/x.md" }, skillContext());
+    expect(readFile).toHaveBeenCalledTimes(1);
+    const refreshSkills = vi.fn(async () => {});
+    const tool = buildSkillScriptTool([], () => ({ skills: new Map(), refreshSkills }));
+    for (let i = 0; i < 3; i++) await tool.execute({ name: "missing", script: "scripts/x.py" }, skillContext());
+    expect(refreshSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["owner", "external", "guest", "scope"] as const)("shares bash's native approval and policy path for %s", async (actor) => {
+    const faux = registerFauxProvider({ provider: `skill-script-policy-${actor}` });
+    try {
+      const script = buildSkillScriptTool([fixture]);
+      // Engine registration erases the static schema. The bridge validates arguments.
+      const bash = { ...bashTool } as ToolDef;
+      const scriptExecute = vi.spyOn(script, "execute");
+      const bashExecute = vi.spyOn(bash, "execute");
+      const stream = new InMemoryEventStream();
+      const gates: string[] = [];
+      stream.subscribe({}, (event) => { if (event.event.type === "decision_gate") gates.push(event.event.type); });
+      const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream, sandboxProvider: new VirtualSandboxProvider() } });
+      const session = await engine.createSession({ userId: "u1", orgId: "o1", owner: { type: "user", id: "u1" },
+        workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [], tools: [bash, script],
+        ...(actor === "scope" ? { toolScope: { tools: ["read"] } } : {}),
+      });
+      faux.setResponses([fauxAssistantMessage([
+        fauxToolCall("bash", { command: "echo checked", timeout: 1 }),
+        fauxToolCall("skill_script", { name: fixture.name, script: "scripts/check.py", timeout: 1 }),
+      ], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+      const receipt = await session.prompt("Run the two native tools", { author: {
+        id: actor === "guest" ? "other" : "u1", ...(actor === "external" ? { externalSender: true } : {}),
+      } });
+      await session.thread().awaitResult(receipt.queueItemId);
+      expect(scriptExecute).toHaveBeenCalledTimes(actor === "owner" ? 1 : 0);
+      expect(bashExecute).toHaveBeenCalledTimes(actor === "owner" ? 1 : 0);
+      expect(gates).toEqual([]);
+      if (actor !== "owner") {
+        const transcript = JSON.stringify(await session.readEntries("web:default"));
+        expect(transcript).toContain(actor === "scope" ? "scope" : "[not_available]");
+      }
+    } finally { faux.unregister(); }
+  });
+
   it.each(["../secret", "references/../x.md", "/etc/passwd", "C:/secret", "scripts\\check.py", "./scripts/check.py", "scripts//check.py"])("rejects the path %s", async (path) => {
     const ctx = skillContext();
     expect((await buildSkillTool([fixture])!.execute({ name: fixture.name, path }, ctx)).text).toContain("[skill_bad_path]");
@@ -59,21 +117,18 @@ describe("skill companion tools", () => {
     expect((await buildSkillScriptTool([fixture]).execute({ name: fixture.name, script: "scripts/missing.py" }, ctx)).text).toContain("[skill_file_not_found]");
   });
 
-  it("writes only scripts on call, reuses the sha, and passes execution context", async () => {
+  it("rewrites only scripts and uses the non-local sandbox default directory", async () => {
     const ctx = skillContext();
     ctx.cwd = "/workspace/repo";
     const record = vi.fn();
     ctx.recordSkillInvocation = record;
-    let ready = false;
     const exec = vi.spyOn(ctx.sandbox, "exec").mockImplementation(async (command) => {
       if (command.startsWith("printf")) return { stdout: "/home/agent", stderr: "", exitCode: 0 };
-      if (command.startsWith("test")) return { stdout: "", stderr: "", exitCode: ready ? 0 : 1 };
       if (command.startsWith("chmod")) return { stdout: "", stderr: "", exitCode: 0 };
       return { stdout: "out", stderr: "err", exitCode: 7 };
     });
     const write = vi.spyOn(ctx.sandbox, "writeBinary");
     const tool = buildSkillScriptTool([fixture]);
-    expect(tool.riskLevel).toBe(bashTool.riskLevel);
     expect(write).not.toHaveBeenCalled();
     const args = { name: fixture.name, script: "scripts/check.py", args: ["reply.md", "a'; $(touch /bad)"] };
     const first = await tool.execute(args, ctx);
@@ -87,13 +142,14 @@ describe("skill companion tools", () => {
     expect(call[0]).toContain("'python3'");
     expect(call[0]).toContain("'reply.md'");
     expect(call[0]).toContain("'a'\\''; $(touch /bad)'");
-    expect(call[1]?.cwd).toBe(ctx.cwd);
+    expect(call[1]).not.toHaveProperty("cwd");
+    expect(exec.mock.calls.every(([, opts]) => opts?.cwd === undefined)).toBe(true);
+    expect(call[1]?.timeout).toBe(120_000);
     expect(call[1]?.env?.SKILL_DIR).toMatch(/\/check-reply@[a-f0-9]{64}$/);
     expect(record.mock.calls[0]?.[1]).toBe("script_run");
-    ready = true;
     const count = write.mock.calls.length;
     await tool.execute(args, ctx);
-    expect(write).toHaveBeenCalledTimes(count);
+    expect(write).toHaveBeenCalledTimes(count + 2);
   });
 
   it.each([
@@ -162,8 +218,11 @@ sys.exit(3)
       const path = write.mock.calls[0]![0];
       expect((await stat(path)).mode & 0o777).toBe(0o755);
       await expect(stat(join(root, "injected"))).rejects.toThrow();
-      await tool.execute(args, ctx);
-      expect(write).toHaveBeenCalledTimes(1);
+      await sandbox.writeFile(path, "print('tampered')");
+      const again = await tool.execute({ ...args, timeout: 13 }, ctx);
+      expect(again.text).toContain("hello");
+      expect(again.text).not.toContain("tampered");
+      expect(write).toHaveBeenCalledTimes(2);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

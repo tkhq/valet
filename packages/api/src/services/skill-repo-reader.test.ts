@@ -181,6 +181,12 @@ describe("GitHubSkillRepoReader", () => {
     });
   });
 
+  it("keeps shared missing-inline-body behavior for oversized entries", async () => {
+    fixture = startGithubFixture({ getContents: () => ({ body: { type: "file", encoding: "none", content: "", sha: "big", size: 2_000_000 } }) });
+    const result = await new GitHubSkillRepoReader({ apiUrl: fixture.url }).readFile("tkhq/skills", "big.json", "main");
+    expect(result).toEqual({ text: "", blobSha: "big" });
+  });
+
   it("refuses a file response with no blob sha", async () => {
     // Without a sha the manifest key would be the same for every version of
     // the file, and a changed skill would report as unchanged for ever.

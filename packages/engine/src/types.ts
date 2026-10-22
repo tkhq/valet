@@ -2518,7 +2518,8 @@ export interface SkillFile {
   blobSha: string;
   size: number;
   mode: string;
-  bytes: Uint8Array;
+  /** Absent in inventories. Load bytes only when a file is used. */
+  bytes?: Uint8Array;
 }
 
 /**
@@ -2534,6 +2535,8 @@ export interface SkillFile {
 export interface SkillSource {
   /** Companion files stored by repository sync. */
   files?: SkillFile[];
+  /** Reads one companion by this skill's immutable stored ID and blob SHA. */
+  readFile?: (file: SkillFile) => Promise<Uint8Array | undefined>;
   name: string;
   description?: string;
   content: string;

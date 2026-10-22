@@ -42,6 +42,7 @@ export {
   renderTemplate,
   loadRoleFromMarkdown,
   loadSkillFromMarkdown,
+  skillFileManifest,
   validateSkillFrontmatter,
   isLoadable,
   type FrontmatterValue,

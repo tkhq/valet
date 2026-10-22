@@ -2215,12 +2215,15 @@ CREATE INDEX IF NOT EXISTS usage_skill_requests_duplicates ON usage_skill_reques
 CREATE OR REPLACE FUNCTION valet_skill_invocation_fact(i skill_invocations)
 RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
  SELECT jsonb_build_array(i.id)::text,i.id,NULL::text,i.created_at,i.session_id,i.skill_key,i.skill_name,
-   i.origin,i.plugin_name,i.invoker_user_id,0::bigint,1::bigint;
+   i.origin,i.plugin_name,i.invoker_user_id,0::bigint,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN 1 ELSE 0 END::bigint;
 $function$;
 CREATE OR REPLACE FUNCTION valet_skill_context_fact(c skill_context_attributions,i skill_invocations)
 RETURNS usage_skill_facts LANGUAGE sql IMMUTABLE AS $function$
- SELECT jsonb_build_array(i.id,c.llm_request_id)::text,i.id,c.llm_request_id,c.created_at,i.session_id,i.skill_key,i.skill_name,
-   i.origin,i.plugin_name,NULL::text,c.estimated_skill_tokens::bigint,0::bigint;
+ SELECT jsonb_build_array(i.id,c.llm_request_id)::text,i.id,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.llm_request_id ELSE NULL END,c.created_at,i.session_id,i.skill_key,i.skill_name,
+   i.origin,i.plugin_name,NULL::text,
+   CASE WHEN i.path IN ('model_tool','host_thread_skill','slash_context','slash_prompt') THEN c.estimated_skill_tokens ELSE 0 END::bigint,0::bigint;
 $function$;
 CREATE OR REPLACE FUNCTION valet_action_hour_sync()
 RETURNS trigger LANGUAGE plpgsql AS $function$
@@ -2370,13 +2373,13 @@ BEGIN
   INSERT INTO usage_skill_facts SELECT f.* FROM new_skill_invocations i CROSS JOIN LATERAL valet_skill_invocation_fact(i::skill_invocations) f
   ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
     skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-    plugin_name=EXCLUDED.plugin_name,invoker_user_id=EXCLUDED.invoker_user_id;
+    plugin_name=EXCLUDED.plugin_name,invoker_user_id=EXCLUDED.invoker_user_id,invoked=EXCLUDED.invoked;
   INSERT INTO usage_skill_facts SELECT f.*
     FROM new_skill_invocations i JOIN skill_context_attributions c ON c.skill_invocation_id=i.id
     CROSS JOIN LATERAL valet_skill_context_fact(c,i::skill_invocations) f
   ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
     skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-    plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens;
+    plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
   RETURN NULL;
 END;
 $function$;
@@ -2418,7 +2421,7 @@ BEGIN
     ORDER BY f.fact_key
     ON CONFLICT (fact_key) DO UPDATE SET created_at=EXCLUDED.created_at,session_id=EXCLUDED.session_id,
       skill_key=EXCLUDED.skill_key,skill_name=EXCLUDED.skill_name,origin=EXCLUDED.origin,
-      plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens;
+      plugin_name=EXCLUDED.plugin_name,tokens=EXCLUDED.tokens,request_id=EXCLUDED.request_id;
   END IF;
   RETURN NULL;
 END;

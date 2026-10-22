@@ -210,8 +210,8 @@ export function pluginSessionExtras(
     ...catalogOptions,
     plugins: actionPlugins,
     pins,
-    // The `skill` tool is appended below, after the catalog has already
-    // chosen its pinned names. The catalog must know that this name is used.
+    // Skill tools are appended after the catalog chooses its pinned names.
+    // Reserve both names so pins cannot shadow them.
     reservedToolNames: [SKILL_TOOL_NAME, SKILL_SCRIPT_TOOL_NAME],
     onPinRejected: warnPinRejected,
   });

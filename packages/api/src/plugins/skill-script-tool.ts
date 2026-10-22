@@ -32,6 +32,7 @@ export function buildSkillScriptTool(
   skills: SkillSource[],
   session?: () => SkillToolSession | undefined,
 ): ToolDef {
+  let refreshedUnknown = false;
   const builtWith = new Map(skills.map((skill) => [skill.name, skill]));
   return defineTool({
     name: SKILL_SCRIPT_TOOL_NAME,
@@ -42,12 +43,14 @@ export function buildSkillScriptTool(
       name: Type.String({ description: "Name of the installed skill that owns the script." }),
       script: Type.String({ description: "Stored script path relative to the skill directory. The path must start with scripts/." }),
       args: Type.Optional(Type.Array(Type.String({ description: "One argument passed to the script without shell interpolation." }))),
+      timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600, description: "Timeout in seconds. Default 120." })),
     }),
     // Use the same approval policy as bash, including its default risk level.
     riskLevel: bashTool.riskLevel,
     execute: async (args, ctx): Promise<ToolResult> => {
       const bound = session?.();
-      if (bound && !bound.skills.has(args.name)) {
+      if (bound && !bound.skills.has(args.name) && !refreshedUnknown) {
+        refreshedUnknown = true;
         try { await bound.refreshSkills(); } catch (err) { console.error("skill_script: skill refresh failed:", err); }
       }
       const skill = (bound?.skills ?? builtWith).get(args.name);
@@ -69,25 +72,25 @@ export function buildSkillScriptTool(
         }
         const sha = skillWithFilesSha(skill.content, skill.files ?? []);
         const directory = posix.join(home.stdout, ".valet", "skills", `${skill.name}@${sha}`);
-        const marker = `${directory}/.scripts-ready`;
-        const ready = await sandbox.exec(`test -d ${quote(marker)}`, { signal: ctx.signal });
-        if (ready.exitCode !== 0) {
-          for (const file of skill.files ?? []) {
-            if (!file.path.startsWith("scripts/") || !validSkillPath(file.path)) continue;
-            const path = `${directory}/${file.path}`;
-            await sandbox.mkdir(posix.dirname(path));
-            await sandbox.writeBinary(path, file.bytes);
-            const mode = file.mode === "100755" ? "755" : "644";
-            const chmod = await sandbox.exec(`chmod ${mode} ${quote(path)}`, { signal: ctx.signal });
-            if (chmod.exitCode !== 0) throw new Error(`Cannot set script permissions: ${chmod.stderr}`);
-          }
-          await sandbox.mkdir(marker);
+        let scriptBytes: Uint8Array | undefined;
+        // Rewriting avoids trusting files the agent or an earlier script can edit.
+        for (const file of skill.files ?? []) {
+          if (!file.path.startsWith("scripts/") || !validSkillPath(file.path)) continue;
+          const bytes = file.bytes ?? await skill.readFile?.(file);
+          if (!bytes) throw new Error(`Stored script ${file.path} changed or was removed`);
+          const path = `${directory}/${file.path}`;
+          await sandbox.mkdir(posix.dirname(path));
+          await sandbox.writeBinary(path, bytes);
+          const chmod = await sandbox.exec(`chmod ${file.mode === "100755" ? "755" : "644"} ${quote(path)}`, { signal: ctx.signal });
+          if (chmod.exitCode !== 0) throw new Error(`Cannot set script permissions: ${chmod.stderr}`);
+          if (file.path === args.script) scriptBytes = bytes;
         }
+        if (!scriptBytes) throw new Error("Stored script is unavailable");
         const path = `${directory}/${args.script}`;
-        const command = [...interpreter(script.bytes, path), path, ...(args.args ?? [])].map(quote).join(" ");
+        const command = [...interpreter(scriptBytes, path), path, ...(args.args ?? [])].map(quote).join(" ");
         const result = await sandbox.exec(command, {
-          cwd: ctx.cwd, env: { SKILL_DIR: directory }, signal: ctx.signal,
-          timeout: 120_000, maxOutputBytes: OUTPUT_BYTES,
+          env: { SKILL_DIR: directory }, signal: ctx.signal,
+          timeout: (args.timeout ?? 120) * 1000, maxOutputBytes: OUTPUT_BYTES,
         });
         const bounded = (text: string) => Buffer.from(text).subarray(0, OUTPUT_BYTES).toString("utf8");
         const text = JSON.stringify({ path, exitCode: result.exitCode, stdout: bounded(result.stdout), stderr: bounded(result.stderr),

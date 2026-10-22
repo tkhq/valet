@@ -7,6 +7,7 @@ import {
 } from "../skill-repo-reader.js";
 
 export const MAX_SKILL_FILE_BYTES = 256 * 1024;
+export const MAX_SKILL_FILES = 64;
 export const MAX_SKILL_BYTES = 2 * 1024 * 1024;
 
 /** Reject path aliases before they reach storage or the sandbox. */
@@ -49,27 +50,33 @@ export async function readSkillFiles(
   previous: SkillFile[],
 ): Promise<{ files: SkillFile[]; warning?: string; unread?: boolean }> {
   const files: SkillFile[] = [];
-  const cached = new Map(previous.map((file) => [file.blobSha, file]));
+  const cached = new Map(previous.map((file) => [`${file.path}:${file.blobSha}`, file]));
   const prefix = skillPath.slice(0, -"SKILL.md".length);
   let total = 0;
+  const warnings: string[] = [];
   for (const entry of entries) {
-    if ((entry.size ?? 0) > MAX_SKILL_FILE_BYTES || total + (entry.size ?? 0) > MAX_SKILL_BYTES) {
-      return { files: [], warning: `Companion files exceed the ${MAX_SKILL_FILE_BYTES}-byte file cap or ${MAX_SKILL_BYTES}-byte skill cap. Reduce their size, then sync again.` };
+    const old = cached.get(`${entry.path.slice(prefix.length)}:${entry.sha}`);
+    const size = entry.size ?? old?.size ?? 0;
+    if (files.length >= MAX_SKILL_FILES || size > MAX_SKILL_FILE_BYTES || total + size > MAX_SKILL_BYTES) {
+      warnings.push(`${entry.path} exceeds a companion cap (${MAX_SKILL_FILES} files, ${MAX_SKILL_FILE_BYTES} bytes per file, ${MAX_SKILL_BYTES} bytes per skill).`);
+      continue;
     }
-    const old = cached.get(entry.sha);
     const read = old ? null : await reader.readFile(repo, entry.path, ref);
-    if (!old && read === null) {
+    if (!old && (read === null || read.bytes === undefined)) {
       return { files: [], unread: true, warning: `${entry.path} could not be read. Sync again to retry. The stored skill is unchanged.` };
     }
-    const bytes = old?.bytes ?? read?.bytes ?? Buffer.from(read?.text ?? "", "utf8");
-    total += bytes.byteLength;
-    if (bytes.byteLength > MAX_SKILL_FILE_BYTES || total > MAX_SKILL_BYTES) {
-      return { files: [], warning: `Companion files exceed the ${MAX_SKILL_FILE_BYTES}-byte file cap or ${MAX_SKILL_BYTES}-byte skill cap. Reduce their size, then sync again.` };
+    const bytes = read?.bytes;
+    const actualSize = old?.size ?? bytes!.byteLength;
+    if (actualSize > MAX_SKILL_FILE_BYTES || total + actualSize > MAX_SKILL_BYTES) {
+      warnings.push(`${entry.path} exceeds the ${MAX_SKILL_FILE_BYTES}-byte file cap or ${MAX_SKILL_BYTES}-byte skill cap.`);
+      continue;
     }
     if (read && read.blobSha !== entry.sha) {
       return { files: [], unread: true, warning: `${entry.path} changed during the read. Sync again to retry. The stored skill is unchanged.` };
     }
-    files.push({ path: entry.path.slice(prefix.length), blobSha: entry.sha, size: bytes.byteLength, mode: entry.mode, bytes });
+    total += actualSize;
+    files.push({ path: entry.path.slice(prefix.length), blobSha: entry.sha, size: actualSize, mode: entry.mode,
+      ...(bytes ? { bytes } : {}) });
   }
-  return { files };
+  return { files, ...(warnings.length ? { warning: warnings.join(" ") + " Sync again after raising the caps or reducing these files." } : {}) };
 }

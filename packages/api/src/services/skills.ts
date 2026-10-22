@@ -702,10 +702,18 @@ export async function listSkillSourcesFor(
 ): Promise<SkillSource[]> {
   const rows = await listSkillRowsFor(db, principal, orgId);
   if (rows.length === 0) return [];
-  const files = await db.select().from(skillFiles).where(inArray(skillFiles.skillId, rows.map((row) => row.id)));
+  const files = await db.select({ skillId: skillFiles.skillId, path: skillFiles.path,
+    size: skillFiles.size, mode: skillFiles.mode, blobSha: skillFiles.blobSha })
+    .from(skillFiles).where(inArray(skillFiles.skillId, rows.map((row) => row.id)));
   return rows.map((row) => ({
     ...rowToSkillSource(row),
     files: files.filter((file) => file.skillId === row.id),
+    readFile: async (file) => {
+      const [stored] = await db.select({ bytes: skillFiles.bytes }).from(skillFiles).where(and(
+        eq(skillFiles.skillId, row.id), eq(skillFiles.path, file.path), eq(skillFiles.blobSha, file.blobSha),
+      ));
+      return stored?.bytes;
+    },
   }));
 }
 

@@ -344,13 +344,13 @@ export interface SkillRepoFile {
 export interface SkillRepoReader {
   /** Commit the ref points at, and its tree. An empty ref means the default
    * branch. */
-  head(repoFullName: string, ref: string): Promise<SkillRepoHead>;
+  head(repoFullName: string, ref: string, signal?: AbortSignal): Promise<SkillRepoHead>;
   /** Every path under `treeSha`, in one request. */
-  listTree(repoFullName: string, treeSha: string): Promise<SkillTreeListing>;
+  listTree(repoFullName: string, treeSha: string, signal?: AbortSignal): Promise<SkillTreeListing>;
   /** One level of `path`. Pass a commit as `ref` to pin the read. */
-  listDirectory(repoFullName: string, path: string, ref: string): Promise<SkillDirectoryListing>;
+  listDirectory(repoFullName: string, path: string, ref: string, signal?: AbortSignal): Promise<SkillDirectoryListing>;
   /** File body and blob sha, or null when the path holds no file. */
-  readFile(repoFullName: string, path: string, ref: string): Promise<SkillRepoFile | null>;
+  readFile(repoFullName: string, path: string, ref: string, signal?: AbortSignal): Promise<SkillRepoFile | null>;
 }
 
 export interface GitHubSkillRepoReaderOptions {
@@ -417,11 +417,11 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     return { fullName: data.full_name, cloneUrl: data.clone_url };
   }
 
-  async head(repoFullName: string, ref: string): Promise<SkillRepoHead> {
+  async head(repoFullName: string, ref: string, signal?: AbortSignal): Promise<SkillRepoHead> {
     const target = ref.length > 0 ? ref : DEFAULT_REF;
     const url = `${this.apiUrl}/repos/${encodePath(repoFullName)}/commits/${encodePath(target)}`;
     const what = `${repoFullName}@${target}`;
-    const data = await this.getJson(url, repoFullName, what);
+    const data = await this.getJson(url, repoFullName, what, signal);
     const sha = isRecord(data) ? data.sha : undefined;
     if (typeof sha !== "string" || sha.length === 0) {
       throw new SkillRepoReadError(what, 200, "The commit response carried no sha. Retry the sync.");
@@ -438,13 +438,13 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     return { sha, treeSha };
   }
 
-  async listTree(repoFullName: string, treeSha: string): Promise<SkillTreeListing> {
+  async listTree(repoFullName: string, treeSha: string, signal?: AbortSignal): Promise<SkillTreeListing> {
     const url = new URL(
       `${this.apiUrl}/repos/${encodePath(repoFullName)}/git/trees/${encodePath(treeSha)}`,
     );
     url.searchParams.set("recursive", "1");
     const what = `${repoFullName} tree ${treeSha}`;
-    const data = await this.getJson(url.toString(), repoFullName, what);
+    const data = await this.getJson(url.toString(), repoFullName, what, signal);
     if (!isRecord(data) || !Array.isArray(data.tree)) {
       throw new SkillRepoReadError(what, 200, "The tree response carried no entries. Retry the sync.");
     }
@@ -463,10 +463,11 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     repoFullName: string,
     path: string,
     ref: string,
+    signal?: AbortSignal,
   ): Promise<SkillDirectoryListing> {
     const [owner = "", repo = ""] = repoFullName.split("/");
     const listing = await collectDirectoryEntries(
-      this.contentsRequest(),
+      this.contentsRequest(signal),
       { owner, repo, path, ref },
       MAX_DIRECTORY_ENTRIES,
     );
@@ -480,10 +481,10 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     return { entries: listing.entries, complete: listing.complete };
   }
 
-  async readFile(repoFullName: string, path: string, ref: string): Promise<SkillRepoFile | null> {
+  async readFile(repoFullName: string, path: string, ref: string, signal?: AbortSignal): Promise<SkillRepoFile | null> {
     const url = this.contentsUrl(repoFullName, path, { ref });
     const what = `${repoFullName}/${path}`;
-    const res = await this.get(url, what);
+    const res = await this.get(url, what, signal);
     if (res.status === 404) return null;
     const data = await this.readBody(res, repoFullName, what);
     if (!isRecord(data) || data.type !== "file") return null;
@@ -498,14 +499,11 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     if (typeof data.sha !== "string" || data.sha.length === 0) {
       throw new SkillRepoReadError(what, 200, "The file response carried no sha. Retry the sync.");
     }
-    if (data.encoding !== "base64") {
-      throw new SkillRepoReadError(what, 200, "The file response has no base64 bytes. Reduce the file size, then sync again.");
-    }
-    return { text, bytes: Buffer.from(raw.replace(/\n/g, ""), "base64"), blobSha: data.sha };
+    return { text, ...(data.encoding === "base64" ? { bytes: Buffer.from(raw.replace(/\n/g, ""), "base64") } : {}), blobSha: data.sha };
   }
 
   /** The `ContentsRequest` seam `collectDirectoryEntries` drives. */
-  private contentsRequest() {
+  private contentsRequest(signal?: AbortSignal) {
     return async (params: ContentsRequestParams): Promise<{ data: unknown }> => {
       const repoFullName = `${params.owner}/${params.repo}`;
       const url = this.contentsUrl(repoFullName, params.path, {
@@ -514,7 +512,7 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
         page: String(params.page),
       });
       const what = `${repoFullName}/${params.path}`;
-      const res = await this.get(url, what);
+      const res = await this.get(url, what, signal);
       const data = await this.readBody(res, repoFullName, what);
       return { data };
     };
@@ -534,21 +532,21 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     return url.toString();
   }
 
-  private async getJson(url: string, repoFullName: string, what: string): Promise<unknown> {
-    const res = await this.get(url, what);
+  private async getJson(url: string, repoFullName: string, what: string, signal?: AbortSignal): Promise<unknown> {
+    const res = await this.get(url, what, signal);
     return this.readBody(res, repoFullName, what);
   }
 
   /** The one place a request leaves this reader, so every read carries the
-   * timeout. This reader owns the only signal on the request, which is why
-   * an abort here can only be that timeout. */
-  private async get(url: string, what: string): Promise<Response> {
+   * per-request timeout and the optional whole-sync deadline. */
+  private async get(url: string, what: string, signal?: AbortSignal): Promise<Response> {
     try {
       return await this.fetchImpl(url, {
         headers: this.headers,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
+      if (signal?.aborted) throw new Error("Repository sync exceeded its read deadline. Import a smaller subdirectory, then sync again.");
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
         throw new SkillRepoTimeoutError(what, this.timeoutMs);
       }

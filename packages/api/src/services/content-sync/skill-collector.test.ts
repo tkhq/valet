@@ -51,7 +51,7 @@ import type {
   CollectorReconcileContext,
   ContentCollector,
 } from "./collector.js";
-import { MAX_SKILL_FILE_BYTES, MAX_SKILL_BYTES } from "./skill-files.js";
+import { MAX_SKILL_FILE_BYTES, MAX_SKILL_BYTES, MAX_SKILL_FILES } from "./skill-files.js";
 import { SkillCollector } from "./skill-collector.js";
 import {
   claimDueContentSources,
@@ -94,6 +94,7 @@ interface FakeRepo {
    * these on the path alone, which is what these cases exercise. */
   extra?: Record<string, string>;
   modes?: Record<string, string>;
+  sizes?: Record<string, number>;
   unread?: string[];
   truncatedSkillTree?: boolean;
   /** Plays a PRIVATE repository: every request without this bearer token
@@ -153,7 +154,7 @@ function serve(repo: FakeRepo): GithubFixture {
           sha: `tree-${repo.sha}`,
           truncated: repo.truncatedTree === true,
           tree: [...blobsOf(repo)].map(([path, content]) =>
-            ({ ...treeEntry(path, { sha: blobShaOf(content), mode: repo.modes?.[path] ?? "100644" }), size: Buffer.byteLength(content) }),
+            ({ ...treeEntry(path, { sha: blobShaOf(content), mode: repo.modes?.[path] ?? "100644" }), size: repo.sizes?.[path] ?? Buffer.byteLength(content) }),
           ),
         },
       };
@@ -262,7 +263,10 @@ describe("skill collector", () => {
     expect(Buffer.from(files[0]!.bytes).toString()).toBe("\0binary");
     expect(files[2]?.mode).toBe("100755");
     const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
-    expect(sources.find((skill) => skill.name === "deploy")?.files).toEqual(expect.arrayContaining(files));
+    const sourceSkill = sources.find((skill) => skill.name === "deploy")!;
+    expect(sourceSkill.files).toEqual(expect.arrayContaining(files.map(({ bytes: _bytes, ...metadata }) => metadata)));
+    expect(sourceSkill.files?.every((file) => file.bytes === undefined)).toBe(true);
+    expect(await sourceSkill.readFile?.(sourceSkill.files![0]!)).toEqual(files[0]!.bytes);
     await db.delete(skills).where(eq(skills.id, row!.id));
     expect(await db.select().from(skillFiles).where(eq(skillFiles.skillId, row!.id))).toEqual([]);
   });
@@ -371,7 +375,41 @@ describe("skill collector", () => {
     const outcome = await serviceFor(f).syncOnce(source.id);
     expect(outcome?.status).toBe("warning");
     expect(outcome?.warnings.join(" ")).toContain("cap");
-    expect((await db.select().from(skills)).map((skill) => skill.name)).toEqual(["other"]);
+    expect((await db.select().from(skills)).map((skill) => skill.name).sort()).toEqual(["deploy", "other"]);
+    expect(outcome?.warnings.join(" ")).toContain(cap === "file" ? "deploy/assets/large" : "deploy/assets/8");
+    const [saved] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
+    expect(saved?.lastSha).toBeNull();
+    expect(saved?.lastManifestHash).toBeNull();
+    f.calls.length = 0;
+    expect((await serviceFor(f).syncOnce(source.id))?.status).toBe("warning");
+    expect(f.calls.some((call) => call.path.endsWith("/deploy/SKILL.md"))).toBe(true);
+  });
+
+  it("imports the body and bounded files when the file-count cap is exceeded", async () => {
+    const extra = Object.fromEntries(Array.from({ length: MAX_SKILL_FILES + 1 }, (_, i) =>
+      [`deploy/references/${String(i).padStart(3, "0")}.md`, "text"]));
+    const f = serve({ sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") }, extra });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const outcome = await serviceFor(f).syncOnce(source.id);
+    expect(outcome?.status).toBe("warning");
+    expect(outcome?.warnings.join(" ")).toContain("deploy/references/064.md");
+    expect(await db.select().from(skills)).toHaveLength(1);
+    expect(await db.select().from(skillFiles)).toHaveLength(MAX_SKILL_FILES);
+    expect(f.calls.filter(call => call.path.includes("/references/"))).toHaveLength(MAX_SKILL_FILES);
+  });
+
+  it("retries unchanged omitted blobs when they fit the cap on a later pass", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/references/x.md": "reference" }, sizes: { "deploy/references/x.md": MAX_SKILL_FILE_BYTES + 1 } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const service = serviceFor(f);
+    expect((await service.syncOnce(source.id))?.status).toBe("warning");
+    expect(await db.select().from(skillFiles)).toHaveLength(0);
+    // The same blob and commit now fit the cap, as they would after a cap increase.
+    repo.sizes = {};
+    expect((await service.syncOnce(source.id))?.status).toBe("ok");
+    expect(await db.select().from(skillFiles)).toHaveLength(1);
   });
 
   it("keeps all files and retries when a listed companion cannot be read", async () => {

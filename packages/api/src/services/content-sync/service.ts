@@ -1,3 +1,4 @@
+import { budgetedReader } from "./read-budget.js";
 /**
  * Repository content sync — mirrors what a GitHub repository holds into
  * Valet's own tables, and keeps mirroring as the repository moves.
@@ -393,7 +394,7 @@ export class ContentSyncService {
 
   private async run(source: ContentSourceRow): Promise<ContentSyncOutcome> {
     // Resolved once per sync, so every read of one commit uses one identity.
-    const reader = this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader;
+    const reader = budgetedReader(this.deps.readerFor ? await this.deps.readerFor(source) : this.deps.reader);
 
     // Both compares below leave the row's report where it is, which is only
     // sound when that report describes a sync that finished. After a failure
@@ -645,7 +646,7 @@ export class ContentSyncService {
         // compare 2 forever, leaving the rows the incomplete pass never wrote
         // permanently missing.
         lastManifestHash: result.complete ? result.manifestHash : null,
-        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : source.discoveryScan,
+        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : null,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,
