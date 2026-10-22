@@ -153,10 +153,22 @@ describe("chatTurn", () => {
     expect(result.exit).toBe(ExitCode.TurnError);
   });
 
-  it("ends on turn_end for our thread when no settle arrives", async () => {
-    const { deps } = makeDeps([queueState("msg1"), textDelta("done"), turnEnd("t1")]);
+  it("ends when the item leaves the active slot and no settle arrives", async () => {
+    const { deps, out } = makeDeps([queueState("msg1"), textDelta("done"), turnEnd("t1"), queueState(undefined), textDelta("after")]);
     const result = await chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "hi" });
     expect(result.exit).toBe(ExitCode.OK);
+    expect(out()).not.toContain("after");
+  });
+
+  it("keeps the turn open across model rounds until the settle", async () => {
+    // The engine sends a turn_end per model round, not per turn.
+    const { deps, out } = makeDeps([
+      queueState("msg1"), toolStart("mem_search"), toolEnd("mem_search", false), turnEnd("t1"),
+      textDelta("final answer"), turnEnd("t1"), settled("failed"),
+    ]);
+    const result = await chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "hi" });
+    expect(result.exit).toBe(ExitCode.TurnError);
+    expect(out()).toContain("final answer");
   });
 
   it("keeps waiting past the turn_end of a turn the prompt queued behind", async () => {

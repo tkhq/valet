@@ -222,9 +222,28 @@ describe("consumeSend", () => {
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
   });
 
-  it("returns OK on turn_end for our thread (fallback when the settle frame is missed)", async () => {
-    const { deps } = stubDeps([queueState("q1"), textDelta("hi"), turnEnd()]);
+  it("returns OK when the item leaves the active slot and its settle frame is missed", async () => {
+    const { deps } = stubDeps([queueState("q1"), textDelta("hi"), turnEnd(), queueState(undefined)]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+  });
+
+  it("keeps waiting through a silent model round after a turn_end until the settle", async () => {
+    // The engine sends a turn_end per model round. The next round may send
+    // nothing for longer than the grace window.
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield queueState("q1");
+        yield toolStart("mem_search");
+        yield toolEnd("mem_search", false);
+        yield turnEnd();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        yield toolStart("bash");
+        yield turnEnd();
+        yield settled("failed");
+      })();
+    const { deps } = stubDeps([]);
+    expect(await consumeSend({ ...deps, stream }, { ...ctx, settleGraceMs: 20 })).toBe(ExitCode.TurnError);
+    expect(stdout()).toContain("bash · running");
   });
 
   it("does not end on the turn_end of a turn the prompt waited behind", async () => {
@@ -273,6 +292,7 @@ describe("consumeSend", () => {
       (async function* () {
         yield queueState("q1");
         yield turnEnd();
+        yield queueState(undefined);
         await hang;
       })();
     const { deps } = stubDeps([]);

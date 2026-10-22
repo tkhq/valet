@@ -160,8 +160,9 @@ interface ConsumeCtx {
   /** The turn's thread; filters deltas/gates to our turn. */
   threadId: string;
   json: boolean;
-  /** How long to keep consuming after `turn_end` for the trailing settle
-   * frame before falling back to OK. Tests inject a small value. */
+  /** How long to wait for a settle frame after the answering item left the
+   * thread's active slot without one, before falling back to OK. Tests
+   * inject a small value. */
   settleGraceMs?: number;
 }
 
@@ -169,29 +170,28 @@ interface ConsumeCtx {
  * Consume the WS stream, rendering the turn, until our submission settles or a
  * decision gate blocks it. Pure over `(deps.stream, ctx)` — exported for tests.
  *
- * Ordering note: the engine emits `submission.settled` AFTER `turn_end` —
- * settlement is post-turn bookkeeping (reserve → repair → finalize, several
- * store round-trips), so on the wire the settle frame always trails the
- * turn_end frame by a few milliseconds. `turn_end` therefore must NOT be
- * treated as terminal: we keep consuming for a short grace window so the
- * settle's real outcome (completed vs failed/aborted) decides the exit code.
- * The OK fallback only fires when the settle frame never arrives (stream
- * close or grace expiry).
+ * The end of the turn is our item's `submission.settled`. A `turn_end` is
+ * not: the engine sends one per model round, and the next round can stay
+ * silent for many seconds before its first frame.
  *
  * The prompt is sent with `inject`, so on a busy thread it either waits
- * behind the running turn or joins it. A turn_end counts only while the
- * answering item is the thread's active item (`queue.state`, which the
- * socket seeds on connect): the turn our prompt waited behind ends first.
- * A `merged` settle means our prompt joined a running turn, so we follow
- * that turn's item (`mergedIntoItemId`) to its own settle.
+ * behind the running turn or joins it. A `merged` settle means our prompt
+ * joined a running turn, so we follow that turn's item (`mergedIntoItemId`)
+ * to its own settle.
+ *
+ * Fallback for a lost settle frame: the engine settles an item before it
+ * moves the thread's active slot (`queue.state`, which the socket seeds on
+ * connect) on. When the answering item was active and the slot moves on with
+ * no settle frame, we wait a short grace window for it, then return OK.
  */
 export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCtx): Promise<number> {
   const stream = deps.stream({ url: deps.url, apiKey: deps.apiKey, sessionId: ctx.sessionId });
   const graceMs = ctx.settleGraceMs ?? 3_000;
   const iter = stream[Symbol.asyncIterator]();
-  let turnEnded = false;
   let answering = ctx.messageId;
   let activeItemId: string | undefined;
+  let wasActive = false;
+  let left = false;
 
   const endTurnOutput = (): void => {
     if (!ctx.json) printLine("");
@@ -199,10 +199,10 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
 
   for (;;) {
     let result: IteratorResult<WireEvent>;
-    if (!turnEnded) {
+    if (!left) {
       result = await iter.next();
     } else {
-      // Post-turn grace: wait briefly for the trailing settle frame.
+      // The item left the active slot: wait briefly for its settle frame.
       const raced = await Promise.race([
         iter.next().then((r) => ({ kind: "event" as const, r })),
         new Promise<{ kind: "timeout" }>((resolveTimeout) => {
@@ -215,7 +215,7 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
     }
 
     if (result.done) {
-      if (turnEnded) return ExitCode.OK; // turn ended; settle frame dropped
+      if (left) return ExitCode.OK; // the item left the slot; settle frame dropped
       printErr("valet send: stream ended before the turn settled");
       return ExitCode.TurnError;
     }
@@ -241,17 +241,26 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
       }
     }
 
-    if (ev.type === "queue.state" && ev.threadId === ctx.threadId) activeItemId = ev.state.activeItemId;
+    if (ev.type === "queue.state" && ev.threadId === ctx.threadId) {
+      activeItemId = ev.state.activeItemId;
+      const active = activeItemId === answering;
+      if (wasActive && !active && !ev.state.pendingIds.includes(answering) && !left) {
+        left = true;
+        endTurnOutput();
+      }
+      wasActive = active;
+    }
 
     // Our prompt joined a running turn: that turn's settle is ours now.
     if (ev.type === "submission.settled" && ev.queueItemId === answering && ev.outcome === "merged" && ev.mergedIntoItemId) {
       answering = ev.mergedIntoItemId;
+      wasActive = activeItemId === answering;
       continue;
     }
 
     // Terminal: our submission settled → map outcome to an exit code.
     if (ev.type === "submission.settled" && ev.queueItemId === answering) {
-      if (!turnEnded) endTurnOutput();
+      if (!left) endTurnOutput();
       return outcomeToExit(ev.outcome);
     }
 
@@ -259,12 +268,6 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
     if (ev.type === "decision_gate" && ev.threadId === ctx.threadId) {
       if (!ctx.json) printLine(`\n${renderGate(ev.gate)}`);
       return ExitCode.GatePending;
-    }
-
-    // Our turn ended: not terminal — enter the settle grace window.
-    if (ev.type === "turn_end" && ev.threadId === ctx.threadId && activeItemId === answering && !turnEnded) {
-      turnEnded = true;
-      endTurnOutput();
     }
   }
 }

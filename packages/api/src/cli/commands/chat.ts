@@ -160,14 +160,16 @@ async function driveGate(deps: ChatTurnDeps, sessionId: string, gate: DecisionGa
 
 /**
  * Send one prompt and consume the session stream until the turn reaches a
- * terminal: our `submission.settled` (queueItemId === our messageId), a
- * `turn_end` on our thread, an `error`, a cancelled gate, or the stream closing
- * (clean close / abort). A `decision_gate` on our thread pauses rendering,
- * reads a selection, resolves it, and resumes the SAME stream.
+ * terminal: our `submission.settled` (queueItemId === our messageId), an
+ * `error`, a cancelled gate, or the stream closing (clean close / abort). A
+ * `decision_gate` on our thread pauses rendering, reads a selection, resolves
+ * it, and resumes the SAME stream.
  *
- * The prompt is sent with `inject`, like `valet send` (`consumeSend`): a
- * turn_end counts only while the answering item is active, and a `merged`
- * settle moves the wait to the turn our prompt joined.
+ * The prompt is sent with `inject`, like `valet send` (`consumeSend`). A
+ * `turn_end` is not a terminal (the engine sends one per model round), and a
+ * `merged` settle moves the wait to the turn our prompt joined. If the
+ * answering item leaves the thread's active slot with no settle frame, the
+ * frame was lost, and the turn ends OK.
  */
 export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promise<ChatTurnResult> {
   // Subscribe first: a prompt that settles before the socket subscribes
@@ -180,6 +182,7 @@ export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promis
   const { threadId, messageId } = sent;
   let answering = messageId;
   let activeItemId: string | undefined;
+  let wasActive = false;
 
   for await (const ev of stream) {
     switch (ev.type) {
@@ -205,24 +208,25 @@ export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promis
       case "error":
         deps.write(`\nerror: ${ev.message}\n`);
         return { exit: ExitCode.TurnError, threadId };
-      case "queue.state":
-        if (ev.threadId === threadId) activeItemId = ev.state.activeItemId;
+      case "queue.state": {
+        if (ev.threadId !== threadId) break;
+        activeItemId = ev.state.activeItemId;
+        const active = activeItemId === answering;
+        // The engine settles an item before it moves the active slot on.
+        if (wasActive && !active && answering !== null && !ev.state.pendingIds.includes(answering)) {
+          deps.write("\n");
+          return { exit: ExitCode.OK, threadId };
+        }
+        wasActive = active;
         break;
+      }
       case "submission.settled":
         if (ev.queueItemId === answering && ev.outcome === "merged" && ev.mergedIntoItemId) {
           answering = ev.mergedIntoItemId;
+          wasActive = activeItemId === answering;
         } else if (ev.queueItemId === answering) {
           deps.write("\n");
           return { exit: outcomeToExit(ev.outcome), threadId };
-        }
-        break;
-      case "turn_end":
-        // Fallback terminal for a missed settle frame. A turn our prompt
-        // waited behind ends on the same thread, so only the answering
-        // item's turn counts.
-        if (ev.threadId === threadId && activeItemId === answering) {
-          deps.write("\n");
-          return { exit: ExitCode.OK, threadId };
         }
         break;
       default:
