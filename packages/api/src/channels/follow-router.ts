@@ -249,8 +249,11 @@ async function routeFollowedMessage(
         origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
       },
       ...(author ? { author } : {}),
-      // The sender's own words answer the thread's open question, when one waits.
-      ...(normalized.text.trim() ? { answer: { userId: actorUserId, text: normalized.text, channelType: "slack", channelId: threadKey } } : {}),
+      // The sender's own words answer the thread's open question, when one
+      // waits. A body that carries missed messages goes in whole, so the
+      // assistant reads them; the question stays open.
+      ...(normalized.text.trim() && attributes.rehydrated !== "true"
+        ? { answer: { userId: actorUserId, text: normalized.text, channelType: "slack", channelId: threadKey } } : {}),
       dispatchId: `slack:follow:${f.eventId}`,
       slackChannel: f.channel,
       mismatchReason: "followed_target_mismatch",

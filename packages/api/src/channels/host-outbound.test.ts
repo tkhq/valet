@@ -2117,8 +2117,40 @@ describe("ChannelHost outbound delivery", () => {
 
     // The answer is not also a queued message, and a replay of the same reply is not one either.
     await host.handleUpdate("fake", inbound({ dispatchId: reply, text: "valet-web" }));
+    // After a restart no card reference is left, and the replay can arrive from another conversation.
+    host.stopOutbound();
+    const restarted = new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "restarted", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID,
+    });
+    await restarted.start();
+    try {
+      await restarted.handleUpdate("fake", inbound({ dispatchId: reply, text: "valet-web", conversationKey: "fake:dm:100" }));
+    } finally {
+      await restarted.stop();
+    }
     const queued = await testDb.pgdb.query("SELECT 1 FROM engine_queue_items WHERE dispatch_id = $1", [reply]);
     expect(queued.rows).toHaveLength(0);
+  });
+
+  it("sends a reply in as a message when another answer settled the question first", async () => {
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?" }, { id: "tq2" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Using valet-api."),
+      fauxAssistantMessage("(noted)"),
+    ]);
+    await host.handleUpdate("fake", inbound({ dispatchId: `fake:${randomUUID()}`, text: "set up the repo" }));
+    await vi.waitFor(() => expect(fakeTransport.gatePrompts).toHaveLength(1), { timeout: 3000 });
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    // Resolving a gate that another answer settled returns without an error.
+    const settledElsewhere = vi.spyOn(session, "resolveDecision").mockResolvedValueOnce(undefined);
+    const reply = `fake:${randomUUID()}`;
+    await host.handleUpdate("fake", inbound({ dispatchId: reply, text: "valet-web" }));
+    expect(settledElsewhere).toHaveBeenCalledOnce();
+    const queued = await testDb.pgdb.query("SELECT 1 FROM engine_queue_items WHERE dispatch_id = $1", [reply]);
+    expect(queued.rows).toHaveLength(1);
+    settledElsewhere.mockRestore();
   });
 
   it("gate_callback round trip resolves the real gate", async () => {

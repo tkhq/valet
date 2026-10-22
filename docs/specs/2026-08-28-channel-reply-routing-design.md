@@ -678,9 +678,9 @@ An open question (a question gate with no options) has no button, so its Slack c
 
 1. A reply under the card. The reply's conversation key ends with the card's own timestamp, so the host finds the card's gate (`cardForReply`). This covers an attention DM card for a question in another thread.
 2. A reply in a bound DM conversation answers the open question its thread waits on.
-3. A reply in a followed channel thread does the same through `deliverToAssistantThread`'s `answer` argument. Only the follow router sets it; automated deliveries never answer a question.
+3. A reply in a followed channel thread does the same through `deliverToAssistantThread`'s `answer` argument. Only the follow router sets it; automated deliveries never answer a question. When the delivery carries missed thread messages, the router does not set it: the whole body goes in as a message, so the assistant reads the missed lines, and the question stays open.
 
-The reply needs the same right as a button click: the person may resolve the session's gates, and a gate that names an approver answers to that person only. A reply with files, or a reply when no open question waits, goes in as a message. The resolution records the inbound dispatch id as its source message, so a replayed delivery is recognized and does not also queue the reply.
+The reply needs the same right as a button click: the person may resolve the session's gates, and a gate that names an approver answers to that person only. A reply with files, or a reply when no open question waits, goes in as a message. The resolution records the inbound dispatch id as its source message. The host checks it with the queue items before it handles a message (`replyAnswered`), so a replayed delivery is recognized after a restart too, when no card reference is left, and does not also queue the reply. Resolving a gate that another answer settled first does not fail, so the reply path reads the stored resolution back: when this reply is not the answer, it goes in as a message.
 
 ### Agent configuration tools
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { MID_TURN_DELIVERY_KEY, VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -543,6 +543,38 @@ describe("handleFollowedMessage", () => {
     expect(admitted.rows).toHaveLength(0);
     // The router never falls back to the Slack thread key.
     expect(await session.threadByKey("slack:C1:1.2")).toBeNull();
+  });
+
+  it("answers the thread's open question with a reply, unless the reply carries missed messages", async () => {
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2", ownerType: "user", ownerId: USER, createdBy: USER, lastSeenTs: "1.3",
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_question", { question: "Which repo?" }, { id: "fq1" })], { stopReason: "toolUse" }),
+      ...Array.from({ length: 4 }, () => fauxAssistantMessage("(noted)")),
+    ]);
+    // The Slack transport returns null when no message was missed.
+    let missed: string | null = null;
+    const deps = { db: testDb.appDb, engineHost, fetchThreadWindow: async () => missed };
+    const send = (ts: string, text: string, eventId: string) => handleFollowedMessage(deps,
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts, user: "U9", text }, eventId) });
+    await send("1.4", "set up the repo", "Ev1");
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER }, { actorUserId: USER, orgId: ORG });
+    const question = async () => (await session.pendingDecisionGates()).find((gate) => gate.type === "question" && gate.status === "pending");
+    await vi.waitFor(async () => expect(await question()).toBeDefined(), { timeout: 3000 });
+    const gateId = (await question())?.id;
+
+    // Missed messages go in whole, so the assistant reads them, and the question stays open.
+    missed = "guest: please check staging too";
+    await send("1.7", "valet-web", "Ev2");
+    expect((await question())?.id).toBe(gateId);
+    const queued = await testDb.pgdb.query("SELECT 1 FROM engine_queue_items WHERE dispatch_id = $1", ["slack:follow:Ev2"]);
+    expect(queued.rows).toHaveLength(1);
+
+    // A plain reply answers it.
+    missed = null;
+    await send("1.8", "valet-web", "Ev3");
+    await vi.waitFor(async () => expect(await question()).toBeUndefined(), { timeout: 3000 });
   });
 
   it("prepends the missed window and advances last_seen_ts", async () => {

@@ -24,11 +24,14 @@ export interface OpenQuestionReply {
   now: number;
 }
 
-/** True when a gate of the thread was already answered by this dispatch. */
-async function answeredBy(db: AppDb, sessionId: string, threadId: string, dispatchId: string): Promise<boolean> {
+/**
+ * True when this inbound message answered a gate. Dispatch ids are the
+ * transport's event ids, so a replay after a restart, when no card or thread
+ * points at the gate any more, still finds it.
+ */
+export async function replyAnswered(db: AppDb, dispatchId: string): Promise<boolean> {
   const rows = await db.execute(sql`SELECT 1 FROM engine_decision_gates
-    WHERE session_id = ${sessionId} AND thread_id = ${threadId} AND status = 'resolved'
-      AND resolution::jsonb -> 'source' ->> 'messageId' = ${dispatchId} LIMIT 1`) as { rows: unknown[] };
+    WHERE status = 'resolved' AND resolution::jsonb -> 'source' ->> 'messageId' = ${dispatchId} LIMIT 1`) as { rows: unknown[] };
   return rows.rows.length > 0;
 }
 
@@ -40,7 +43,7 @@ async function answeredBy(db: AppDb, sessionId: string, threadId: string, dispat
 export async function answerOpenQuestion(db: AppDb, reply: OpenQuestionReply): Promise<boolean> {
   const text = reply.text.trim();
   if (!text) return false;
-  if (await answeredBy(db, reply.session.id, reply.thread.id, reply.dispatchId)) return true;
+  if (await replyAnswered(db, reply.dispatchId)) return true;
   // A question with options keeps its buttons. A gate that names one approver
   // (a shared account) answers to that person on their own card.
   const gate = reply.thread.pendingDecisionGates()
@@ -55,12 +58,14 @@ export async function answerOpenQuestion(db: AppDb, reply: OpenQuestionReply): P
       resolvedAt: reply.now,
       source: { channelType: reply.channelType, channelId: reply.channelId, messageId: reply.dispatchId },
     });
-    return true;
   } catch (err) {
-    // Another answer settled the gate first: the reply goes in as a message.
-    console.warn(`[channels] open question ${gate.id} was settled before the reply could answer it`, err);
+    console.warn(`[channels] reply could not answer open question ${gate.id}; it goes in as a message`, err);
     return false;
   }
+  // Resolving a gate another answer already settled does not throw. The
+  // stored resolution says whether this reply is the answer; when it is not,
+  // the reply goes in as a message.
+  return replyAnswered(db, reply.dispatchId);
 }
 
 /**

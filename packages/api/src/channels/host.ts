@@ -52,7 +52,7 @@ import {
 } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { answerOpenQuestion, cardForReply } from "./open-question-reply.js";
+import { answerOpenQuestion, cardForReply, replyAnswered } from "./open-question-reply.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
@@ -555,11 +555,12 @@ export class ChannelHost {
         resolvedAt: this.now(),
         source: { channelType, channelId: event.conversationKey, messageId: event.dispatchId },
       });
-      return true;
     } catch (err) {
       console.warn(`[channels] reply could not answer question ${card.gateId}; it goes in as a message`, err);
       return false;
     }
+    // A gate another answer settled first resolves without an error.
+    return replyAnswered(this.deps.db, event.dispatchId);
   }
 
   async start(): Promise<void> {
@@ -1634,10 +1635,12 @@ export class ChannelHost {
       orgId,
     });
 
+    // A message that answered a question left no queue item, and its card
+    // reference is gone once the question settles, so the gate is checked too.
     const alreadyAdmitted = async () => {
       const rows = await this.deps.db.execute(sql`SELECT id FROM engine_queue_items
         WHERE session_id=${session.id} AND dispatch_id=${event.dispatchId} LIMIT 1`) as { rows: Array<{ id: string }> };
-      return rows.rows.length > 0;
+      return rows.rows.length > 0 || await replyAnswered(this.deps.db, event.dispatchId);
     };
     // A restart may replay after admission but before inbox deletion. Do not
     // download attachments again: their filenames or contents may have changed.

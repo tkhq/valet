@@ -45,7 +45,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import type { WorkflowStepGrant } from "../workflows/step-grants.js";
 import { canAdministerTeam, isTeamMember } from "../services/teams.js";
 import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
-import { upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
+import { listPolicies, upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
@@ -150,31 +150,44 @@ export async function policyOwner(
  * or `undefined` when they may. In a personal session only its owner may
  * allow the action for themselves. In a team session any member may stop
  * the asking for the whole team, so one approval covers everyone. A team
- * admin still decides a critical action and an action that a team rule asks
- * for: a member cannot loosen a rule a team admin set. Every resolver
- * surface calls this before the engine consumes the gate, as
+ * admin still decides a critical action and an action that any team rule
+ * names: a member cannot write over or beside a rule a team admin set. The
+ * check reads the team's current rules, not the gate's snapshot. Every
+ * resolver surface calls this before the engine consumes the gate, as
  * `canApplyAlwaysAllow` does for the org option.
  */
 const TEAM_ADMIN_FOR_CRITICAL = "Only a team admin can always allow a critical action for the team. Approve it once, or ask a team admin.";
-const TEAM_ADMIN_FOR_TEAM_RULE = "A team rule asks for this action, and only a team admin can change it. Approve it once, or ask a team admin.";
+const TEAM_ADMIN_FOR_TEAM_RULE = "A team rule covers this action, and only a team admin can change it. Approve it once, or ask a team admin.";
 
-/** What a policy gate recorded about its action: the risk level and the rule that asked. */
-export interface GatePolicyFacts { riskLevel?: RiskLevel; policySource?: string }
+/** The action a policy gate asks about, from the gate's context. */
+export interface GatePolicyFacts { riskLevel?: RiskLevel; service?: string; actionId?: string }
 
 export function gatePolicyFacts(gate: { context?: Record<string, unknown> }): GatePolicyFacts {
-  const risk = gate.context?.riskLevel;
-  const provenance = gate.context?.provenance;
-  const source = provenance && typeof provenance === "object" && "source" in provenance ? provenance.source : undefined;
+  const { riskLevel: risk, service, tool_id: actionId } = gate.context ?? {};
   return {
     ...(risk === "low" || risk === "medium" || risk === "high" || risk === "critical" ? { riskLevel: risk } : {}),
-    ...(typeof source === "string" ? { policySource: source } : {}),
+    ...(typeof service === "string" ? { service } : {}),
+    ...(typeof actionId === "string" ? { actionId } : {}),
   };
 }
 
-/** The refusal for a team member who is not a team admin, when one applies. */
-function teamAdminRefusal(facts: GatePolicyFacts): string | undefined {
-  if (facts.riskLevel === "critical") return TEAM_ADMIN_FOR_CRITICAL;
-  if (facts.policySource === "team_policy") return TEAM_ADMIN_FOR_TEAM_RULE;
+/** True when a live team rule names this action, its service, or its risk level. */
+export function teamRuleNamesAction(
+  rules: ReadonlyArray<{ service: string | null; actionId: string | null; riskLevel: string | null; expiresAt: number | null }>,
+  action: GatePolicyFacts,
+  now: number,
+): boolean {
+  return rules.some((rule) => (rule.expiresAt === null || rule.expiresAt > now) && (
+    (rule.actionId !== null && rule.actionId === action.actionId)
+    || (rule.service !== null && rule.service === action.service)
+    || (rule.riskLevel !== null && rule.riskLevel === action.riskLevel)));
+}
+
+/** Why a team member who is not a team admin may not write the team's allow, given the team's rules. */
+function memberRefusal(teamRules: Parameters<typeof teamRuleNamesAction>[0], action: GatePolicyFacts, now: number): string | undefined {
+  if (action.riskLevel === "critical") return TEAM_ADMIN_FOR_CRITICAL;
+  // A gate that does not name its action cannot be checked against the rules.
+  if (!action.actionId || teamRuleNamesAction(teamRules, action, now)) return TEAM_ADMIN_FOR_TEAM_RULE;
   return undefined;
 }
 
@@ -182,15 +195,15 @@ export async function ownerAlwaysAllowRefusal(
   db: AppQueryable,
   scope: { orgId: string; sessionId?: string; teamId?: string; userId?: string } & GatePolicyFacts,
   resolverId: string,
+  now = Date.now(),
 ): Promise<string | undefined> {
   const owner = await policyOwner(db, scope);
   if (owner.teamId) {
     if (await canAdministerTeam(db, owner.teamId, resolverId)) return undefined;
-    const adminOnly = teamAdminRefusal(scope);
-    if (adminOnly) return adminOnly;
-    return await isTeamMember(db, owner.teamId, resolverId)
-      ? undefined
-      : "Only a member of this team can always allow this for the team. Approve it once instead.";
+    if (!(await isTeamMember(db, owner.teamId, resolverId))) {
+      return "Only a member of this team can always allow this for the team. Approve it once instead.";
+    }
+    return memberRefusal(await listPolicies(db, { orgId: scope.orgId, type: "team", id: owner.teamId }), scope, now);
   }
   return owner.userId === resolverId ? undefined : "Only the owner of this conversation can always allow this. Approve it once instead.";
 }
@@ -226,24 +239,26 @@ export function ownerAllowTakesEffect(
 async function writeOwnerAlwaysAllow(
   deps: PolicyResolverDeps,
   input: PolicyResolveInput & { orgId: string },
-  policySource: string,
   resolvedBy: string,
   now: number,
 ): Promise<void> {
-  const facts: GatePolicyFacts = { ...(input.riskLevel ? { riskLevel: input.riskLevel } : {}), policySource };
-  const refusal = await ownerAlwaysAllowRefusal(deps.db, { ...input, ...facts }, resolvedBy);
+  const action: GatePolicyFacts = { service: input.service, actionId: input.actionId, ...(input.riskLevel ? { riskLevel: input.riskLevel } : {}) };
+  const refusal = await ownerAlwaysAllowRefusal(deps.db, { ...input, ...action }, resolvedBy, now);
   if (refusal) throw new Error(refusal);
   const target = { actionId: input.actionId };
   const { teamId } = await policyOwner(deps.db, input);
   if (teamId) {
     await deps.db.transaction(async (tx) => {
       // The lock refuses a non-member and says whether the member is an admin.
+      const teamScope = { orgId: input.orgId, type: "team" as const, id: teamId };
+      // Read the rules again under the lock: a rule a team admin added after
+      // the card opened still wins over a member's click.
       const admin = await lockTeamDeletionAccess(tx, { orgId: input.orgId, userId: resolvedBy }, teamId);
-      const adminOnly = admin ? undefined : teamAdminRefusal(facts);
+      const adminOnly = admin ? undefined : memberRefusal(await listPolicies(tx, teamScope), action, now);
       if (adminOnly) throw new Error(adminOnly);
       const bounds = await validateOverrideBounds(tx, input.orgId, target, "allow", now, deps.actionPluginByService);
       if (!bounds.ok) throw new Error(bounds.error);
-      await upsertSimpleTeamPolicy(tx, { orgId: input.orgId, type: "team", id: teamId }, { ...target, mode: "allow", managedBy: resolvedBy, now });
+      await upsertSimpleTeamPolicy(tx, teamScope, { ...target, mode: "allow", managedBy: resolvedBy, now });
     });
     return;
   }
@@ -870,23 +885,27 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // own setting could allow the action, the rule Integrations applies.
       const owner = await policyOwner(deps.db, { ...input, orgId: input.orgId });
       const now = clock();
+      const rows = await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId });
       const ownerMayAllow = !input.externalSender && (owner.teamId ?? owner.userId) !== undefined
         && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, deps.actionPluginByService)).ok
         && ownerAllowTakesEffect(
-          await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId }),
+          rows,
           owner,
           { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, appliesIn: input.appliesIn,
             sessionId: input.sessionId, now, ...(input.partialParams ? { partialParams: true } : {}) },
           pluginDefaultFor(input.service),
         );
+      // Fewer buttons: when anyone who may answer can stop the asking for
+      // good, the session-long approval adds nothing a person would pick. It
+      // stays where an org rule hides the owner option, and where only a team
+      // admin may set the team's allow: a critical action, or one a team rule
+      // names. A member who is refused the allow still has a lasting choice.
+      const anyoneMayAllow = ownerMayAllow && input.riskLevel !== "critical"
+        && !(owner.teamId && teamRuleNamesAction(rows.policies.filter((rule) => rule.principalType === "team"), input, now));
       return {
         ...decision,
         extraGateActions: [
-          // Fewer buttons: when the owner can stop the asking for good, the
-          // session-long approval adds nothing a person would pick. It stays
-          // where an org rule hides the owner option, and for a critical
-          // action, whose team allow only a team admin may set.
-          ...(ownerMayAllow && input.riskLevel !== "critical" ? [] : [{ id: GATE_ACTION_APPROVE_SESSION, label: GATE_ACTION_LABELS.approveSession, approves: true }]),
+          ...(anyoneMayAllow ? [] : [{ id: GATE_ACTION_APPROVE_SESSION, label: GATE_ACTION_LABELS.approveSession, approves: true }]),
           ...(ownerMayAllow
             ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? GATE_ACTION_LABELS.alwaysAllowForTeam : GATE_ACTION_LABELS.alwaysAllowForMe, approves: true }]
             : []),
@@ -952,7 +971,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       } else if (resolution.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
         // Throws for a resolver who may not choose it, or when an org policy
         // now stops the allow; the engine fails the approval closed.
-        await writeOwnerAlwaysAllow(deps, { ...input, orgId: input.orgId }, decision.provenance.source, resolution.resolvedBy, now);
+        await writeOwnerAlwaysAllow(deps, { ...input, orgId: input.orgId }, resolution.resolvedBy, now);
       }
       // Plain "approve" (or any other resolution) is a one-shot allow — no
       // durable write.

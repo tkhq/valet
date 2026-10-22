@@ -197,7 +197,7 @@ describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
     const gate = (id: string, riskLevel: string) => p.engineStore.saveDecisionGate(sessionId, threadId, {
       id, sessionId, threadId, queueItemId: "q", resumeKey: id, ordinal: 0, type: "approval", title: `Approve ${id}?`,
       actions: [{ id: "approve", label: "Approve once" }, { id: "always_allow_owner", label: "Always allow for this team", approves: true }],
-      context: { riskLevel }, status: "pending", createdAt: now, updatedAt: now,
+      context: { riskLevel, service: "slack", tool_id: "slack.send_message" }, status: "pending", createdAt: now, updatedAt: now,
     });
     await gate("send", "high");
     await gate("drop", "critical");
