@@ -32,9 +32,10 @@ import { parseGlobalFlags, printErr, printLine, printText } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
 import type { CliContext } from "../types.js";
-import { outcomeToExit, renderToolEnd, renderToolStart, submitSubscribed, type StreamFn } from "./send.js";
+import { followTurn, outcomeToExit, readGatesOf, renderToolEnd, renderToolStart, submitSubscribed, type StreamFn } from "./send.js";
 import type {
   DecisionGate,
+  ListDecisionsResponse,
   ResolveDecisionRequest,
   SendPromptRequest,
   SendPromptResponse,
@@ -110,6 +111,8 @@ export function parseGateSelection(gate: DecisionGate, raw: string | null): Gate
 export interface ChatClient {
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
   resolveDecision(id: string, gateId: string, body: ResolveDecisionRequest): Promise<void>;
+  /** Reads a gate the stream names only by id (`queue.state.blockedGateId`). */
+  listThreadDecisions?(id: string): Promise<ListDecisionsResponse>;
 }
 
 export interface ChatTurnDeps {
@@ -160,16 +163,18 @@ async function driveGate(deps: ChatTurnDeps, sessionId: string, gate: DecisionGa
 
 /**
  * Send one prompt and consume the session stream until the turn reaches a
- * terminal: our `submission.settled` (queueItemId === our messageId), an
- * `error`, a cancelled gate, or the stream closing (clean close / abort). A
- * `decision_gate` on our thread pauses rendering, reads a selection, resolves
- * it, and resumes the SAME stream.
+ * terminal: the answering item's `submission.settled`, an `error`, a
+ * cancelled gate, or the stream closing (clean close / abort). A gate on our
+ * thread pauses rendering, reads a selection, resolves it, and resumes the
+ * SAME stream.
  *
- * The prompt is sent with `inject`, like `valet send` (`consumeSend`). A
- * `turn_end` is not a terminal (the engine sends one per model round), and a
- * `merged` settle moves the wait to the turn our prompt joined. If the
- * answering item leaves the thread's active slot with no settle frame, the
- * frame was lost, and the turn ends OK.
+ * The prompt is sent with `inject`, like `valet send` (`consumeSend`), and
+ * `followTurn` decides which frames are our reply: only the answering turn's
+ * output is shown, a `turn_end` (one per model round) ends nothing, and a
+ * `merged` settle moves the wait to the turn our prompt joined. A gate that
+ * blocks the thread blocks our prompt too, so it is shown even while our
+ * prompt waits behind it. If the answering item leaves the thread's active
+ * slot with no settle frame, the frame was lost, and the turn ends OK.
  */
 export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promise<ChatTurnResult> {
   // Subscribe first: a prompt that settles before the socket subscribes
@@ -180,57 +185,48 @@ export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promis
     () => deps.client.sendPrompt(input.sessionId, { text: input.text, threadId: input.threadId, queueMode: "inject" }),
   );
   const { threadId, messageId } = sent;
-  let answering = messageId;
-  let activeItemId: string | undefined;
-  let wasActive = false;
+  const turn = followTurn(messageId, threadId);
+  const shownGates = new Set<string>();
 
   for await (const ev of stream) {
     switch (ev.type) {
       case "text_delta":
-        if (ev.threadId === threadId) deps.write(ev.delta);
+        if (ev.threadId === threadId && turn.ours()) deps.write(ev.delta);
         break;
       case "tool_start":
-        if (ev.threadId === threadId) deps.write(`${renderToolStart(ev.toolName)}\n`);
+        if (ev.threadId === threadId && turn.ours()) deps.write(`${renderToolStart(ev.toolName)}\n`);
         break;
       case "tool_end":
-        if (ev.threadId === threadId) deps.write(`${renderToolEnd(ev.toolName, ev.isError)}\n`);
+        if (ev.threadId === threadId && turn.ours()) deps.write(`${renderToolEnd(ev.toolName, ev.isError)}\n`);
         break;
-      case "decision_gate": {
-        if (ev.threadId !== threadId) break;
-        deps.write(`\n${renderGatePrompt(ev.gate)}\n`);
-        const resolved = await driveGate(deps, input.sessionId, ev.gate);
-        if (!resolved) {
-          deps.write("\n");
-          return { exit: ExitCode.GatePending, threadId };
-        }
-        break; // resolved → keep consuming; the turn resumes on the same stream.
-      }
       case "error":
         deps.write(`\nerror: ${ev.message}\n`);
         return { exit: ExitCode.TurnError, threadId };
-      case "queue.state": {
-        if (ev.threadId !== threadId) break;
-        activeItemId = ev.state.activeItemId;
-        const active = activeItemId === answering;
-        // The engine settles an item before it moves the active slot on.
-        if (wasActive && !active && answering !== null && !ev.state.pendingIds.includes(answering)) {
-          deps.write("\n");
-          return { exit: ExitCode.OK, threadId };
-        }
-        wasActive = active;
-        break;
-      }
-      case "submission.settled":
-        if (ev.queueItemId === answering && ev.outcome === "merged" && ev.mergedIntoItemId) {
-          answering = ev.mergedIntoItemId;
-          wasActive = activeItemId === answering;
-        } else if (ev.queueItemId === answering) {
-          deps.write("\n");
-          return { exit: outcomeToExit(ev.outcome), threadId };
-        }
-        break;
       default:
         break;
+    }
+
+    const signal = turn.read(ev);
+    if (signal?.kind === "settled") {
+      deps.write("\n");
+      return { exit: outcomeToExit(signal.outcome), threadId };
+    }
+    if (signal?.kind === "left") {
+      deps.write("\n");
+      return { exit: ExitCode.OK, threadId };
+    }
+    if (signal?.kind === "gate" && !shownGates.has(signal.gateId)) {
+      shownGates.add(signal.gateId);
+      // A socket that connects to a blocked thread gets only the gate's id.
+      const gate = signal.gate ?? (await readGatesOf(deps.client)(threadId).catch(() => [])).find((g) => g.id === signal.gateId);
+      if (!gate) continue; // answered already
+      deps.write(`\n${renderGatePrompt(gate)}\n`);
+      const resolved = await driveGate(deps, input.sessionId, gate);
+      if (!resolved) {
+        deps.write("\n");
+        return { exit: ExitCode.GatePending, threadId };
+      }
+      // Resolved: keep consuming; the turn resumes on the same stream.
     }
   }
 

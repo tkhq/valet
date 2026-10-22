@@ -21,18 +21,21 @@ import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
 import type { CliContext } from "../types.js";
 import type {
+  ListDecisionsResponse,
   PostSessionFileUploadResponse,
   SendPromptRequest,
   SendPromptResponse,
   WireEvent,
 } from "../../wire/types.js";
-import { consumeSend, submitSubscribed } from "./send.js";
+import { consumeSend, readGatesOf, submitSubscribed } from "./send.js";
 
 /** The subset of `InstanceClient` the `upload` command needs. */
 export interface UploadClient {
   getThread(id: string): Promise<{ sessionId: string }>;
   uploadFiles(sessionId: string, files: UploadFileInfo[]): Promise<UploadResponse>;
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
+  /** Reads a gate the stream names only by id (`queue.state.blockedGateId`). */
+  listThreadDecisions?(id: string): Promise<ListDecisionsResponse>;
 }
 
 /** Info about one file to upload. */
@@ -285,7 +288,7 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
       }
 
       // Stream the reply using the same logic as `valet send`.
-      return await consumeSend({ ...deps, stream: () => events }, {
+      return await consumeSend({ ...deps, stream: () => events, readGates: readGatesOf(deps.client) }, {
         sessionId,
         messageId: sent.messageId,
         threadId: sent.threadId,
@@ -355,5 +358,9 @@ class RealUploadClient implements UploadClient {
 
   async sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse> {
     return this.instanceClient.sendPrompt(id, body);
+  }
+
+  listThreadDecisions(id: string): Promise<ListDecisionsResponse> {
+    return this.instanceClient.listThreadDecisions(id);
   }
 }

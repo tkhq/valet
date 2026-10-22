@@ -20,6 +20,10 @@ function settled(
 ): WireEvent {
   return { seq: 1, ts: 1, type: "submission.settled", sessionId: "s1", threadId, queueItemId, outcome };
 }
+/** The thread's queue with `activeItemId` running, as the socket seeds it. */
+function queueState(activeItemId: string, threadId = "t1"): WireEvent {
+  return { seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId, state: { mode: "steer", status: "running", activeItemId, pendingIds: [], collectingIds: [] } };
+}
 function textDelta(delta: string, threadId = "t1"): WireEvent {
   return { seq: 1, ts: 1, type: "text_delta", threadId, messageId: "m1", delta };
 }
@@ -267,7 +271,7 @@ describe("runHandoff", () => {
     it("streams until our submission settles and exits OK", async () => {
       const { deps } = stubDeps({
         files: { "doc.md": DOC },
-        events: [textDelta("on it"), settled("completed")],
+        events: [queueState("q1"), textDelta("on it"), settled("completed")],
       });
       const code = await runHandoff(deps, parseGlobalFlags(["doc.md", "--wait"]));
       expect(code).toBe(ExitCode.OK);

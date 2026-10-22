@@ -192,7 +192,7 @@ const ctx = { sessionId: "s1", messageId: "q1", threadId: "t1", json: false };
 
 describe("consumeSend", () => {
   it("streams deltas and returns OK on a matching completed settle", async () => {
-    const { deps } = stubDeps([textDelta("hello "), textDelta("world"), settled("completed")]);
+    const { deps } = stubDeps([queueState("q1"), textDelta("hello "), textDelta("world"), settled("completed")]);
     const code = await consumeSend(deps, ctx);
     expect(code).toBe(ExitCode.OK);
     expect(stdout()).toContain("hello world");
@@ -204,7 +204,7 @@ describe("consumeSend", () => {
   });
 
   it("renders tool lifecycle lines", async () => {
-    const { deps } = stubDeps([toolStart("bash"), toolEnd("bash", false), settled("completed")]);
+    const { deps } = stubDeps([queueState("q1"), toolStart("bash"), toolEnd("bash", false), settled("completed")]);
     await consumeSend(deps, ctx);
     expect(stdout()).toContain("bash · running");
     expect(stdout()).toContain("✓ bash");
@@ -264,12 +264,45 @@ describe("consumeSend", () => {
     expect(stdout()).toContain("ours");
   });
 
+  it("reports a gate that blocked the thread before it connected, from the queue snapshot", async () => {
+    // The socket replays no decision_gate: the snapshot names the gate only.
+    const blocked: WireEvent = {
+      seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId: "t1",
+      state: { mode: "steer", status: "blocked_on_decision_gate", activeItemId: "r0", pendingIds: ["q1"], collectingIds: [], blockedGateId: "gate_1" },
+    };
+    const hang = new Promise<never>(() => {});
+    const stream: StreamFn = () =>
+      (async function* () {
+        yield blocked;
+        await hang;
+      })();
+    const { deps } = stubDeps([]);
+    const run = consumeSend({ ...deps, stream, readGates: async () => [GATE] }, ctx);
+    const timeout = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 500).unref());
+    expect(await Promise.race([run, timeout])).toBe(ExitCode.GatePending);
+    expect(stdout()).toContain("Approve write?");
+    expect(stdout()).toContain("valet gates resolve gate_1");
+  });
+
+  it("does not print the output of a turn the prompt waits behind", async () => {
+    const { deps } = stubDeps([
+      queueState("r0"), textDelta("OTHER TURN TEXT. "), toolStart("grep"), turnEnd(),
+      queueState("q1"), textDelta("my answer"), settled("completed"),
+    ]);
+    expect(await consumeSend(deps, ctx)).toBe(ExitCode.OK);
+    expect(stdout()).toContain("my answer");
+    expect(stdout()).not.toContain("OTHER TURN TEXT");
+    expect(stdout()).not.toContain("grep");
+  });
+
   it("follows a prompt that joined the running turn to that turn's settle", async () => {
     const { deps } = stubDeps([
       queueState("r0"), textDelta("before "), mergedInto("q1", "r0"), textDelta("answer"), turnEnd(), settled("failed", "r0"),
     ]);
     expect(await consumeSend(deps, ctx)).toBe(ExitCode.TurnError);
-    expect(stdout()).toContain("before answer");
+    // The running turn's output before the join is not our reply.
+    expect(stdout()).toContain("answer");
+    expect(stdout()).not.toContain("before");
   });
 
   it("waits past turn_end for the settle frame and maps its outcome", async () => {

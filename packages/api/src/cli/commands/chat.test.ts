@@ -121,6 +121,7 @@ function makeDeps(
 describe("chatTurn", () => {
   it("sends the prompt, writes tokens in order, and ends on the matching settle", async () => {
     const { deps, out, sendCalls } = makeDeps([
+      queueState("msg1"),
       textDelta("Hello"),
       textDelta(", "),
       textDelta("world"),
@@ -136,13 +137,13 @@ describe("chatTurn", () => {
   });
 
   it("renders compact tool lines", async () => {
-    const { deps, out } = makeDeps([toolStart("bash"), toolEnd("bash", false), settled("completed")]);
+    const { deps, out } = makeDeps([queueState("msg1"), toolStart("bash"), toolEnd("bash", false), settled("completed")]);
     await chatTurn(deps, { sessionId: "s1", text: "run" });
     expect(out()).toBe("⚙ bash · running\n✓ bash\n\n");
   });
 
   it("ignores deltas/tools on other threads", async () => {
-    const { deps, out } = makeDeps([textDelta("nope", "other"), textDelta("yes"), settled("completed")]);
+    const { deps, out } = makeDeps([queueState("msg1"), textDelta("nope", "other"), textDelta("yes"), settled("completed")]);
     await chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "hi" });
     expect(out()).toBe("yes\n");
   });
@@ -228,6 +229,16 @@ describe("chatTurn", () => {
     expect(await Promise.race([turn.then((r) => r.exit), timeout])).toBe(ExitCode.OK);
   });
 
+  it("does not show the output of a turn the prompt waits behind", async () => {
+    const { deps, out } = makeDeps([
+      queueState("r0"), textDelta("OTHER TURN TEXT. "), toolStart("grep"), turnEnd("t1"),
+      queueState("msg1"), textDelta("my answer"), settled("completed"),
+    ]);
+    const result = await chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "hi" });
+    expect(result.exit).toBe(ExitCode.OK);
+    expect(out()).toBe("my answer\n");
+  });
+
   it("prints an error event and returns TurnError", async () => {
     const { deps, out } = makeDeps([errorEvent("kaboom")]);
     const result = await chatTurn(deps, { sessionId: "s1", text: "hi" });
@@ -242,7 +253,7 @@ describe("chatTurn gate round-trip", () => {
   it("resolves an approval gate by number and resumes the stream", async () => {
     const gate = approvalGate();
     const { deps, out, resolveCalls } = makeDeps(
-      [textDelta("thinking"), gateEvent(gate), textDelta("done"), settled("completed")],
+      [queueState("msg1"), textDelta("thinking"), gateEvent(gate), textDelta("done"), settled("completed")],
       { selections: ["1"] },
     );
 
@@ -252,6 +263,25 @@ describe("chatTurn gate round-trip", () => {
     // The turn resumed after resolution and ran to the settle.
     expect(out()).toContain("thinking");
     expect(out()).toContain("done");
+    expect(result.exit).toBe(ExitCode.OK);
+  });
+
+  it("asks about a gate that blocked the thread before it connected, then follows the turn", async () => {
+    // The socket replays no decision_gate: the snapshot names the gate only.
+    const gate = approvalGate();
+    const blocked: WireEvent = {
+      seq: 1, ts: 1, type: "queue.state", sessionId: "s1", threadId: "t1",
+      state: { mode: "steer", status: "blocked_on_decision_gate", activeItemId: "r0", pendingIds: ["msg1"], collectingIds: [], blockedGateId: gate.id },
+    };
+    const { deps, out, resolveCalls } = makeDeps(
+      [blocked, queueState("r0"), queueState("msg1"), textDelta("my answer"), settled("completed")],
+      { selections: ["1"] },
+    );
+    deps.client.listThreadDecisions = async () => ({ gates: [gate] });
+    const result = await chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "go" });
+    expect(resolveCalls).toEqual([{ id: "s1", gateId: "gate_1", body: { actionId: "approve" } }]);
+    expect(out()).toContain("Approve write?");
+    expect(out()).toContain("my answer");
     expect(result.exit).toBe(ExitCode.OK);
   });
 

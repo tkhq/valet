@@ -20,12 +20,13 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
-import { consumeSend, submitSubscribed, type StreamFn } from "./send.js";
+import { consumeSend, readGatesOf, submitSubscribed, type StreamFn } from "./send.js";
 import type { CliContext } from "../types.js";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
   EnsureWorkspaceRuntimeResponse,
+  ListDecisionsResponse,
   RepoBinding,
   SendPromptRequest,
   SendPromptResponse,
@@ -38,6 +39,8 @@ export interface HandoffClient {
   ensureOrchestrator(): Promise<EnsureWorkspaceRuntimeResponse>;
   createSession(body: CreateSessionRequest): Promise<CreateSessionResponse>;
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
+  /** Reads a gate the stream names only by id (`queue.state.blockedGateId`). */
+  listThreadDecisions?(id: string): Promise<ListDecisionsResponse>;
 }
 
 export interface HandoffDeps {
@@ -235,7 +238,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
     t.unref();
   });
   const follow = consumeSend(
-    { stream: () => followed, url: deps.url, apiKey: deps.apiKey },
+    { stream: () => followed, url: deps.url, apiKey: deps.apiKey, readGates: readGatesOf(deps.client) },
     { sessionId, messageId: sentMessageId, threadId: sent.threadId, json: flags.json },
   );
   return Promise.race([follow, timeout]);
