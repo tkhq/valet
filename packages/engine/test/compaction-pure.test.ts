@@ -231,6 +231,45 @@ describe("compaction: transcript DAG", () => {
     expect(JSON.stringify(messages)).not.toContain("inactive linked branch");
   });
 
+  it("gives a path that starts at a branch note no legacy prefix", () => {
+    const oldRoot = user("old-root", "old first message");
+    const oldReply = assistant("old-reply", "old answer");
+    oldReply.parentId = oldRoot.id;
+    const note: SessionEntry = {
+      id: "note", sessionId: "s", threadId: "t", parentId: null, type: "branch_summary",
+      branchRootId: oldRoot.id, branchLeafId: oldReply.id, summary: "NOTE-TEXT", createdAt: 3,
+    };
+    const edited = user("edited", "new first message");
+    edited.parentId = note.id;
+
+    const active = walkTranscriptDag([oldRoot, oldReply, note, edited], edited.id);
+    expect(active.map((entry) => entry.id)).toEqual([note.id, edited.id]);
+    const live = JSON.stringify(entriesToAgentMessages([oldRoot, oldReply, note, edited], MODEL, { activeLeafEntryId: edited.id }));
+    expect(live).toContain("<branch-note>\\nNOTE-TEXT\\n</branch-note>");
+    expect(live).not.toContain("old first message");
+    expect(JSON.stringify(entriesToSummaryMessages(active, { toolOutputMaxChars: 1000, attributeAuthors: false }))).toContain("NOTE-TEXT");
+  });
+
+  it("brings entries a compaction covered back when the leaf moves before that compaction", () => {
+    const u1 = user("u1", "covered request");
+    const a1 = assistant("a1", "covered answer");
+    a1.parentId = u1.id;
+    const u2 = user("u2", "edited later");
+    u2.parentId = a1.id;
+    const c1: CompactionEntry = {
+      id: "c1", sessionId: "s", threadId: "t", parentId: u2.id, type: "compaction",
+      summary: "SUMMARY", coveredEntryIds: [u1.id, a1.id], tokenCountBefore: 20, tokenCountAfter: 5, createdAt: 4,
+    };
+    const note: SessionEntry = {
+      id: "note", sessionId: "s", threadId: "t", parentId: a1.id, type: "branch_summary",
+      branchRootId: u2.id, branchLeafId: c1.id, summary: "NOTE", createdAt: 5,
+    };
+    const live = JSON.stringify(entriesToAgentMessages([u1, a1, u2, c1, note], MODEL, { activeLeafEntryId: note.id }));
+    expect(live).toContain("covered request");
+    expect(live).not.toContain("SUMMARY");
+    expect(live).not.toContain("edited later");
+  });
+
   it("rejects a broken active path instead of silently dropping context", () => {
     const leaf = assistant("leaf", "answer");
     leaf.parentId = "missing-parent";
@@ -336,34 +375,29 @@ describe("compaction: summary checkpoint tail", () => {
   });
 
   it("steps back to the newest entry the summarizer can read", () => {
-    // A command result and a branch summary both render into no summarizer
-    // message. A window made only of them converts to an empty transcript,
-    // and the summary is then written from the prompt template alone.
+    // A command result renders into no summarizer message. A window made
+    // only of command results converts to an empty transcript, and the
+    // summary is then written from the prompt template alone.
     const opener = user("gap-opener", "start the turn");
     const bulk = assistant("gap-bulk", "x".repeat(40_000));
     const command = commandResult("gap-command");
-    const branch: SessionEntry = {
-      id: "gap-branch",
-      sessionId: "s",
-      threadId: "t",
-      parentId: null,
-      type: "branch_summary",
-      summary: "y".repeat(4_000),
-      branchRootId: "b-root",
-      branchLeafId: "b-leaf",
-      createdAt: 1,
-    };
-    // The raw ruler charges for a branch summary the summarizer never reads.
-    expect(estimateEntryTokens(branch)).toBeGreaterThan(0);
-    expect(estimateSummaryEntryTokens(branch)).toBe(0);
+    const second = commandResult("gap-command-2");
     expect(estimateSummaryEntryTokens(command)).toBe(0);
 
-    const selected = selectSummaryCheckpointTail([opener, bulk, branch, command], 10, {
+    const selected = selectSummaryCheckpointTail([opener, bulk, command, second], 10, {
       sizeOf: estimateSummaryEntryTokens,
     });
 
-    expect(selected.map((entry) => entry.id)).toEqual([bulk.id, branch.id, command.id]);
+    expect(selected.map((entry) => entry.id)).toEqual([bulk.id, command.id, second.id]);
     expect(entriesToSummaryMessages(selected, { toolOutputMaxChars: 2_000 })).toHaveLength(1);
+  });
+
+  it("charges a branch note to the summary window, because the summary keeps it", () => {
+    const branch: SessionEntry = {
+      id: "gap-branch", sessionId: "s", threadId: "t", parentId: null, type: "branch_summary",
+      summary: "y".repeat(4_000), branchRootId: "b-root", branchLeafId: "b-leaf", createdAt: 1,
+    };
+    expect(estimateSummaryEntryTokens(branch)).toBeGreaterThan(0);
   });
 
   it("trims optional evidence to the budget instead of dropping all of it", () => {

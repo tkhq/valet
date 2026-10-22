@@ -1211,6 +1211,7 @@ function makeListTool(
   ].join("");
   return {
     name: "list_tools",
+    sideEffect: "none",
     description:
       "List integration actions only. Native tools are already on your own tool list and are not listed here. " +
       "Filter by service or search by name/description. Focused tasks return compact summaries. Use detail: schema with an exact query before calling an action." +

@@ -134,7 +134,19 @@ export {
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
-export { Thread } from "./thread.js";
+export { Thread, THREAD_BRANCHED_KEY, type ThreadEntryQuery } from "./thread.js";
+export {
+  BRANCH_NOTE_KEY,
+  THREAD_EDIT_KEY,
+  branchNoteText,
+  readBranchNote,
+  readThreadEdit,
+  summarizeBranchActions,
+  type BranchNote,
+  type BranchNoteAction,
+  type BranchNoteKind,
+  type ThreadEdit,
+} from "./branch-note.js";
 export {
   InMemoryBlobStore,
   InMemoryEventStream,

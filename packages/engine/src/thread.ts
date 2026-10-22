@@ -57,7 +57,18 @@ import {
   validateSignalAttributeKeys,
   validateSignalTagName,
 } from "./submission.js";
-import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import { ConflictError, NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import {
+  BRANCH_NOTE_KEY,
+  THREAD_EDIT_KEY,
+  branchNoteText,
+  readBranchNote,
+  readThreadEdit,
+  summarizeBranchActions,
+  type BranchNote,
+  type BranchNoteKind,
+  type ThreadEdit,
+} from "./branch-note.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
@@ -106,6 +117,7 @@ import {
   SummarizeOverflowError,
   usableTokens,
   walkTranscriptDag,
+  renderBranchNote,
   selectSummaryCheckpointTail,
   type PruneResult,
   type SummarizeResult,
@@ -113,8 +125,10 @@ import {
 import type {
   ActiveModelState,
   AwaitResultOptions,
+  BranchSummaryEntry,
   CompactionEntry,
   DecisionGate,
+  DecisionGateEntry,
   DecisionGateRequest,
   DecisionResolution,
   DecisionWithdrawReason,
@@ -2232,6 +2246,294 @@ export class Thread {
     return append;
   }
 
+  // ── Branches (docs/specs/2026-10-22-thread-edit-fork-design.md) ──────
+
+  /**
+   * Queue an edit of one of the author's own earlier messages. The edited
+   * text runs next: it stops the running turn the way steer does, and queued
+   * messages run after it. The leaf moves when the edit is claimed
+   * (`applyEdit`), after the stopped turn settled.
+   */
+  async editMessage(entryId: string, content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    const editorId = opts.author?.id;
+    if (!editorId) throw new ValidationError("Only a person can edit a message. Send the text as a new message.");
+    const store = this.session.providers.store;
+    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new NotFoundError("thread", this.id);
+    const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const index = active.findIndex((entry) => entry.id === entryId);
+    const target = active[index];
+    if (!target) {
+      throw new ValidationError("That message is not in this version of the conversation. Reload the thread, then edit it again.");
+    }
+    if (target.type !== "message" || target.role !== "user" || target.signal) {
+      throw new ValidationError("Only a message a person typed can be edited.");
+    }
+    if (target.author?.id !== editorId) {
+      throw new ValidationError("Only the person who wrote a message can edit it. Branch into a new thread to try another version.");
+    }
+    if (target.channel) {
+      throw new ValidationError(`This message came from ${channelLabel(target.channel.channelType)}, and Valet cannot change the copy there. Branch into a new thread instead.`);
+    }
+    const later = laterOtherAuthor(active.slice(index + 1), editorId);
+    if (later) {
+      throw new ValidationError(`${later} wrote after this message, and an edit would remove that message. Branch into a new thread instead.`);
+    }
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    if (unsettled.some((item) => item.threadId === this.id && !item.supersededByItemId && readThreadEdit(item.metadata))) {
+      throw new ValidationError("Another edit is waiting to start in this thread. Wait for it to start, then edit again.");
+    }
+
+    const edit: ThreadEdit = { entryId };
+    const prepared = this.prepareSubmissionContent(content, {
+      ...opts,
+      metadata: { ...opts.metadata, [THREAD_EDIT_KEY]: edit },
+    });
+    const item = this.buildQueueItem(prepared.content, {
+      dispatchId: prepared.dispatchId,
+      author: opts.author,
+      channel: opts.channel,
+      replyTarget: opts.replyTarget,
+      model: opts.model,
+      role: opts.role,
+      metadata: prepared.metadata,
+    });
+    // The marker comes before the leaf can move, so a reader never sees a
+    // moved leaf through the one-path read (`readEntries`).
+    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_BRANCHED_KEY]: true }), "after-save");
+    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+      { steer: true, steerScope: "active" },
+    );
+    // The stopped turn can take a while to wind down (a tool waiting on the
+    // sandbox), and the person who sent the edit must not wait for it. The
+    // abort signal is set synchronously; the claim loop runs the edit once
+    // the stopped turn settles.
+    if (supersededItemIds.length > 0) {
+      void this.handleSteerSupersession(supersededItemIds).catch((err: unknown) => {
+        this.emitError("edit_supersession_failed", err instanceof Error ? err.message : String(err));
+      });
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  /**
+   * Move the leaf for a claimed edit: write a branch note whose parent is the
+   * entry before the edited message, and rebuild the agent transcript from
+   * the new path. The claim comes after the stopped turn settled, so none of
+   * its writes can land on the new branch. A retried attempt finds its note
+   * and does nothing. Returns false when the attempt went stale.
+   */
+  private async applyEdit(item: QueueItem): Promise<boolean> {
+    const edit = readThreadEdit(item.metadata);
+    if (!edit) return true;
+    const store = this.session.providers.store;
+    const fence = this.fence;
+    const move = this.entryAppendTail.then(async (): Promise<string | undefined> => {
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) throw new NotFoundError("thread", this.id);
+      if (snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id)) return undefined;
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      const active = walkTranscriptDag(snapshot.entries, leaf ?? undefined);
+      const index = active.findIndex((entry) => entry.id === edit.entryId);
+      if (index < 0) {
+        throw new ValidationError("The message you edited is no longer in this conversation. Edit it again from the current version.");
+      }
+      // The entry before it on the path, not its parentId: in a transcript
+      // from before TKAI-211, the edited message's parent is null.
+      const note = this.buildBranchNote("edit", {
+        parentId: active[index - 1]?.id ?? null,
+        left: active.slice(index),
+        actorId: item.author?.id,
+        queueItemId: item.id,
+      });
+      if (!(await store.appendBranch(this.session.id, this.id, [note], { expectedLeafId: leaf, fence }))) {
+        throw new ConflictError("The thread changed while the edit started. Edit the message again.");
+      }
+      this.activeLeafEntryId = note.id;
+      this.rehydrateTranscript([...snapshot.entries, note]);
+      return note.id;
+    });
+    this.entryAppendTail = move.then(() => undefined, () => undefined);
+    let noteId: string | undefined;
+    try {
+      noteId = await move;
+    } catch (err) {
+      if (!(err instanceof StaleAttemptError)) throw err;
+      this.staleFenceDetected = true;
+      this.emitError("stale_fence", `turn superseded for item ${err.itemId}`);
+      return false;
+    }
+    if (noteId) await this.session.emit({ type: "branch_switched", threadId: this.id, noteEntryId: noteId }, { queueItemId: item.id });
+    return true;
+  }
+
+  /**
+   * Go back to the branch a note left. The thread must be idle: a running
+   * turn writes to the current branch. Writes a note for the branch it
+   * leaves, so the person can return again.
+   */
+  async returnToBranch(noteEntryId: string, actor: { id: string }): Promise<{ noteEntryId: string }> {
+    if (this.session.options.readOnlyReason) throw new ValidationError(this.session.options.readOnlyReason);
+    const store = this.session.providers.store;
+    const busy = "Valet is working in this thread. Stop it, then go back to the earlier version.";
+    const unsettled = await store.listUnsettledSubmissions(this.session.id);
+    if (this.runningItem || unsettled.some((item) => item.threadId === this.id && (item.status === "running" || item.status === "blocked_on_decision_gate"))) {
+      throw new ValidationError(busy);
+    }
+    await this.patchThreadMetadata((current) => ({ ...current, [THREAD_BRANCHED_KEY]: true }), "after-save");
+    const move = this.entryAppendTail.then(async (): Promise<string> => {
+      // A claim can start between the check above and this point.
+      if (this.runningItem) throw new ValidationError(busy);
+      const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+      if (!snapshot) throw new NotFoundError("thread", this.id);
+      const leaf = snapshot.thread.activeLeafEntryId ?? null;
+      const active = walkTranscriptDag(snapshot.entries, leaf ?? undefined);
+      const note = active.find((entry) => entry.id === noteEntryId);
+      if (note?.type !== "branch_summary" || readBranchNote(note.metadata)?.kind === "fork") {
+        throw new ValidationError("That version note is not in this conversation. Reload the thread and try again.");
+      }
+      const target = snapshot.entries.find((entry) => entry.id === note.branchLeafId);
+      if (!target) throw new ValidationError("The earlier version is not in this thread, so Valet cannot go back to it.");
+      const onTarget = new Set(walkTranscriptDag(snapshot.entries, target.id).map((entry) => entry.id));
+      const firstLeft = active.findIndex((entry) => !onTarget.has(entry.id));
+      const left = firstLeft < 0 ? [] : active.slice(firstLeft);
+      const other = laterOtherAuthor(left, actor.id);
+      if (other) {
+        throw new ValidationError(`${other} wrote in this version, and going back would remove that message. Branch into a new thread instead.`);
+      }
+      const fresh = this.buildBranchNote("return", { parentId: target.id, left, actorId: actor.id });
+      if (!(await store.appendBranch(this.session.id, this.id, [fresh], { expectedLeafId: leaf }))) {
+        throw new ConflictError("The thread changed. Reload it and try again.");
+      }
+      this.activeLeafEntryId = fresh.id;
+      if (this.transcriptPending) return fresh.id;
+      this.rehydrateTranscript([...snapshot.entries, fresh]);
+      return fresh.id;
+    });
+    this.entryAppendTail = move.then(() => undefined, () => undefined);
+    const freshId = await move;
+    await this.session.emit({ type: "branch_switched", threadId: this.id, noteEntryId: freshId });
+    return { noteEntryId: freshId };
+  }
+
+  /**
+   * The active path through `lastEntryId` (null: nothing), for a fork to
+   * copy. Refuses a path that holds a tool call still running. Call it
+   * before creating the destination thread, so a refused fork leaves no
+   * empty thread behind.
+   */
+  async forkPath(lastEntryId: string | null): Promise<SessionEntry[]> {
+    const snapshot = await this.session.providers.store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) throw new NotFoundError("thread", this.id);
+    const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const end = lastEntryId === null ? -1 : active.findIndex((entry) => entry.id === lastEntryId);
+    if (lastEntryId !== null && end < 0) {
+      throw new ValidationError("That message is not in this version of the conversation. Reload the thread and try again.");
+    }
+    const path = active.slice(0, end + 1);
+    if (path.some((entry) => entry.type === "message" && entry.parts?.some((part) => part.type === "tool_call" && part.status === "running"))) {
+      throw new ValidationError("That reply is still running. Wait for it to finish, then branch.");
+    }
+    return path;
+  }
+
+  /**
+   * Fill this empty thread with copies of a fork path (`forkPath`), then a
+   * fork note. Copies get new ids and re-linked parents. They drop their
+   * submission link, usage, and cost, so usage views count each model call
+   * once. Decision-gate entries stay behind: their gate rows belong to the
+   * source thread.
+   */
+  async copyPath(
+    path: readonly SessionEntry[],
+    opts: { source: { sessionId: string; threadId: string }; actorId?: string },
+  ): Promise<void> {
+    const store = this.session.providers.store;
+    const ids = new Map<string, string>();
+    const copies: SessionEntry[] = [];
+    let parentId: string | null = null;
+    for (const entry of path) {
+      if (entry.type === "decision_gate") continue;
+      const copy = copyEntry(entry, { id: uid("e"), sessionId: this.session.id, threadId: this.id, parentId }, ids);
+      ids.set(entry.id, copy.id);
+      copies.push(copy);
+      parentId = copy.id;
+    }
+    const lastEntryId = path[path.length - 1]?.id ?? "";
+    const note = this.buildBranchNote("fork", {
+      parentId,
+      left: [],
+      actorId: opts.actorId,
+      source: { ...opts.source, sameWorkingDirectory: opts.source.sessionId === this.session.id },
+      branchRootId: lastEntryId,
+      branchLeafId: lastEntryId,
+    });
+    const append = this.entryAppendTail.then(async () => {
+      if (!(await store.appendBranch(this.session.id, this.id, [...copies, note], { expectedLeafId: null }))) {
+        throw new ValidationError("The new thread already has messages. Branch again into a new thread.");
+      }
+      this.activeLeafEntryId = note.id;
+      this.transcriptPending = true;
+    });
+    this.entryAppendTail = append.catch(() => undefined);
+    await append;
+  }
+
+  /** How a branch note sorts each tool by what its calls leave behind (`ToolDef.sideEffect`). */
+  private branchNoteTools(): { silent: Set<string>; files: Set<string>; plugin: Set<string> } {
+    const defs: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])];
+    const names = (keep: (def: ToolDef) => boolean) => new Set(defs.filter(keep).map((def) => def.name));
+    return {
+      silent: names((def) => def.sideEffect === "none" || (def.concurrencySafe === true && !def.requiresApproval)),
+      files: names((def) => def.sideEffect === "files"),
+      plugin: names((def) => def.policyChecked === true),
+    };
+  }
+
+  private buildBranchNote(kind: BranchNoteKind, args: {
+    parentId: string | null;
+    left: readonly SessionEntry[];
+    actorId?: string;
+    queueItemId?: string;
+    source?: BranchNote["source"];
+    branchRootId?: string;
+    branchLeafId?: string;
+  }): BranchSummaryEntry {
+    const ran = kind === "fork"
+      ? { actions: [], moreActions: 0, filesChanged: false }
+      : summarizeBranchActions(args.left, this.branchNoteTools());
+    const note: BranchNote = {
+      kind,
+      ...ran,
+      ...(args.actorId ? { actorId: args.actorId } : {}),
+      ...(args.source ? { source: args.source } : {}),
+    };
+    return {
+      id: uid("e"),
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: args.parentId,
+      type: "branch_summary",
+      branchRootId: args.branchRootId ?? args.left[0]?.id ?? "",
+      branchLeafId: args.branchLeafId ?? args.left[args.left.length - 1]?.id ?? "",
+      summary: branchNoteText(note),
+      metadata: { [BRANCH_NOTE_KEY]: note },
+      queueItemId: args.queueItemId,
+      createdAt: Date.now(),
+    };
+  }
+
   private async transcriptSnapshot(): Promise<{ thread: ThreadData; entries: SessionEntry[] }> {
     const snapshot = await this.session.providers.store.getThreadSnapshot(
       this.session.id,
@@ -2691,8 +2993,31 @@ export class Thread {
     this.agent.state.model = resolved.model;
   }
 
-  async readEntries(opts?: MessageQuery): Promise<SessionEntry[]> {
-    return this.session.providers.store.getEntries(this.session.id, this.id, opts);
+  /**
+   * This thread's entries. Without `queueItemId` or `allBranches`, only the
+   * active path: the version the model sees and REST shows. A thread that
+   * never branched has one path, so the bounded store read serves it.
+   */
+  async readEntries(opts?: ThreadEntryQuery): Promise<SessionEntry[]> {
+    const store = this.session.providers.store;
+    const { allBranches, ...query } = opts ?? {};
+    if (allBranches || query.queueItemId !== undefined || this.threadMetadata?.[THREAD_BRANCHED_KEY] !== true) {
+      return store.getEntries(this.session.id, this.id, query);
+    }
+    const snapshot = await store.getThreadSnapshot(this.session.id, this.id);
+    if (!snapshot) return [];
+    let path = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    // While an edit waits to start, the conversation already ends before
+    // the edited message. The client hides those rows at Send, and a
+    // refetch before the claim must not bring them back.
+    for (const item of await store.listUnsettledSubmissions(this.session.id)) {
+      const edit = item.threadId === this.id && !item.supersededByItemId ? readThreadEdit(item.metadata) : undefined;
+      if (!edit || snapshot.entries.some((entry) => entry.type === "branch_summary" && entry.queueItemId === item.id)) continue;
+      const cut = path.findIndex((entry) => entry.id === edit.entryId);
+      if (cut >= 0) path = path.slice(0, cut);
+    }
+    if (query.includeCompacted === false) path = path.filter((entry) => entry.type !== "compaction");
+    return query.limit && query.limit > 0 ? path.slice(-query.limit) : path;
   }
 
   // ── internals ───────────────────────────────────────────────────
@@ -3716,6 +4041,9 @@ export class Thread {
   private async appendUserEntry(
     item: QueueItem,
   ): Promise<{ text: string; attachments: MessageEntry["attachments"] }> {
+    // Every path that appends the user entry moves an edit's leaf first, the
+    // claim loop's credential-cap path included. It runs once per item.
+    await this.applyEdit(item);
     // Signal content persists as its raw body + `signal` metadata; the text
     // the model actually sees this turn is the same rendered XML envelope
     // `entriesToAgentMessages` would reconstruct on reload (single render
@@ -3977,6 +4305,9 @@ export class Thread {
     this.currentAssistantParts = [];
     this.currentToolCalls.clear();
     if (!(await this.canRunCurrentSubmission())) return;
+    // An edit moves the leaf before anything else in the turn reads or
+    // writes the transcript (model state, compaction, the user entry).
+    if (!(await this.applyEdit(item))) return;
 
     // Warm-on-claim (spec decision 5): kick sandbox provisioning at the
     // start of the claimed turn, in parallel with the LLM call — never at
@@ -6742,6 +7073,67 @@ function buildSignalMeta(
 }
 
 /** Map a submission's live status onto the narrower PromptReceipt status. */
+/**
+ * Thread metadata key set once a thread's leaf has moved (an edit or a
+ * return). Until then the thread has one path, and `readEntries` serves the
+ * active path from the bounded store read.
+ */
+export const THREAD_BRANCHED_KEY = "branched";
+
+/** A thread entry read: the store query, plus every branch on request. */
+export type ThreadEntryQuery = MessageQuery & { allBranches?: boolean };
+
+/** The name of the first person other than `actorId` who wrote one of these entries. */
+function laterOtherAuthor(entries: readonly SessionEntry[], actorId: string): string | undefined {
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "user" || !entry.author) continue;
+    if (entry.author.id === actorId) continue;
+    return entry.author.name || entry.author.email || "Someone else";
+  }
+  return undefined;
+}
+
+function channelLabel(channelType: string): string {
+  return channelType === "slack" ? "Slack" : channelType;
+}
+
+/**
+ * One entry copied into another thread for a fork. `ids` maps the source ids
+ * copied so far to their copies, so compaction coverage and branch-note
+ * links follow the copy.
+ */
+function copyEntry(
+  entry: Exclude<SessionEntry, DecisionGateEntry>,
+  at: { id: string; sessionId: string; threadId: string; parentId: string | null },
+  ids: ReadonlyMap<string, string>,
+): SessionEntry {
+  const base = { ...at, queueItemId: undefined, sequence: undefined };
+  switch (entry.type) {
+    case "message":
+      return { ...entry, ...base, usage: undefined, cost: undefined };
+    case "compaction":
+      return {
+        ...entry,
+        ...base,
+        coveredEntryIds: entry.coveredEntryIds.flatMap((id) => {
+          const copied = ids.get(id);
+          return copied ? [copied] : [];
+        }),
+      };
+    case "branch_summary":
+      return {
+        ...entry,
+        ...base,
+        // The version a copied note left is not in the copy, so the copy
+        // cannot go back to it.
+        branchRootId: ids.get(entry.branchRootId) ?? "",
+        branchLeafId: ids.get(entry.branchLeafId) ?? "",
+      };
+    case "command_result":
+      return { ...entry, ...base };
+  }
+}
+
 function receiptStatus(status: QueueItem["status"]): PromptReceipt["status"] {
   if (status === "running") return "running";
   if (status === "blocked_on_decision_gate") return "blocked_on_decision_gate";
@@ -7073,6 +7465,10 @@ export function entriesToAgentMessages(
   }
 
   for (const e of activeEntries) {
+    if (e.type === "branch_summary" && !activeCompaction?.covered.has(e.id)) {
+      out.push({ role: "user", content: [{ type: "text", text: renderBranchNote(e.summary) }], timestamp: e.createdAt });
+      continue;
+    }
     if (e.type !== "message") continue;
     if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
 

@@ -254,6 +254,7 @@ export const readTool = defineTool({
 
 export const writeTool = defineTool({
   name: "write",
+  sideEffect: "files",
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
@@ -289,6 +290,7 @@ export const writeTool = defineTool({
 
 export const editTool = defineTool({
   name: "edit",
+  sideEffect: "files",
   description: "Replace exact text occurrences in a file.",
   parameters: Type.Object({
     path: Type.String(),
@@ -331,6 +333,7 @@ export const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMax
 
 export const bashTool = defineTool({
   name: "bash",
+  sideEffect: "files",
   description:
     "Execute a shell command in the sandbox. `timeout` (seconds, default " +
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
@@ -780,6 +783,7 @@ export const switchModelTool = defineTool({
 
 export const askApprovalTool = defineTool({
   name: "ask_approval",
+  sideEffect: "none",
   description:
     "Ask the user for an explicit approval before proceeding with an action. " +
     "Blocks until the user approves or denies (or the gate expires). Use for " +
@@ -837,6 +841,7 @@ export const askApprovalTool = defineTool({
 
 export const askQuestionTool = defineTool({
   name: "ask_question",
+  sideEffect: "none",
   description:
     "Ask the person a question and wait for the answer. Use it when a decision or a missing " +
     "fact blocks the work, not to confirm something you can check yourself. Give `options` " +

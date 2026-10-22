@@ -244,6 +244,11 @@ export function tailBudget(usable: number, cfg?: CompactionConfig): number {
 
 // ── Transcript DAG traversal ───────────────────────────────────────
 
+/** A branch note as the model reads it, in live context and in summaries. */
+export function renderBranchNote(summary: string): string {
+  return `<branch-note>\n${summary}\n</branch-note>`;
+}
+
 /**
  * Return the active transcript path in root-to-leaf order. Entries on other
  * branches stay durable but do not enter compaction or model context.
@@ -271,6 +276,12 @@ export function walkTranscriptDag(
     entryId = entry.parentId;
   }
   path.reverse();
+
+  // Only edits, returns, and forks write branch notes, and each is newer
+  // than TKAI-211. So a path that starts at a note has no legacy prefix: an
+  // edit of a thread's first message starts a second root, and the old root
+  // before it belongs to the branch the edit left.
+  if (path[0]?.type === "branch_summary") return path;
 
   // Before TKAI-211, normal entries had null parents but compaction entries
   // pointed at the covered head. Keep the latest legacy checkpoint and the
@@ -982,7 +993,13 @@ export function entriesToSummaryMessages(
       ? raw.slice(0, SUMMARY_PROSE_MAX_CHARS) + `…(truncated, ${raw.length - SUMMARY_PROSE_MAX_CHARS} more chars)`
       : raw;
   for (const e of entries) {
-    if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry, BranchSummary
+    // A branch note on the path is context the summary must keep: what still
+    // stands from a branch the thread left.
+    if (e.type === "branch_summary") {
+      out.push({ role: "user", content: [{ type: "text", text: renderBranchNote(e.summary) }], timestamp: e.createdAt });
+      continue;
+    }
+    if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry
     if (e.role === "user") {
       // Same sender-line rule as `entriesToAgentMessages`: shared sessions
       // only, and signal entries are exempt (their envelope names the
