@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../env.js";
-import { bestEffortTelemetry, externalCallOwner, recordExternalCall } from "../services/external-usage.js";
+import { bestEffortTelemetry, externalCallOwner, externalWorkflowOwner, recordExternalCall } from "../services/external-usage.js";
 
 /** Headers identify an invocation, never authority. Auth supplies the user and org. */
 export function cliUsage(): MiddlewareHandler<AppEnv> {
@@ -36,7 +36,8 @@ export function cliUsage(): MiddlewareHandler<AppEnv> {
       }
       const owner = c.var.principal.type === "team"
         ? { ownerType: "team" as const, ownerId: c.var.principal.id }
-        : await externalCallOwner(c.var.providers.db, user.orgId, user.id,
+        : await externalWorkflowOwner(c.var.providers.db, user.orgId, c.res.ok ? c.req.path : undefined)
+          ?? await externalCallOwner(c.var.providers.db, user.orgId, user.id,
           c.res.ok && parts[2] === "threads" ? parts[3] : undefined, c.res.ok && parts[2] === "sessions" ? parts[3] : undefined, c.res.ok ? workspace : undefined);
       await recordExternalCall(c.var.providers.db, {
         id: `cli:${user.orgId}:${user.id}:${id}`, orgId: user.orgId, userId: user.id, surface: "cli", name,

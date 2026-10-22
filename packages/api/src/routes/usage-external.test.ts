@@ -276,13 +276,22 @@ it("does not disclose team thread intents to an admin outside their audience", a
     ('private', 'session', 'app-assistant:test-member', 'idle', 'steer', 1, 1),
     ('shared', 'session', 'web:default', 'idle', 'steer', 1, 1),
     ('slack-private', 'session', 'slack:CUNKNOWNPRIVATE:1', 'idle', 'steer', 1, 1)`);
-  await seed(api, "private-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "private", userId: "test-member" });
+  await seed(api, "private-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "private", userId: "test-member", intent: "Confidential layoff investigation.", createdAt: Date.now() });
   await seed(api, "shared-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "shared", userId: "test-member" });
   await seed(api, "slack-call", { surface: "hosted", ownerType: "team", ownerId: "team", sessionId: "session", threadId: "slack-private", userId: "test-member" });
   for (const scope of ["&scope=org", "&scope=team&teamId=team"]) {
     const data = await (await read(api, scope)).json() as ExternalUsageResponse;
     expect(data.daily.reduce((sum, day) => sum + day.calls, 0)).toBe(3);
     expect(data.recent.map(row => row.id)).toEqual(["shared-call"]);
+    const hidden = await (await read(api, `${scope}&q=layoff&limit=1`)).json() as ExternalUsageResponse;
+    expect(hidden.recent).toEqual([]);
+    expect(hidden.hasMore).toBe(false);
+    const first = await (await read(api, `${scope}&limit=1`)).json() as ExternalUsageResponse;
+    expect(first.recent.map(row => row.id)).toEqual(["shared-call"]);
+    expect(first.hasMore).toBe(false);
+    const next = await (await read(api, `${scope}&offset=1&limit=1`)).json() as ExternalUsageResponse;
+    expect(next.recent).toEqual([]);
+    expect(next.hasMore).toBe(false);
   }
 });
 

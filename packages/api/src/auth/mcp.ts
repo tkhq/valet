@@ -26,7 +26,7 @@
  *     the verified user attached by `mcp-caller.ts`, so the routes keep sole
  *     ownership of access control.
  */
-import { bestEffortTelemetry, externalCallOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
+import { bestEffortTelemetry, externalCallOwner, externalWorkflowOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
 import { intentSchema, registerTool } from "./mcp-intent.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -85,6 +85,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
     let resolvedThreadId: string | undefined;
     let resolvedTeamId: string | undefined;
     let resolvedActionId: string | undefined;
+    let admittedWorkflowPath: string | undefined;
     const server = new McpServer({ name: "valet", version: "1.0.0" });
 
     const [row] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
@@ -110,6 +111,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         if (res.ok) {
           const url = new URL(inner.url);
           const pathParts = url.pathname.split("/");
+          if (pathParts[2] === "workflows") admittedWorkflowPath = url.pathname;
           const invokeBody = pathParts[2] === "actions" && pathParts[4] === "invoke" ? object(body) : undefined;
           const team = url.searchParams.get("workspace") ?? (typeof invokeBody?.workspace === "string" ? invokeBody.workspace : null)
             ?? (url.searchParams.get("ownerType") === "team" ? url.searchParams.get("ownerId") : null);
@@ -209,7 +211,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           await recordExternalCall(db, {
             id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: (toolName === "call_tool" ? resolvedActionId ?? (typeof args?.tool_id === "string" ? args.tool_id : toolName) : toolName).slice(0, 200),
             clientName: client?.name, clientVersion: client?.version,
-            ...await externalCallOwner(db, orgId, session.userId, resolvedThreadId, resolvedSessionId, resolvedTeamId),
+            ...await externalWorkflowOwner(db, orgId, admittedWorkflowPath) ?? await externalCallOwner(db, orgId, session.userId, resolvedThreadId, resolvedSessionId, resolvedTeamId),
             outcome, errorCode, durationMs,
             intent: intent.success && typeof intent.data === "string" ? intent.data.trim() : null, createdAt: started,
           });

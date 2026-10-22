@@ -11,7 +11,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { oauthAccessToken, orgMembers, orgs, skills, users } from "../schema/index.js";
+import { oauthAccessToken, orgMembers, orgs, skills, users, teams, teamMembers, workflowDefinitions, externalCalls } from "../schema/index.js";
 import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
@@ -148,6 +148,10 @@ describe("MCP workspace tools", () => {
     });
     const ping = await createWorkflowDefinition(deps, owner, { name: "Ping", definition: definition("ping") });
     const risky = await createWorkflowDefinition(deps, owner, { name: "Risky", definition: definition("risky") });
+    await p.db.insert(teams).values({ id: "workflow-team", name: "Workflow team", orgId: ORG, createdAt: 1 });
+    await p.db.insert(teamMembers).values({ teamId: "workflow-team", userId: "alice", role: "admin" });
+    await p.db.update(workflowDefinitions).set({ ownerType: "team", ownerId: "workflow-team" }).where(eq(workflowDefinitions.id, risky.id));
+    await p.engineCredentials.save({ type: "team", id: "workflow-team" }, "demo", { type: "api_key", apiKey: "fixture-only" });
 
     const listed = await tool(testApi.baseUrl, alice, "list_workflows");
     expect((listed.data.workflows as Array<{ name: string }>).map((w) => w.name).sort()).toEqual(["Ping", "Risky"]);
@@ -158,6 +162,7 @@ describe("MCP workspace tools", () => {
 
     const parked = await tool(testApi.baseUrl, alice, "run_workflow", { workflow_id: risky.id, wait_seconds: 30 });
     expect(parked.data).toMatchObject({ pending_approvals: [expect.objectContaining({ kind: "policy_gate", action: "demo.risky" })] });
+    expect((await tool(testApi.baseUrl, alice, "get_workflow_run", { run_id: parked.data.run_id })).isError).toBe(false);
     const inbox = await tool(testApi.baseUrl, alice, "list_inbox");
     expect(inbox.data.workflow_approvals).toEqual([expect.objectContaining({ run_id: parked.data.run_id, workflow: "Risky", action: "demo.risky" })]);
     expect((await tool(testApi.baseUrl, bob, "list_inbox")).data.workflow_approvals).toEqual([]);
@@ -170,6 +175,13 @@ describe("MCP workspace tools", () => {
     const retried = await tool(testApi.baseUrl, alice, "retry_workflow_run", { run_id: parked.data.run_id, wait_seconds: 30 });
     expect(retried.isError).toBe(false);
     expect(retried.data).toMatchObject({ pending_approvals: [expect.objectContaining({ kind: "policy_gate", action: "demo.risky" })] });
+    await vi.waitFor(async () => {
+      const rows = await p.db.select().from(externalCalls);
+      for (const name of ["run_workflow", "get_workflow_run", "cancel_workflow_run", "retry_workflow_run"]) {
+        expect(rows.some(row => row.name === name && row.userId === "alice" && row.ownerType === "team" && row.ownerId === "workflow-team")).toBe(true);
+      }
+      expect(rows.filter(row => row.userId === "bob" && row.ownerType === "team")).toEqual([]);
+    });
   });
 
   it("lists a thread approval in the inbox but refuses to let an MCP agent approve it", async () => {

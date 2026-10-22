@@ -4,7 +4,7 @@ import type { ToolUsageFact } from "@valet/shared";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, externalCalls, mcpClientInfo, sessionThreads, users } from "../schema/index.js";
+import { agentSessions, externalCalls, mcpClientInfo, sessionThreads, users, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import type { UsageScope } from "./usage.js";
 import type { ResolvedUsagePeriod } from "./usage-period.js";
 import type { ExternalUsageResponse } from "../wire/types.js";
@@ -55,6 +55,17 @@ export async function externalCallOwner(db: AppDb, orgId: string, userId: string
   return { ownerType: session.ownerType === "team" ? "team" as const : "user" as const, ownerId: session.ownerId, sessionId: session.id, ...(threadId ? { threadId } : {}) };
 }
 
+/** Call only with an API path that admitted this caller. Ownership comes from stored rows, never tool arguments. */
+export async function externalWorkflowOwner(db: AppDb, orgId: string, admittedPath: string | undefined) {
+  const parts = admittedPath?.split("/");
+  if (parts?.[1] !== "api" || parts[2] !== "workflows" || !parts[3]) return undefined;
+  const table = parts[3] === "runs" ? workflowRuns : workflowDefinitions;
+  const id = decodeURIComponent(parts[3] === "runs" ? parts[4] ?? "" : parts[3]);
+  const [row] = await db.select({ ownerType: table.ownerType, ownerId: table.ownerId }).from(table)
+    .where(and(eq(table.id, id), eq(table.orgId, orgId))).limit(1);
+  return row?.ownerType === "team" ? { ownerType: "team" as const, ownerId: row.ownerId } : undefined;
+}
+
 export async function saveMcpClientInfo(db: AppDb, identity: { orgId: string; userId: string; clientId: string }, info: { name: string; version: string }) {
   await bestEffortTelemetry(async () => {
     const value = { name: info.name.slice(0, 200), version: info.version.slice(0, 100) };
@@ -96,18 +107,24 @@ export async function getExternalUsage(db: AppDb, opts: {
     }
   }
   if (!detailsVisible) return { daily: filledDaily, tools, clients, detailsVisible, recent: [], hasMore: false };
+  const feedWhere = and(where,
+    scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined);
+  // Resolve audiences before text search or pagination; hidden intents must not affect either.
+  const pairs = await db.selectDistinct({ sessionId: externalCalls.sessionId, threadId: externalCalls.threadId }).from(externalCalls)
+    .where(and(feedWhere, eq(externalCalls.ownerType, "team"), sql`${externalCalls.sessionId} IS NOT NULL AND ${externalCalls.threadId} IS NOT NULL`));
+  const teamThreads = pairs.flatMap(pair => pair.sessionId && pair.threadId ? [{ sessionId: pair.sessionId, threadId: pair.threadId }] : []);
+  const visible = await visibleThreadIds(opts.viewer.deps, { ownerType: "team" }, { orgId: scope.orgId, userId: opts.viewer.userId }, teamThreads);
+  const hidden = teamThreads.filter(pair => !visible.has(`${pair.sessionId}:${pair.threadId}`));
+  const audience = hidden.length ? sql`NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(hidden)}::jsonb)
+    AS hidden("sessionId" text, "threadId" text) WHERE ${externalCalls.ownerType} = 'team'
+    AND hidden."sessionId" = ${externalCalls.sessionId} AND hidden."threadId" = ${externalCalls.threadId})` : undefined;
   // strpos treats search as literal text, not a wildcard pattern.
   const recent = await db.select({ call: externalCalls, userName: users.name }).from(externalCalls)
-    .leftJoin(users, eq(users.id, externalCalls.userId)).where(and(where,
-    scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined,
+    .leftJoin(users, eq(users.id, externalCalls.userId)).where(and(feedWhere, audience,
     opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
     .orderBy(sql`${externalCalls.createdAt} desc`, sql`${externalCalls.id} desc`).offset(opts.offset).limit(opts.limit + 1);
-  const teamThreads = recent.flatMap(({ call }) => call.ownerType === "team" && call.sessionId && call.threadId
-    ? [{ sessionId: call.sessionId, threadId: call.threadId }] : []);
-  const visible = await visibleThreadIds(opts.viewer.deps, { ownerType: "team" }, { orgId: scope.orgId, userId: opts.viewer.userId }, teamThreads);
-  const readable = recent.slice(0, opts.limit).filter(({ call }) => call.ownerType !== "team" || !call.sessionId || !call.threadId || visible.has(`${call.sessionId}:${call.threadId}`));
   return { daily: filledDaily, tools, clients, detailsVisible, hasMore: recent.length > opts.limit,
-    recent: readable.map(({ call: r, userName }) => ({ userName, id: r.id, surface: r.surface, name: r.name,
+    recent: recent.slice(0, opts.limit).map(({ call: r, userName }) => ({ userName, id: r.id, surface: r.surface, name: r.name,
       clientName: r.clientName, clientVersion: r.clientVersion, userId: r.userId, outcome: r.outcome, intent: r.intent, createdAt: r.createdAt })) };
 }
 

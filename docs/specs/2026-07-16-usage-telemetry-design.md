@@ -485,7 +485,8 @@ The usage query retains previous data while search changes, so the input keeps f
 Team members can see aggregates.
 Team admins can also see individual intents from threads they can read.
 The recent feed uses the existing batched thread visibility check, including private-channel and personal-helper restrictions.
-Pagination offsets count candidate rows, so filtered pages can contain fewer rows.
+Visibility is applied before text search, offsets, limits, and `hasMore`, so hidden intents cannot change search responses.
+Admitted workflow paths resolve ownership from stored definitions or runs for MCP and CLI telemetry.
 Admitted invoke bodies supply team workspace ownership for MCP and CLI calls.
 CLI discovery requests do not overwrite an invocation's resolved team ownership.
 Legacy replay repairs missing or invalid metadata without relaxing fresh-call validation.
