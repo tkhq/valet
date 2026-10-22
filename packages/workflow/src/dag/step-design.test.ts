@@ -28,10 +28,22 @@ describe('pushesGitCommits', () => {
     expect(pushesGitCommits({ type: 'orchestrator', prompt: 'Push the changes to the main branch.' })).toBe(true);
   });
 
+  it('flags a push that follows a negation in an earlier clause', () => {
+    expect(pushesGitCommits(session("Don't open a PR; commit and push straight to main."))).toBe(true);
+    expect(pushesGitCommits(session('No review needed, just commit and push to main.'))).toBe(true);
+    expect(pushesGitCommits(session('Skip the pull request, never wait: git push origin main'))).toBe(true);
+  });
+
+  it('stays quiet for a step that opens a pull request for a person to merge', () => {
+    expect(pushesGitCommits(session('Create a branch, commit the fix, push the branch and open a pull request.'))).toBe(false);
+    expect(pushesGitCommits(session('git push origin fix-branch, then gh pr create'))).toBe(false);
+  });
+
   it('stays quiet for prompts that forbid pushing, never mention git, or are not agent steps', () => {
     expect(pushesGitCommits(session('Read the diff and comment on it. Do not commit or push anything.'))).toBe(false);
     expect(pushesGitCommits(session('Summarize the open pull requests in three bullets.'))).toBe(false);
     expect(pushesGitCommits(session('Send a push notification to the on-call channel.'))).toBe(false);
+    expect(pushesGitCommits(session('Summarize the incidents and push the update to the main Slack channel.'))).toBe(false);
     expect(pushesGitCommits({ type: 'llm', prompt: 'Commit and push the file.' })).toBe(false);
   });
 });
@@ -47,7 +59,10 @@ describe('scheduledRunMisses', () => {
         { id: 'own', type: 'session', prompt: '{{trigger.data.scheduleName}} {{trigger.data.cron}} {{trigger.data.input}} {{trigger.data}}' },
       ],
     };
-    expect([...scheduledRunMisses(definition)]).toEqual([['gate', ['push']], ['each', ['channel']]]);
+    expect([...scheduledRunMisses(definition)]).toEqual([
+      ['gate', [{ field: 'push', sites: ['expression'] }]],
+      ['each', [{ field: 'channel', sites: ['template'] }]],
+    ]);
   });
 
   it('lists a trigger.data read in an edge condition under the edge\'s from node', () => {
@@ -59,6 +74,14 @@ describe('scheduledRunMisses', () => {
         { from: 'publish', to: 'skip', when: 'trigger.data.input.dry || trigger.data.dry' },
       ],
     };
-    expect([...scheduledRunMisses(definition)]).toEqual([['start', ['push']]]);
+    expect([...scheduledRunMisses(definition)]).toEqual([['start', [{ field: 'push', sites: ['expression'] }]]]);
+  });
+
+  it('reports a field read both in a template and in a condition once, with both sites', () => {
+    const definition = {
+      nodes: [{ id: 'start', type: 'trigger' }, { id: 'publish', type: 'session', prompt: 'Dry run: {{trigger.data.dry}}' }, { id: 'skip', type: 'stop' }],
+      edges: [{ from: 'publish', to: 'skip', when: 'trigger.data.dry' }],
+    };
+    expect([...scheduledRunMisses(definition)]).toEqual([['publish', [{ field: 'dry', sites: ['template', 'expression'] }]]]);
   });
 });

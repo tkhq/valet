@@ -51,6 +51,26 @@ describe("stepDesignWarnings: what a run reads and runs as", () => {
     expect(warnings.get("each")?.join(" ")).toContain("trigger.data.input.channel");
   });
 
+  it("gives a condition's read the bare expression, and says || skips false, 0, and an empty string", () => {
+    const definition = {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "gate", type: "if", conditions: [{ left: "trigger.data.dryRun", dataType: "boolean", operation: "false" }] },
+        { id: "publish", type: "session", mode: "start", prompt: "Publish the report." },
+      ],
+      edges: [{ from: "trigger", to: "gate" }, { from: "gate", to: "publish", when: "trigger.data.limit > 0" }],
+    };
+    const warnings = stepDesignWarnings(definition, [], { schedules: ["Nightly"] });
+    const gate = warnings.get("gate") ?? [];
+    expect(gate).toHaveLength(2);
+    expect(gate.join(" ")).not.toContain("{{");
+    expect(gate.join(" ")).toContain("write trigger.data.input.dryRun || trigger.data.dryRun with no braces in a condition");
+    expect(gate.join(" ")).toContain("write trigger.data.input.limit || trigger.data.limit with no braces in a condition");
+    expect(gate.join(" ")).toContain("false, 0, or an empty string");
+    expect(gate.join(" ")).toContain("read trigger.data.input.limit alone");
+  });
+
   it("stays quiet with no schedule, a read that covers both paths, or a field the schedule sets itself", () => {
     const read = (prompt: string) => steps({ id: "refresh", type: "session", mode: "start", prompt });
     expect(stepDesignWarnings(read("If {{trigger.data.push}} is true, save the report."), []).size).toBe(0);

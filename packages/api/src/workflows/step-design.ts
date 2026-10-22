@@ -6,7 +6,7 @@
  * reads its schedule's input under `trigger.data.input`. A team run commits
  * under the generic git identity, which deploy checks can block.
  */
-import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses } from "@valet/workflow";
+import { approvalRequestWarning, pushesGitCommits, scheduledRunMisses, type ScheduledRunMiss } from "@valet/workflow";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { DEFAULT_USER_EMAIL, DEFAULT_USER_NAME } from "../engine/workspace-prep.js";
@@ -52,14 +52,26 @@ export function unknownRiskActionWarning(row: WorkflowNodePermissionWire): strin
   );
 }
 
-/** The warning for a template read that a scheduled run leaves empty. */
-function scheduleInputWarning(field: string, schedules: readonly string[]): string {
+/**
+ * The warning for a read that a scheduled run leaves empty. It gives the fix
+ * in braces for a template, and bare for a condition, which takes an
+ * expression. The language has no `??`, so `||` is the fallback, and it
+ * skips a falsy schedule value.
+ */
+function scheduleInputWarning({ field, sites }: ScheduledRunMiss, schedules: readonly string[]): string {
   const named = schedules.length === 1 ? `schedule "${schedules[0]}"` : `schedules ${schedules.map((name) => `"${name}"`).join(", ")}`;
+  // copy-lint: allow trigger
+  const either = `trigger.data.input.${field} || trigger.data.${field}`;
+  const forms = [
+    ...(sites.includes("template") ? [`{{${either}}} in a template`] : []),
+    ...(sites.includes("expression") ? [`${either} with no braces in a condition`] : []),
+  ];
   return (
     // The text names template paths, which start with the word.
     // copy-lint: allow trigger
     `A scheduled run puts the schedule's input under trigger.data.input, so trigger.data.${field} is empty when ${named} starts this workflow. ` +
-    `To read it on every kind of run, write {{trigger.data.input.${field} || trigger.data.${field}}}.`
+    `To read it on every kind of run, write ${forms.join(", and ")}. ` +
+    `The || operator skips a schedule value of false, 0, or an empty string. To keep such a value, read trigger.data.input.${field} alone. Only a scheduled run sets it.`
   );
 }
 
@@ -107,8 +119,8 @@ export function stepDesignWarnings(
     add(row.nodeId, unknownRiskActionWarning(row));
   }
   if (context.schedules && context.schedules.length > 0) {
-    for (const [nodeId, fields] of scheduledRunMisses(definition)) {
-      for (const field of fields) add(nodeId, scheduleInputWarning(field, context.schedules));
+    for (const [nodeId, misses] of scheduledRunMisses(definition)) {
+      for (const miss of misses) add(nodeId, scheduleInputWarning(miss, context.schedules));
     }
   }
   return warnings;

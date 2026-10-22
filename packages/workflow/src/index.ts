@@ -66,6 +66,7 @@ export {
 export type { StepField } from './dag/step-reference.js';
 export { DEFAULT_STEP_MODEL_CALLS, MAX_STEP_MODEL_CALLS, stepModelCallLimit, unboundedWorkWarning } from './dag/step-budget.js';
 export { approvalRequestWarning, pushesGitCommits, scheduledRunMisses } from './dag/step-design.js';
+export type { ScheduledRunMiss, TriggerReadSite } from './dag/step-design.js';
 export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
 export {
