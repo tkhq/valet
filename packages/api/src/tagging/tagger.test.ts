@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/drizzle.js";
-import { tagDimensionState, tagJobs, tagKeys, tagLabels } from "../schema/index.js";
+import { tagDimensionState, tagJobs, tagKeys, tagLabels, tagSubjects } from "../schema/index.js";
 import { capSubjectText, defineDimension, normalizeKey, type Dimension, type TagSubject } from "./dimension.js";
 import type { Classify } from "./classifier.js";
 import { Tagger } from "./tagger.js";
@@ -215,4 +215,11 @@ it("repairs deployed databases without replaying 0000 and keeps steady-state boo
   await applyAppMigrations(fixture.pgdb);
   expect(await missingSchemaRepairs(fixture.pgdb)).toEqual([]);
   await setup().tagger.tag("tool_intent", [subject("repaired")]);
+});
+
+it("does not count automated team subjects as distinct users for key promotion", async () => {
+  const { tagger } = setup(toolIntentDimension, async request => choice(newKey.key, request.subjects.length, [newKey]));
+  await tagger.tag("tool_intent", ["one", "two"].map(id => ({ ...subject(id), userId: null, ownerType: "team", ownerId: "team" })));
+  expect((await tagger.registry.list("tool_intent")).find(key => key.key === newKey.key)).toMatchObject({ assignments: 2, users: 0, status: "provisional" });
+  expect((await db.select().from(tagSubjects)).every(row => row.userId === null)).toBe(true);
 });

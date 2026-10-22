@@ -1,7 +1,7 @@
 export interface SubjectRef { type: string; id: string }
 export interface TagSubject extends SubjectRef {
   text: string;
-  userId: string;
+  userId: string | null;
   ownerType: "user" | "team";
   ownerId: string;
   /** Only renderer-supplied metadata can drive deterministic rules. */

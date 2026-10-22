@@ -21,7 +21,7 @@ export function taggingModel(db: AppDb, credentials: CredentialStore, orgId: str
     const entry = stepUsageEntry(result.usage);
     if (entry) try {
       // Each batch's exact total is divided across its billing principals. No text is stored.
-      const groups = new Map<string, { userId: string; ownerType: "user" | "team"; ownerId: string; count: number }>();
+      const groups = new Map<string, { userId: string | null; ownerType: "user" | "team"; ownerId: string; count: number }>();
       for (const subject of request.subjects) {
         const key = JSON.stringify([subject.userId, subject.ownerType, subject.ownerId]);
         const group = groups.get(key) ?? { userId: subject.userId, ownerType: subject.ownerType, ownerId: subject.ownerId, count: 0 };
@@ -31,7 +31,8 @@ export function taggingModel(db: AppDb, credentials: CredentialStore, orgId: str
       for (const [key, group] of groups) {
         const now = Date.now();
         const sessionId = `tagger:${createHash("sha256").update(JSON.stringify([orgId, key])).digest("hex").slice(0, 32)}`;
-        await db.insert(agentSessions).values({ id: sessionId, orgId, userId: group.userId, ownerType: group.ownerType, ownerId: group.ownerId,
+        // Accounting sessions require an identity. Reuse the existing team runtime principal; labels keep the null actor.
+        await db.insert(agentSessions).values({ id: sessionId, orgId, userId: group.userId ?? `team:${group.ownerId}`, ownerType: group.ownerType, ownerId: group.ownerId,
           title: "Automatic tagging", workspace: "tagging", status: "archived", createdAt: now, updatedAt: now }).onConflictDoNothing();
         const share = group.count / request.subjects.length;
         const nextAllocated = allocated + group.count;

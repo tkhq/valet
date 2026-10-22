@@ -48,6 +48,8 @@ Model usage enters the existing engine usage projection.
 A batch's tokens and cost are divided among its user/team billing principals.
 Archived accounting sessions use the `tagger:` prefix.
 The same usage and scope queries include that spend.
+Labels retain null actors for automated team calls.
+Their accounting sessions reuse the existing team runtime principal because session rows require an identity.
 
 ## Usage UI
 

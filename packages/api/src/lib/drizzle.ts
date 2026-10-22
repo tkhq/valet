@@ -424,7 +424,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   { describe: "tag_labels_single", probe: { kind: "index", index: "tag_labels_single" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single'` },
   { describe: "tag_labels_aggregate", probe: { kind: "index", index: "tag_labels_aggregate" }, sql: `CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at)` },
   { describe: "tag_subjects", probe: { kind: "table", table: "tag_subjects" }, sql: `CREATE TABLE IF NOT EXISTS tag_subjects (
- org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text NOT NULL,
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text,
  input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
  PRIMARY KEY (org_id, dimension, subject_type, subject_id)
 )` },
