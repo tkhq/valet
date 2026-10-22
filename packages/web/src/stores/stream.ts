@@ -585,6 +585,15 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "branch_switched": {
+      // The thread now continues on another branch. Rows still streaming
+      // there belong to the branch it left; the messages refetch that this
+      // event cues brings the new branch from REST.
+      const kept = slice.messages.filter((m) => m.threadId !== ev.threadId || m.persistence !== "streaming");
+      if (kept.length !== slice.messages.length) next.messages = kept;
+      return next;
+    }
+
     case "compaction_start": {
       next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
       return next;

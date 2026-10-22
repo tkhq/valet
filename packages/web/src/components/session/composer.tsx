@@ -13,7 +13,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
+import { ArrowUp, Paperclip, Pencil, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useCancelQueuedItem, useResumeThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
@@ -112,6 +112,10 @@ export function Composer({
   queuedItemCount = 0,
   replyTarget,
   onCancelReply,
+  editTarget,
+  onCancelEdit,
+  onEditSubmit,
+  onEditResult,
   beforeSend,
   submissionLock,
   onSent,
@@ -143,6 +147,17 @@ export function Composer({
   queuedItemCount?: number;
   replyTarget?: MessageReplyReference;
   onCancelReply?: () => void;
+  /**
+   * One of the viewer's own messages, back in the composer to edit
+   * (docs/specs/2026-10-22-thread-edit-fork-design.md). Send replaces it and
+   * everything after it; the draft typed before Edit comes back afterwards.
+   */
+  editTarget?: ComposerEditTarget;
+  onCancelEdit?: () => void;
+  /** Called as an edit is sent, before the server answers. */
+  onEditSubmit?: (messageId: string) => void;
+  /** Called when the server accepted (true) or refused (false) the edit. */
+  onEditResult?: (ok: boolean) => void;
 }) {
   // The draft (text, images, files, intake errors) lives in the per-thread
   // draft store, NOT component state: a draft typed for one thread must not
@@ -189,6 +204,27 @@ export function Composer({
   useEffect(() => {
     if (replyTarget) inputRef.current?.focus();
   }, [replyTarget]);
+  // Edit swaps the draft for the message's text and images. Leaving edit
+  // mode (Cancel, a sent edit, a thread switch) gives the earlier draft back.
+  const editingId = editTarget?.messageId;
+  useEffect(() => {
+    if (!editTarget) return;
+    const drafts = useComposerDraftStore.getState();
+    const slot = key;
+    const stash = { text: drafts.byKey[slot]?.text ?? "", images: drafts.byKey[slot]?.images ?? [] };
+    drafts.setText(slot, editTarget.text);
+    drafts.setImages(slot, editTarget.images);
+    caretToEnd.current = true;
+    inputRef.current?.focus();
+    return () => {
+      const store = useComposerDraftStore.getState();
+      store.setText(slot, stash.text);
+      store.setImages(slot, stash.images);
+    };
+    // Keyed by the message id: a new target object for the same message
+    // must not stash the edited text as the earlier draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, key]);
 
   // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
   // update this" sets this store then navigates to `/chat`; the next
@@ -406,7 +442,8 @@ export function Composer({
   }, [working, queueState, threadId, queuedFollowup?.itemId]);
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
-  const action: SubmitAction = !working
+  // An edit always sends: it stops a running turn rather than queueing.
+  const action: SubmitAction = !working || editTarget
     ? "send"
     : queuedFollowup && text.trim().length === 0 && images.length === 0 && files.length === 0
       ? "steer"
@@ -616,7 +653,7 @@ export function Composer({
 
     // Empty Enter after a self-queued followup promotes that item. Do not
     // POST the same text again — that would write a second user entry.
-    if (action === "steer" && queuedFollowup) {
+    if (action === "steer" && queuedFollowup && !editTarget) {
       await promoteQueuedItem(queuedFollowup.itemId, queuedFollowup.localId);
       return;
     }
@@ -647,16 +684,22 @@ export function Composer({
     setPreparing(true);
     try {
       const target = beforeSend ? await beforeSend(t) : { text: t, threadId };
-      const localId = addUserMessage(sessionId, t, target.threadId, attachments, replyTarget);
+      if (editTarget) onEditSubmit?.(editTarget.messageId);
+      const localId = addUserMessage(sessionId, t, target.threadId, attachments, editTarget ? undefined : replyTarget);
       const res = await send.mutateAsync({
         text: target.text,
         ...(appPageHint ? { appPageHint } : {}),
         threadId: target.threadId,
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
-        ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
-        ...(working ? { queueMode: "inject" as const } : {}),
+        ...(editTarget
+          ? { editEntryId: editTarget.messageId }
+          : {
+              ...(replyTarget ? { replyToMessageId: replyTarget.messageId } : {}),
+              ...(working ? { queueMode: "inject" as const } : {}),
+            }),
       });
+      if (editTarget) onEditResult?.(true);
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
@@ -666,7 +709,7 @@ export function Composer({
       if (res.messageId) {
         const itemId = res.messageId;
         setMessageQueueItemId(sessionId, localId, itemId);
-        if (working) {
+        if (working && !editTarget) {
           setQueuedFollowupByThread((prev) => ({
             ...prev,
             [threadId]: { localId, itemId },
@@ -732,6 +775,7 @@ export function Composer({
               ? err.message
               : "Unknown error.";
       drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
+      if (editTarget) onEditResult?.(false);
       console.error("send failed:", err);
     } finally {
       submitting.current = false;
@@ -776,6 +820,12 @@ export function Composer({
       const inDock = inAskValetDock(inputRef.current);
       if (e.target instanceof Element && e.target !== document.body && inAskValetDock(e.target) !== inDock
         && !(inDock && pageComposers === 0)) return;
+      // An edit in progress takes Escape first: it cancels the edit, not the turn.
+      if (editingId && onCancelEdit) {
+        e.preventDefault();
+        onCancelEdit();
+        return;
+      }
       const targetItemId = queueState?.activeItemId;
       if (!working || !threadId) return;
       // A running turn keeps Escape while its stop is pending or before its
@@ -794,7 +844,7 @@ export function Composer({
     const target: Document | Window = inAskValetDock(inputRef.current) ? window : document;
     target.addEventListener("keydown", onEscape as EventListener);
     return () => target.removeEventListener("keydown", onEscape as EventListener);
-  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
+  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError, editingId, onCancelEdit]);
   useEffect(() => {
     if (inAskValetDock(inputRef.current)) return;
     pageComposers += 1;
@@ -902,6 +952,7 @@ export function Composer({
     images.length > 0 ||
     files.length > 0 ||
     !!replyTarget ||
+    !!editTarget ||
     imageErrors.length > 0 ||
     fileErrors.length > 0 ||
     Boolean(submitError) ||
@@ -1011,6 +1062,26 @@ export function Composer({
         )}
       >
         <QueueIndicator queueState={queueState} />
+        {editTarget && (
+          <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
+            <Pencil className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium text-ink">Editing your message</p>
+              <p className="mt-0.5 text-muted">
+                {working ? "Send stops the current reply, then replaces" : "Send replaces"} this message and everything after it. The earlier version is kept.
+                {editTarget.droppedFiles > 0 && ` Attach ${editTarget.droppedFiles === 1 ? "its file" : "its files"} again if the edit needs ${editTarget.droppedFiles === 1 ? "it" : "them"}.`}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancelEdit}
+              className="rounded p-1 text-muted hover:text-ink max-sm:min-h-11 max-sm:min-w-11"
+              aria-label="Cancel edit"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        )}
         {replyTarget && (
           <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-moss-wash px-3 py-2 text-xs">
             <div className="min-w-0 flex-1">
@@ -1290,4 +1361,14 @@ function QueuedRow({ cancel, canceling, sendNow, sending, sendDisabled, children
       )}
     </div>
   );
+}
+
+/** A message back in the composer for an edit. */
+export interface ComposerEditTarget {
+  messageId: string;
+  text: string;
+  /** The message's images, back in the image strip. */
+  images: ComposerImage[];
+  /** Files the message had. An edit cannot carry them, so the bar says so. */
+  droppedFiles: number;
 }

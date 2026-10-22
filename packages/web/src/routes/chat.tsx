@@ -69,7 +69,8 @@ function ChatPage() {
   return <>
     <div className="flex-1 min-h-0 flex flex-col">
       <SessionView key={sessionId} sessionId={sessionId} activeThreadId={active?.id ?? thread} scopeNotice={teamId ? teamThreadNotice(team?.name ?? "this team", activeKey) : undefined}
-        onOpenChild={id => void navigate({ search: prev => ({ ...prev, child: id }) })} enableReplies />
+        onOpenChild={id => void navigate({ search: prev => ({ ...prev, child: id }) })} enableReplies
+        onOpenThread={id => void navigate({ search: prev => ({ ...prev, thread: id, child: undefined }) })} />
     </div>
     {child && <ChildPanel childId={child} onClose={() => void navigate({ search: prev => ({ ...prev, child: undefined }) })} />}
   </>;

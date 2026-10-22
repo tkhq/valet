@@ -52,6 +52,10 @@ import type {
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
+  ForkThreadRequest,
+  ForkThreadResponse,
+  ReturnToBranchRequest,
+  ReturnToBranchResponse,
   CreateThreadResponse,
   CreateWorkflowRequest,
   CreateWorkflowResponse,
@@ -980,6 +984,10 @@ export const api = {
       "POST",
       `/threads/${encodeURIComponent(threadId)}/resume`,
     ),
+  forkThread: (threadId: string, body: ForkThreadRequest) =>
+    request<ForkThreadResponse>("POST", `/threads/${encodeURIComponent(threadId)}/fork`, body),
+  returnToBranch: (threadId: string, body: ReturnToBranchRequest) =>
+    request<ReturnToBranchResponse>("POST", `/threads/${encodeURIComponent(threadId)}/branch/return`, body),
   cancelQueuedItem: (threadId: string, itemId: string) =>
     request<{ ok: true }>(
       "POST",

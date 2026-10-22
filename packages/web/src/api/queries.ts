@@ -23,6 +23,8 @@ import type {
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  ForkThreadResponse,
+  ReturnToBranchResponse,
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
@@ -667,6 +669,32 @@ export function useAbortThread(sessionId: string) {
 export function useCancelQueuedItem() {
   return useMutation<{ ok: true }, Error, { threadId: string; itemId: string }>({
     mutationFn: ({ threadId, itemId }) => api.cancelQueuedItem(threadId, itemId),
+  });
+}
+
+/** Copies the conversation up to a message into a new thread
+ * (docs/specs/2026-10-22-thread-edit-fork-design.md). The new thread joins
+ * the thread list; the caller opens it. */
+export function useForkThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ForkThreadResponse, Error, { threadId: string; entryId: string }>({
+    mutationFn: ({ threadId, entryId }) => api.forkThread(threadId, { entryId }),
+    onSuccess: (result) => {
+      void qc.invalidateQueries(threadListFilters(sessionId));
+      if (result.thread.sessionId !== sessionId) void qc.invalidateQueries(threadListFilters(result.thread.sessionId));
+    },
+  });
+}
+
+/** Goes back to the version a branch note left. The `branch_switched` wire
+ * event refetches the messages for every viewer. */
+export function useReturnToBranch(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<ReturnToBranchResponse, Error, { threadId: string; noteEntryId: string }>({
+    mutationFn: ({ threadId, noteEntryId }) => api.returnToBranch(threadId, { noteEntryId }),
+    onSuccess: (_result, { threadId }) => {
+      void qc.invalidateQueries({ queryKey: qk.messages(sessionId, threadId) });
+    },
   });
 }
 
