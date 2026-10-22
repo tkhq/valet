@@ -3113,3 +3113,42 @@ export const mcpClientInfo = pgTable("mcp_client_info", {
   name: text("name").notNull(),
   version: text("version").notNull(),
 }, (t) => [primaryKey({ columns: [t.orgId, t.userId, t.clientId] })]);
+
+// Tag registries are organization-local. Subject text is supplied by callers.
+export const tagKeys = pgTable("tag_keys", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), key: text("key").notNull(),
+  label: text("label").notNull(), definition: text("definition").notNull(),
+  examples: jsonb("examples").$type<string[]>().notNull().default([]),
+  origin: text("origin", { enum: ["seed", "classifier", "admin"] }).notNull(),
+  status: text("status", { enum: ["provisional", "active", "merged"] }).notNull(),
+  mergedInto: text("merged_into"), createdAt: bigint("created_at", { mode: "number" }).notNull(), updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.key] }), check("tag_key_format", sql`${t.key} ~ '^[a-z][a-z0-9_]{0,31}$'`)]);
+
+export const tagLabels = pgTable("tag_labels", {
+  orgId: text("org_id").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  dimension: text("dimension").notNull(), key: text("key").notNull(),
+  mode: text("mode", { enum: ["single", "multi"] }).notNull(), confidence: doublePrecision("confidence").notNull(),
+  model: text("model").notNull(), inputHash: text("input_hash").notNull(), classifiedAt: bigint("classified_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.subjectType, t.subjectId, t.dimension, t.key] }),
+  uniqueIndex("tag_labels_single").on(t.orgId, t.subjectType, t.subjectId, t.dimension).where(sql`${t.mode} = 'single'`),
+  index("tag_labels_aggregate").on(t.orgId, t.dimension, t.key, t.classifiedAt),
+  check("tag_label_confidence", sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`)]);
+
+// A successful multi classification with no labels still has an input hash.
+export const tagSubjects = pgTable("tag_subjects", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  userId: text("user_id").notNull(), inputHash: text("input_hash").notNull(), otherRetried: boolean("other_retried").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] })]);
+
+export const tagJobs = pgTable("tag_jobs", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), subjectType: text("subject_type").notNull(), subjectId: text("subject_id").notNull(),
+  version: integer("version").notNull().default(1), attempts: integer("attempts").notNull().default(0),
+  force: boolean("force").notNull().default(false), nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension, t.subjectType, t.subjectId] }), index("tag_jobs_due").on(t.nextAttemptAt)]);
+
+// One serial classifier per org/dimension across API replicas.
+export const tagDimensionState = pgTable("tag_dimension_state", {
+  orgId: text("org_id").notNull(), dimension: text("dimension").notNull(), leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+  consolidationDue: boolean("consolidation_due").notNull().default(false),
+}, t => [primaryKey({ columns: [t.orgId, t.dimension] })]);

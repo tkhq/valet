@@ -6631,14 +6631,23 @@ export interface AgentAccessResponse {
 
 /** External MCP and CLI facts. Arguments and results are never included. */
 export interface ExternalUsageResponse {
+  classification?: ToolIntentUsage;
   daily: { dayMs: number; surface: "hosted" | "mcp" | "cli"; calls: number }[];
-  tools: { name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
+  tools: { key?: string | null; name: string; surface: "hosted" | "mcp" | "cli"; calls: number; errorRate: number; uniqueUsers: number }[];
   clients: { surface: "hosted" | "mcp" | "cli"; name: string; version: string | null; calls: number }[];
   detailsVisible: boolean;
   recent: {
     id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
     clientVersion: string | null; userId: string | null; userName: string | null; outcome: "ok" | "error" | "denied" | "pending-approval";
-    intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
+    key?: string | null; intent: string | null; intentCleared?: boolean; teamName?: string | null; createdAt: number;
   }[];
   hasMore: boolean;
+}
+
+export interface ToolIntentKeyUsage {
+  key: string; label: string; definition: string; status: "provisional" | "active" | "merged";
+  origin: "seed" | "classifier" | "admin"; calls: number; uniqueUsers: number; errorRate: number;
+}
+export interface ToolIntentUsage {
+  keys: ToolIntentKeyUsage[]; consolidationDue: boolean; canManage: boolean;
 }

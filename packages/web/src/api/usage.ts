@@ -18,8 +18,8 @@ import { api } from "~/api/client";
 import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkUsage = {
-  external: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: string) =>
-    ["usage", "external", period, scope, teamId, search, offset, surface] as const,
+  external: (period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined, search: string, offset: number, surface?: string, key?: string) =>
+    ["usage", "external", period, scope, teamId, search, offset, surface, key] as const,
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
     ["usage", "breakdown", period, scope, teamId] as const,
   items: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
@@ -88,10 +88,10 @@ export function useUsageItems(
 }
 
 export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScopeName, teamId: string | undefined,
-  search: string, offset: number, surface?: "hosted" | "mcp" | "cli") {
+  search: string, offset: number, surface?: "hosted" | "mcp" | "cli", key?: string) {
   return useCancellableQuery<ExternalUsageResponse>({
-    queryKey: qkUsage.external(period, scope, teamId, search, offset, surface),
-    queryFn: ({ signal }) => api.externalUsage(period, scope, teamId, search, offset, surface, signal),
+    queryKey: qkUsage.external(period, scope, teamId, search, offset, surface, key),
+    queryFn: ({ signal }) => api.externalUsage(period, scope, teamId, search, offset, surface, signal, key),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });

@@ -2840,3 +2840,54 @@ CREATE INDEX IF NOT EXISTS external_calls_owner_created ON external_calls (org_i
 
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS external_calls_intent_retention ON external_calls (created_at) WHERE intent IS NOT NULL;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_keys (
+ org_id text NOT NULL, dimension text NOT NULL, key text NOT NULL CHECK (key ~ '^[a-z][a-z0-9_]{0,31}$'),
+ label text NOT NULL, definition text NOT NULL, examples jsonb NOT NULL DEFAULT '[]',
+ origin text NOT NULL, status text NOT NULL, merged_into text, created_at bigint NOT NULL, updated_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_labels (
+ org_id text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, dimension text NOT NULL, key text NOT NULL,
+ mode text NOT NULL, confidence float8 NOT NULL CHECK (confidence >= 0 AND confidence <= 1), model text NOT NULL,
+ input_hash text NOT NULL, classified_at bigint NOT NULL,
+ PRIMARY KEY (org_id, subject_type, subject_id, dimension, key)
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS tag_labels_single ON tag_labels (org_id, subject_type, subject_id, dimension) WHERE mode = 'single';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_labels_aggregate ON tag_labels (org_id, dimension, key, classified_at);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_subjects (
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL, user_id text NOT NULL,
+ input_hash text NOT NULL, other_retried boolean NOT NULL DEFAULT false,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_jobs (
+ org_id text NOT NULL, dimension text NOT NULL, subject_type text NOT NULL, subject_id text NOT NULL,
+ version integer NOT NULL DEFAULT 1, attempts integer NOT NULL DEFAULT 0, force boolean NOT NULL DEFAULT false, next_attempt_at bigint NOT NULL,
+ PRIMARY KEY (org_id, dimension, subject_type, subject_id)
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS tag_jobs_due ON tag_jobs (next_attempt_at);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS tag_dimension_state (
+ org_id text NOT NULL, dimension text NOT NULL, lease_token text, lease_until bigint NOT NULL DEFAULT 0,
+ consolidation_due boolean NOT NULL DEFAULT false, PRIMARY KEY (org_id, dimension)
+);
+--> statement-breakpoint
+
+CREATE OR REPLACE VIEW tag_resolved_labels AS
+WITH RECURSIVE resolved AS (
+ SELECT org_id, dimension, key AS original_key, key, status, merged_into, 0 AS depth FROM tag_keys
+ UNION ALL
+ SELECT r.org_id, r.dimension, r.original_key, k.key, k.status, k.merged_into, r.depth + 1
+ FROM resolved r JOIN tag_keys k ON k.org_id = r.org_id AND k.dimension = r.dimension AND k.key = r.merged_into
+ WHERE r.status = 'merged' AND r.depth < 1000
+)
+SELECT DISTINCT ON (l.org_id, l.subject_type, l.subject_id, l.dimension, r.key) l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.key AS original_key,
+ l.confidence, l.model, l.input_hash, l.classified_at
+FROM tag_labels l JOIN resolved r ON r.org_id = l.org_id AND r.dimension = l.dimension AND r.original_key = l.key
+WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.dimension, r.key, l.classified_at DESC, l.confidence DESC;

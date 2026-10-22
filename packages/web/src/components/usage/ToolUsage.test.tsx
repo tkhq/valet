@@ -38,11 +38,11 @@ describe("Tool usage", () => {
   it("filters all views by surface and resets search pagination", async () => {
     show();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
-    expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "", 20, undefined);
+    expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "", 20, undefined, undefined);
     fireEvent.click(screen.getByRole("button", { name: "Hosted" }));
-    expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "", 0, "hosted");
+    expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "", 0, "hosted", undefined);
     fireEvent.change(screen.getByRole("textbox", { name: "Search intents" }), { target: { value: "login" } });
-    await waitFor(() => expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "login", 0, "hosted"));
+    await waitFor(() => expect(hook).toHaveBeenLastCalledWith({ kind: "lookback", window: "7d" }, "me", undefined, "login", 0, "hosted", undefined));
   });
   it("does not expose a feed to a team member without detail permission", () => {
     hook.mockReturnValue({ data: { ...data, detailsVisible: false, recent: [] }, isPending: false });
