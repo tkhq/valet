@@ -113,4 +113,25 @@ describe("ActiveViewers", () => {
     expect(heard.at(-1)?.names).toEqual(["Riley"]);
     expect(viewers.activeThreads("o1").get("s1")).toEqual(new Set(["t1"]));
   });
+
+  it("removes a silent connection from the registry, and a late report adds it back", () => {
+    const { viewers, advance } = harness();
+    viewers.view({ id: "c1", sessionId: "s1", orgId: "o1", person: dana }, ["t1"], true);
+    advance(SILENT_MS);
+    expect(viewers.size).toBe(0);
+    expect(viewers.activeThreads("o1").size).toBe(0);
+    expect(viewers.view({ id: "c1", sessionId: "s1", orgId: "o1", person: dana }, ["t1"], true)).toEqual(["t1"]);
+    expect(viewers.viewersOf("s1", "t1").map((v) => v.name)).toEqual(["Dana"]);
+  });
+
+  it("keeps a hidden but reporting tab in the registry so it can come back", () => {
+    const { viewers, advance } = harness();
+    viewers.view({ id: "c1", sessionId: "s1", orgId: "o1", person: dana }, ["t1"], false);
+    advance(HIDDEN_GRACE_MS);
+    viewers.view({ id: "c1", sessionId: "s1", orgId: "o1", person: dana }, ["t1"], false);
+    expect(viewers.size).toBe(1);
+    expect(viewers.viewersOf("s1", "t1")).toEqual([]);
+    viewers.view({ id: "c1", sessionId: "s1", orgId: "o1", person: dana }, ["t1"], true);
+    expect(viewers.viewersOf("s1", "t1").map((v) => v.name)).toEqual(["Dana"]);
+  });
 });

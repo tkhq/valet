@@ -138,6 +138,11 @@ export class ActiveViewers {
       .map(({ since: _since, ...viewer }) => viewer);
   }
 
+  /** How many connections the registry holds, for tests and a future gauge. */
+  get size(): number {
+    return this.connections.size;
+  }
+
   /** One organization's threads with at least one live viewer, by session. */
   activeThreads(orgId: string): Map<string, Set<string>> {
     const now = this.now();
@@ -182,8 +187,14 @@ export class ActiveViewers {
     if (due.length === 0) { this.timers.delete(connection.id); return; }
     this.timers.set(connection.id, this.setTimer(() => {
       this.timers.delete(connection.id);
-      if (connection.typing && connection.typing.until <= this.now()) delete connection.typing;
       if (this.connections.get(connection.id) !== connection) return;
+      // A silent connection is gone (its socket may never close): remove it,
+      // so the registry holds only current viewers. A late report re-adds it.
+      if (this.now() - connection.lastSeen >= SILENT_MS) {
+        this.leave(connection.id);
+        return;
+      }
+      if (connection.typing && connection.typing.until <= this.now()) delete connection.typing;
       this.schedule(connection);
       this.publish(connection.sessionId, connection.threadIds);
     }, Math.min(...due) - now));
