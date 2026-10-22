@@ -1,4 +1,3 @@
-import { ToolUsage } from "~/components/usage/ToolUsage";
 /**
  * `/usage` — unified spend dashboard.
  *
@@ -19,6 +18,7 @@ import { ToolUsage } from "~/components/usage/ToolUsage";
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
+import { ToolUsage } from "~/components/usage/ToolUsage";
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";

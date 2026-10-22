@@ -1,4 +1,3 @@
-import { cliTelemetryHeaders } from "./telemetry.js";
 /**
  * `InstanceClient` — the CLI's typed HTTP client for a single valet instance.
  *
@@ -13,6 +12,7 @@ import { cliTelemetryHeaders } from "./telemetry.js";
  *   - Local stub instances (`VALET_LOCAL_AUTH=1`) need no credential — when
  *     `apiKey` is undefined the header is simply omitted.
  */
+import { cliTelemetryHeaders } from "./telemetry.js";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
 import { latestCredential } from "./token-refresh.js";
 import type {

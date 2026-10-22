@@ -1,6 +1,3 @@
-import { bestEffortTelemetry, externalCallOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
-import { intentSchema } from "./mcp-intent.js";
-import { registerTool } from "./mcp-intent.js";
 /**
  * MCP endpoint (auth-v2 design, Task 9): a single `app.all("/mcp", ...)`
  * mount, public (outside `/api/*`, not behind `authMiddleware`) — guarded
@@ -29,6 +26,8 @@ import { registerTool } from "./mcp-intent.js";
  *     the verified user attached by `mcp-caller.ts`, so the routes keep sole
  *     ownership of access control.
  */
+import { bestEffortTelemetry, externalCallOwner, newExternalCallId, recordExternalCall, saveMcpClientInfo } from "../services/external-usage.js";
+import { intentSchema, registerTool } from "./mcp-intent.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { withMcpAuth } from "better-auth/plugins";
@@ -77,10 +76,11 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
     const args = object(params?.arguments);
     const clientInfo = object(params?.clientInfo);
     if (rpc?.method === "initialize" && typeof clientInfo?.name === "string" && typeof clientInfo.version === "string") {
-      await saveMcpClientInfo(db, identity, { name: clientInfo.name, version: clientInfo.version });
+      void saveMcpClientInfo(db, identity, { name: clientInfo.name, version: clientInfo.version });
     }
-    let outcome: "ok" | "error" | "denied" = "ok";
+    let outcome: "ok" | "error" | "denied" | "pending-approval" = "error";
     let errorCode: string | null = null;
+    let finalHttpStatus: number | undefined;
     let resolvedSessionId: string | undefined;
     let resolvedThreadId: string | undefined;
     let resolvedTeamId: string | undefined;
@@ -97,6 +97,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           body: body === undefined ? undefined : JSON.stringify(body),
         }), { user: caller, clientId: session.clientId });
         const res = await dispatch(inner);
+        finalHttpStatus = res.status;
         const text = await res.text();
         let parsed: unknown = text;
         try {
@@ -104,13 +105,7 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         } catch {
           // Keep the raw text; the tool reports the status.
         }
-        if (!res.ok) {
-          outcome = res.status === 403 ? "denied" : "error";
-          errorCode = `http_${res.status}`;
-        }
         const action = object(parsed);
-        if (action?.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
-        if (action?.status === "approval_required") { outcome = "denied"; errorCode = "approval_required"; }
         // IDs come only from routes that admitted this user. Never retain the response.
         if (res.ok) {
           const url = new URL(inner.url);
@@ -170,18 +165,31 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
+    // Observe the final JSON-RPC reply before serialization. Inner requests may fail and recover.
+    const send = transport.send.bind(transport);
+    transport.send = async (message, ...rest) => {
+      const reply = object(message);
+      if (rpc?.method === "tools/call" && reply && "id" in reply && reply.id === rpc.id) {
+        const result = object(reply.result);
+        const error = object(reply.error);
+        outcome = error || result?.isError === true ? finalHttpStatus === 403 ? "denied" : "error" : "ok";
+        errorCode = error ? String(error.code ?? "rpc_error") : result?.isError === true ? "tool_error" : null;
+        if (params?.name === "call_tool" && Array.isArray(result?.content)) {
+          for (const block of result.content) {
+            const text = object(block)?.text;
+            if (typeof text !== "string") continue;
+            let action: Record<string, unknown> | undefined;
+            try { action = object(JSON.parse(text)); } catch { continue; }
+            if (action?.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
+            if (action?.status === "approval_required") { outcome = "pending-approval"; errorCode = "approval_required"; }
+          }
+        }
+      }
+      return send(message, ...rest);
+    };
     await server.connect(transport);
     try {
       const response = await transport.handleRequest(req);
-      if (rpc?.method === "tools/call") {
-        const responseBody: unknown = await response.clone().json().catch(() => null);
-        const result = object(object(responseBody)?.result);
-        const error = object(object(responseBody)?.error);
-        if (error || result?.isError === true) {
-          if (outcome === "ok") outcome = "error";
-          errorCode ??= typeof error?.code === "number" ? String(error.code) : "tool_error";
-        }
-      }
       return response;
     } catch (error) {
       outcome = "error";
@@ -195,9 +203,9 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           const [client] = await db.select().from(mcpClientInfo).where(and(
             eq(mcpClientInfo.orgId, orgId), eq(mcpClientInfo.userId, session.userId), eq(mcpClientInfo.clientId, session.clientId),
           )).limit(1);
-          const intent = intentSchema.safeParse(args?.intent);
+          const intent = intentSchema.safeParse(params.name === "call_tool" ? args?.summary : args?.intent);
           await recordExternalCall(db, {
-            id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: toolName === "call_tool" && resolvedActionId ? resolvedActionId : toolName.slice(0, 200),
+            id: newExternalCallId(), orgId, userId: session.userId, surface: "mcp", name: (toolName === "call_tool" ? resolvedActionId ?? (typeof args?.tool_id === "string" ? args.tool_id : toolName) : toolName).slice(0, 200),
             clientName: client?.name, clientVersion: client?.version,
             ...await externalCallOwner(db, orgId, session.userId, resolvedThreadId, resolvedSessionId, resolvedTeamId),
             outcome, errorCode, durationMs,
@@ -205,7 +213,6 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
           });
         });
       }
-      await server.close();
     }
   });
 }

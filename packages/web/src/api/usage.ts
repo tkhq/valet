@@ -1,10 +1,10 @@
-import type { ExternalUsageResponse } from "@valet/api/wire";
 /**
  * TanStack Query hooks for the unified spend dashboard.
  * Consumes `GET /api/usage/breakdown`, `GET /api/usage/items`.
  * Routed through the central `api` client for 401→login handling.
  */
-import type { UseQueryOptions } from "@tanstack/react-query";
+import type { ExternalUsageResponse } from "@valet/api/wire";
+import { keepPreviousData, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   UsageDrillResponse,
   UsagePeriodSelection,
@@ -93,5 +93,6 @@ export function useExternalUsage(period: UsagePeriodSelection, scope: UsageScope
     queryKey: qkUsage.external(period, scope, teamId, search, offset, surface),
     queryFn: ({ signal }) => api.externalUsage(period, scope, teamId, search, offset, surface, signal),
     staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
 }

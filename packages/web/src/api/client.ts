@@ -1,6 +1,3 @@
-import type { ExternalUsageResponse, GetLinearConnectionResponse, HomeConversationResponse, HomeTasksResponse } from "@valet/api/wire";
-import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
-import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
  * `@valet/api/wire` so server + web agree on the shape.
@@ -9,7 +6,16 @@ import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, 
  * (or no) Authorization header. We don't ship one for now; later when real
  * auth lands we'll wire token storage here.
  */
+import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type {
+  HomeConversationResponse,
+  HomeTasksResponse,
+  ExternalUsageResponse,
+  GetLinearConnectionResponse,
+  ListTeamDeletionRequestsParams,
+  ListTeamDeletionRequestsResponse,
+  ListTeamDeletionTargetsResponse,
+  SubmitTeamDeletionRequest,
   WorkspaceOutcomesResponse,
   ListChannelsResponse,
   WorkspaceIntegrationLimitResponse,

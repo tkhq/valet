@@ -1,19 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { INTENT_EXEMPT_TOOLS, stripToolIntent, withToolIntentSchema } from "./tool-intent.js";
-
+import { stripToolIntent, withToolIntentSchema } from "./tool-intent.js";
+const tool = { parameters: { type: "object", properties: {} } };
 describe("tool intent contract", () => {
-  it("pins the exemption list", () => {
-    expect(INTENT_EXEMPT_TOOLS).toEqual(["bash", "shell", "read", "write", "edit", "read_file", "write_file", "edit_file", "list_files", "search_files"]);
-    for (const name of INTENT_EXEMPT_TOOLS) {
-      const schema = { properties: { path: { type: "string" } }, required: ["path"] };
-      expect(withToolIntentSchema(name, schema)).toBe(schema);
-    }
-  });
   it.each([undefined, null, 123, "", "   ", "x".repeat(501)])("rejects invalid intent %s", intent => {
-    expect(() => stripToolIntent("task", { intent })).toThrow("Add intent");
+    expect(() => stripToolIntent(tool, { intent })).toThrow("Add intent");
   });
-  it("trims and caps the only free text", () => {
-    expect(stripToolIntent("task", { intent: "  Delegate the tests to check the change.  ", prompt: "brief" })).toEqual({ intent: "Delegate the tests to check the change.", args: { prompt: "brief" } });
-    expect(stripToolIntent("task", { intent: "x".repeat(500) }).intent).toHaveLength(500);
+  it("trims and caps metadata", () => {
+    expect(stripToolIntent(tool, { intent: "  Delegate the tests to check the change.  ", prompt: "brief" })).toEqual({ intent: "Delegate the tests to check the change.", args: { prompt: "brief" } });
+    expect(stripToolIntent(tool, { intent: "x".repeat(500) }).intent).toHaveLength(500);
+  });
+  it("preserves an action's own intent and non-object schemas", () => {
+    const schema = { type: "object", properties: { intent: { type: "number" } } };
+    const action = { parameters: schema };
+    expect(withToolIntentSchema(action, schema)).toBe(schema);
+    expect(stripToolIntent(action, { intent: 42 })).toEqual({ intent: null, args: { intent: 42 } });
+    const array = { type: "array" };
+    expect(withToolIntentSchema({ parameters: array }, array)).toBe(array);
+  });
+  it("uses summary without a second free-text argument", () => {
+    const broker = { ...tool, intent: "summary" as const };
+    expect(withToolIntentSchema(broker, tool.parameters)).toBe(tool.parameters);
+    expect(stripToolIntent(broker, { summary: "  Check access. " })).toEqual({ args: { summary: "  Check access. " }, intent: "Check access." });
   });
 });

@@ -1,4 +1,3 @@
-import { withCliInvocation } from "./cli/telemetry.js";
 /**
  * `valet` CLI entry point / dispatcher.
  *
@@ -10,6 +9,7 @@ import { withCliInvocation } from "./cli/telemetry.js";
  * This module is the bundle entry (see `build.mjs`). Importing it must not
  * have side effects beyond running `main()` at the bottom.
  */
+import { withCliInvocation } from "./cli/telemetry.js";
 import { loadConfig } from "./cli/config.js";
 import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";

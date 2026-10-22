@@ -1,10 +1,10 @@
-import { getExternalUsage } from "../services/external-usage.js";
 /**
  * `/api/usage` — token/cost aggregates for the dashboard. Thin handlers: they
  * resolve the request (window, scope, admin gate) and delegate every query to
  * the `services/usage` library, which owns the SQL over the one `cost_entries`
  * definition (so the dashboard and Grafana cannot drift).
  */
+import { getExternalUsage } from "../services/external-usage.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";

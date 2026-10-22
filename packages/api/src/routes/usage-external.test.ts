@@ -1,9 +1,14 @@
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, pluginCatalogTools, type ActionPlugin, type ValetPlugin } from "@valet/engine";
+import { Type } from "typebox";
+import { fauxToolCall } from "@valet/engine/test-helpers";
+import { buildPolicyResolver } from "../policies/service.js";
+import { createPolicy } from "../policies/admin.js";
 import { fauxAssistantMessage, fauxToolCall as rawToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { externalCalls, teams, teamMembers } from "../schema/index.js";
-import { hostedToolUsageSink, recordExternalCall } from "../services/external-usage.js";
+import { actionInvocations, externalCalls, teams, teamMembers } from "../schema/index.js";
+import { externalUsageRetention, hostedToolUsageSink, recordExternalCall } from "../services/external-usage.js";
 import { InstanceClient } from "../cli/client.js";
 import { withCliInvocation } from "../cli/telemetry.js";
 import type { ExternalUsageResponse } from "../wire/types.js";
@@ -126,4 +131,110 @@ describe("external tool usage", () => {
     await expect(recordExternalCall(api.providers.db, { id: "bad", orgId: "local-org", userId: "local-user", ownerType: "user", ownerId: "local-user", surface: "cli", name: "status", outcome: "error", durationMs: 1, createdAt: Date.now() })).resolves.toBeUndefined();
     expect(warning.mock.calls).toEqual([["External usage telemetry failed. Check database availability."]]);
   });
+});
+
+it("keeps matcher inputs and audit params clean through hosted broker and pinned calls", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  const seen: Record<string, unknown>[] = [];
+  const actions: ActionPlugin = { service: "demo", defaultApprovalMode: "allow", actions: [{
+    id: "echo", name: "Echo", description: "Echo a value", riskLevel: "low", parameters: Type.Object({ value: Type.Number() }),
+    execute: async args => { if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Expected action arguments."); seen.push({ ...args }); return { success: true, data: {} }; },
+  }] };
+  const plugin: ValetPlugin = { name: "demo", version: "1", actions: [actions] };
+  await createPolicy(db, { orgId: "local-org", type: "org", id: "local-org" }, { actionId: "demo.echo", mode: "deny", paramMatchers: [{ path: "value", op: "eq", value: 2 }], managedBy: "test", now: Date.now() });
+  const faux = registerFauxProvider({ provider: "hosted-policy-intent" });
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "echo", params: { value: 1 }, summary: "Read one to check the connection." })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxToolCall("demo__echo", { value: 1, summary: "Read one through the pinned action." })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxToolCall("call_tool", { tool_id: "demo.echo", params: { value: 2 }, summary: "Check whether the policy refuses two." })], { stopReason: "toolUse" }),
+    fauxAssistantMessage([fauxToolCall("demo__echo", { value: 2, summary: "Check the same policy through the pin." })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("done"),
+  ]);
+  const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+  const session = await engine.createSession({ userId: "local-user", orgId: "local-org", workspace: "/", sandbox: {}, model: faux.getModel(),
+    tools: pluginCatalogTools({ plugins: [actions], pins: [{ actionId: "demo.echo" }] }),
+    policyResolver: buildPolicyResolver({ db, actionPluginByService: new Map([["demo", { plugin, actionPlugin: actions }]]) }),
+    recordToolUsage: hostedToolUsageSink(db),
+  });
+  try {
+    const receipt = await session.prompt("Check the policy through both tool routes.");
+    await session.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([{ value: 1 }, { value: 1 }]);
+    await vi.waitFor(async () => {
+      const audit = await db.select().from(actionInvocations);
+      expect(audit).toHaveLength(4);
+      expect(audit.every(row => !JSON.stringify(row.params).includes("intent") && !JSON.stringify(row.params).includes("summary"))).toBe(true);
+      const facts = await db.select().from(externalCalls);
+      expect(facts).toHaveLength(4);
+      expect(facts.every(row => row.name === "demo.echo" && row.intent !== null)).toBe(true);
+      expect(facts.filter(row => row.outcome === "denied")).toHaveLength(2);
+    });
+  } finally { await session.destroy(); faux.unregister(); }
+});
+
+it("does not await a hanging hosted insert", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  const insert = db.insert.bind(db);
+  let started = false;
+  vi.spyOn(db, "insert").mockImplementation((...args) => {
+    const builder = insert(...args);
+    if (args[0] === externalCalls) {
+      const values = builder.values.bind(builder);
+      vi.spyOn(builder, "values").mockImplementation((...rows) => {
+        const query = values(...rows);
+        vi.spyOn(query, "execute").mockImplementation(() => { started = true; return new Promise(() => {}); });
+        return query;
+      });
+    }
+    return builder;
+  });
+  const sink = hostedToolUsageSink(db);
+  const faux = registerFauxProvider({ provider: "hanging-telemetry" });
+  faux.setResponses([fauxAssistantMessage([fauxToolCall("list_threads", {})], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+  const engine = new Engine({ providers: { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+  const session = await engine.createSession({ userId: "local-user", orgId: "local-org", workspace: "/", sandbox: {}, model: faux.getModel(), recordToolUsage: sink });
+  try {
+    const receipt = await session.prompt("List threads.");
+    expect((await session.thread(receipt.threadId).awaitResult(receipt.queueItemId)).outcome).toBe("completed");
+    expect(started).toBe(true);
+  } finally { await session.destroy(); faux.unregister(); }
+});
+
+it("keeps late CLI requests and reused invocation ids isolated by user", async () => {
+  api = await bootTestApi();
+  const db = api.providers.db;
+  await recordExternalCall(db, { id: "ordered", orgId: "local-org", userId: "local-user", surface: "cli", name: "threads list", ownerType: "user", ownerId: "local-user", outcome: "error", durationMs: 10, createdAt: 100 });
+  await recordExternalCall(db, { id: "ordered", orgId: "local-org", userId: "local-user", surface: "cli", name: "threads list", ownerType: "user", ownerId: "local-user", outcome: "ok", durationMs: 20, createdAt: 50 });
+  expect((await db.select().from(externalCalls).where(eq(externalCalls.id, "ordered")))[0]).toMatchObject({ createdAt: 50, durationMs: 60, outcome: "error" });
+  const headers = { "x-valet-cli-invocation": "11111111-1111-4111-8111-111111111111", "x-valet-cli-command": "threads list" };
+  await fetch(`${api.baseUrl}/api/me`, { headers });
+  await fetch(`${api.baseUrl}/api/me`, { headers: { ...headers, "x-valet-test-user-id": "test-member" } });
+  await vi.waitFor(async () => {
+    const rows = (await db.select().from(externalCalls)).filter(row => row.id.startsWith("cli:"));
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.userId).sort()).toEqual(["local-user", "test-member"]);
+  });
+});
+
+it("keeps health public with bad credentials and records no health usage", async () => {
+  api = await bootTestApi({ auth: true });
+  const response = await fetch(`${api.baseUrl}/api/health`, { headers: { Authorization: "Bearer invalid", "x-valet-cli-invocation": "11111111-1111-4111-8111-111111111111", "x-valet-cli-command": "status" } });
+  expect(response.status).toBe(200);
+  expect(await api.providers.db.select().from(externalCalls)).toEqual([]);
+});
+
+it("nulls old intent text while retaining counts and hides personal rows in the org feed", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+  await seed(api, "old", { createdAt: Date.now() - 91 * 86400000 });
+  await seed(api, "personal");
+  await seed(api, "team", { ownerType: "team", ownerId: "team", userId: null });
+  await externalUsageRetention(db)();
+  expect((await db.select().from(externalCalls).where(eq(externalCalls.id, "old")))[0]?.intent).toBeNull();
+  const org = await (await read(api, "&scope=org")).json() as ExternalUsageResponse;
+  expect(org.daily.reduce((sum, day) => sum + day.calls, 0)).toBe(2);
+  expect(org.recent.map(row => row.id)).toEqual(["team"]);
+  expect(org.tools[0]?.uniqueUsers).toBe(1);
 });

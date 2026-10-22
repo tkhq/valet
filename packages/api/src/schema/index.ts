@@ -3081,7 +3081,7 @@ export const homeTasks = pgTable("home_tasks", {
 export const externalCalls = pgTable("external_calls", {
   id: text("id").primaryKey(),
   orgId: text("org_id").notNull(),
-  userId: text("user_id").notNull(),
+  userId: text("user_id"),
   surface: text("surface", { enum: ["hosted", "mcp", "cli"] }).notNull(),
   name: text("name").notNull(),
   clientName: text("client_name"),
@@ -3091,13 +3091,14 @@ export const externalCalls = pgTable("external_calls", {
   threadId: text("thread_id"),
   ownerType: text("owner_type", { enum: ["user", "team"] }).notNull(),
   ownerId: text("owner_id").notNull(),
-  outcome: text("outcome", { enum: ["ok", "error", "denied"] }).notNull(),
+  outcome: text("outcome", { enum: ["ok", "error", "denied", "pending-approval"] }).notNull(),
   errorCode: text("error_code"),
   durationMs: integer("duration_ms").notNull(),
   intent: text("intent"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, (t) => [
   index("external_calls_org_created").on(t.orgId, t.createdAt, t.id),
+  index("external_calls_owner_created").on(t.orgId, t.ownerType, t.ownerId, t.createdAt),
   index("external_calls_user_created").on(t.orgId, t.userId, t.createdAt),
   check("external_calls_intent_length", sql`length(${t.intent}) <= 500`),
 ]);

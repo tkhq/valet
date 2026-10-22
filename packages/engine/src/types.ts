@@ -717,6 +717,8 @@ export interface PluginStore {
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ToolDef<TParams extends TSchema = TSchema> {
+  /** Sandbox primitives opt out. Broker tools reuse summary without adding intent. */
+  intent?: "exempt" | "summary" | "passthrough";
   /** Integration action behind a direct tool. Scope checks use its canonical ID. */
   scopeAction?: string;
   name: string;
@@ -758,7 +760,7 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 }
 
 export interface ToolResult {
-  usageOutcome?: { outcome: "ok" | "error" | "denied"; errorCode: string | null };
+  usageOutcome?: { outcome: "ok" | "error" | "denied" | "pending-approval"; errorCode: string | null; name?: string };
   text: string;
   attachments?: ToolAttachment[];
   /** Confirmed side effect from a successful, recognized terminal command. */
@@ -1106,6 +1108,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
@@ -1129,6 +1133,8 @@ export interface DecisionGateRequest {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored explanation, never trusted policy context. */
+  agentReason?: string;
   actions?: DecisionAction[];
   expiresAt?: number;
   context?: Record<string, unknown>;

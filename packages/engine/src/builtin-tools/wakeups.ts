@@ -104,6 +104,7 @@ function refusalText(err: unknown, prefix: string): string | null {
 
 export const watchTool = defineTool({
   name: "watch",
+  intent: "exempt",
   description:
     "Run a command in the background and receive its new output lines " +
     "(stdout and stderr together) as `watch.event` signals. The watcher " +
@@ -232,6 +233,7 @@ export const holdSandboxTool = defineTool({
 
 export const processReadTool = defineTool({
   name: "process_read",
+  intent: "exempt",
   concurrencySafe: true,
   description:
     "Read a slice of a background process's or watch's log by byte `offset` " +

@@ -1,4 +1,3 @@
-import { withToolIntentSchema } from "@valet/shared";
 import type { TSchema } from "typebox";
 import type { ToolDef } from "../types.js";
 
@@ -11,5 +10,5 @@ import type { ToolDef } from "../types.js";
  * cycle back through index.ts.
  */
 export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return { ...def, parameters: withToolIntentSchema(def.name, def.parameters) };
+  return def;
 }

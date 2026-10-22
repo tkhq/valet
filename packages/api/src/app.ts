@@ -1,5 +1,3 @@
-import { cliUsage } from "./middleware/cli-usage.js";
-import { threadsRouter } from "./routes/threads.js";
 /**
  * Hono app factory. Wiring lives here; main.ts only handles boot + listen.
  *
@@ -7,6 +5,8 @@ import { threadsRouter } from "./routes/threads.js";
  * test app with stub providers, no node-server). It also keeps boot-time
  * I/O (open sqlite, build providers) out of the hot test path.
  */
+import { cliUsage } from "./middleware/cli-usage.js";
+import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
 import { productAnnouncementsRouter } from "./routes/product-announcements.js";
 import { Hono } from "hono";
@@ -245,10 +245,6 @@ export function createApp(
   mountOnboardingRoutes(app);
 
   app.get("/api/health", async (c) => {
-    // Health stays public. Valid CLI credentials supply optional telemetry identity.
-    if (c.req.header("x-valet-cli-invocation")) {
-      await buildAuthMiddleware({ auth: auth ?? null, db: providers.db })(c, async () => {});
-    }
     const body: HealthResponse = {
       ok: true,
       service: "valet-api",

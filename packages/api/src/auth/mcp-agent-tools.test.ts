@@ -66,7 +66,7 @@ async function rpc(baseUrl: string, token: string, method: string, params: unkno
 interface ToolResult { isError?: boolean; text: string; data: Record<string, unknown> }
 
 async function tool(baseUrl: string, token: string, name: string, args: Record<string, unknown>): Promise<ToolResult> {
-  const { result, error } = await rpc(baseUrl, token, "tools/call", { name, arguments: { intent: "Exercise this tool in the integration test.", ...args } });
+  const { result, error } = await rpc(baseUrl, token, "tools/call", { name, arguments: { [name === "call_tool" ? "summary" : "intent"]: "Exercise this tool in the integration test.", ...args } });
   expect(error).toBeUndefined();
   const content = (result?.content as Array<{ type: string; text: string }> | undefined) ?? [];
   const text = content.map((c) => c.text).join("\n");

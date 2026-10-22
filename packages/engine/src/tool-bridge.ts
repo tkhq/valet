@@ -1,4 +1,5 @@
 import { requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
+import { IsObject } from "typebox";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
@@ -24,17 +25,20 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
   }) => ToolContext,
   replay = false,
 ): AgentTool<TParams> {
+  if (def.intent === undefined && IsObject(def.parameters) && Object.hasOwn(def.parameters.properties, "intent")) {
+    console.warn(`Tool ${def.name} declares its own intent parameter. Intent telemetry is skipped for this tool.`);
+  }
   return {
     name: def.name,
     label: def.name,
     description: def.description,
-    parameters: withToolIntentSchema(def.name, def.parameters),
-    ...(requiresToolIntent(def.name) ? {
+    parameters: withToolIntentSchema(def, def.parameters),
+    ...(requiresToolIntent(def) || def.intent === "summary" ? {
       prepareArguments: (value: unknown) => {
         const args = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-        const parsed = stripToolIntent(def.name, args);
+        const parsed = stripToolIntent(def, args);
         // The SDK validates the original tool fields immediately after preparation.
-        return { ...parsed.args, intent: parsed.intent } as import("typebox").Static<TParams>;
+        return { ...parsed.args, [def.intent === "summary" ? "summary" : "intent"]: parsed.intent } as import("typebox").Static<TParams>;
       },
     } : {}),
     // Sequential unless the tool opts in (TKAI-318). One sequential tool
@@ -49,12 +53,13 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     execute: async (toolCallId, params, signal) => {
       const provided = params as Record<string, unknown>;
       // Old suspended calls predate intent. This path is never used for a fresh call.
-      const original = replay && provided.intent === undefined && requiresToolIntent(def.name)
-        ? { ...provided, intent: "Resume the previously suspended tool call." } : provided;
+      const field = def.intent === "summary" ? "summary" : "intent";
+      const original = replay && provided[field] === undefined && (requiresToolIntent(def) || def.intent === "summary")
+        ? { ...provided, [field]: "Resume the previously suspended tool call." } : provided;
       let intent: string | null = null;
       let clean = original;
       let validationError: Error | undefined;
-      try { const parsed = stripToolIntent(def.name, original); clean = parsed.args; intent = parsed.intent; }
+      try { const parsed = stripToolIntent(def, original); clean = parsed.args; intent = parsed.intent; }
       catch (error) { validationError = error instanceof Error ? error : new Error("Add a valid intent and retry the tool."); clean = {}; }
       const ctx = buildContext({
         signal: signal ?? new AbortController().signal,

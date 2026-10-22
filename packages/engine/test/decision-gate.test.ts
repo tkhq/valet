@@ -1637,3 +1637,20 @@ describe("interactive actor provenance", () => {
     faux.unregister();
   });
 });
+
+it.each(["ask_question", "ask_approval"] as const)("does not change %s prompts with telemetry intent", async name => {
+  const faux = registerFauxProvider({ provider: `no-reason-${name}` });
+  const params = name === "ask_question" ? { question: "Choose?", detail: "Original details" } : { title: "Approve?", body: "Original details" };
+  faux.setResponses([fauxAssistantMessage([fauxToolCall(name, params)], { stopReason: "toolUse" }), fauxAssistantMessage("done")]);
+  const { engine, events } = makeEngine();
+  const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+  try {
+    const receipt = await session.prompt("Ask the person.");
+    await waitFor(() => gatesFrom(events).length > 0);
+    const gate = gatesFrom(events)[0];
+    if (!gate) throw new Error("Missing gate");
+    expect(gate.body).toBe("Original details"); expect(gate.agentReason).toBeUndefined();
+    await session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() });
+    await session.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+  } finally { session.suspendTimers(); faux.unregister(); }
+});

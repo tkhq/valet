@@ -1,3 +1,5 @@
+import * as agentTools from "./mcp-tools.js";
+import { registerTool } from "./mcp-intent.js";
 /**
  * Integration tests for the MCP tool broker: `search_tools`, `describe_tool`,
  * and `call_tool` over `/mcp`, backed by `/api/actions`.
@@ -10,11 +12,11 @@
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import { and, eq, like, lt } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDiscoveryCache } from "../routes/actions.js";
-import { actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { externalCalls, actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { shareCredential } from "../services/credential-shares.js";
 
@@ -23,6 +25,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.restoreAllMocks();
 });
 
 const SECRET = "demo-secret-key-123";
@@ -133,7 +136,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
   const res = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { intent: "Exercise this tool in the integration test.", ...args } } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { [name === "call_tool" ? "summary" : "intent"]: "Exercise this tool in the integration test.", ...args } } }),
   });
   expect(res.status).toBe(200);
   const { result } = (await res.json()) as { result: { isError?: boolean; content: Array<{ text: string }> } };
@@ -351,7 +354,7 @@ describe("MCP tool broker", () => {
     const res = await fetch(`${testApi.baseUrl}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice}` },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: "call_tool", arguments: { intent: "Run the test action.", tool_id: "demo.ping", params: { text: "x".repeat(60_000) } } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: "call_tool", arguments: { summary: "Run the test action.", tool_id: "demo.ping", params: { text: "x".repeat(60_000) } } } }),
     });
     const { result } = (await res.json()) as { result: { content: Array<{ text: string }>; structuredContent: Record<string, unknown> } };
     const structured = result.structuredContent;
@@ -414,5 +417,28 @@ describe("MCP tool broker", () => {
         ["locked.read", "error", "locked: no credential connected. Connect Locked in Integrations.", "bob", "mcp:client-bob"],
       ]);
     });
+  });
+});
+
+it("records final MCP success after an inner 404 and pending approval separately", async () => {
+  const { testApi, alice } = await setup();
+  vi.spyOn(agentTools, "registerAgentTools").mockImplementation((server, deps) => {
+    registerTool(server, "recover", { description: "Recover after a missing optional resource" }, async () => {
+      expect((await deps.api("GET", "/api/threads/missing-thread")).status).toBe(404);
+      const response = await deps.api("GET", "/api/me");
+      return { content: [{ type: "text", text: JSON.stringify(response.body) }] };
+    });
+  });
+  expect((await tool(testApi.baseUrl, alice, "recover", {})).isError).toBe(false);
+  await vi.waitFor(async () => {
+    const rows = await testApi.providers.db.select().from(externalCalls).where(eq(externalCalls.name, "recover"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "ok", errorCode: null });
+  });
+  vi.restoreAllMocks();
+  await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.risky" });
+  await vi.waitFor(async () => {
+    const rows = await testApi.providers.db.select().from(externalCalls).where(eq(externalCalls.name, "demo.risky"));
+    expect(rows[0]).toMatchObject({ outcome: "pending-approval", errorCode: "approval_required", intent: "Exercise this tool in the integration test." });
   });
 });

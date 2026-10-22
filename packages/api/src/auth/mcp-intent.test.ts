@@ -34,8 +34,9 @@ describe("MCP intent boundary", () => {
     const { tools } = await client.listTools();
     expect(tools.length).toBeGreaterThan(25);
     for (const tool of tools) {
-      expect(tool.inputSchema.required, tool.name).toContain("intent");
-      expect(tool.inputSchema.properties?.intent, tool.name).toMatchObject({ type: "string", minLength: 1, maxLength: 500 });
+      const field = tool.name === "call_tool" ? "summary" : "intent";
+      expect(tool.inputSchema.required, tool.name).toContain(field);
+      expect(tool.inputSchema.properties?.[field], tool.name).toMatchObject({ type: "string", minLength: 1, maxLength: 500 });
     }
   });
 
@@ -50,9 +51,9 @@ describe("MCP intent boundary", () => {
     expect(missing.isError).toBe(true);
     expect(handler).not.toHaveBeenCalled();
     await client.callTool({ name: "probe", arguments: { value: "x", intent: "  Check the probe to verify access.  " } });
-    expect(handler).toHaveBeenCalledWith({ value: "x" });
+    expect(handler).toHaveBeenCalledWith({ value: "x" }, expect.objectContaining({ signal: expect.any(AbortSignal), sendNotification: expect.any(Function) }));
     for (const intent of ["Read the value to check access.", "Retry the read to confirm the result."]) {
-      await client.callTool({ name: "call_tool", arguments: { tool_id: "demo.read", params: { value: "x" }, idempotency_key: "same", intent } });
+      await client.callTool({ name: "call_tool", arguments: { tool_id: "demo.read", params: { value: "x" }, idempotency_key: "same", summary: intent } });
     }
     expect(api.mock.calls).toEqual([
       ["POST", "/api/actions/demo.read/invoke", { params: { value: "x" }, idempotencyKey: "same" }],

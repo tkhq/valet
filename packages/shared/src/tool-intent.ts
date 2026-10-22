@@ -1,5 +1,3 @@
-/** Sandbox primitives stay unchanged to avoid repeated tokens on high-volume I/O. */
-export const INTENT_EXEMPT_TOOLS = ["bash", "shell", "read", "write", "edit", "read_file", "write_file", "edit_file", "list_files", "search_files"] as const;
 export const TOOL_INTENT_SCHEMA = {
   type: "string",
   minLength: 1,
@@ -9,35 +7,47 @@ export const TOOL_INTENT_SCHEMA = {
 } as const;
 export const TOOL_INTENT_ERROR = "Add intent: one sentence about your goal and why you need this tool. Use 1 to 500 characters.";
 
-export function requiresToolIntent(name: string): boolean {
-  return !INTENT_EXEMPT_TOOLS.some(exempt => exempt === name);
+export interface IntentTool {
+  /** Exempt only actual sandbox primitives. Broker tools use their existing summary. */
+  intent?: "exempt" | "summary" | "passthrough";
+  parameters?: { type?: unknown; properties?: Record<string, unknown> };
+}
+
+/** An action's own intent parameter must never become telemetry metadata. */
+export function requiresToolIntent(tool: IntentTool): boolean {
+  return tool.intent === undefined && tool.parameters?.type === "object" && !Object.hasOwn(tool.parameters.properties ?? {}, "intent");
+}
+
+export function parseToolIntent(value: unknown): string {
+  if (typeof value !== "string") throw new Error(TOOL_INTENT_ERROR);
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > 500) throw new Error(TOOL_INTENT_ERROR);
+  return trimmed;
 }
 
 /** Validation and stripping happen together, before policy, gates, or execution. */
-export function stripToolIntent(name: string, args: Record<string, unknown>): { args: Record<string, unknown>; intent: string | null } {
+export function stripToolIntent(tool: IntentTool, args: Record<string, unknown>): { args: Record<string, unknown>; intent: string | null } {
+  if (tool.intent === "summary") return { args, intent: parseToolIntent(args.summary) };
+  if (!requiresToolIntent(tool)) return { args, intent: null };
   const { intent, ...rest } = args;
-  if (!requiresToolIntent(name)) return { args: rest, intent: null };
-  if (typeof intent !== "string") throw new Error(TOOL_INTENT_ERROR);
-  const trimmed = intent.trim();
-  if (trimmed.length < TOOL_INTENT_SCHEMA.minLength || trimmed.length > TOOL_INTENT_SCHEMA.maxLength) throw new Error(TOOL_INTENT_ERROR);
-  return { args: rest, intent: trimmed };
+  return { args: rest, intent: parseToolIntent(intent) };
 }
 
-/** Adds the same JSON Schema contract without coupling shared to a schema library. */
-export function withToolIntentSchema<T extends { properties?: Record<string, unknown>; required?: string[] }>(name: string, schema: T): T {
-  if (!requiresToolIntent(name)) return schema;
+/** Called once at publication, using the original action schema to detect collisions. */
+export function withToolIntentSchema<T extends { type?: unknown; properties?: Record<string, unknown>; required?: string[] }>(tool: IntentTool, schema: T): T {
+  if (!requiresToolIntent(tool)) return schema;
   return { ...schema, properties: { ...schema.properties, intent: TOOL_INTENT_SCHEMA }, required: [...new Set([...(schema.required ?? []), "intent"])] };
 }
 
 export interface ToolUsageFact {
   id: string;
   orgId: string;
-  userId: string;
+  userId: string | null;
   sessionId: string;
   threadId: string;
   name: string;
   intent: string | null;
-  outcome: "ok" | "error" | "denied";
+  outcome: "ok" | "error" | "denied" | "pending-approval";
   errorCode: string | null;
   durationMs: number;
   createdAt: number;

@@ -370,6 +370,7 @@ export function fromRequest(
     type: req.type,
     title: req.title,
     body: req.body,
+    agentReason: req.agentReason,
     actions:
       req.actions ??
       (req.type === "approval"

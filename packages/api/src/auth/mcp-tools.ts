@@ -1,4 +1,3 @@
-import { registerTool } from "./mcp-intent.js";
 /**
  * Agent-facing MCP tools (`docs/specs/2026-10-07-mcp-agent-tools-design.md`).
  *
@@ -13,6 +12,7 @@ import { registerTool } from "./mcp-intent.js";
  * decision, or the time runs out. A timed-out wait is not an error: the
  * result says `running`, and the agent calls `get_thread` to wait again.
  */
+import { registerTool } from "./mcp-intent.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Providers } from "../providers/types.js";
@@ -108,6 +108,7 @@ function gateView(gate: DecisionGate) {
     type: gate.type,
     title: gate.title,
     ...(gate.body ? { body: clip(gate.body) } : {}),
+    ...(gate.agentReason ? { agent_reason: { label: "Agent's stated reason (model-authored)", text: gate.agentReason } } : {}),
     options: gate.actions.map((action) => ({ action_id: action.id, label: action.label })),
   };
 }

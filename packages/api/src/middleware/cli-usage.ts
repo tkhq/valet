@@ -5,6 +5,7 @@ import { bestEffortTelemetry, externalCallOwner, recordExternalCall } from "../s
 /** Headers identify an invocation, never authority. Auth supplies the user and org. */
 export function cliUsage(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
+    if (c.req.path === "/api/health") { await next(); return; }
     const started = Date.now();
     await next();
     const id = c.req.header("x-valet-cli-invocation");
@@ -15,13 +16,13 @@ export function cliUsage(): MiddlewareHandler<AppEnv> {
     // Schedule the entire recording operation. Ownership reads must not delay the response either.
     const durationMs = Date.now() - started;
     void bestEffortTelemetry(async () => {
-      let outcome: "ok" | "error" | "denied" = c.res.status === 403 ? "denied" : c.res.status >= 400 ? "error" : "ok";
+      let outcome: "ok" | "error" | "denied" | "pending-approval" = c.res.status === 403 ? "denied" : c.res.status >= 400 ? "error" : "ok";
       let errorCode = c.res.status >= 400 ? `http_${c.res.status}` : null;
       if (c.req.path.startsWith("/api/actions/") && c.req.path.endsWith("/invoke") && c.res.ok) {
         const response: unknown = await c.res.clone().json();
         if (response && typeof response === "object" && "status" in response) {
           if (response.status === "failed") { outcome = "error"; errorCode = "action_failed"; }
-          if (response.status === "approval_required") { outcome = "denied"; errorCode = "approval_required"; }
+          if (response.status === "approval_required") { outcome = "pending-approval"; errorCode = "approval_required"; }
         }
       }
       const parts = c.req.path.split("/");
@@ -30,7 +31,7 @@ export function cliUsage(): MiddlewareHandler<AppEnv> {
         : await externalCallOwner(c.var.providers.db, user.orgId, user.id,
           c.res.ok && parts[2] === "threads" ? parts[3] : undefined, c.res.ok && parts[2] === "sessions" ? parts[3] : undefined, c.res.ok ? c.req.query("workspace") : undefined);
       await recordExternalCall(c.var.providers.db, {
-        id: `cli:${id}`, orgId: user.orgId, userId: user.id, surface: "cli", name,
+        id: `cli:${user.orgId}:${user.id}:${id}`, orgId: user.orgId, userId: user.id, surface: "cli", name,
         clientName: "Valet CLI", clientVersion: version?.slice(0, 100), ...owner,
         outcome, errorCode,
         durationMs, createdAt: started,

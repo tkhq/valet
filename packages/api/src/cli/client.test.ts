@@ -224,3 +224,10 @@ describe("CLI invocation telemetry headers", () => {
     expect(JSON.stringify(lastRequest?.headers)).not.toContain("private-thread-id");
   });
 });
+
+it("records prebuild plan without its working-directory argument", async () => {
+  const { cliCommandPath } = await import("./telemetry.js");
+  expect(cliCommandPath("prebuild", ["plan", "/private/repo"])).toBe("prebuild plan");
+  expect(cliCommandPath("prebuild", ["build", "/private/repo"])).toBe("prebuild build");
+  expect(cliCommandPath("prebuild", ["private-value"])).toBe("prebuild");
+});

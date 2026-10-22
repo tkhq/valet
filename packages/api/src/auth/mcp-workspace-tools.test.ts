@@ -58,7 +58,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
   const res = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { intent: "Exercise this tool in the integration test.", ...args } } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: { [name === "call_tool" ? "summary" : "intent"]: "Exercise this tool in the integration test.", ...args } } }),
   });
   expect(res.status).toBe(200);
   const { result, error } = (await res.json()) as { result?: { isError?: boolean; content: Array<{ text: string }> }; error?: unknown };

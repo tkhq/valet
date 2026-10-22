@@ -420,8 +420,25 @@ It does not infer sentence boundaries.
 Intent is metadata, not a provider argument.
 The bridges remove it before policy matching, approval parameter comparison, execution, and idempotency hashing.
 Suspended hosted calls retain intent for replay and approval explanations.
+Broker `call_tool` and pinned tools use their required `summary` as intent.
+They do not add a separate `intent` argument.
+The bridge publishes an added argument only once.
+An action's own `intent` parameter is preserved.
+Non-object schemas remain unchanged.
+A collision skips injected intent and logs a bounded warning.
 
-The explicit primitive exemptions are `bash`, `shell`, `read`, `write`, `edit`, `read_file`, `write_file`, `edit_file`, `list_files`, and `search_files`.
+Tool approval gates carry a separate `agentReason` field.
+The web card labels it "Agent's stated reason" and identifies it as model-authored text.
+Channel prompts render it as an escaped labelled field.
+`ask_question` and `ask_approval` keep their original body without this field.
+Gate persistence and wire projection retain the separate field.
+Restart replay starts a new execution clock and records a fact.
+Approval waiting does not contribute to execution duration.
+Turn end and abort clear transient telemetry state.
+
+Actual sandbox primitives declare `ToolDef.intent: "exempt"`: `bash`, `read`, `write`, `edit`, `process_read`, `watch`, and `sec_fs_*`.
+Exemption does not depend on a tool name.
+A plugin action named `read` does not inherit it.
 These high-volume file and shell operations keep their existing schemas.
 They do not produce usage facts.
 This avoids repeated model output and schema tokens for low-level I/O.
@@ -440,13 +457,31 @@ Command paths exclude positional values and option values.
 The server derives user and organization from authentication.
 An upsert keeps one row per invocation across its HTTP requests.
 Later completion timestamps win when requests finish out of order.
+An earlier-arriving start can extend duration without replacing a newer outcome.
+Invocation IDs are namespaced by authenticated organization and user.
+Health checks skip authentication and usage recording.
 MCP initialization metadata is stored by organization, user, and OAuth client ID.
 No bearer token is retained in that metadata.
+Client-info writes do not block initialization.
+MCP telemetry observes the final JSON-RPC reply before serialization.
+An inner request error does not override a successful final tool result.
+`pending-approval` is distinct from a denial.
 
 `GET /api/usage/external` uses the existing period and personal, team, or organization scope rules.
 The optional `surface` filter applies to daily counts, tools, clients, and recent intents.
 Daily counts include zero days.
-Recent intents use literal text search and offset pagination.
+Recent intents use literal `strpos` text search and offset pagination.
+Personal-workspace rows are excluded from the organization recent-intents feed by default.
+They remain in organization aggregates.
+`ORG_RECENT_INCLUDES_PERSONAL` is the one-line switch for that privacy decision.
+Team automation without a human actor stores a null user and retains team ownership.
+Distinct-user counts exclude null users.
+A team ownership/time index supports scoped reads.
+The event dispatcher nulls intent text older than 90 days in bounded asynchronous batches.
+It retains the usage rows and counts.
+Hosted inserts remain asynchronous per-call writes, not batched writes.
+The search query remains a substring scan within the scoped time range.
+The usage query retains previous data while search changes, so the input keeps focus.
 Team members can see aggregates.
 Team admins can also see individual intents.
 The Usage page adds a Tool usage view with the same scope and period controls.

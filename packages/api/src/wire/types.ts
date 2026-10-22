@@ -1738,6 +1738,8 @@ export interface DecisionGate {
   type: DecisionGateType;
   title: string;
   body?: string;
+  /** Model-authored text, not policy or approver context. */
+  agentReason?: string;
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
@@ -6635,7 +6637,7 @@ export interface ExternalUsageResponse {
   detailsVisible: boolean;
   recent: {
     id: string; surface: "hosted" | "mcp" | "cli"; name: string; clientName: string | null;
-    clientVersion: string | null; userId: string; userName: string | null; outcome: "ok" | "error" | "denied";
+    clientVersion: string | null; userId: string | null; userName: string | null; outcome: "ok" | "error" | "denied" | "pending-approval";
     intent: string | null; createdAt: number;
   }[];
   hasMore: boolean;

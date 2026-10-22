@@ -7,7 +7,8 @@ const invocation = new AsyncLocalStorage<{ id: string; command: string }>();
 const SUBCOMMANDS: Record<string, readonly string[]> = {
   threads: ["list", "new", "show"], sessions: ["list", "new", "show"],
   gates: ["list", "resolve"], tools: ["search", "describe", "call"],
-  mcp: ["setup"], instance: ["list", "use", "remove"],
+  prebuild: ["plan", "build"],
+  mcp: ["setup"], instance: ["list", "use"],
 };
 
 /** Only command words enter headers. Positional arguments can contain secrets. */

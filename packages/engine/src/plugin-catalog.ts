@@ -1,4 +1,4 @@
-import { actionInScope, scopeRefusal } from "@valet/shared";
+import { TOOL_INTENT_SCHEMA, actionInScope, scopeRefusal } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -480,7 +480,8 @@ function approvalGateRequest(
   return {
     type: "approval",
     title: `Approve ${entry.action.name}?`,
-    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    body: `tool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    agentReason: summary,
     resumeKey,
     dedupeKey: qualifiedId(entry),
     context: {
@@ -859,7 +860,7 @@ export async function invokeAction(
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `Valet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -1463,6 +1464,7 @@ function resolveFailurePrefix(message: string): string {
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    intent: "summary",
     policyChecked: true,
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
@@ -1477,8 +1479,9 @@ function makeCallTool(catalog: Catalog): ToolDef {
         }),
       ),
       summary: Type.String({
+        ...TOOL_INTENT_SCHEMA,
         description:
-          "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.",
+          "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.",
       }),
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -1488,7 +1491,9 @@ function makeCallTool(catalog: Catalog): ToolDef {
         summary: string;
       };
       const outcome = await invokeAction(catalog, a.tool_id, a.params, ctx, a.summary);
-      return renderInvokeOutcome(outcome, a.tool_id);
+      const entry = catalog.byId.get(a.tool_id);
+      const result = renderInvokeOutcome(outcome, a.tool_id);
+      return { ...result, usageOutcome: { ...result.usageOutcome!, name: entry ? qualifiedId(entry) : a.tool_id } };
     },
   };
 }
@@ -1502,7 +1507,7 @@ function makeCallTool(catalog: Catalog): ToolDef {
 function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolResult {
   const result = renderInvokeResult(outcome, toolId);
   const status = outcome.kind === "ok" ? (result.ok === false ? "error" : "ok")
-    : outcome.kind.startsWith("denied") || outcome.kind.endsWith("approval") ? "denied" : "error";
+    : outcome.kind === "pending-approval" ? "pending-approval" : outcome.kind.startsWith("denied") ? "denied" : "error";
   return { ...result, usageOutcome: { outcome: status, errorCode: status === "ok" ? null : outcome.kind } };
 }
 
@@ -1667,12 +1672,12 @@ const PINNED_SUMMARY_ARG = "summary";
 
 /** Published on the added argument. Matches `call_tool`'s wording. */
 const PINNED_SUMMARY_DESCRIPTION =
-  "One-line human-readable summary of what this call does. Shown in approval gates and audit logs.";
+  "State in one sentence what you are trying to accomplish and why you need this action. This is model-authored text, shown as the agent’s stated reason.";
 
 /**
  * Publishes the action's schema with a `summary` argument added.
  *
- * WHY. The summary is the first line of an approval gate body and the
+ * WHY. The summary is the labelled model-authored reason on an approval gate and the
  * `summary` field of every audit record. `call_tool` takes it from the
  * model. A pinned tool that derived a constant instead would ask a person
  * to approve an action with no statement of intent, and would write the
@@ -1680,7 +1685,7 @@ const PINNED_SUMMARY_DESCRIPTION =
  * `require_approval` at any time through an org policy, so a pinned tool
  * must carry the model's own sentence.
  *
- * The added argument is optional and it is stripped before validation, so
+ * The added argument is required and it is stripped before validation, so
  * the two routes still agree about what the ACTION accepts. `carriesSummary`
  * is false in two cases, and the caller then falls back to a derived
  * constant: the schema is not an object, or the action already declares its
@@ -1695,9 +1700,7 @@ function withSummaryArg(schema: TSchema): { schema: TSchema; carriesSummary: boo
   const published = Type.Object(
     {
       ...schema.properties,
-      [PINNED_SUMMARY_ARG]: Type.Optional(
-        Type.String({ description: PINNED_SUMMARY_DESCRIPTION }),
-      ),
+      [PINNED_SUMMARY_ARG]: Type.String({ ...TOOL_INTENT_SCHEMA, description: PINNED_SUMMARY_DESCRIPTION }),
     },
     // Keeps `description`, `additionalProperties` and every other keyword
     // the action set on its own object schema. `ObjectOptions` discards the
@@ -1753,6 +1756,7 @@ function makePinnedTool(
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
     scopeAction: actionId,
+    intent: published.carriesSummary ? "summary" : "passthrough",
     policyChecked: true,
     name,
     description: parts.join(" "),

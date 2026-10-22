@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
-
   registerFauxProvider,
   Type,
 } from "@earendil-works/pi-ai/compat";
@@ -22,6 +21,7 @@ const approvalTool: ToolDef<typeof approvalParams> = {
   description: "approval-gated",
   parameters: approvalParams,
   execute: async (args, ctx) => {
+    expect(args).toEqual({ arg: "x" });
     const r = await ctx.requestDecision({
       type: "approval",
       title: "ok?",
@@ -52,6 +52,7 @@ export function runRestartSafeGatesContract(
 ): void {
   describe(`restart-safe gates contract: ${name}`, () => {
     it("survives engine teardown and restoreSession resumes", async () => {
+      const facts: import("@valet/shared").ToolUsageFact[] = [];
       const store = await factory();
       const sandboxProvider = new VirtualSandboxProvider();
 
@@ -123,6 +124,7 @@ export function runRestartSafeGatesContract(
           sandbox: {},
           model: faux2.getModel(),
           tools: [approvalTool],
+          recordToolUsage: fact => { facts.push(fact); },
         },
       });
 
@@ -184,6 +186,8 @@ export function runRestartSafeGatesContract(
       // past the test and hit a closed pool — an unhandled rejection that
       // fails the run with all tests green. session1 stays un-destroyed on
       // purpose (it IS the simulated crash) but is quiescent on the gate.
+      expect(facts).toHaveLength(1);
+      expect(facts[0]).toMatchObject({ name: "do_thing", intent: "Exercise do_thing in this test.", outcome: "ok" });
       await session2.destroy();
 
       faux2.unregister();

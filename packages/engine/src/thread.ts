@@ -1,7 +1,7 @@
 import { ThinkingTiming } from "./thinking-timing.js";
 import { normalizeGatePath } from "./builtin-tools/index.js";
 import { skillFileManifest } from "./roles-skills/loader.js";
-import { requiresToolIntent, stripToolIntent, type ToolUsageFact } from "@valet/shared";
+import { stripToolIntent, type ToolUsageFact } from "@valet/shared";
 import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, MODEL_CALL_LIMIT_KEY, readModelCallLimit, readThreadPlan, readToolScope, THREAD_PLAN_KEY, toolInScope, TOOL_SCOPE_KEY, UNATTENDED_DELIVERY_KEY, UNATTENDED_WORKFLOW_KEY, type ThreadPlan, type ThreadPlanItem, type ToolScope } from "@valet/shared";
@@ -552,7 +552,41 @@ export class Thread {
   private currentAssistantMessageId: string | undefined;
   private currentAssistantParts: MessagePart[] = [];
   private thinkingTiming = new ThinkingTiming();
-  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name">>();
+  private usageToolDef(name: string): ToolDef | undefined {
+    return [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].find(tool => tool.name === name);
+  }
+
+  private startToolUsage(callId: string, name: string, args: Record<string, unknown>): void {
+    const def = this.usageToolDef(name);
+    if (!def || def.intent === "exempt") return;
+    let intent: string | null = null;
+    try { intent = stripToolIntent(def, args).intent; } catch { /* Invalid calls still count. */ }
+    const actionId = def.scopeAction ?? (name === "call_tool" && typeof args.tool_id === "string" ? args.tool_id : name);
+    this.toolUsageStarts.set(callId, { createdAt: Date.now(), waitMs: 0, intent, name: actionId.slice(0, 200) });
+  }
+
+  private finishToolUsage(callId: string, details: unknown, isError: boolean): void {
+    const usage = this.toolUsageStarts.get(callId);
+    this.toolUsageStarts.delete(callId);
+    if (!usage) return;
+    const { waitMs, ...base } = usage;
+    if (details && typeof details === "object" && "usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object" && "name" in details.usageOutcome && typeof details.usageOutcome.name === "string") {
+      base.name = details.usageOutcome.name.slice(0, 200);
+    }
+    const owner = this.session.owner;
+    const actor = this.runningItem?.author?.id ?? this.defaultActorId();
+    const fact: ToolUsageFact = {
+      ...base, ...readToolUsageOutcome(details, isError), id: `${this.session.id}:${callId}`,
+      orgId: this.session.options.orgId, userId: actor.startsWith("team:") ? null : actor,
+      sessionId: this.session.id, threadId: this.id,
+      ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
+      durationMs: Math.max(0, Date.now() - usage.createdAt - waitMs),
+    };
+    try { this.session.options.recordToolUsage?.(fact); }
+    catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
+  }
+
+  private toolUsageStarts = new Map<string, Pick<ToolUsageFact, "createdAt" | "intent" | "name"> & { waitMs: number }>();
   private currentToolCalls = new Map<string, MessagePart>();
   /**
    * The persisted assistant entry for the current turn. Held so we can
@@ -1529,6 +1563,7 @@ export class Thread {
 
   async abort(): Promise<void> {
     this.aborted = true;
+    this.toolUsageStarts.clear();
     if (this.collectTimer) {
       clearTimeout(this.collectTimer);
       this.collectTimer = null;
@@ -1641,6 +1676,7 @@ export class Thread {
     };
     const fakeAbort = new AbortController();
     let toolResult;
+    this.startToolUsage(suspended.toolCallId, suspended.toolName, suspended.toolArgs);
     try {
       await this.persistContinuationToolScope();
       toolResult = await tool.execute(
@@ -1649,6 +1685,7 @@ export class Thread {
         fakeAbort.signal,
       );
     } catch (err) {
+      this.finishToolUsage(suspended.toolCallId, undefined, true);
       this.runningItem = priorActive;
       this.emitError(
         "replay_tool_failed",
@@ -1656,6 +1693,7 @@ export class Thread {
       );
       return;
     }
+    this.finishToolUsage(suspended.toolCallId, toolResult.details, false);
     this.runningItem = priorActive;
     this.agent.state.messages = [
       ...this.agent.state.messages,
@@ -6682,7 +6720,7 @@ export class Thread {
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
       requestDecision: async (req: DecisionGateRequest): Promise<DecisionResolution> => {
-        if (toolIntent) req = { ...req, body: [req.body, `Intent: ${toolIntent}`].filter(Boolean).join("\n\n") };
+        if (toolIntent && req.type === "approval" && toolName !== "ask_question" && toolName !== "ask_approval") req = { ...req, agentReason: toolIntent };
         // A channel sender with no Valet account may not put an approval or a
         // question in front of a teammate: the request is refused here, before
         // any gate opens, so a newcomer cannot flood the team with requests.
@@ -6734,6 +6772,7 @@ export class Thread {
         // One gate cycle at a time per thread (see gateCycleTail): the next
         // open waits until the previous gate resolves and releases the
         // durable blocked toggle (TKAI-238).
+        const waitStarted = Date.now();
         const prevCycle = this.gateCycleTail;
         let releaseCycle!: () => void;
         this.gateCycleTail = new Promise<void>((r) => {
@@ -6742,9 +6781,11 @@ export class Thread {
         await prevCycle;
         try {
           return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName,
-            toolArgs: toolIntent ? { ...toolArgs, intent: toolIntent } : toolArgs });
+            toolArgs: toolIntent && toolName !== "call_tool" && !this.usageToolDef(toolName)?.scopeAction ? { ...toolArgs, intent: toolIntent } : toolArgs });
         } finally {
           releaseCycle();
+          const usage = this.toolUsageStarts.get(toolCallId);
+          if (usage) usage.waitMs += Date.now() - waitStarted;
         }
       },
       // The same lookup slash commands use: a key, or a thread id (a pasted
@@ -7005,14 +7046,7 @@ export class Thread {
         break;
       }
       case "tool_execution_start":
-        if (requiresToolIntent(event.toolName)) {
-          let intent: string | null = null;
-          try { intent = stripToolIntent(event.toolName, event.args ?? {}).intent; } catch { /* Invalid calls still count. */ }
-          this.toolUsageStarts.set(event.toolCallId, {
-            createdAt: Date.now(), intent,
-            name: event.toolName === "call_tool" && typeof event.args?.tool_id === "string" ? event.args.tool_id : event.toolName,
-          });
-        }
+        this.startToolUsage(event.toolCallId, event.toolName, event.args ?? {});
         this.turnToolCallCount++;
         this.toolCtxOverlay.gateId = undefined;
         await this.fencedEmit(
@@ -7032,22 +7066,7 @@ export class Thread {
         );
         break;
       case "tool_execution_end": {
-        const usage = this.toolUsageStarts.get(event.toolCallId);
-        this.toolUsageStarts.delete(event.toolCallId);
-        if (usage) {
-          const owner = this.session.owner;
-          const details = event.result?.details;
-          const status = readToolUsageOutcome(details, event.isError);
-          const fact: ToolUsageFact = {
-            ...usage, ...status, id: `${this.session.id}:${event.toolCallId}`,
-            orgId: this.session.options.orgId, userId: this.runningItem?.author?.id ?? this.defaultActorId(),
-            sessionId: this.session.id, threadId: this.id,
-            ownerType: owner.type === "team" ? "team" : "user", ownerId: owner.id,
-            durationMs: Math.max(0, Date.now() - usage.createdAt),
-          };
-          try { this.session.options.recordToolUsage?.(fact); }
-          catch { console.warn("Tool usage telemetry failed. Check the host telemetry sink."); }
-        }
+        this.finishToolUsage(event.toolCallId, event.result?.details, event.isError);
         const part = this.currentToolCalls.get(event.toolCallId);
         const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
@@ -7098,6 +7117,7 @@ export class Thread {
         break;
       }
       case "turn_end": {
+        this.toolUsageStarts.clear();
         const stopReason =
           event.message.role === "assistant" ? event.message.stopReason : undefined;
         const errorMessage =
@@ -8218,7 +8238,7 @@ function readToolUsageOutcome(details: unknown, isError: boolean): Pick<ToolUsag
   if (details && typeof details === "object") {
     if ("usageOutcome" in details && details.usageOutcome && typeof details.usageOutcome === "object") {
       const status = details.usageOutcome;
-      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied")) {
+      if ("outcome" in status && (status.outcome === "ok" || status.outcome === "error" || status.outcome === "denied" || status.outcome === "pending-approval")) {
         return { outcome: status.outcome, errorCode: "errorCode" in status && typeof status.errorCode === "string" ? status.errorCode : null };
       }
     }

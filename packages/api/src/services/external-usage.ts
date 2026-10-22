@@ -13,6 +13,9 @@ export async function bestEffortTelemetry(write: () => Promise<unknown>): Promis
   catch { console.warn("External usage telemetry failed. Check database availability."); }
 }
 
+/** Flip only after the personal-workspace privacy decision changes. Aggregates remain unchanged. */
+export const ORG_RECENT_INCLUDES_PERSONAL = false;
+
 export type ExternalCall = typeof externalCalls.$inferInsert;
 
 export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise<void> {
@@ -20,12 +23,13 @@ export async function recordExternalCall(db: AppDb, call: ExternalCall): Promise
     await db.insert(externalCalls).values(call).onConflictDoUpdate({
       target: externalCalls.id,
       // A CLI invocation can issue many requests. Keep one fact and its latest outcome.
-      set: {
-        outcome: call.outcome, errorCode: call.errorCode,
-        durationMs: sql`greatest(0, ${call.createdAt + call.durationMs} - ${externalCalls.createdAt})::integer`,
+      set: call.surface !== "cli" ? { outcome: call.outcome, errorCode: call.errorCode, durationMs: call.durationMs, createdAt: call.createdAt } : {
+        outcome: sql`CASE WHEN ${call.createdAt + call.durationMs} >= ${externalCalls.createdAt} + ${externalCalls.durationMs} THEN ${call.outcome} ELSE ${externalCalls.outcome} END`,
+        errorCode: sql`CASE WHEN ${call.createdAt + call.durationMs} >= ${externalCalls.createdAt} + ${externalCalls.durationMs} THEN ${call.errorCode ?? null} ELSE ${externalCalls.errorCode} END`,
+        createdAt: sql`least(${call.createdAt}, ${externalCalls.createdAt})`,
+        durationMs: sql`greatest(0, greatest(${call.createdAt + call.durationMs}, ${externalCalls.createdAt} + ${externalCalls.durationMs}) - least(${call.createdAt}, ${externalCalls.createdAt}))::integer`,
       },
-      setWhere: and(eq(externalCalls.orgId, call.orgId), eq(externalCalls.userId, call.userId),
-        sql`${call.createdAt + call.durationMs} >= ${externalCalls.createdAt} + ${externalCalls.durationMs}`),
+      setWhere: and(eq(externalCalls.orgId, call.orgId), sql`${externalCalls.userId} IS NOT DISTINCT FROM ${call.userId ?? null}`),
     });
   });
 }
@@ -91,6 +95,7 @@ export async function getExternalUsage(db: AppDb, opts: {
   // strpos treats search as literal text, not a wildcard pattern.
   const recent = await db.select({ call: externalCalls, userName: users.name }).from(externalCalls)
     .leftJoin(users, eq(users.id, externalCalls.userId)).where(and(where,
+    scope.scope === "org" && !ORG_RECENT_INCLUDES_PERSONAL ? eq(externalCalls.ownerType, "team") : undefined,
     opts.search ? sql`strpos(lower(coalesce(${externalCalls.intent}, '')), lower(${opts.search})) > 0` : undefined))
     .orderBy(sql`${externalCalls.createdAt} desc`, sql`${externalCalls.id} desc`).offset(opts.offset).limit(opts.limit + 1);
   return { daily: filledDaily, tools, clients, detailsVisible, hasMore: recent.length > opts.limit,
@@ -102,4 +107,22 @@ export function newExternalCallId(): string { return randomUUID(); }
 
 export function hostedToolUsageSink(db: AppDb, persona?: string): (fact: ToolUsageFact) => void {
   return fact => { void recordExternalCall(db, { ...fact, surface: "hosted", persona }); };
+}
+
+/** Bounded column-nulling runs on the existing event-dispatch rail, not on a tool's response path. */
+export function externalUsageRetention(db: AppDb): () => Promise<void> {
+  let nextRun = 0;
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    if (inFlight) return inFlight;
+    if (Date.now() < nextRun) return Promise.resolve();
+    inFlight = (async () => {
+      const result = await db.execute(sql`WITH expired AS (
+        SELECT id FROM external_calls WHERE intent IS NOT NULL AND created_at < ${Date.now() - 90 * 86400000}
+        ORDER BY created_at LIMIT 5000
+      ) UPDATE external_calls SET intent = NULL WHERE id IN (SELECT id FROM expired) RETURNING id`) as { rows: { id: string }[] };
+      nextRun = Date.now() + (result.rows.length === 5000 ? 1000 : 3600000);
+    })().finally(() => { inFlight = undefined; });
+    return inFlight;
+  };
 }

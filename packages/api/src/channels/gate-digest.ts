@@ -61,7 +61,7 @@ function argValue(value: unknown): string {
   return `\`${truncate(json, MAX_VALUE_CHARS)}\``;
 }
 
-export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | "context">): GateDigest {
+export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | "context" | "agentReason">): GateDigest {
   const ctx = gate.type === "approval" ? toolApprovalGateContext(gate.context) : null;
   if (ctx === null) {
     return { title: gate.title, body: gate.body };
@@ -83,8 +83,9 @@ export function digestGate(gate: Pick<DecisionGate, "type" | "title" | "body" | 
     }
   }
 
+  if (gate.agentReason) fields.unshift({ label: "Agent's stated reason", value: gate.agentReason });
   // A blank summary must not leave the durable notification row (and the
   // card) with no body at all — fall back to naming the requested tool.
   const summary = ctx.summary !== undefined && ctx.summary.trim() !== "" ? ctx.summary.trim() : undefined;
-  return { title: gate.title, body: summary ?? `Requested: \`${ctx.toolId}\``, fields };
+  return { title: gate.title, body: gate.agentReason ? undefined : summary ?? `Requested: \`${ctx.toolId}\``, fields };
 }

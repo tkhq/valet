@@ -1,4 +1,3 @@
-import { registerTool } from "./mcp-intent.js";
 /**
  * MCP tools for the rest of a workspace: skills, memory, workflows, the
  * approvals inbox, and artifacts
@@ -8,6 +7,7 @@ import { registerTool } from "./mcp-intent.js";
  * in-process as the verified user, so each area's ownership and permission
  * rules apply unchanged. The tools only reshape requests and responses.
  */
+import { registerTool } from "./mcp-intent.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { renderTemplate } from "@valet/engine";
