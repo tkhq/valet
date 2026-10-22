@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "~/lib/cn";
 import { useScrollHeader } from "~/hooks/use-scroll-header";
 import { ArrowDown } from "lucide-react";
@@ -8,6 +8,7 @@ import { MessageItem } from "./message-item";
 import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
+import { NewSinceDivider } from "./thread-recap";
 
 /**
  * Scrolling message list. Auto-scrolls to bottom when new messages arrive
@@ -37,6 +38,7 @@ export function MessageList({
   header,
   onReply,
   ratings = true,
+  newSince,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -69,8 +71,11 @@ export function MessageList({
    * ratings are session-addressed, so they belong to the session's viewers.
    */
   ratings?: boolean;
+  /** The "new" line before the first message other people added since the reader's last visit. */
+  newSince?: { anchorId: string; label: string };
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollHeader = useScrollHeader(containerRef, threadId);
   // The ref above drives the auto-scroll effect and must stay a ref: the
@@ -105,6 +110,24 @@ export function MessageList({
       scrollHeader.syncPosition();
     }
   }, [visible, scrollHeader.syncPosition]);
+
+  // A reader at the bottom stays at the bottom when the list gets shorter (a
+  // card opens above the composer) or its content grows without a new
+  // message (a running tool card expands, an image loads). Otherwise the next
+  // scroll event reads the gap as the reader scrolling away.
+  const hasContent = visible.length > 0;
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return;
+      el.scrollTop = el.scrollHeight;
+      scrollHeader.syncPosition();
+    });
+    observer.observe(el);
+    if (contentRef.current) observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, [hasContent, scrollHeader.syncPosition]);
 
   function onScroll() {
     const el = containerRef.current;
@@ -170,13 +193,13 @@ export function MessageList({
             No messages yet — try sending a prompt below.
           </div>
         ) : (
-          <div className="shrink-0 space-y-2 py-4">
+          <div ref={contentRef} className="shrink-0 space-y-2 py-4">
             {groupWatchEvents(visible).map((item, i, items) => {
               if (item.kind === "watch") {
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
               }
               const m = item.message;
-              return m.compaction ? (
+              const row = m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
                 <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
@@ -193,6 +216,9 @@ export function MessageList({
                   ratings={ratings}
                 />
               );
+              return newSince && m.id === newSince.anchorId
+                ? <Fragment key={m.id}><NewSinceDivider label={newSince.label} />{row}</Fragment>
+                : row;
             })}
           </div>
         )}

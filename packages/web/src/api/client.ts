@@ -18,6 +18,7 @@ import type {
   PresencePlaceDetailResponse,
   ThreadChannelActivity,
   ThreadContextResponse,
+  ThreadRecapResponse,
   WaitingThreadsResponse,
   WorkspaceActiveWorkResponse,
   AbortThreadRequest,
@@ -650,6 +651,8 @@ export const api = {
   /** How full the thread's model context is. Reading it never wakes the sandbox. */
   getThreadContext: (threadId: string) =>
     request<ThreadContextResponse>("GET", `/threads/${encodeURIComponent(threadId)}/context`),
+  getThreadRecap: (threadId: string, since?: number) =>
+    request<ThreadRecapResponse>("GET", `/threads/${encodeURIComponent(threadId)}/recap${since === undefined ? "" : `?since=${since}`}`),
   /** Download URL for a file attached to the thread; an `<a download>` target. */
   threadFileUrl: (sessionId: string, threadId: string, path: string): string =>
     `/api/sessions/${encodeURIComponent(sessionId)}/threads/${encodeURIComponent(threadId)}/files?${new URLSearchParams({ path })}`,

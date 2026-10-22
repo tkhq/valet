@@ -845,14 +845,8 @@ function ThreadNode({
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, isDefault);
   const liveStatus = useThreadLiveStatus(thread.sessionId, thread.id);
-  const markRead = useMarkThreadsRead(thread.sessionId);
-  // An open thread is read: mark it when it opens and when a new reply lands.
+  // The open thread's view marks it read (`useThreadRecap`), so an open row never shows unread.
   const unread = !active && isThreadUnread(thread);
-  const openUnread = active && isThreadUnread(thread);
-  const markReadMutate = markRead.mutate;
-  useEffect(() => {
-    if (openUnread) markReadMutate({ threadIds: [thread.id] });
-  }, [openUnread, markReadMutate, thread.id, thread.lastAgentActivityAt]);
   const pullRequest = rowPullRequest(thread.pullRequests);
   // A question waiting on a reply outranks plain unread: it asks for an answer.
   const question = pendingAgentQuestion(thread);

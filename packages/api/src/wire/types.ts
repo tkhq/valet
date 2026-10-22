@@ -1040,6 +1040,20 @@ export interface ThreadAddress {
   guest?: { mode: ThreadShareMode; ownerName: string };
 }
 
+/** One line of a thread recap. `forReader` marks the line that waits on the reader. */
+export interface ThreadRecapPoint {
+  text: string;
+  forReader?: boolean;
+}
+
+/** `GET /api/threads/:threadId/recap?since=<ms>` — what other people did in
+ * the thread since the reader last saw it, in at most three lines. `recap` is
+ * null when no other person wrote in that window, or when the window reads
+ * at a glance. */
+export interface ThreadRecapResponse {
+  recap: { mode: "away" | "first"; points: ThreadRecapPoint[] } | null;
+}
+
 /** `GET /api/threads/:threadId/context` — how full the thread's model
  * context is. The engine measures it like the proactive compaction check
  * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn

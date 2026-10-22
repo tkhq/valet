@@ -27,6 +27,7 @@ import {
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
+import { ThreadRecapDock, useThreadRecap } from "~/components/session/thread-recap";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
@@ -208,6 +209,7 @@ export function SessionView({
   const agentBusy =
     (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
+  const recap = useThreadRecap({ threadId: effectiveThreadId, thread: helperThread, messages: stream.messages, viewerId: me.data?.id, working: agentBusy });
 
   const browserWatch = useBrowserWatch({
     sessionId,
@@ -353,6 +355,7 @@ export function SessionView({
               pendingIds={threadQueueState?.pendingIds}
               viewerId={me.data?.id}
               onReply={enableReplies ? setReplyTarget : undefined}
+              newSince={recap?.divider ? { anchorId: recap.anchorId, label: recap.divider } : undefined}
             />
             {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
@@ -381,6 +384,7 @@ export function SessionView({
           {/* Keyed by gate id: the question input's draft must not carry
               over when the pending gate changes (e.g. a thread switch to a
               different pending gate). */}
+          <ThreadRecapDock recap={recap} collapsed={Boolean(pendingGate)} />
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
