@@ -8,6 +8,7 @@ import type {
   ListThreadsResponse,
   PatchSessionResponse,
   PatchThreadResponse,
+  ThreadDefaultsResponse,
 } from "../wire/types.js";
 
 async function createSession(baseUrl: string): Promise<string> {
@@ -129,6 +130,24 @@ describe("POST /api/sessions/:id/threads settings", () => {
       model: "l",
       reasoning: "medium",
     });
+  }, 30_000);
+
+  it("reports the defaults a new thread gets and the default that sets them", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    await api.providers.db
+      .update(users)
+      .set({ defaultModel: "l", defaultReasoning: "medium" })
+      .where(eq(users.id, "local-user"));
+
+    const read = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/thread-defaults`);
+    expect(read.status).toBe(200);
+    expect((await read.json()) as ThreadDefaultsResponse).toEqual({ model: "l", reasoning: "medium", scope: "personal" });
+    const created = (await (await createThread(api.baseUrl, sessionId)).json()) as CreateThreadResponse;
+    expect(created).toMatchObject({ model: "l", reasoning: "medium" });
+
+    const outsider = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/thread-defaults`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(outsider.status).toBe(404);
   }, 30_000);
 
   it("uses the Valet default instead of historical session reasoning when no default is set", async () => {
