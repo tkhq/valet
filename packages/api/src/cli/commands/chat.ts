@@ -32,7 +32,7 @@ import { parseGlobalFlags, printErr, printLine, printText } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
 import type { CliContext } from "../types.js";
-import { outcomeToExit, renderToolEnd, renderToolStart, type StreamFn } from "./send.js";
+import { outcomeToExit, renderToolEnd, renderToolStart, submitSubscribed, type StreamFn } from "./send.js";
 import type {
   DecisionGate,
   ResolveDecisionRequest,
@@ -170,17 +170,16 @@ async function driveGate(deps: ChatTurnDeps, sessionId: string, gate: DecisionGa
  * settle moves the wait to the turn our prompt joined.
  */
 export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promise<ChatTurnResult> {
-  const sent = await deps.client.sendPrompt(input.sessionId, { text: input.text, threadId: input.threadId, queueMode: "inject" });
+  // Subscribe first: a prompt that settles before the socket subscribes
+  // would never reach this loop (`submitSubscribed`).
+  const { sent, events: stream } = await submitSubscribed(
+    deps.stream,
+    { url: deps.url, apiKey: deps.apiKey, sessionId: input.sessionId, signal: deps.signal },
+    () => deps.client.sendPrompt(input.sessionId, { text: input.text, threadId: input.threadId, queueMode: "inject" }),
+  );
   const { threadId, messageId } = sent;
   let answering = messageId;
   let activeItemId: string | undefined;
-
-  const stream = deps.stream({
-    url: deps.url,
-    apiKey: deps.apiKey,
-    sessionId: input.sessionId,
-    signal: deps.signal,
-  });
 
   for await (const ev of stream) {
     switch (ev.type) {

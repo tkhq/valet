@@ -89,6 +89,70 @@ export function resolvePromptText(flags: ParsedFlags): string | undefined {
   return undefined;
 }
 
+/** How long to wait for the stream's subscription before sending anyway, for a server that never sends `sandbox.status`. */
+const SUBSCRIBE_WAIT_MS = 5_000;
+
+/**
+ * Open the session stream, wait until the server has subscribed it, then run
+ * `submit`. A fresh socket replays nothing, so a prompt that settles, or
+ * joins the running turn, before the socket subscribes never reaches a
+ * follower that connected after sending. The server sends `sandbox.status`
+ * once, right after it subscribes. The frames read before it (the queue
+ * snapshot) stay in `events`.
+ */
+export async function submitSubscribed<T>(
+  stream: StreamFn,
+  opts: StreamSessionOpts,
+  submit: () => Promise<T>,
+  waitMs = SUBSCRIBE_WAIT_MS,
+): Promise<{ sent: T; events: AsyncIterable<WireEvent> }> {
+  const iter = stream(opts)[Symbol.asyncIterator]();
+  const early: Array<IteratorResult<WireEvent>> = [];
+  let pending: Promise<IteratorResult<WireEvent>> | undefined;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const next = iter.next();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raced = await Promise.race([
+      next,
+      new Promise<"timeout">((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout("timeout"), Math.max(0, deadline - Date.now()));
+        timer.unref();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (raced === "timeout") {
+      pending = next;
+      break;
+    }
+    early.push(raced);
+    if (raced.done || raced.value.type === "sandbox.status" || raced.value.type === "error") break;
+  }
+  let sent: T;
+  try {
+    sent = await submit();
+  } catch (err) {
+    void iter.return?.();
+    throw err;
+  }
+  async function* events(): AsyncGenerator<WireEvent> {
+    try {
+      for (const r of [...early, ...(pending ? [await pending] : [])]) {
+        if (r.done) return;
+        yield r.value;
+      }
+      for (;;) {
+        const r = await iter.next();
+        if (r.done) return;
+        yield r.value;
+      }
+    } finally {
+      void iter.return?.();
+    }
+  }
+  return { sent, events: { [Symbol.asyncIterator]: events } };
+}
+
 interface ConsumeCtx {
   sessionId: string;
   /** The user-message id; correlates with `submission.settled.queueItemId`. */
@@ -226,7 +290,11 @@ export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<numbe
   }
   const sessionId = resolved?.sessionId ?? (typeof sessionOverride === "string" ? sessionOverride : (await deps.client.ensureOrchestrator()).sessionId);
 
-  const sent = await deps.client.sendPrompt(sessionId, { text, threadId: threadOverride, queueMode: "inject" });
+  const { sent, events } = await submitSubscribed(
+    deps.stream,
+    { url: deps.url, apiKey: deps.apiKey, sessionId },
+    () => deps.client.sendPrompt(sessionId, { text, threadId: threadOverride, queueMode: "inject" }),
+  );
   // A null messageId means the text ran as a slash command: it executed
   // immediately, took no queue item, and its result arrives as a
   // command_result entry — there is no turn to follow.
@@ -238,7 +306,7 @@ export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<numbe
     }
     return ExitCode.OK;
   }
-  return consumeSend(deps, {
+  return consumeSend({ ...deps, stream: () => events }, {
     sessionId,
     messageId: sent.messageId,
     // Prefer the server-echoed thread (resolves the default thread when we

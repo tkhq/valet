@@ -26,7 +26,7 @@ import type {
   SendPromptResponse,
   WireEvent,
 } from "../../wire/types.js";
-import { consumeSend } from "./send.js";
+import { consumeSend, submitSubscribed } from "./send.js";
 
 /** The subset of `InstanceClient` the `upload` command needs. */
 export interface UploadClient {
@@ -260,17 +260,22 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
   }
 
   // If `--message` was set, send a follow-up with the uploaded refs.
-  if (args.message !== undefined && uploadedFiles.length > 0) {
+  const text = args.message;
+  if (text !== undefined && uploadedFiles.length > 0) {
     const fileRefs = uploadedFiles.map((f) => ({
       ref: f.attachmentRef,
     }));
     try {
-      const sent = await deps.client.sendPrompt(sessionId, {
-        threadId: args.threadId,
-        text: args.message,
-        fileRefs,
-        queueMode: "inject",
-      });
+      const { sent, events } = await submitSubscribed(
+        deps.stream,
+        { url: deps.url, apiKey: deps.apiKey, sessionId },
+        () => deps.client.sendPrompt(sessionId, {
+          threadId: args.threadId,
+          text,
+          fileRefs,
+          queueMode: "inject",
+        }),
+      );
 
       if (sent.messageId === null) {
         if (!args.json) {
@@ -280,7 +285,7 @@ export async function runUpload(deps: UploadDeps, args: UploadArgs): Promise<num
       }
 
       // Stream the reply using the same logic as `valet send`.
-      return await consumeSend(deps, {
+      return await consumeSend({ ...deps, stream: () => events }, {
         sessionId,
         messageId: sent.messageId,
         threadId: sent.threadId,

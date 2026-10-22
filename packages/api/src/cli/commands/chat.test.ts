@@ -180,6 +180,42 @@ describe("chatTurn", () => {
     expect(out()).toContain("answer");
   });
 
+  it("subscribes before sending, so a prompt that joins and settles at once still ends the turn", async () => {
+    const subscribers = new Set<(event: WireEvent) => void>();
+    const stream: StreamFn = () =>
+      (async function* () {
+        const queue: WireEvent[] = [];
+        let wake: (() => void) | undefined;
+        const subscriber = (event: WireEvent) => {
+          queue.push(event);
+          wake?.();
+        };
+        subscribers.add(subscriber);
+        try {
+          yield { seq: 1, ts: 1, type: "sandbox.status", state: "released", epoch: 0 } satisfies WireEvent;
+          for (;;) {
+            while (queue.length > 0) yield queue.shift()!;
+            await new Promise<void>((resolve) => { wake = resolve; });
+          }
+        } finally {
+          subscribers.delete(subscriber);
+        }
+      })();
+    const { deps } = makeDeps([]);
+    deps.stream = stream;
+    deps.client.sendPrompt = async () => {
+      // The prompt joins the running turn, which settles before the send returns.
+      for (const event of [
+        { seq: 1, ts: 1, type: "submission.settled", sessionId: "s1", threadId: "t1", queueItemId: "msg1", outcome: "merged", mergedIntoItemId: "r0" },
+        settled("completed", "r0"),
+      ] satisfies WireEvent[]) subscribers.forEach((s) => s(event));
+      return { messageId: "msg1", threadId: "t1", activityAt: 1 };
+    };
+    const turn = chatTurn(deps, { sessionId: "s1", threadId: "t1", text: "hi" });
+    const timeout = new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 1_000).unref());
+    expect(await Promise.race([turn.then((r) => r.exit), timeout])).toBe(ExitCode.OK);
+  });
+
   it("prints an error event and returns TurnError", async () => {
     const { deps, out } = makeDeps([errorEvent("kaboom")]);
     const result = await chatTurn(deps, { sessionId: "s1", text: "hi" });

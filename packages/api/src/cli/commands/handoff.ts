@@ -20,7 +20,7 @@ import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
-import { consumeSend, type StreamFn } from "./send.js";
+import { consumeSend, submitSubscribed, type StreamFn } from "./send.js";
 import type { CliContext } from "../types.js";
 import type {
   CreateSessionRequest,
@@ -29,6 +29,7 @@ import type {
   RepoBinding,
   SendPromptRequest,
   SendPromptResponse,
+  WireEvent,
 } from "../../wire/types.js";
 
 /** The subset of `InstanceClient` the `handoff` command needs. */
@@ -194,9 +195,13 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   }
 
   const text = `${provenanceHeader(deps.env)}\n\n${doc}`;
+  const submit = () => deps.client.sendPrompt(sessionId, { text, queueMode: "inject", ...(threadFlag ? { threadId: threadFlag } : {}) });
   let sent: SendPromptResponse;
+  let events: AsyncIterable<WireEvent> | undefined;
   try {
-    sent = await deps.client.sendPrompt(sessionId, { text, queueMode: "inject", ...(threadFlag ? { threadId: threadFlag } : {}) });
+    // A follower subscribes before sending (`submitSubscribed`).
+    if (wait) ({ sent, events } = await submitSubscribed(deps.stream, { url: deps.url, apiKey: deps.apiKey, sessionId }, submit));
+    else sent = await submit();
   } catch (err) {
     if (newSession) {
       printErr(`session ${sessionId} was created but the handoff was not delivered.`);
@@ -213,11 +218,12 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
   };
   printReceipt(receipt, flags.json);
 
-  if (!wait) return ExitCode.OK;
+  if (!wait || !events) return ExitCode.OK;
   // A null messageId means the text ran as a slash command — it executed
   // immediately and took no queue item, so there is no turn to follow.
   const sentMessageId = sent.messageId;
   if (sentMessageId === null) return ExitCode.OK;
+  const followed = events;
 
   // Follow the turn like `send` does, but bounded: the handoff is already
   // delivered, so a quiet target should not hang the calling agent.
@@ -229,7 +235,7 @@ export async function runHandoff(deps: HandoffDeps, flags: ParsedFlags): Promise
     t.unref();
   });
   const follow = consumeSend(
-    { stream: deps.stream, url: deps.url, apiKey: deps.apiKey },
+    { stream: () => followed, url: deps.url, apiKey: deps.apiKey },
     { sessionId, messageId: sentMessageId, threadId: sent.threadId, json: flags.json },
   );
   return Promise.race([follow, timeout]);
