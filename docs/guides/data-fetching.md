@@ -14,22 +14,32 @@ key factories, query hooks, invalidation, and mutations.
 - **Types come from the wire.** Import request and response types from
   `@valet/api/wire`. Never redeclare a server shape in the client.
 
-Global defaults are set once, in `src/main.tsx`:
-
-```ts
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      // Sessions list, etc. — moderate freshness; WS will push live updates.
-      staleTime: 5_000,
-      retry: 1,
-    },
-  },
-});
-```
+Global defaults are set once, in `createQueryClient` (`src/api/query-client.ts`):
+`staleTime: 5_000`, `retry: 1`, the shared backoff as `retryDelay`, and
+`networkMode: "always"` for mutations.
 
 Override per query when a surface needs something different. Do not change the
 defaults to fix one page.
+
+## Api restarts and outages
+
+A deploy restarts the single api replica, and the load balancer answers 503
+until the new one is up. `src/api/connection.ts` is the one place that handles
+this. Do not add a second retry loop or a second "reconnecting" notice.
+
+- **Retryable** means that no api answered: `fetch` rejected, or a 502/503/504
+  came back without the api's JSON error body. The api's own JSON errors,
+  including its real 502/503, are never retried as outages.
+- **Queries** pause during a confirmed outage and refetch when the api returns.
+  The rule wraps each query's own `retry`, even `retry: false`, so a panel never
+  shows an error for a restart. Render `isError` for real errors only.
+- **One banner** (`ReconnectingBanner`) reads `useApiConnection`. Panels do not.
+- **Mutations** never retry. They fail at once, and `errorText` names the
+  outage. A message send carries `clientMessageId`, so a resend after a lost
+  answer cannot post the message twice.
+- **A loop outside TanStack Query** (a socket, a frame feed) waits with
+  `backoffDelay`, calls `reportServerUnavailable()` when no api answers, and
+  starts again after `waitForOutageEnd()` or `reportServerReachable()`.
 
 ## Query key factories
 
@@ -260,3 +270,5 @@ server result you cannot predict. Show a pending state instead.
 | Owner or filter first in a key | Destroys the invalidation prefix | Broad to narrow |
 | Optimistic write without `cancelQueries` | An in-flight refetch clobbers it | Cancel, then write |
 | Raising the global `staleTime` for one page | Changes every other page too | Override on that query |
+| A hand-written retry or reconnect loop | A second backoff and a second outage notice | `connection.ts` |
+| Retrying a mutation | A second write, or a message posted twice | Fail at once; key the send |

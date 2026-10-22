@@ -1,12 +1,13 @@
 import "./styles/globals.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
 import { applyStoredPalette, applyStoredTheme } from "./lib/theme";
 import { registerServiceWorker } from "./pwa/register";
 import { api } from "./api/client";
+import { createQueryClient } from "./api/query-client";
 import { loadPublicOrigin } from "./lib/public-origin";
 
 // Apply the persisted appearance choices (Settings → Appearance) before the
@@ -25,15 +26,7 @@ registerServiceWorker();
 // them on this hostname once the origin is known (lib/public-origin.ts).
 void loadPublicOrigin(() => api.getAuthConfig());
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      // Sessions list, etc. — moderate freshness; WS will push live updates.
-      staleTime: 5_000,
-      retry: 1,
-    },
-  },
-});
+const queryClient = createQueryClient();
 
 const router = createRouter({
   routeTree,
