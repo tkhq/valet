@@ -685,12 +685,14 @@ Pass criterion: all steps, in one run, from a clean start.
    conditions as removable pills in words (`repository is acme/api`,
    `channel is #incidents`, `author is jack`) and `+ Add a condition`,
    which offers the fields these events carry. A condition compares with
-   `is`, `is one of`, `is not`, `starts with`, `doesn't start with`, or
-   `contains`. `is not` (`not_in`) and `doesn't start with` (`not_prefix`)
+   `is`, `is one of`, `is not`, `starts with`, `doesn't start with`,
+   `contains`, `matches`, or `doesn't match`. `is not` (`not_in`),
+   `doesn't start with` (`not_prefix`), and `doesn't match` (`not_regex`)
    skip the events they name, so the pill `bot is not B0123ABCD` keeps that
    app's posts from starting a turn. An event with no value for the field
    still matches an exclusion. `is one of` and `is not` take a
-   comma-separated list. The hidden creator scope
+   comma-separated list. Only `is` picks its value from a list such as the
+   channels or users; every other comparison takes typed text. The hidden creator scope
    (Part C step 2) shows as a pill `your own mentions` (or `mentions by
    <creator>` on another person's line) that cannot be removed. A mention
    with no channel condition offers `Any channel`; Save refuses both
@@ -893,7 +895,8 @@ Pass criterion: all steps, in one run, from a clean start.
   (see Deviations).
 - A copy lint for INV-H2 and a no-navigation test for INV-H5.
 - Editor tests for the exclusion conditions: an `is not` pill renders in
-  words and saves as `not_in`.
+  words and saves as `not_in`, and a `doesn't match` condition on a field
+  with a picker takes typed text.
 
 ## Non-goals (normative boundary)
 

@@ -1174,6 +1174,7 @@ export function opWords(op: EventSubscriptionFilterWire["op"]): string {
     case "regex": return "matches";
     case "not_in": return "is not";
     case "not_prefix": return "doesn't start with";
+    case "not_regex": return "doesn't match";
   }
 }
 

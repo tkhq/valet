@@ -31,7 +31,7 @@ export const NO_CHANNEL_MATCH_HELP =
 
 export type FilterOp = EventSubscriptionFilterWire["op"];
 
-const FILTER_OPS: readonly FilterOp[] = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix"];
+const FILTER_OPS: readonly FilterOp[] = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix", "not_regex"];
 
 /** True for an op whose value is a list: `in` and `not_in`. */
 export function isListOp(op: FilterOp): op is "in" | "not_in" {

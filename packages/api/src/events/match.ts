@@ -7,18 +7,18 @@ export { eventKeyMatches } from "@valet/shared";
 import type { EventCatalogEntry } from "@valet/engine";
 
 /**
- * The filter operators a subscription accepts. `not_in` and `not_prefix`
- * exclude events: they match when the value is absent, because an absent
- * value is not in the excluded set (see `filtersMatch`). The write validator
- * (`subscription-write.ts`) re-exports this list, and the
+ * The filter operators a subscription accepts. `not_in`, `not_prefix`, and
+ * `not_regex` exclude events: they match when the value is absent, because
+ * an absent value is not in the excluded set (see `filtersMatch`). The write
+ * validator (`subscription-write.ts`) re-exports this list, and the
  * `event-subscriptions` skill names each one.
  */
-export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix"] as const;
+export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix", "not_regex"] as const;
 export type SubscriptionFilterOp = (typeof FILTER_OPS)[number];
 
 /** True for an op that excludes events: it matches when the value is absent. */
-export function isExclusionOp(op: SubscriptionFilterOp): op is "not_in" | "not_prefix" {
-  return op === "not_in" || op === "not_prefix";
+export function isExclusionOp(op: SubscriptionFilterOp): op is "not_in" | "not_prefix" | "not_regex" {
+  return op === "not_in" || op === "not_prefix" || op === "not_regex";
 }
 
 export interface SubscriptionFilter {
@@ -210,10 +210,11 @@ export function subscriptionNamesKey(sub: { eventKeys: unknown }, eventKey: stri
  * A value is absent when the event's catalog entry does not declare the
  * field, or the payload holds no text or number at its path. An absent value
  * fails every op that names what to match (`eq`, `in`, `prefix`, `contains`,
- * `regex`). It passes the exclusion ops (`not_in`, `not_prefix`), because an
- * absent value is not in the excluded set: `bot_id not_in [B1]` still matches
- * a message a person wrote, and `channel_name not_prefix alerts-dev` still
- * matches a direct message, which has no channel name.
+ * `regex`). It passes the exclusion ops (`not_in`, `not_prefix`,
+ * `not_regex`), because an absent value is not in the excluded set:
+ * `bot_id not_in [B1]` still matches a message a person wrote, and
+ * `channel_name not_prefix alerts-dev` still matches a direct message, which
+ * has no channel name.
  */
 export function filtersMatch(
   payload: unknown,
@@ -240,15 +241,17 @@ export function filtersMatch(
         return typeof filter.value === "string" && actual.startsWith(filter.value);
       case "contains":
         return typeof filter.value === "string" && actual.includes(filter.value);
-      case "regex": {
-        // A bad pattern fails closed — it never matches and never throws, so a
-        // malformed rule cannot break the ingest transaction. The pattern is
-        // compiled once (cached) and tested against a bounded slice of the
-        // input, so backtracking cost stays bounded per event.
+      case "regex":
+      case "not_regex": {
+        // A bad pattern fails closed — the filter never passes and never
+        // throws, so a malformed rule cannot break the ingest transaction or
+        // wake the assistant. The pattern is compiled once (cached) and tested
+        // against a bounded slice of the input, so backtracking cost stays
+        // bounded per event.
         if (typeof filter.value !== "string") return false;
         const re = compileRegexCached(filter.value);
         if (re === null) return false;
-        return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH));
+        return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH)) === (filter.op === "regex");
       }
       case "not_in":
         return Array.isArray(filter.value) && !filter.value.includes(actual);

@@ -13,9 +13,10 @@
  * common ops (`eq`, `in`, `prefix`, `contains`) and the exclusion ops
  * (`not_in`, `not_prefix`). An exclusion's set also holds every event with
  * no value for the field (`filtersMatch`), so a positive filter never
- * contains one, and two exclusions are never disjoint. A `regex` filter is
- * undecidable here: it can prove nothing, so it never yields containment
- * (blocking), only possible overlap (a warning). The check is advisory, not
+ * contains one, and two exclusions are never disjoint. A `regex` or
+ * `not_regex` filter is undecidable here: it can prove nothing, so it never
+ * yields containment (blocking), only possible overlap (a warning). The
+ * check is advisory, not
  * an invariant: a collision that slips past it means double delivery, which
  * the feed makes visible, not corruption.
  *
@@ -92,6 +93,7 @@ function filterImplies(a: SubscriptionFilter, b: SubscriptionFilter): boolean {
       case "contains":
         return typeof b.value === "string" && aValues.every((v) => v.includes(b.value as string));
       case "regex":
+      case "not_regex":
         return false;
       case "not_in":
         return Array.isArray(b.value) && aValues.every((v) => !(b.value as string[]).includes(v));
@@ -154,7 +156,8 @@ function filtersDisjoint(a: SubscriptionFilter, b: SubscriptionFilter): boolean 
       const excluded = exclusion.value;
       return finiteOther !== null && finiteOther.every((v) => excluded.includes(v));
     }
-    if (typeof exclusion.value !== "string") return false;
+    // not_regex is undecidable, so it may overlap anything.
+    if (exclusion.op !== "not_prefix" || typeof exclusion.value !== "string") return false;
     const excludedPrefix = exclusion.value;
     if (finiteOther !== null) return finiteOther.every((v) => v.startsWith(excludedPrefix));
     return other.op === "prefix" && typeof other.value === "string" && other.value.startsWith(excludedPrefix);

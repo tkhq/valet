@@ -200,7 +200,11 @@ describe("exclusion conditions", () => {
       entries: [
         { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel" }, { field: "user" }] },
         { key: "slack.message", description: "Message", filters: [{ field: "channel" }] },
-        { key: "slack.bot_message", description: "App message", filters: [{ field: "channel_name" }, { field: "bot_id" }] },
+        {
+          key: "slack.bot_message",
+          description: "App message",
+          filters: [{ field: "channel_name" }, { field: "bot_id" }, { field: "user", options: { source: "slack.users" } }],
+        },
       ],
     },
   ];
@@ -213,14 +217,30 @@ describe("exclusion conditions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
   }
 
-  it("offers is not and doesn't start with among the comparisons", () => {
+  it("offers the exclusions among the comparisons", () => {
     render(<Harness initial={newDraft({ timezone: "UTC" })} services={ALERTS} />);
     fireEvent.click(screen.getByLabelText("An app posts a message"));
     fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
     const comparison = screen.getByLabelText("Condition comparison") as HTMLSelectElement;
     expect([...comparison.options].map((o) => o.textContent)).toEqual([
-      "is", "is one of", "is not", "starts with", "doesn't start with", "contains",
+      "is", "is one of", "is not", "starts with", "doesn't start with", "contains", "matches", "doesn't match",
     ]);
+  });
+
+  it("takes a typed pattern for doesn't match on a field with a picker", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} services={ALERTS} />);
+    fireEvent.click(screen.getByLabelText("An app posts a message"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "user" } });
+    // "is" picks a user from the list.
+    expect(screen.getByLabelText("Filter value")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: "not_regex" } });
+    expect(screen.queryByLabelText("Filter value")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "^U0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(within(screen.getByRole("group", { name: "Only when" })).getByText("user doesn't match ^U0")).toBeTruthy();
+    const saved = latest !== undefined ? bodyFromDraft(latest, { kind: "create" }) : null;
+    expect(saved?.kind === "create-line" ? saved.body.filters : null).toEqual([{ field: "user", op: "not_regex", value: "^U0" }]);
   });
 
   it("renders a bot is not pill and saves it as not_in", () => {

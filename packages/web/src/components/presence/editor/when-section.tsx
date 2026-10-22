@@ -388,6 +388,8 @@ const ADD_OPS: readonly { value: FilterOp; label: string }[] = [
   { value: "prefix", label: "starts with" },
   { value: "not_prefix", label: "doesn't start with" },
   { value: "contains", label: "contains" },
+  { value: "regex", label: "matches" },
+  { value: "not_regex", label: "doesn't match" },
 ];
 
 /** The small picker behind `+ Add a condition`: a field these events carry, how it compares, and a value. */
@@ -413,7 +415,8 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
     }
   }, [offered, firstField]);
   const selected = fields.find((f) => f.field === field);
-  const source = isListOp(op) ? undefined : selected?.options;
+  // Only an exact value comes from the picker. A list or a pattern is typed.
+  const source = op === "eq" ? selected?.options : undefined;
   const deps: Record<string, string> = {};
   for (const dep of source?.dependsOn ?? []) {
     const sibling = rows.find((r) => r.field === dep && r.value.trim().length > 0);
@@ -439,7 +442,10 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
           value={op}
           onChange={(e) => {
             const next = ADD_OPS.find((o) => o.value === e.target.value);
-            if (next) setOp(next.value);
+            if (!next) return;
+            setOp(next.value);
+            // A picked name labels an exact value only, not a typed list or pattern.
+            if (next.value !== "eq") setLabel(undefined);
           }}
         >
           {ADD_OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}

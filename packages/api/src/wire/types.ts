@@ -5089,12 +5089,12 @@ export interface GetEventCatalogResponse {
   services: { service: string; entries: EventCatalogEntryWire[]; readiness?: EventIngressReadiness }[];
 }
 
-/** Mirrors `events/match.ts`'s `SubscriptionFilter`. `not_in` and
- * `not_prefix` skip matching events; an event with no value for the field
- * still matches them. */
+/** Mirrors `events/match.ts`'s `SubscriptionFilter`. `not_in`,
+ * `not_prefix`, and `not_regex` skip matching events; an event with no value
+ * for the field still matches them. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains" | "regex" | "not_in" | "not_prefix";
+  op: "eq" | "in" | "prefix" | "contains" | "regex" | "not_in" | "not_prefix" | "not_regex";
   value: string | string[];
   /**
    * Optional display label for the value — a resolved name for a raw id (a

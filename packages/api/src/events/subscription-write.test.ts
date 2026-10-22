@@ -34,9 +34,17 @@ describe("exclusion filters", () => {
   const body = { name: "Alert triage", eventKeys: ["slack.bot_message"], target: { kind: "assistant" } };
   const check = (filter: Record<string, unknown>) => validateSubscription([slackPlugin], { ...body, filters: [filter] });
 
-  it("accepts a not_in list and a not_prefix text", () => {
+  it("accepts a not_in list, a not_prefix text, and a not_regex pattern", () => {
     expect(check({ field: "bot_id", op: "not_in", value: ["B1", "B2"] })).toBeNull();
     expect(check({ field: "channel_name", op: "not_prefix", value: "alerts-dev" })).toBeNull();
+    expect(check({ field: "user", op: "not_regex", value: "^U0(1|2)$" })).toBeNull();
+  });
+
+  it("refuses a not_regex pattern that is empty, invalid, too long, or too slow", () => {
+    expect(check({ field: "bot_id", op: "not_regex", value: "" })).toBe("filter value invalid for op not_regex on field bot_id");
+    expect(check({ field: "bot_id", op: "not_regex", value: "(" })).toBe("invalid regular expression. Fix the pattern.");
+    expect(check({ field: "bot_id", op: "not_regex", value: "x".repeat(201) })).toContain("too long");
+    expect(check({ field: "bot_id", op: "not_regex", value: "(a+)+" })).toContain("nests unbounded quantifiers");
   });
 
   it("refuses a not_in value that is not a list of one or more strings", () => {

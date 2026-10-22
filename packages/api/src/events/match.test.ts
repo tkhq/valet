@@ -121,11 +121,12 @@ describe("Slack channel_name filter", () => {
   });
 });
 
-describe("exclusion filters (not_in, not_prefix)", () => {
+describe("exclusion filters (not_in, not_prefix, not_regex)", () => {
   const catalog = (slackPlugin.triggers ?? []).flatMap((t) => t.catalog);
   const post = (fields: Record<string, string>) => ({ type: "message", channel: "C1", text: "CPU high", ...fields });
   const botIdNotIn = [{ field: "bot_id", op: "not_in" as const, value: ["B1", "B2"] }];
   const nameNotPrefix = [{ field: "channel_name", op: "not_prefix" as const, value: "alerts-dev" }];
+  const botIdNotRegex = [{ field: "bot_id", op: "not_regex" as const, value: "^B(1|2)$" }];
 
   // An absent value is not in the excluded set, so an exclusion passes it:
   // the payload has no value, or the key does not declare the field at all.
@@ -139,6 +140,10 @@ describe("exclusion filters (not_in, not_prefix)", () => {
     ["not_prefix: value does not start with it", "slack.bot_message", post({ channel_name: "alerts-prod" }), nameNotPrefix, true],
     ["not_prefix: value absent (no name read)", "slack.bot_message", post({}), nameNotPrefix, true],
     ["not_prefix: field the key does not declare", "slack.reaction_added", { reaction: "eyes", channel: "C1" }, nameNotPrefix, true],
+    ["not_regex: value matches the pattern", "slack.bot_message", post({ bot_id: "B2" }), botIdNotRegex, false],
+    ["not_regex: value does not match the pattern", "slack.bot_message", post({ bot_id: "B22" }), botIdNotRegex, true],
+    ["not_regex: value absent from the payload", "slack.bot_message", post({}), botIdNotRegex, true],
+    ["not_regex: field the key does not declare", "slack.message", post({ user: "U1" }), botIdNotRegex, true],
   ] as const)("%s", (_label, key, payload, filters, expected) => {
     expect(filtersMatch(payload, key, [...filters], catalog)).toBe(expected);
   });
@@ -146,6 +151,14 @@ describe("exclusion filters (not_in, not_prefix)", () => {
   it("fails closed on a malformed value that is present", () => {
     expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_in", value: "B2" }], catalog)).toBe(false);
     expect(filtersMatch(post({ channel_name: "general" }), "slack.bot_message", [{ field: "channel_name", op: "not_prefix", value: ["x"] }], catalog)).toBe(false);
+    // A pattern that does not compile never passes, for regex and not_regex alike.
+    expect(filtersMatch(post({ bot_id: "B1" }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "(" }], catalog)).toBe(false);
+  });
+
+  it("not_regex tests the same bounded slice of the value as regex", () => {
+    const long = `${"x".repeat(2_000)}B1`;
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "regex", value: "B1$" }], catalog)).toBe(false);
+    expect(filtersMatch(post({ bot_id: long }), "slack.bot_message", [{ field: "bot_id", op: "not_regex", value: "B1$" }], catalog)).toBe(true);
   });
 
   it("ANDs with the other filters: alert channels minus two bots", () => {

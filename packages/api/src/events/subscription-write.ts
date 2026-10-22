@@ -108,13 +108,13 @@ export function validateSubscription(
         return `filter value invalid for op not_in on field ${f.field}. Give a list of one or more values to exclude.`;
       }
     } else {
-      // eq / prefix / contains / regex / not_prefix — value must be a non-empty string
+      // eq / prefix / contains / regex / not_prefix / not_regex — value must be a non-empty string
       if (typeof f.value !== "string" || f.value.length === 0) {
         return `filter value invalid for op ${f.op} on field ${f.field}`;
       }
       // A regex runs on every event, so refuse an invalid, oversized, or
       // catastrophic-backtracking pattern at write time (see match.ts).
-      if (f.op === "regex") {
+      if (f.op === "regex" || f.op === "not_regex") {
         const regexError = validateRegexPattern(f.value);
         if (regexError) return regexError;
       }

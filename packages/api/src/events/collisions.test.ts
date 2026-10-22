@@ -203,6 +203,14 @@ describe("computeCollisions — exclusion filters", () => {
     expect(report.overlapping[0]?.relation).toBe("partial");
   });
 
+  it("a not_regex filter proves nothing: an identical rule only warns", () => {
+    const notRegex: SubscriptionFilter = { field: "channel", op: "not_regex", value: "^C9" };
+    const report = computeCollisions(candidate({ filters: [notRegex] }), [sub({ filters: [notRegex] })], CATALOG);
+    expect(report.blocking).toHaveLength(0);
+    expect(report.overlapping[0]?.relation).toBe("partial");
+    expect(computeCollisions(candidate({ filters: [notRegex] }), [sub({ filters: [chEq("C9")] })], CATALOG).overlapping).toHaveLength(1);
+  });
+
   it("keeps a key that does not declare the excluded field", () => {
     // `text` is declared by slack.message only. Its exclusion still passes on
     // github.push, so the pair shares that key.
