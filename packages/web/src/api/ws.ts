@@ -116,6 +116,9 @@ function announceViewing(socket: SharedSocket): void {
   socket.send({ type: "viewing", threadIds: [...new Set(socket.viewing.values())], visible: document.visibilityState === "visible" });
 }
 
+/** How often a socket repeats its report, so the server can drop a silent one (sleep, lost network). */
+const VIEWING_HEARTBEAT_MS = 20_000;
+
 let visibilityListening = false;
 function listenForVisibility(): void {
   if (visibilityListening || typeof document === "undefined") return;
@@ -180,7 +183,8 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
       listenForVisibility();
       const created: SharedSocket = { sessionId, views: 0, close: () => {}, send: () => {}, viewing: new Map() };
       const connection = connect(qc, sessionId, sharedThreadId, () => announceViewing(created));
-      created.close = connection.close;
+      const heartbeat = setInterval(() => { if (created.viewing.size > 0) announceViewing(created); }, VIEWING_HEARTBEAT_MS);
+      created.close = () => { clearInterval(heartbeat); connection.close(); };
       created.send = connection.send;
       shared = created;
       sockets.set(key, shared);

@@ -47,6 +47,19 @@ describe("thread viewers on the session socket", () => {
     view.unmount();
   });
 
+  it("repeats the report every 20 seconds while the view shows a thread", () => {
+    vi.useFakeTimers();
+    const view = renderView("s4", "t1");
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket?.open());
+    const reports = () => socket?.sent.filter((frame) => (frame as { type: string }).type === "viewing").length ?? 0;
+    const before = reports();
+    act(() => { vi.advanceTimersByTime(20_000); });
+    expect(reports()).toBe(before + 1);
+    view.unmount();
+    vi.useRealTimers();
+  });
+
   it("sends a typing signal at most every two seconds, and a stop once", () => {
     const view = renderView("s2", "t1");
     const socket = FakeWebSocket.instances[0];

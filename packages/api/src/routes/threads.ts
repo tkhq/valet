@@ -44,7 +44,7 @@ threadsRouter.get("/viewers", async (c) => {
   const owner = await authorizedWorkspaceOwner(c, c.req.query("workspace") ?? (c.var.principal.type === "team" ? c.var.principal.id : "user"));
   if (!owner) return c.json({ error: "Workspace not found." }, 404);
   const body: ActiveViewersResponse = { threads: {} };
-  const active = activeViewers.activeThreads();
+  const active = activeViewers.activeThreads(c.var.user.orgId);
   if (active.size === 0) return c.json(body);
   const rows = await c.var.providers.db
     .select({ id: agentSessions.id, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, userId: agentSessions.userId })

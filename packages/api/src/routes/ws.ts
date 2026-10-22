@@ -119,6 +119,14 @@ export function registerWsRoutes(
       let viewing: ((frame: ClientViewing | { type: "typing"; threadId: string; active: boolean }) => Promise<void>) | undefined;
       let pendingViewing: ClientViewing | undefined;
       let stopViewers: (() => void) | undefined;
+      // Frames apply in arrival order: each awaits access checks, so a quick
+      // hidden-then-visible pair must not land the wrong way round.
+      let viewerFrames: Promise<void> = Promise.resolve();
+      const applyViewerFrame = (frame: ClientViewing | { type: "typing"; threadId: string; active: boolean }) => {
+        const apply = viewing;
+        if (!apply) return;
+        viewerFrames = viewerFrames.then(() => apply(frame)).catch((err) => console.error(`ws ${frame.type} frame failed:`, err));
+      };
       const deliver = (ws: { send: (data: string) => void; close: (code?: number, reason?: string) => void }, draftEvent: WireEventDraft) => {
         const threadId = "threadId" in draftEvent && typeof draftEvent.threadId === "string" ? draftEvent.threadId : undefined;
         const shown = threadShown;
@@ -411,17 +419,17 @@ export function registerWsRoutes(
                   const allowed = (await Promise.all(requested.map(async (id) => (await mayShow(id)) ? id : undefined)))
                     .filter((id): id is string => id !== undefined);
                   if (lifecycle.closed) return;
-                  activeViewers.view({ id: connectionId, sessionId, person }, allowed, frame.visible === true);
+                  const added = activeViewers.view({ id: connectionId, sessionId, orgId: row.orgId, person }, allowed, frame.visible === true);
                   // A second tab of someone already listed changes no list, so
-                  // this socket gets the current lists directly.
-                  for (const threadId of allowed) {
+                  // this socket gets a newly shown thread's list directly.
+                  for (const threadId of added) {
                     deliver(ws, { type: "thread.viewers", threadId, viewers: activeViewers.viewersOf(sessionId, threadId) });
                   }
                   return;
                 }
                 activeViewers.type(connectionId, frame.threadId, frame.active === true);
               };
-              if (pendingViewing) await viewing(pendingViewing);
+              if (pendingViewing) applyViewerFrame(pendingViewing);
             }
           } catch (err) {
             // Engine setup failed (e.g. workspace doesn't exist, Docker
@@ -457,12 +465,10 @@ export function registerWsRoutes(
           if (frame.type === "viewing" && Array.isArray(frame.threadIds)) {
             // A frame sent before the handshake ends waits for it.
             if (!viewing) { pendingViewing = frame; return; }
-            void viewing(frame).catch((err) => console.error("ws viewing frame failed:", err));
+            applyViewerFrame(frame);
             return;
           }
-          if (frame.type === "typing" && typeof frame.threadId === "string" && viewing) {
-            void viewing(frame).catch((err) => console.error("ws typing frame failed:", err));
-          }
+          if (frame.type === "typing" && typeof frame.threadId === "string") applyViewerFrame(frame);
         },
 
         onClose() {
