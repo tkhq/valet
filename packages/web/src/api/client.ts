@@ -287,6 +287,8 @@ import type {
   SearchMemoryResponse,
 } from "./memory-types";
 import { safeNextPath } from "~/lib/next-path";
+import { ApiError } from "./api-error";
+import { isServerUnavailable, reportServerUnavailable } from "./connection";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -327,13 +329,6 @@ function ownerQuery(owner: OwnerFilter | undefined): string {
 function ownerSuffix(owner: OwnerFilter | undefined): string {
   const params = ownerParams(owner);
   return params ? `&${params}` : "";
-}
-
-class ApiError extends Error {
-  constructor(public status: number, message: string, public payload?: unknown) {
-    super(message);
-    this.name = "ApiError";
-  }
 }
 
 export interface MemoryCopyRequest {
@@ -490,6 +485,7 @@ async function requestForm<T>(path: string, form: FormData): Promise<T> {
         `POST ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
       );
     }
+    if (isServerUnavailable(err)) reportServerUnavailable();
     throw err;
   } finally {
     clearTimeout(timer);
@@ -542,6 +538,7 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
         `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
       );
     }
+    if (isServerUnavailable(err)) reportServerUnavailable();
     throw err;
   } finally {
     clearTimeout(timer);

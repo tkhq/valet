@@ -22,11 +22,6 @@ export function useWorkspaceAssistant() {
   return context;
 }
 
-/** Opening Ask Valet runs even while the browser reports offline. A paused
- * mutation never settles, so the panel showed neither an error nor Retry;
- * the request now fails at once and the panel offers Retry. */
-export const ENSURE_CONVERSATION_MUTATION = { networkMode: "always" } as const;
-
 /** Ask Valet, reused across app pages. Opening the panel from closed starts a
  * new conversation, unless the latest one runs a turn or waits for an approval.
  * A contextual prompt starts a new conversation unless the panel is open. */
@@ -37,7 +32,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   const qc = useQueryClient();
   // A mutation, not a direct call: the UI stress gallery's frozen client
   // refuses every mutation, so the gallery never sends this request.
-  const ensureConversation = useMutation({ ...ENSURE_CONVERSATION_MUTATION,
+  const ensureConversation = useMutation({
     mutationFn: ({ workspace, request }: { workspace: string; request: EnsureWorkspaceConversationRequest }) => api.ensureWorkspaceConversation(workspace, request) });
   // In-flight requests by workspace and body. The latest start in each
   // workspace decides which conversation the panel shows.

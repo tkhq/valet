@@ -15,11 +15,10 @@ import { useActiveViewersStore } from "./active-viewers";
 import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 import { qkThreadContext } from "./thread-context";
 import { qkThreadPlan } from "./thread-plan";
+import { backoffDelay, reportServerReachable, reportServerUnavailable } from "./connection";
 
-const MAX_RETRY_MS = 8_000;
 /** `WebSocket.OPEN`. */
 const SOCKET_OPEN = 1;
-const INITIAL_RETRY_MS = 500;
 
 function isSettingsWrite(toolName: string, args: unknown): boolean {
   const actionId = typeof args === "object" && args !== null && "tool_id" in args ? args.tool_id : undefined;
@@ -236,8 +235,11 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
       }
     }
   }
-  let retryDelay = INITIAL_RETRY_MS;
+  /** Reconnect tries since the last `init`; the shared backoff (`connection.ts`) sets the wait. */
+  let retryAttempt = 0;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set when the socket closed under this connection, cleared by the next `init`. */
+  let reconnecting = false;
 
   function open() {
     if (cancelled) return;
@@ -299,9 +301,9 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         }
         // Reset backoff only after receiving init — confirms the session
         // is valid and the connection is healthy. Resetting in onopen
-        // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
+        // allowed a connect→immediate-close loop at the first backoff step.
         if (wire.type === "init") {
-          retryDelay = INITIAL_RETRY_MS;
+          retryAttempt = 0;
           // The server sends current viewer lists again for the threads this
           // tab reports; lists from before a reconnect may be stale.
           useActiveViewersStore.getState().clear(sessionId);
@@ -309,6 +311,12 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
           // after every initial connection or reconnect to recover a frame
           // missed while this client was disconnected.
           invalidatePersistedTitles(qc, sessionId, true, true);
+          // The api answers again. REST reads that failed while the
+          // socket was down refetch now (connection.ts).
+          if (reconnecting) {
+            reconnecting = false;
+            reportServerReachable();
+          }
         }
       } catch (err) {
         console.error("ws parse failed:", err);
@@ -328,8 +336,12 @@ function connect(qc: QueryClient, sessionId: string, sharedThreadId: string | un
         return;
       }
       setConnection(sessionId, "closed");
-      retryTimer = setTimeout(open, retryDelay);
-      retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
+      // A close is often the first sign of an api restart. The health
+      // check decides whether the app shows the reconnecting state.
+      reconnecting = true;
+      reportServerUnavailable();
+      retryAttempt += 1;
+      retryTimer = setTimeout(open, backoffDelay(retryAttempt));
     };
   }
 

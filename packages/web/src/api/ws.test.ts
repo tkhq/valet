@@ -15,6 +15,15 @@ import { useSidebarThreads } from "./queries";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { useSessionWebSocket } from "./ws";
 import { useStreamStore } from "~/stores/stream";
+import { reportServerReachable, reportServerUnavailable } from "./connection";
+
+// The socket reports closes and reconnects to the app's connection state.
+// The health probe behind it is tested in connection.test.ts.
+vi.mock("./connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./connection")>()),
+  reportServerReachable: vi.fn(),
+  reportServerUnavailable: vi.fn(),
+}));
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -42,12 +51,17 @@ class FakeWebSocket {
 beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket);
+  // No jitter, so the reconnect waits are exactly 500 ms, 1 s, 2 s.
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  vi.mocked(reportServerReachable).mockClear();
+  vi.mocked(reportServerUnavailable).mockClear();
   useStreamStore.setState({ bySession: {} });
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function renderSocketHook(sessionId: string) {
@@ -192,6 +206,25 @@ describe("useSessionWebSocket", () => {
 
     expect(invalidate).toHaveBeenCalledTimes(3);
     expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
+    unmount();
+  });
+
+  it("reports a dropped socket, and the init after its reconnect, to the app's connection state", () => {
+    vi.useFakeTimers();
+    const { unmount } = renderSocketHook("s1");
+    const init = JSON.stringify({ type: "init", seq: 1, ts: 1, session: { id: "s1" } });
+    const first = FakeWebSocket.instances[0];
+    // The first init is not a recovery: nothing failed before it.
+    act(() => first?.onmessage?.({ data: init }));
+    expect(reportServerReachable).not.toHaveBeenCalled();
+
+    act(() => {
+      first?.onclose?.({ code: 1006 });
+      vi.advanceTimersByTime(500);
+    });
+    expect(reportServerUnavailable).toHaveBeenCalledTimes(1);
+    act(() => FakeWebSocket.instances[1]?.onmessage?.({ data: init }));
+    expect(reportServerReachable).toHaveBeenCalledTimes(1);
     unmount();
   });
 
