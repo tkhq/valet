@@ -1,6 +1,6 @@
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
-import { RowFaces } from "./viewer-faces";
+import { RowFaces, ViewerNames } from "./viewer-faces";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { bucketCounts, threadChannelType, threadOriginBucket, THREAD_ORIGIN_FILTERS, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { useChildWork, flattenChildWork, useDismissChild } from "~/api/child-work";
@@ -964,7 +964,7 @@ function ThreadNode({
             />
           </div>
         ) : (
-          <Tooltip content={label} delayDuration={600}>
+          <Tooltip content={<>{label}<span className="text-muted"><ViewerNames viewers={viewers} /></span></>} delayDuration={600}>
             <Link
               to="/chat"
               search={(prev) => ({
