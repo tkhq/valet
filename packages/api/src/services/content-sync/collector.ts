@@ -27,7 +27,7 @@ import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
  * so compare 2 still short-circuits while the files are unchanged. Nothing
  * re-renders mirrored rows today.
  */
-export const DISCOVERY_RULES_VERSION = 1;
+export const DISCOVERY_RULES_VERSION = 2;
 
 /**
  * What a complete sync records in `skill_sources.discovery_scan`: the rules
@@ -83,6 +83,7 @@ export interface CollectorWalkContext {
 
 export interface CollectorReconcileContext {
   db: AppDb;
+  reader?: SkillRepoReader;
   source: ContentSourceRow;
   /** The commit every body in `text` was read at. A collector that records
    * provenance writes this and never the ref, which moves. */
@@ -133,8 +134,8 @@ export interface CollectorPass {
   readonly kind: ContentKind;
   /** Files whose bodies reconcile needs, in the order reconcile wants them. */
   readonly readEntries: ContentManifestEntry[];
-  /** The same files in canonical order — the manifest-hash input. Canonical
-   * means independent of how GitHub listed the tree. */
+  /** All tracked files in canonical order, including companion files.
+   * This manifest-hash input does not depend on GitHub listing order. */
   readonly manifestEntries: ContentManifestEntry[];
   /** Bodies discovery already read, keyed by PATH. Empty after a tree read;
    * the directory walk fills it, because it reads a file to learn its blob

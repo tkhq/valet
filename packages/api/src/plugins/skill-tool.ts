@@ -16,6 +16,7 @@
  * a skill as a new prompt, while this tool serves the model's own
  * mid-turn request.
  */
+import { validSkillPath } from "../services/content-sync/skill-files.js";
 import { Type, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { renderTemplate } from "@valet/engine";
@@ -35,6 +36,7 @@ const skillParameters = Type.Object({
   name: Type.String({
     description: "Name of the skill to read. Use one of the names listed in this tool's description.",
   }),
+  path: Type.Optional(Type.String({ description: "Path of a stored text file, relative to the skill directory. Omit this to read SKILL.md." })),
   args: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), {
       description:
@@ -72,11 +74,20 @@ function renderSkillResult(
   skills: ReadonlyMap<string, SkillSource>,
   name: string,
   args: Record<string, unknown>,
+  path?: string,
 ): { text: string; skill?: SkillSource } {
   const skill = skills.get(name);
   if (!skill) {
     const known = [...skills.keys()].join(", ");
     return { text: `[skill_not_found] There is no skill named "${name}". Call skill again with one of: ${known}.` };
+  }
+  if (path !== undefined) {
+    if (!validSkillPath(path)) return { text: "[skill_bad_path] Use a relative file path without empty, dot, or parent segments." };
+    const file = skill.files?.find((file) => file.path === path);
+    if (!file) return { text: `[skill_file_not_found] There is no stored file "${path}". Read skill({ name: "${name}" }) to see its files.` };
+    const text = skillFileText(file.bytes);
+    if (text === null) return { text: "[skill_binary_file] This file is binary. Choose a text file from the skill manifest." };
+    return { text, skill };
   }
   if (skill.argsSchema) {
     const validator = Compile(skill.argsSchema);
@@ -89,7 +100,11 @@ function renderSkillResult(
       };
     }
   }
-  return { text: renderTemplate(skill.content, args), skill };
+  const manifest = skill.files?.length
+    ? "\n\nStored skill files:\n" + skill.files.map((file) => `- ${file.path} (${file.size} bytes)`).join("\n") +
+      "\nUse skill({ name, path }) to read a text file. Use skill_script({ name, script, args }) to run a scripts/ file."
+    : "";
+  return { text: renderTemplate(skill.content, args) + manifest, skill };
 }
 
 /**
@@ -158,11 +173,21 @@ export function buildSkillTool(
           console.error(`skill tool: skill refresh failed while looking up "${args.name}":`, err);
         }
       }
-      const rendered = renderSkillResult(current(), args.name, args.args ?? {});
+      const rendered = renderSkillResult(current(), args.name, args.args ?? {}, args.path);
       if (rendered.skill && ctx.recordSkillInvocation) {
-        await ctx.recordSkillInvocation(rendered.skill, "model_tool", rendered.text);
+        await ctx.recordSkillInvocation(rendered.skill, args.path === undefined ? "model_tool" : "file_read", rendered.text);
       }
       return { text: rendered.text };
     },
   });
+}
+
+/** Text references must be valid UTF-8 without binary control bytes. */
+export function skillFileText(bytes: Uint8Array): string | null {
+  if (bytes.some((byte) => byte < 32 && byte !== 9 && byte !== 10 && byte !== 13 && byte !== 12)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }

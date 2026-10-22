@@ -1,5 +1,6 @@
 import {
   pgTable,
+  customType,
   text,
   integer,
   bigint,
@@ -1078,6 +1079,21 @@ export const skills = pgTable(
   ],
 );
 
+const skillBytes = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType: () => "bytea",
+  toDriver: (value) => Buffer.from(value),
+  fromDriver: (value) => new Uint8Array(value),
+});
+
+export const skillFiles = pgTable("skill_files", {
+  skillId: text("skill_id").notNull().references(() => skills.id, { onDelete: "cascade" }),
+  path: text("path").notNull(),
+  blobSha: text("blob_sha").notNull(),
+  size: integer("size").notNull(),
+  mode: text("mode").notNull(),
+  bytes: skillBytes("bytes").notNull(),
+}, (t) => [primaryKey({ columns: [t.skillId, t.path] })]);
+
 // Immutable facts for skill adoption and marginal context telemetry.
 export const skillInvocations = pgTable(
   "skill_invocations",
@@ -1090,7 +1106,7 @@ export const skillInvocations = pgTable(
     invokerUserId: text("invoker_user_id"),
     invocationEntryId: text("invocation_entry_id"),
     path: text("path", {
-      enum: ["model_tool", "host_thread_skill", "slash_context", "slash_prompt"],
+      enum: ["model_tool", "file_read", "script_run", "host_thread_skill", "slash_context", "slash_prompt"],
     }).notNull(),
     skillKey: text("skill_key").notNull(),
     skillName: text("skill_name").notNull(),

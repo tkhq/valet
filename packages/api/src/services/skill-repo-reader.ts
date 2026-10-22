@@ -321,6 +321,7 @@ export interface SkillTreeEntry {
   /** Blob or tree sha. For a blob this is the content identity, which is
    * what lets sync compare a file without reading it. */
   sha: string;
+  size?: number;
 }
 
 export interface SkillTreeListing {
@@ -332,6 +333,7 @@ export interface SkillTreeListing {
 /** One file, with the identity the tree read also carries. */
 export interface SkillRepoFile {
   text: string;
+  bytes?: Uint8Array;
   /** Git blob sha. Equal to the `sha` of the same path's tree entry, so a
    * file read through either path produces the same manifest. */
   blobSha: string;
@@ -451,7 +453,8 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
       if (!isRecord(raw)) continue;
       const { path, type, mode, sha } = raw;
       if (typeof path !== "string" || typeof type !== "string" || typeof sha !== "string") continue;
-      entries.push({ path, type, mode: typeof mode === "string" ? mode : "", sha });
+      entries.push({ path, type, mode: typeof mode === "string" ? mode : "", sha,
+        ...(typeof raw.size === "number" ? { size: raw.size } : {}), });
     }
     return { entries, truncated: data.truncated === true };
   }
@@ -495,7 +498,10 @@ export class GitHubSkillRepoReader implements SkillRepoReader {
     if (typeof data.sha !== "string" || data.sha.length === 0) {
       throw new SkillRepoReadError(what, 200, "The file response carried no sha. Retry the sync.");
     }
-    return { text, blobSha: data.sha };
+    if (data.encoding !== "base64") {
+      throw new SkillRepoReadError(what, 200, "The file response has no base64 bytes. Reduce the file size, then sync again.");
+    }
+    return { text, bytes: Buffer.from(raw.replace(/\n/g, ""), "base64"), blobSha: data.sha };
   }
 
   /** The `ContentsRequest` seam `collectDirectoryEntries` drives. */

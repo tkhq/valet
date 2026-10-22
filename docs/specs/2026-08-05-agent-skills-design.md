@@ -97,6 +97,55 @@ Access follows workflow definitions exactly (`packages/api/src/services/skills.t
 
 A UNIQUE index on `(org_id, owner_type, owner_id, name)` stops two stored skills sharing a name inside one owner scope.
 
+## Companion files
+
+Repository skills can include `references/`, `scripts/`, `assets/`, and other files beside `SKILL.md`.
+The `skill_files` table stores each file's relative path, Git blob SHA, size, Git mode, and bytes.
+The table has a composite primary key on skill ID and path.
+Deleting a skill deletes its files.
+Plugin-bundled skills and UI-authored skills do not support companion files yet.
+
+Sync collects regular blobs below each skill directory.
+It excludes `SKILL.md`, symbolic links, and directories with their own `SKILL.md`.
+Sync reuses stored bytes when a blob SHA is unchanged.
+The discovery manifest includes companion paths, blob SHAs, and modes.
+The skill's `contentSha` includes the body and these file identities.
+A script-only edit or executable-bit change therefore updates the skill.
+A complete read replaces the stored file set, including deletions.
+A missing file keeps the whole stored skill unchanged and makes the sync incomplete.
+A transport failure or partial listing reconciles nothing.
+When the repository tree is truncated, sync reads a complete subtree for each skill found by the directory fallback.
+A truncated skill subtree fails the sync before any writes.
+
+Each companion file can contain at most 256 KiB.
+The companion files for one skill can contain at most 2 MiB in total.
+If either cap is exceeded, sync warns for that skill and keeps its stored version unchanged.
+Other skills still sync.
+
+`skill({ name, path })` reads a stored text file.
+The path is relative to the skill directory.
+The tool rejects absolute paths, parent segments, unknown paths, binary control bytes, and invalid UTF-8.
+Omitting `path` reads the rendered skill body and a file manifest.
+Body and file results remain protected from pruning.
+Reference reads do not write files to the sandbox.
+
+`skill_script({ name, script, args })` runs a stored file under `scripts/`.
+Only this call writes the skill's scripts to the sandbox.
+The directory is `$HOME/.valet/skills/<name>@<sha>/scripts/`.
+A completion marker lets later calls reuse the same files for that SHA.
+The tool preserves executable bits.
+It never writes references or assets.
+The script runs in the session's normal working directory.
+`SKILL_DIR` contains the content-addressed skill directory.
+The tool uses the shebang interpreter when present.
+Otherwise, `.py` uses `python3`, `.sh` uses `bash`, and `.js` or `.mjs` uses `node`.
+Other files run directly.
+The tool quotes each argument separately and uses the same risk level as `bash`.
+A session without a sandbox gets a text error.
+The result contains the script path, exit code, stdout, and stderr.
+Each output stream is limited to 32 KiB.
+Telemetry records successful file reads as `file_read` and script executions as `script_run`.
+
 ## Delivery
 
 `EngineHost.sessionExtras` is the one seam that assembles a session's skills. All four session builders call it, and each passes the session's OWN principal:
@@ -158,7 +207,7 @@ Over-exclusion is also reported rather than silent, because the rule is a guess 
 
 **Two files, one name.** A `SKILL.md` outranks a `prompts/<name>.md` of the same name, ranked by kind so the winner never depends on where either file sits. Two files of the SAME kind sharing a name import NEITHER, and the sync warns with both paths. Nothing here can rank them: taking the first by sorted path would make the skill somebody gets depend on the names of unrelated directories, and a file added later could quietly displace the skill they use. A name in that state stays in the upstream set, so the row that already holds it is kept rather than deleted.
 
-**Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. Content is still one contents read per skill: the tree gives paths and blob shas, never bodies.
+**Cost.** The manifest key is the git blob sha, which the tree read carries, so the second compare runs before any file is read. On a repository of eight skills, a commit that moved but changed no skill costs two requests instead of eleven, and a first import costs ten instead of eleven. The body costs one contents read per skill. Each new companion blob costs one more read. Unchanged companion blobs reuse stored bytes.
 
 That per-skill read is what the tree read does not bound. A tree that is not cut can carry 100,000 entries, so a whole-repository scan could queue an unbounded run of sequential content reads — which an anonymous read (60 requests per hour per IP) cannot finish, and which can outlast the sweep's five-minute claim lease. `MAX_SKILL_CANDIDATES` caps one sync at 300 skill files on both discovery paths, and a repository past it fails with the subdirectory named as the fix. Importing the first 300 of a longer list is not an option, for the truncation reason below.
 
@@ -293,7 +342,7 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 
 ## Not implemented
 
-- **Bundled resources.** A spec skill may ship `scripts/`, `references/`, and `assets/`. Sync reads `SKILL.md` and nothing else. A skill body that points at `references/REFERENCE.md` leaves the agent with a path it cannot open. Carrying those files needs its own table, and `github.read_repo_file` decodes as UTF-8, so it cannot carry a binary asset either.
+- **Plugin and UI companion files.** Companion files are supported for repository skills only. Plugin bundles and UI uploads need separate work. The MCP skill surface does not list or download companion files.
 - **Resource-level progressive disclosure.** Point 3 of the spec's disclosure model (load a bundled file when it is needed) needs the resource loading above.
 - **`allowed-tools` enforcement.** The field is parsed and carried. Nothing acts on it. The spec marks it experimental.
 - **Repositories of 100,000 files or more.** GitHub cuts a recursive tree at 100,000 entries, or 7 MB. A source that names a subdirectory falls back to the per-directory walk, which has its own cut at 500 entries and applies no deletions. A source that tracks the whole repository fails the sync and reconciles nothing, because the entries past the cut cannot be told apart from skills the repository no longer holds. Set the subdirectory that holds the skills.

@@ -397,6 +397,15 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "skill_files table", probe: { kind: "table", table: "skill_files" }, sql: `CREATE TABLE IF NOT EXISTS "skill_files" (
+  "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
+  "path" text NOT NULL,
+  "blob_sha" text NOT NULL,
+  "size" integer NOT NULL,
+  "mode" text NOT NULL,
+  "bytes" bytea NOT NULL,
+  PRIMARY KEY ("skill_id", "path")
+);` },
   { describe: "attention channel grace", probe: { kind: "column", table: "user_notification_preferences", column: "channel_grace_seconds" }, sql: 'ALTER TABLE user_notification_preferences ADD COLUMN channel_grace_seconds integer' },
   { describe: "personal attention outbox", probe: { kind: "table", table: "pending_channel_deliveries" }, sql: `CREATE TABLE pending_channel_deliveries (
     id text PRIMARY KEY NOT NULL, user_id text NOT NULL, tier_id text NOT NULL, notification_id text,

@@ -24,7 +24,7 @@ import { NotFoundError, parseSearchQuery } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, teamMembers, type SkillRow } from "../schema/index.js";
+import { skills, skillFiles, teamMembers, type SkillRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 
 export type SkillOrigin = "local" | "repo";
@@ -700,7 +700,13 @@ export async function listSkillSourcesFor(
   principal: Principal,
   orgId: string,
 ): Promise<SkillSource[]> {
-  return (await listSkillRowsFor(db, principal, orgId)).map(rowToSkillSource);
+  const rows = await listSkillRowsFor(db, principal, orgId);
+  if (rows.length === 0) return [];
+  const files = await db.select().from(skillFiles).where(inArray(skillFiles.skillId, rows.map((row) => row.id)));
+  return rows.map((row) => ({
+    ...rowToSkillSource(row),
+    files: files.filter((file) => file.skillId === row.id),
+  }));
 }
 
 /** Stored rows available to one session principal, in registry precedence. */

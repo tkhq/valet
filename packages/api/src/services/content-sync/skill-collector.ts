@@ -8,8 +8,8 @@
  * `walkDirectory` is the narrow fallback for a repository whose tree GitHub
  * cuts: list the configured subdirectory, read
  * `<subdirectory>/<entry>/SKILL.md` under each directory in it, then list
- * `<subdirectory>/prompts`. One level, one directory, one request per
- * candidate.
+ * `<subdirectory>/prompts`. Each discovered skill also needs a complete
+ * subtree read for its companion files.
  *
  * One skill rule has no counterpart on the rail: a name the owner already
  * holds is a per-skill warning, and the skill already there is left alone.
@@ -21,16 +21,18 @@ import {
   validateSkillFrontmatter,
   BUILTIN_COMMAND_NAMES,
   type SkillSpecViolation,
+  type SkillFile,
 } from "@valet/engine";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../../lib/drizzle.js";
 import { canonicalJson } from "../../lib/canonical-json.js";
-import { skills, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
-import { newSkillId, skillContentSha } from "../skills.js";
+import { skills, skillFiles, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
+import { newSkillId } from "../skills.js";
 import {
   SkillRepoListingTruncatedError,
   SkillRepoNotFoundError,
   type SkillRepoReader,
+  type SkillTreeEntry,
 } from "../skill-repo-reader.js";
 import {
   discoverFromTree,
@@ -50,11 +52,13 @@ import type {
   ContentManifestEntry,
 } from "./collector.js";
 
+import { companionEntries, readSkillFiles, skillWithFilesSha } from "./skill-files.js";
+
 export class SkillCollector implements ContentCollector {
   readonly kind = "skills" as const;
 
   discover({ entries, source }: CollectorDiscoverContext): CollectorPass {
-    return new SkillPass(discoverFromTree(entries, source.subpath), new Map());
+    return new SkillPass(discoverFromTree(entries, source.subpath), new Map(), entries);
   }
 
   async walkDirectory({ source, headSha, reader }: CollectorWalkContext): Promise<CollectorPass> {
@@ -66,6 +70,7 @@ export class SkillCollector implements ContentCollector {
     }
     const candidates: SkillCandidate[] = [];
     const text = new Map<string, string>();
+    const entries: SkillTreeEntry[] = [];
 
     for (const dir of listing.entries) {
       if (dir.type !== "dir") continue;
@@ -82,6 +87,10 @@ export class SkillCollector implements ContentCollector {
         kind: "skill",
       });
       text.set(path, file.text);
+      const subtree = await reader.listTree(source.repoFullName, dir.sha);
+      if (subtree.truncated) throw new SkillRepoListingTruncatedError(source.repoFullName, path);
+      const prefix = joinPath(source.subpath, dir.name);
+      entries.push(...subtree.entries.map((entry) => ({ ...entry, path: `${prefix}/${entry.path}` })));
     }
 
     const promptsDir = joinPath(source.subpath, PROMPTS_DIR);
@@ -122,6 +131,7 @@ export class SkillCollector implements ContentCollector {
     return new SkillPass(
       { ...resolved, discovered: candidates.length, excludedCandidates: [] },
       text,
+      entries,
     );
   }
 }
@@ -148,6 +158,11 @@ class SkillPass implements CollectorPass {
   readonly discovered: number;
   readonly excluded: number;
 
+  private readonly companionFiles = new Map<string, SkillTreeEntry[]>();
+  private readonly preparedFiles = new Map<string, SkillFile[]>();
+  private readonly skippedFiles = new Set<string>();
+  private readonly fileWarnings: string[] = [];
+  private readonly deferred: string[] = [];
   /** Names that came from `prompts/`, so reconcile parses them differently. */
   private readonly promptNames: Set<string>;
   private readonly reservedNames: Set<string>;
@@ -156,6 +171,7 @@ class SkillPass implements CollectorPass {
   constructor(
     found: SkillDiscovery,
     readonly text: Map<string, string>,
+    tree: SkillTreeEntry[],
   ) {
     const skillEntries: ContentManifestEntry[] = [];
     const promptEntries: ContentManifestEntry[] = [];
@@ -166,6 +182,7 @@ class SkillPass implements CollectorPass {
         promptEntries.push(entry);
         promptNames.add(candidate.name);
       } else {
+        this.companionFiles.set(candidate.path, companionEntries(candidate, tree));
         skillEntries.push(entry);
       }
     }
@@ -175,13 +192,37 @@ class SkillPass implements CollectorPass {
     this.readEntries = [...skillEntries, ...promptEntries];
     // Sorted per group, so the same commit hashes the same however GitHub
     // ordered the tree, and a tree read and a walk agree on a shared file.
-    this.manifestEntries = [...byName(skillEntries), ...byName(promptEntries)];
+    this.manifestEntries = [...byName(skillEntries), ...byName(promptEntries),
+      ...[...this.companionFiles].flatMap(([path, entries]) => entries.map((entry) => ({
+        name: path, path: entry.path, blobSha: `${entry.sha}:${entry.mode}`,
+      }))).sort((a, b) => a.path.localeCompare(b.path)),
+    ];
     this.promptNames = promptNames;
     this.reservedNames = found.reservedNames;
     this.warnings = found.warnings;
     this.discovered = found.discovered;
     this.excludedCandidates = found.excludedCandidates;
     this.excluded = found.excludedCandidates.length;
+  }
+
+  async prepareReconcile(ctx: CollectorReconcileContext): Promise<(db: AppDb) => Promise<CollectorReconcileResult>> {
+    if (!ctx.reader) throw new Error("Skill sync needs a repository reader.");
+    const previous = await ctx.db.select({ file: skillFiles, upstreamPath: skills.upstreamPath })
+      .from(skillFiles).innerJoin(skills, eq(skillFiles.skillId, skills.id))
+      .where(and(eq(skills.sourceId, ctx.source.id), eq(skills.origin, "repo")));
+    for (const [path, entries] of this.companionFiles) {
+      if (!ctx.text.has(path)) continue;
+      const result = await readSkillFiles(ctx.reader, ctx.source.repoFullName, ctx.commitSha, path,
+        entries, previous.filter((row) => row.upstreamPath === path).map((row) => row.file));
+      if (result.warning) {
+        this.fileWarnings.push(`${path}: ${result.warning}`);
+        this.skippedFiles.add(path);
+        if (result.unread) this.deferred.push(path);
+      } else {
+        this.preparedFiles.set(path, result.files);
+      }
+    }
+    return (db) => this.reconcile({ ...ctx, db });
   }
 
   unreadWarning(path: string): string {
@@ -213,7 +254,7 @@ class SkillPass implements CollectorPass {
       ...this.reservedNames,
     ]);
 
-    const warnings: string[] = [];
+    const warnings: string[] = [...this.fileWarnings];
     let imported = 0;
     let updated = 0;
 
@@ -233,7 +274,8 @@ class SkillPass implements CollectorPass {
       // Keyed by PATH, so a same-named skill directory and prompt file cannot
       // overwrite each other.
       const raw = text.get(entry.path);
-      if (raw === undefined) continue;
+      if (raw === undefined || this.skippedFiles.has(entry.path)) continue;
+      const files = this.preparedFiles.get(entry.path) ?? [];
       const isPrompt = this.promptNames.has(entry.name);
       const parsed = isPrompt ? parsePromptFile(raw, entry.name) : parseSkillFile(raw, entry.name);
       if (parsed.violations.length > 0) {
@@ -244,7 +286,7 @@ class SkillPass implements CollectorPass {
       }
       const row = byRowName.get(entry.name);
       if (row === undefined) {
-        const wrote = await insertMirror(db, source, entry, parsed, ctx.now());
+        const wrote = await insertMirror(db, source, entry, parsed, files, ctx.now());
         if (wrote) imported += 1;
         else if (isPrompt) {
           warnings.push(
@@ -257,7 +299,7 @@ class SkillPass implements CollectorPass {
         }
         continue;
       }
-      if (await updateMirror(db, row, entry, parsed, ctx.now())) updated += 1;
+      if (await updateMirror(db, row, entry, parsed, files, ctx.now())) updated += 1;
     }
 
     const stale = existing.filter((row) => !upstream.has(row.name));
@@ -268,6 +310,7 @@ class SkillPass implements CollectorPass {
         imported,
         updated,
         deleted: 0,
+        deferred: this.deferred,
         keptStale: stale.map((row) => row.name),
         warnings,
       };
@@ -288,7 +331,7 @@ class SkillPass implements CollectorPass {
           ),
         );
     }
-    return { imported, updated, deleted: stale.length, keptStale: [], warnings };
+    return { imported, updated, deleted: stale.length, keptStale: [], deferred: this.deferred, warnings };
   }
 
   /**
@@ -347,6 +390,7 @@ async function insertMirror(
   source: ContentSourceRow,
   entry: ContentManifestEntry,
   parsed: ParsedSkillFile,
+  files: SkillFile[],
   now: number,
 ): Promise<boolean> {
   const row: SkillRow = {
@@ -360,14 +404,17 @@ async function insertMirror(
     description: parsed.description,
     content: parsed.body,
     frontmatter: parsed.frontmatter,
-    contentSha: skillContentSha(parsed.body),
+    contentSha: skillWithFilesSha(parsed.body, files),
     upstreamPath: entry.path,
     createdAt: now,
     updatedAt: now,
   };
   try {
     // Keep a handled name collision from aborting the source transaction.
-    await db.transaction((tx) => tx.insert(skills).values(row));
+    await db.transaction(async (tx) => {
+      await tx.insert(skills).values(row);
+      if (files.length > 0) await tx.insert(skillFiles).values(files.map((file) => ({ ...file, skillId: row.id })));
+    });
     return true;
   } catch (err) {
     // `skills_owner_name` is the only unique index, so a violation is a name
@@ -384,11 +431,11 @@ async function updateMirror(
   row: SkillRow,
   entry: ContentManifestEntry,
   parsed: ParsedSkillFile,
+  files: SkillFile[],
   now: number,
 ): Promise<boolean> {
-  const contentSha = skillContentSha(parsed.body);
-  // `contentSha` hashes the BODY only, and the row also stores the whole
-  // frontmatter. Without comparing it, an edit that touches only a
+  const contentSha = skillWithFilesSha(parsed.body, files);
+  // Compare the whole frontmatter map. An edit that touches only a
   // frontmatter field this test does not name — `tags`, `license`, anything
   // an author adds — reads as unchanged and never reaches the mirror, while
   // the manifest hash moved so every later poll re-reads the file to decide
@@ -399,6 +446,8 @@ async function updateMirror(
     row.description === parsed.description &&
     row.upstreamPath === entry.path;
   if (unchanged) return false;
+  await db.delete(skillFiles).where(eq(skillFiles.skillId, row.id));
+  if (files.length > 0) await db.insert(skillFiles).values(files.map((file) => ({ ...file, skillId: row.id })));
   await db
     .update(skills)
     .set({

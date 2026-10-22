@@ -176,6 +176,7 @@ describe("GitHubSkillRepoReader", () => {
     // here and the same file's tree entry produce one manifest key.
     expect(await reader.readFile("tkhq/skills", "deploy/SKILL.md", "commit-1")).toEqual({
       text: "# Deploy\n",
+      bytes: Buffer.from("# Deploy\n"),
       blobSha: "blob-1",
     });
   });

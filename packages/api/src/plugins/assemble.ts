@@ -46,6 +46,7 @@ import type {
 } from "@valet/engine";
 import { buildToolIndex } from "./action-id.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
+import { buildSkillScriptTool, SKILL_SCRIPT_TOOL_NAME } from "./skill-script-tool.js";
 import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolSession } from "./skill-tool.js";
 
 export interface AssembledPlugins {
@@ -211,7 +212,7 @@ export function pluginSessionExtras(
     pins,
     // The `skill` tool is appended below, after the catalog has already
     // chosen its pinned names. The catalog must know that this name is used.
-    reservedToolNames: [SKILL_TOOL_NAME],
+    reservedToolNames: [SKILL_TOOL_NAME, SKILL_SCRIPT_TOOL_NAME],
     onPinRejected: warnPinRejected,
   });
   const pluginCatalog = buildPluginCatalog(actionPlugins, catalogOptions.clock, {
@@ -227,6 +228,7 @@ export function pluginSessionExtras(
   let session: SkillToolSession | undefined;
   const skillTool = buildSkillTool(skills, () => session);
   if (skillTool) tools.push(skillTool);
+  tools.push(buildSkillScriptTool(skills, () => session));
 
   return {
     tools, skills, roles, pluginCatalog, shadowedSkills: shadowed,

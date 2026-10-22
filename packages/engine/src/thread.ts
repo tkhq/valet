@@ -1355,7 +1355,7 @@ export class Thread {
 
   private async recordModelToolSkillInvocation(
     skill: SkillSource,
-    path: "model_tool",
+    path: "model_tool" | "file_read" | "script_run",
     injectedText: string,
     toolCallId: string,
   ): Promise<SkillInvocationFact> {

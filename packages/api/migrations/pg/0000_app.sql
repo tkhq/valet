@@ -640,6 +640,16 @@ CREATE INDEX "skills_owner" ON "skills" ("org_id","owner_type","owner_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "skills_owner_name" ON "skills" ("org_id","owner_type","owner_id","name");
 --> statement-breakpoint
+CREATE TABLE "skill_files" (
+  "skill_id" text NOT NULL REFERENCES "skills"("id") ON DELETE CASCADE,
+  "path" text NOT NULL,
+  "blob_sha" text NOT NULL,
+  "size" integer NOT NULL,
+  "mode" text NOT NULL,
+  "bytes" bytea NOT NULL,
+  PRIMARY KEY ("skill_id", "path")
+);
+--> statement-breakpoint
 CREATE TABLE "skill_invocations" (
   "id" text PRIMARY KEY NOT NULL,
   "created_at" bigint NOT NULL,

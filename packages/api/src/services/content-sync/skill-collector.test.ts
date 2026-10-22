@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 /**
  * The skills collector, driven through `syncOnce` — the one entry point that
  * mirrors a repository's skills into the `skills` table.
@@ -7,6 +9,11 @@
  * suite can assert directly. That number is the design: a poll that finds an
  * unmoved head commit must cost exactly one call.
  */
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { LocalSandbox } from "@valet/sandbox-local";
+import type { ToolContext } from "@valet/engine";
+import { buildSkillTool } from "../../plugins/skill-tool.js";
+import { buildSkillScriptTool } from "../../plugins/skill-script-tool.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -24,13 +31,14 @@ import {
   orgMembers,
   orgs,
   skills,
+  skillFiles,
   teamMembers,
   teams,
   users,
 } from "../../schema/index.js";
 import { PgCredentialStore } from "../../plugins/credential-store.js";
 import { deriveSecretKey } from "../../lib/secret-crypto.js";
-import { createSkill, type SkillOwner } from "../skills.js";
+import { createSkill, listSkillSourcesFor, type SkillOwner } from "../skills.js";
 import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../content-source-credential.js";
@@ -43,6 +51,7 @@ import type {
   CollectorReconcileContext,
   ContentCollector,
 } from "./collector.js";
+import { MAX_SKILL_FILE_BYTES, MAX_SKILL_BYTES } from "./skill-files.js";
 import { SkillCollector } from "./skill-collector.js";
 import {
   claimDueContentSources,
@@ -84,6 +93,9 @@ interface FakeRepo {
    * skills, junk trees, and second copies of a name. Discovery has to judge
    * these on the path alone, which is what these cases exercise. */
   extra?: Record<string, string>;
+  modes?: Record<string, string>;
+  unread?: string[];
+  truncatedSkillTree?: boolean;
   /** Plays a PRIVATE repository: every request without this bearer token
    * gets the same 404 GitHub gives for a repository that is not there. */
   requireToken?: string;
@@ -128,14 +140,20 @@ function serve(repo: FakeRepo): GithubFixture {
     fixture?.calls[fixture.calls.length - 1]?.authHeader !== `Bearer ${repo.requireToken}`;
   fixture = startGithubFixture({
     getCommit: () => (denied() ? notFound : { body: commitBody(repo.sha) }),
-    getTree: () => {
+    getTree: (_owner, _repo, sha) => {
       if (denied()) return notFound;
+      if (sha.startsWith("sha-")) {
+        const prefix = `${repo.root ? repo.root + "/" : ""}${sha.slice(4)}/`;
+        return { body: { sha, truncated: repo.truncatedSkillTree === true, tree: [...blobsOf(repo)]
+          .filter(([path]) => path.startsWith(prefix))
+          .map(([path, content]) => treeEntry(path.slice(prefix.length), { sha: blobShaOf(content) })) } };
+      }
       return {
         body: {
           sha: `tree-${repo.sha}`,
           truncated: repo.truncatedTree === true,
           tree: [...blobsOf(repo)].map(([path, content]) =>
-            treeEntry(path, { sha: blobShaOf(content) }),
+            ({ ...treeEntry(path, { sha: blobShaOf(content), mode: repo.modes?.[path] ?? "100644" }), size: Buffer.byteLength(content) }),
           ),
         },
       };
@@ -143,6 +161,7 @@ function serve(repo: FakeRepo): GithubFixture {
     getContents: (_owner, _name, path) => {
       if (denied()) return notFound;
       const blobs = blobsOf(repo);
+      if (repo.unread?.includes(path)) return notFound;
       const content = blobs.get(path);
       if (typeof content === "string") {
         return {
@@ -226,6 +245,154 @@ describe("skill collector", () => {
       metadata: { login },
     });
   }
+
+  it("stores companion bytes, excludes nested skills, and delivers files to the session", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/references/x.md": "reference", "deploy/scripts/check.py": "print('ok')",
+        "deploy/assets/data.bin": "\0binary", "deploy/nested/SKILL.md": skillMd("nested", "Nested skill."),
+        "deploy/nested/scripts/child.py": "child", "deploy/link": "../outside" },
+      modes: { "deploy/scripts/check.py": "100755", "deploy/link": "120000" },
+    };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    expect((await serviceFor(f).syncOnce(source.id))?.status).toBe("ok");
+    const [row] = await db.select().from(skills).where(eq(skills.name, "deploy"));
+    const files = await db.select().from(skillFiles).where(eq(skillFiles.skillId, row!.id)).orderBy(skillFiles.path);
+    expect(files.map((file) => file.path)).toEqual(["assets/data.bin", "references/x.md", "scripts/check.py"]);
+    expect(Buffer.from(files[0]!.bytes).toString()).toBe("\0binary");
+    expect(files[2]?.mode).toBe("100755");
+    const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+    expect(sources.find((skill) => skill.name === "deploy")?.files).toEqual(expect.arrayContaining(files));
+    await db.delete(skills).where(eq(skills.id, row!.id));
+    expect(await db.select().from(skillFiles).where(eq(skillFiles.skillId, row!.id))).toEqual([]);
+  });
+
+  it("syncs a fixture, reads a reference, and runs its script in a local sandbox", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synced-skill-"));
+    try {
+      const f = serve({ sha: "c1", skills: { deploy: skillMd("deploy", "Check a reply.") }, extra: {
+        "deploy/references/x.md": "The reply must say hello.",
+        "deploy/scripts/check.py": "import os, sys; print(open(sys.argv[1]).read()); print(os.environ['SKILL_DIR'])",
+        "deploy/assets/case.json": "{}",
+      } });
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      expect((await serviceFor(f).syncOnce(source.id))?.status).toBe("ok");
+      const sources = await listSkillSourcesFor(db, { type: "user", id: "u1" }, ORG);
+      const sandbox = new LocalSandbox("synced", root);
+      const ctx: ToolContext = {
+        sandbox, cwd: root, userId: "u1", orgId: ORG, sessionId: "s1", threadId: "t1",
+        credentials: { get: async () => null, request: async () => { throw new Error("unused"); } },
+        requestDecision: async () => { throw new Error("unused"); }, signal: new AbortController().signal,
+        threadRead: async () => [], listThreads: async () => [],
+        setModel: async ({ model }) => ({ fromModel: model, toModel: model }),
+      };
+      const exec = sandbox.exec.bind(sandbox);
+      sandbox.exec = (command, opts) => exec(command, { ...opts, env: { ...opts?.env, HOME: root } });
+      expect((await buildSkillTool(sources)!.execute({ name: "deploy", path: "references/x.md" }, ctx)).text)
+        .toBe("The reply must say hello.");
+      await sandbox.writeFile("reply.md", "hello");
+      const result = await buildSkillScriptTool(sources).execute({ name: "deploy", script: "scripts/check.py", args: ["reply.md"] }, ctx);
+      expect(result.text).toContain('"exitCode":0');
+      expect(result.text).toContain("hello");
+      const output: unknown = JSON.parse(result.text ?? "{}");
+      expect(output).toHaveProperty("path");
+      if (typeof output !== "object" || output === null || !("path" in output) || typeof output.path !== "string") {
+        throw new Error("The script result has no path.");
+      }
+      const directory = output.path.slice(0, -"/scripts/check.py".length);
+      await expect(stat(`${directory}/references`)).rejects.toThrow();
+      await expect(stat(`${directory}/assets`)).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses unchanged blobs, removes deleted files, and hashes script-only changes", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/references/x.md": "reference", "deploy/scripts/check.py": "v1" } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const service = serviceFor(f);
+    await service.syncOnce(source.id);
+    const [before] = await db.select().from(skills);
+    f.calls.length = 0;
+    repo.sha = "c2";
+    repo.extra!["deploy/scripts/check.py"] = "v2";
+    expect((await service.syncOnce(source.id))?.updated).toBe(1);
+    expect(f.calls.filter((call) => call.path.endsWith("/references/x.md"))).toHaveLength(0);
+    const [after] = await db.select().from(skills);
+    expect(after?.content).toBe(before?.content);
+    expect(after?.contentSha).not.toBe(before?.contentSha);
+    repo.sha = "c3";
+    delete repo.extra!["deploy/references/x.md"];
+    expect((await service.syncOnce(source.id))?.updated).toBe(1);
+    expect((await db.select().from(skillFiles)).map((file) => file.path)).toEqual(["scripts/check.py"]);
+  });
+
+  it("changes the skill hash for a mode-only edit without reading the blob again", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/scripts/check.py": "script" } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const service = serviceFor(f);
+    await service.syncOnce(source.id);
+    const [before] = await db.select().from(skills);
+    repo.sha = "c2";
+    repo.modes = { "deploy/scripts/check.py": "100755" };
+    f.calls.length = 0;
+    expect((await service.syncOnce(source.id))?.updated).toBe(1);
+    expect(f.calls.filter((call) => call.path.endsWith("/scripts/check.py"))).toHaveLength(0);
+    expect((await db.select().from(skillFiles))[0]?.mode).toBe("100755");
+    expect((await db.select().from(skills))[0]?.contentSha).not.toBe(before?.contentSha);
+  });
+
+  it("keeps stored files when the fallback skill subtree is partial", async () => {
+    const repo: FakeRepo = { sha: "c1", root: "skills", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "skills/deploy/scripts/check.py": "v1" } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills", subpath: "skills" });
+    const service = serviceFor(f);
+    await service.syncOnce(source.id);
+    const before = await db.select().from(skillFiles);
+    repo.sha = "c2";
+    repo.truncatedTree = true;
+    repo.truncatedSkillTree = true;
+    repo.extra = {};
+    expect((await service.syncOnce(source.id))?.status).toBe("error");
+    expect(await db.select().from(skillFiles)).toEqual(before);
+  });
+
+  it.each(["file", "skill"])("reports a %s size cap as a per-skill warning", async (cap) => {
+    const extra = cap === "file" ? { "deploy/assets/large": "x".repeat(MAX_SKILL_FILE_BYTES + 1) }
+      : Object.fromEntries(Array.from({ length: MAX_SKILL_BYTES / MAX_SKILL_FILE_BYTES + 1 }, (_, i) =>
+        [`deploy/assets/${i}`, "x".repeat(MAX_SKILL_FILE_BYTES)]));
+    const f = serve({ sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it."), other: skillMd("other", "Other skill.") }, extra });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const outcome = await serviceFor(f).syncOnce(source.id);
+    expect(outcome?.status).toBe("warning");
+    expect(outcome?.warnings.join(" ")).toContain("cap");
+    expect((await db.select().from(skills)).map((skill) => skill.name)).toEqual(["other"]);
+  });
+
+  it("keeps all files and retries when a listed companion cannot be read", async () => {
+    const repo: FakeRepo = { sha: "c1", skills: { deploy: skillMd("deploy", "Deploy it.") },
+      extra: { "deploy/references/x.md": "reference", "deploy/scripts/check.py": "v1" } };
+    const f = serve(repo);
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    const service = serviceFor(f);
+    await service.syncOnce(source.id);
+    const before = await db.select().from(skillFiles).orderBy(skillFiles.path);
+    repo.sha = "c2";
+    repo.extra = { "deploy/scripts/check.py": "v2" };
+    repo.unread = ["deploy/scripts/check.py"];
+    const outcome = await service.syncOnce(source.id);
+    expect(outcome?.status).toBe("warning");
+    expect(await db.select().from(skillFiles).orderBy(skillFiles.path)).toEqual(before);
+    expect((await db.select().from(contentSources))[0]?.lastSha).toBe("c1");
+    repo.unread = [];
+    expect((await service.syncOnce(source.id))?.updated).toBe(1);
+    expect((await db.select().from(skillFiles)).map((file) => file.path)).toEqual(["scripts/check.py"]);
+  });
 
   it("imports every skill directory on the first sync", async () => {
     const f = serve({
