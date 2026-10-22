@@ -1,6 +1,6 @@
 ---
 name: event-subscriptions
-description: Set up, change, or debug a Presence line, an event subscription that wakes the assistant when something happens in Slack, GitHub, Linear, or another connected service. Covers when to use a line instead of wait_for_event, narrow filters, standing instructions, where an event lands, and why most lines cannot ask a person. Use before you propose a line or explain why one did or did not reply.
+description: Set up, change, or debug a Presence line, an event subscription that wakes the assistant when something happens in Slack, GitHub, Linear, or another connected service. Covers when to use a line instead of wait_for_event, narrow filters and exclusions, standing instructions, where an event lands, and why most lines cannot ask a person. Use before you propose a line or explain why one did or did not reply.
 ---
 
 # Presence lines (event subscriptions)
@@ -57,10 +57,29 @@ A line runs a full assistant turn for every event that matches. A broad filter c
 - To listen in a fixed set of Slack channels, filter `channel` with `eq` or `in` and channel IDs. To cover every channel whose name follows a pattern, including channels created later, filter `channel_name` with `prefix` (such as `alerts-`) or `regex`. The name has no `#`. Do not tell a person that they need a fixed list of channel IDs: offer `channel_name` instead.
 - `slack.message`, `slack.bot_message`, and `slack.app_mention` declare `channel_name`. A direct message has no name, so a `channel_name` condition never matches one.
 - Add `bot_id` or `app_id` to listen to one app only.
-- The operators are `eq`, `in`, `prefix`, `contains`, and `regex`. Valet refuses a `regex` that is invalid or too slow.
+- The operators are `eq`, `in`, `prefix`, `contains`, `regex`, `not_in`, `not_prefix`, and `not_regex`. Valet refuses a `regex` or `not_regex` pattern that is invalid or too slow.
+- Every filter must match. `not_in` (Presence shows "is not") takes a list and skips an event whose value is in the list. `not_prefix` ("doesn't start with") takes text and skips an event whose value starts with it. `not_regex` ("doesn't match") takes a pattern and skips an event whose value matches it.
+- An event with no value for the field still matches `not_in`, `not_prefix`, and `not_regex`, because an absent value is not in the excluded set. A person's message has no `bot_id`, and a direct message has no `channel_name`.
+- To exclude by pattern, use `not_regex`, not a negative lookahead inside `regex`. People can read `bot is not B0123ABCD` in Presence, but not `^(?!B0123ABCD$)`.
 - A `slack.app_mention` line needs a channel filter (`eq` or `in`), or `any_channel: true` to listen in every channel the app can see. A `channel_name` condition is not a fixed channel list, so a mention line with one also needs `any_channel: true`.
 - A personal mention line fires only for its creator's own @-mentions. Valet adds a `user` filter for the creator's linked Slack account, and refuses the line until the creator links Slack in Integrations. To answer other people's mentions, put the line on a team assistant (see `audience` below).
-- Do not depend on the standing instruction to drop unwanted events. A filter costs nothing; an assistant turn that decides to stop still costs a full turn.
+- If a line's turns often end without a reply for the same app or channel, propose a new version with `replaces` that excludes that `bot_id`, `channel`, or `channel_name` with `not_in`.
+- Do not depend on the standing instruction to drop unwanted events. A filter costs nothing; an assistant turn that decides to stop still costs a full turn. When a person names sources to ignore, such as some alert bots or channels, put them in a `not_in` filter on `bot_id`, `app_id`, `user`, `channel`, or `channel_name`, not in `system_prompt`.
+
+```json
+{
+  "proposal_key": "alert-triage-v2",
+  "name": "Alert triage",
+  "event_keys": ["slack.bot_message"],
+  "filters": [
+    { "field": "channel_name", "op": "prefix", "value": "alerts-" },
+    { "field": "bot_id", "op": "not_in", "value": ["B0123ABCD", "B0456EFGH"] },
+    { "field": "channel_name", "op": "not_prefix", "value": "alerts-deal" }
+  ],
+  "system_prompt": "Triage the alert: name the failing service and the likely cause in two lines. If the alert needs no action, end without a reply.",
+  "user_prompt_template": "New alert in #{{payload.channel_name}}:\n\n{{event.body}}"
+}
+```
 
 ## Write the instructions
 

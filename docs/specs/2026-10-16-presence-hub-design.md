@@ -1,6 +1,6 @@
 # Presence hub
 
-Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary) and 2026-10-18 (overview landing; roster presentation). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18; review fixes 2026-10-19.
+Date: 2026-10-16. Revised 2026-10-17 (rail layout, vocabulary), 2026-10-18 (overview landing; roster presentation), and 2026-10-22 (exclusion conditions). Status: implemented (revision 4); UX fixes 2026-10-18; revision 4 (line page and editor) 2026-10-18; review fixes 2026-10-19.
 
 Depends on: `2026-10-16-delivery-threads-and-claims-design.md` (thread
 policy, claims, natural subjects), `2026-08-15-workflow-triggers-ui-design.md`
@@ -322,7 +322,7 @@ Pass criterion: all steps, in one run, from a clean start.
    `anything happens in Slack`, `github.pull_request.*` as `a pull request
    changes`. A place field with an operator other than `is` or `in` names
    no place; it reads as a condition (`on a repository that starts with
-   acme/`). When the api scopes a line to its creator, that actor applies
+   acme/`, `in a channel that is not #random`). When the api scopes a line to its creator, that actor applies
    to every clause whose key carries `user` (`When you mention Valet or you
    post a message in #incidents`). A labeled sender on a mention line is
    the actor (`When Alice mentions Valet`). A Slack channel in `<place>`
@@ -684,7 +684,15 @@ Pass criterion: all steps, in one run, from a clean start.
    event keys only under `Advanced`. Under the events, **Only when**: the
    conditions as removable pills in words (`repository is acme/api`,
    `channel is #incidents`, `author is jack`) and `+ Add a condition`,
-   which offers the fields these events carry. The hidden creator scope
+   which offers the fields these events carry. A condition compares with
+   `is`, `is one of`, `is not`, `starts with`, `doesn't start with`,
+   `contains`, `matches`, or `doesn't match`. `is not` (`not_in`),
+   `doesn't start with` (`not_prefix`), and `doesn't match` (`not_regex`)
+   skip the events they name, so the pill `bot is not B0123ABCD` keeps that
+   app's posts from starting a turn. An event with no value for the field
+   still matches an exclusion. `is one of` and `is not` take a
+   comma-separated list. Only `is` picks its value from a list such as the
+   channels or users; every other comparison takes typed text. The hidden creator scope
    (Part C step 2) shows as a pill `your own mentions` (or `mentions by
    <creator>` on another person's line) that cannot be removed. A mention
    with no channel condition offers `Any channel`; Save refuses both
@@ -886,6 +894,9 @@ Pass criterion: all steps, in one run, from a clean start.
 - The acceptance scenario as a router-level web test plus api integration
   (see Deviations).
 - A copy lint for INV-H2 and a no-navigation test for INV-H5.
+- Editor tests for the exclusion conditions: an `is not` pill renders in
+  words and saves as `not_in`, and a `doesn't match` condition on a field
+  with a picker takes typed text.
 
 ## Non-goals (normative boundary)
 

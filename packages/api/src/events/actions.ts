@@ -8,6 +8,7 @@ import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow, type EventSubscriptionRow } from "../schema/index.js";
 
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
+import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
 import { receiptWire, RECEIPT_RETENTION_DAYS } from "./receipts.js";
@@ -146,9 +147,9 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     name: Type.String({ minLength: 1 }),
     event_keys: Type.Array(Type.String(), { minItems: 1 }),
     filters: Type.Optional(Type.Array(Type.Object({
-      field: Type.String(), op: Type.Union([Type.Literal("eq"), Type.Literal("in"), Type.Literal("prefix"), Type.Literal("contains"), Type.Literal("regex")]),
+      field: Type.String(), op: Type.Union(FILTER_OPS.map((op) => Type.Literal(op))),
       value: Type.Unknown(),
-    }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex." })),
+    }), { description: "Conditions on fields the selected event keys declare. To cover Slack channels by name, including channels created later, filter channel_name with prefix (such as alerts-) or regex. To skip events, such as posts from one bot, use not_in with a list, not_prefix, or not_regex; an event without the field still matches." })),
     any_channel: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: listen in every channel the app can see. A channel_name condition needs it too, because it is not a fixed channel list." })),
     follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
     delivery_policy: Type.Optional(Type.Union([

@@ -167,6 +167,62 @@ describe("computeCollisions — containment lattice", () => {
   });
 });
 
+describe("computeCollisions — exclusion filters", () => {
+  const chNotIn = (v: string[]): SubscriptionFilter => ({ field: "channel", op: "not_in", value: v });
+  const gh = { eventKeys: ["github.push"] };
+  const repo = (op: SubscriptionFilter["op"], value: string): SubscriptionFilter => ({ field: "repo", op, value });
+
+  it("blocks an identical exclusion rule (equal)", () => {
+    const report = computeCollisions(candidate({ filters: [chNotIn(["C1"])] }), [sub({ filters: [chNotIn(["C1"])] })], CATALOG);
+    expect(report.blocking[0]?.relation).toBe("equal");
+  });
+
+  it("excluding more is narrower: a subset warns, a superset blocks", () => {
+    const narrower = computeCollisions(candidate({ filters: [chNotIn(["C1", "C2"])] }), [sub({ filters: [chNotIn(["C1"])] })], CATALOG);
+    expect(narrower.overlapping[0]?.relation).toBe("subset");
+    const wider = computeCollisions(candidate(), [sub({ filters: [chNotIn(["C1"])] })], CATALOG);
+    expect(wider.blocking[0]?.relation).toBe("superset");
+  });
+
+  it("an exclusion contains a positive filter that avoids every excluded value", () => {
+    const report = computeCollisions(candidate({ filters: [chNotIn(["C9"])] }), [sub({ filters: [chIn(["C1", "C2"])] })], CATALOG);
+    expect(report.blocking[0]?.relation).toBe("superset");
+    const prefix = computeCollisions(candidate({ ...gh, filters: [repo("not_prefix", "acme/")] }), [sub({ ...gh, filters: [repo("prefix", "beta/")] })], CATALOG);
+    expect(prefix.blocking[0]?.relation).toBe("superset");
+  });
+
+  it("reports nothing when the exclusion removes every value the other rule matches", () => {
+    expect(computeCollisions(candidate({ filters: [chNotIn(["C1", "C2"])] }), [sub({ filters: [chIn(["C1", "C2"])] })], CATALOG).overlapping).toHaveLength(0);
+    const prefix = computeCollisions(candidate({ ...gh, filters: [repo("not_prefix", "acme/")] }), [sub({ ...gh, filters: [repo("prefix", "acme/api")] })], CATALOG);
+    expect(prefix.blocking).toHaveLength(0);
+    expect(prefix.overlapping).toHaveLength(0);
+  });
+
+  it("two exclusions always overlap, because both match an event with no value", () => {
+    const report = computeCollisions(candidate({ filters: [chNotIn(["C1"])] }), [sub({ filters: [chNotIn(["C2"])] })], CATALOG);
+    expect(report.overlapping[0]?.relation).toBe("partial");
+  });
+
+  it("a not_regex filter proves nothing: an identical rule only warns", () => {
+    const notRegex: SubscriptionFilter = { field: "channel", op: "not_regex", value: "^C9" };
+    const report = computeCollisions(candidate({ filters: [notRegex] }), [sub({ filters: [notRegex] })], CATALOG);
+    expect(report.blocking).toHaveLength(0);
+    expect(report.overlapping[0]?.relation).toBe("partial");
+    expect(computeCollisions(candidate({ filters: [notRegex] }), [sub({ filters: [chEq("C9")] })], CATALOG).overlapping).toHaveLength(1);
+  });
+
+  it("keeps a key that does not declare the excluded field", () => {
+    // `text` is declared by slack.message only. Its exclusion still passes on
+    // github.push, so the pair shares that key.
+    const report = computeCollisions(
+      candidate({ eventKeys: ["slack.message", "github.push"], filters: [{ field: "text", op: "not_in", value: ["noise"] }] }),
+      [sub({ ...gh, filters: [repo("eq", "acme/api")] })],
+      CATALOG,
+    );
+    expect(report.overlapping[0]?.sharedKeys).toEqual(["github.push"]);
+  });
+});
+
 describe("computeCollisions — event keys", () => {
   it("reports nothing when the key sets do not intersect", () => {
     const report = computeCollisions(

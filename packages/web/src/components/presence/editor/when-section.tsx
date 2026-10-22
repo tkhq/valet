@@ -8,7 +8,7 @@
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ErrorRow, Button, Input, LoadingRow, Select } from "~/components/primitives";
-import { FilterValuePicker, fieldLabel, toWireFilters, type FilterField, type FilterOp, type UiFilterRow } from "~/components/events/filter-editor";
+import { FilterValuePicker, fieldLabel, isListOp, toWireFilters, type FilterField, type FilterOp, type UiFilterRow } from "~/components/events/filter-editor";
 import { splitCommon } from "~/components/events/event-match-step";
 import { ScheduleMatchStep } from "~/components/events/schedule-step";
 import { EVENT_SERVICES } from "~/components/events/when-do-step";
@@ -18,7 +18,7 @@ import { selectsSlackMention, hasChannelScopeFilter } from "~/lib/slack-mention"
 import { cn } from "~/lib/cn";
 import { formatDateTime } from "~/lib/format-when";
 import { ServiceGlyph, ServiceMark, SERVICE_NAMES, glyphColor } from "../service-mark";
-import { channelWords, eventLabel, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
+import { channelWords, eventLabel, opWords, SENTENCE_PLACE_FIELD_SET, type SentenceNames } from "../sentences";
 import { BAD_THREAD_LINK, parseSlackThreadLink } from "./slack-thread-link";
 import {
   addCondition,
@@ -37,33 +37,23 @@ import {
 
 const SERVICE_CHOICES: readonly EditorService[] = [...EVENT_SERVICES, "schedule"];
 
-/** Mirrors the private `opWords` in sentences.ts, which this change may not
- * touch; fold the two together when that file opens again. */
-const OP_WORDS: Readonly<Record<FilterOp, string>> = {
-  eq: "is",
-  in: "is",
-  prefix: "starts with",
-  contains: "contains",
-  regex: "matches",
-};
-
 /**
- * A condition in words: `repository is acme/api`, `channel is #a or #b`. An
- * exact channel takes its name from `names` when it has no label
- * (`channelWords`), the same words the sentence shows.
+ * A condition in words: `repository is acme/api`, `channel is #a or #b`,
+ * `bot is not B01`. An exact channel takes its name from `names` when it has
+ * no label (`channelWords`), the same words the sentence shows.
  */
 export function conditionWords(row: UiFilterRow, names: SentenceNames = {}): string {
   const field = fieldLabel(row.field).toLowerCase();
-  const exactChannel = row.field === "channel" && (row.op === "eq" || row.op === "in");
+  const exactChannel = row.field === "channel" && (row.op === "eq" || isListOp(row.op));
   let value: string;
-  if (row.op === "in") {
+  if (isListOp(row.op)) {
     const values = row.value.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
     const labels = row.inLabels !== undefined && row.inLabels.values.join(",") === values.join(",") ? row.inLabels.labels : values;
     value = values.map((v, i) => (exactChannel ? channelWords(v, labels[i], names) : labels[i] ?? v)).join(" or ");
   } else {
     value = exactChannel ? channelWords(row.value, row.label, names) : row.label?.trim() || row.value;
   }
-  return `${field} ${OP_WORDS[row.op]} ${value}`;
+  return `${field} ${opWords(row.op)} ${value}`;
 }
 
 /** Who a mention line hears, for the creator scope pill. */
@@ -394,8 +384,12 @@ function Conditions({ draft, mode, onChange, services, names }: {
 const ADD_OPS: readonly { value: FilterOp; label: string }[] = [
   { value: "eq", label: "is" },
   { value: "in", label: "is one of" },
+  { value: "not_in", label: "is not" },
   { value: "prefix", label: "starts with" },
+  { value: "not_prefix", label: "doesn't start with" },
   { value: "contains", label: "contains" },
+  { value: "regex", label: "matches" },
+  { value: "not_regex", label: "doesn't match" },
 ];
 
 /** The small picker behind `+ Add a condition`: a field these events carry, how it compares, and a value. */
@@ -421,7 +415,8 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
     }
   }, [offered, firstField]);
   const selected = fields.find((f) => f.field === field);
-  const source = op === "in" ? undefined : selected?.options;
+  // Only an exact value comes from the picker. A list or a pattern is typed.
+  const source = op === "eq" ? selected?.options : undefined;
   const deps: Record<string, string> = {};
   for (const dep of source?.dependsOn ?? []) {
     const sibling = rows.find((r) => r.field === dep && r.value.trim().length > 0);
@@ -447,7 +442,10 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
           value={op}
           onChange={(e) => {
             const next = ADD_OPS.find((o) => o.value === e.target.value);
-            if (next) setOp(next.value);
+            if (!next) return;
+            setOp(next.value);
+            // A picked name labels an exact value only, not a typed list or pattern.
+            if (next.value !== "eq") setLabel(undefined);
           }}
         >
           {ADD_OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -473,7 +471,7 @@ function AddCondition({ fields, rows, onAdd, onCancel }: {
             aria-label="Condition value"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder={op === "in" ? "a, b, c" : "Value"}
+            placeholder={isListOp(op) ? "a, b, c" : "Value"}
             className="min-w-0"
           />
         )}

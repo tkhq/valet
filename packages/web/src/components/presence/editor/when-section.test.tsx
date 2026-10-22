@@ -6,7 +6,7 @@ import type { CatalogService } from "~/components/events/subscription-match";
 import type { WhenService } from "~/components/events/wizard-preview";
 import { formatDateTime } from "~/lib/format-when";
 import { line } from "../test-fixtures";
-import { draftFromLine, newDraft, scheduleCron, type Draft, type EditorMode } from "./draft";
+import { bodyFromDraft, draftFromLine, isEmptyBody, newDraft, scheduleCron, type Draft, type EditorMode } from "./draft";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
@@ -40,10 +40,11 @@ const INCIDENTS = { subject: "slack:T1/C1", service: "slack" as const, label: "#
 
 let latest: Draft | undefined;
 
-function Harness({ initial, mode = { kind: "create" }, connected = new Set<WhenService>(["slack", "github"]) }: {
+function Harness({ initial, mode = { kind: "create" }, connected = new Set<WhenService>(["slack", "github"]), services = SERVICES }: {
   initial: Draft;
   mode?: EditorMode;
   connected?: ReadonlySet<WhenService> | null;
+  services?: CatalogService[];
 }) {
   const [draft, setDraft] = useState(initial);
   latest = draft;
@@ -52,7 +53,7 @@ function Harness({ initial, mode = { kind: "create" }, connected = new Set<WhenS
       draft={draft}
       mode={mode}
       onChange={setDraft}
-      services={SERVICES}
+      services={services}
       catalogLoading={false}
       catalogError={false}
       connected={connected}
@@ -189,6 +190,88 @@ describe("WhenSection", () => {
     expect(conditionWords({ id: "3", field: "channel", op: "in", value: "C1, C2", inLabels: { field: "channel", values: ["C1", "C2"], labels: ["C1", "C2"] } }, names))
       .toBe("channel is #incidents or C2");
     expect(conditionWords({ id: "4", field: "channel", op: "prefix", value: "C1" }, names)).toBe("channel starts with C1");
+  });
+});
+
+describe("exclusion conditions", () => {
+  const ALERTS: CatalogService[] = [
+    {
+      service: "slack",
+      entries: [
+        { key: "slack.app_mention", description: "Mention", filters: [{ field: "channel" }, { field: "user" }] },
+        { key: "slack.message", description: "Message", filters: [{ field: "channel" }] },
+        {
+          key: "slack.bot_message",
+          description: "App message",
+          filters: [{ field: "channel_name" }, { field: "bot_id" }, { field: "user", options: { source: "slack.users" } }],
+        },
+      ],
+    },
+  ];
+
+  function addCondition(field: string, op: string, value: string) {
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: field } });
+    fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: op } });
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+  }
+
+  it("offers the exclusions among the comparisons", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} services={ALERTS} />);
+    fireEvent.click(screen.getByLabelText("An app posts a message"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    const comparison = screen.getByLabelText("Condition comparison") as HTMLSelectElement;
+    expect([...comparison.options].map((o) => o.textContent)).toEqual([
+      "is", "is one of", "is not", "starts with", "doesn't start with", "contains", "matches", "doesn't match",
+    ]);
+  });
+
+  it("takes a typed pattern for doesn't match on a field with a picker", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} services={ALERTS} />);
+    fireEvent.click(screen.getByLabelText("An app posts a message"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add a condition" }));
+    fireEvent.change(screen.getByLabelText("Condition field"), { target: { value: "user" } });
+    // "is" picks a user from the list.
+    expect(screen.getByLabelText("Filter value")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Condition comparison"), { target: { value: "not_regex" } });
+    expect(screen.queryByLabelText("Filter value")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Condition value"), { target: { value: "^U0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(within(screen.getByRole("group", { name: "Only when" })).getByText("user doesn't match ^U0")).toBeTruthy();
+    const saved = latest !== undefined ? bodyFromDraft(latest, { kind: "create" }) : null;
+    expect(saved?.kind === "create-line" ? saved.body.filters : null).toEqual([{ field: "user", op: "not_regex", value: "^U0" }]);
+  });
+
+  it("renders a bot is not pill and saves it as not_in", () => {
+    render(<Harness initial={newDraft({ timezone: "UTC" })} services={ALERTS} />);
+    fireEvent.click(screen.getByLabelText("An app posts a message"));
+    addCondition("bot_id", "not_in", "B0123ABCD, B0456EFGH");
+    addCondition("channel_name", "not_prefix", "alerts-deal");
+    const only = screen.getByRole("group", { name: "Only when" });
+    expect(within(only).getByText("bot is not B0123ABCD or B0456EFGH")).toBeTruthy();
+    expect(within(only).getByText("channel name doesn't start with alerts-deal")).toBeTruthy();
+    const saved = latest !== undefined ? bodyFromDraft(latest, { kind: "create" }) : null;
+    expect(saved?.kind === "create-line" ? saved.body.filters : null).toEqual([
+      { field: "bot_id", op: "not_in", value: ["B0123ABCD", "B0456EFGH"] },
+      { field: "channel_name", op: "not_prefix", value: "alerts-deal" },
+    ]);
+  });
+
+  it("keeps a stored exclusion as it is when the line is edited", () => {
+    const sub = line("l1", {
+      eventKeys: ["slack.bot_message"],
+      filters: [{ field: "channel_name", op: "prefix", value: "alerts-" }, { field: "bot_id", op: "not_in", value: ["B1"] }],
+      target: { kind: "assistant", assistant: "team" },
+    });
+    render(<Harness initial={draftFromLine(sub)} mode={{ kind: "edit", line: sub }} services={ALERTS} />);
+    expect(within(screen.getByRole("group", { name: "Only when" })).getByText("bot is not B1")).toBeTruthy();
+    expect(latest !== undefined && isEmptyBody(bodyFromDraft(latest, { kind: "edit", line: sub }))).toBe(true);
+  });
+
+  it("names an excluded channel from the places list", () => {
+    expect(conditionWords({ id: "1", field: "channel", op: "not_in", value: "C1, C2" }, { channels: { C1: "incidents" } }))
+      .toBe("channel is not #incidents or C2");
   });
 });
 
