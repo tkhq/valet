@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { InMemoryCredentialStore, type ValetPlugin } from "@valet/engine";
 import { validateSubscription } from "./subscription-write.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -26,6 +27,37 @@ describe("subject filter (spec Part G)", () => {
   it("refuses an op the spec does not define for subject", () => {
     const error = validateSubscription([githubPlugin], { ...body, filters: [{ field: "subject", op: "contains", value: "lean-proofs" }] });
     expect(error).toBe('A place condition matches only with "is" or "starts with", not "contains". Change how the condition matches.');
+  });
+});
+
+describe("exclusion filters", () => {
+  const body = { name: "Alert triage", eventKeys: ["slack.bot_message"], target: { kind: "assistant" } };
+  const check = (filter: Record<string, unknown>) => validateSubscription([slackPlugin], { ...body, filters: [filter] });
+
+  it("accepts a not_in list and a not_prefix text", () => {
+    expect(check({ field: "bot_id", op: "not_in", value: ["B1", "B2"] })).toBeNull();
+    expect(check({ field: "channel_name", op: "not_prefix", value: "alerts-dev" })).toBeNull();
+  });
+
+  it("refuses a not_in value that is not a list of one or more strings", () => {
+    const refusal = "filter value invalid for op not_in on field bot_id. Give a list of one or more values to exclude.";
+    for (const value of ["B1", [], [1], undefined]) {
+      expect(check({ field: "bot_id", op: "not_in", value })).toBe(refusal);
+    }
+  });
+
+  it("refuses a not_prefix value that is not a non-empty string", () => {
+    for (const value of ["", ["alerts-"], undefined]) {
+      expect(check({ field: "channel_name", op: "not_prefix", value })).toBe("filter value invalid for op not_prefix on field channel_name");
+    }
+  });
+
+  it("refuses an exclusion on the place field and on a field no selected key declares", () => {
+    expect(check({ field: "subject", op: "not_in", value: ["slack:T1/C1"] })).toBe(
+      'A place condition matches only with "is" or "starts with", not "not_in". Change how the condition matches.',
+    );
+    expect(check({ field: "subject", op: "not_prefix", value: "slack:T1" })).toContain('not "not_prefix"');
+    expect(check({ field: "reaction", op: "not_in", value: ["eyes"] })).toBe("filter field reaction is not declared by any event selected by eventKeys");
   });
 });
 

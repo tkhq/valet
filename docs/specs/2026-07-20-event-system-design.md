@@ -130,7 +130,7 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `org_id`, `owner_type`, `owner_id` | scoping |
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
-| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest). Every catalog entry also carries the implicit field `subject`, matched against the event's `subjects` column with `eq` or `prefix` (2026-10-15) |
+| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains\|regex\|not_in\|not_prefix, value }[]` over catalog fields (see "Filter matching"); a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest). Every catalog entry also carries the implicit field `subject`, matched against the event's `subjects` column with `eq` or `prefix` (2026-10-15) |
 | `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }`. `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
 | `enabled` | bool |
 | `created_by`, timestamps | |
@@ -139,6 +139,29 @@ Workflow event-triggers are rows here too — a subscription with a
 `{ kind: "workflow" }` target starts that workflow, so one matching engine
 serves everything. (Auto-syncing subscription rows from workflow-definition
 trigger nodes is deferred — see Out of scope.)
+
+#### Filter matching
+
+Every filter must match. `eq` matches one value and `in` matches a list.
+`prefix`, `contains`, and `regex` match a pattern over the text. The two
+exclusion ops were added on 2026-10-22: `not_in` takes a list and fails when
+the value is in it, and `not_prefix` takes text and fails when the value
+starts with it. Presence shows them as "is not" and "doesn't start with". A
+line that must skip some sources, such as some alert bots, puts them in an
+exclusion filter, so an excluded event starts no assistant turn.
+
+A value is absent when the event's catalog entry does not declare the field,
+or when the payload holds no text or number at the field's path. An absent
+value fails `eq`, `in`, `prefix`, `contains`, and `regex`. It passes `not_in`
+and `not_prefix`, because an absent value is not in the excluded set. For
+example, `bot_id not_in [B1]` on `slack.message` and `slack.bot_message` still
+matches a person's message, which has no `bot_id`. `channel_name not_prefix
+alerts-dev` still matches a direct message, and it also matches a channel
+message when intake could not read the channel's name in time.
+
+The write validator (`events/subscription-write.ts`) needs a non-empty list
+of strings for `not_in` and a non-empty string for `not_prefix`. The implicit
+`subject` field takes only `eq` and `prefix`.
 
 ### `event_deliveries`
 
@@ -329,7 +352,10 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
 - Collision gate (TKAI-294, `events/collisions.ts`): a create, a match edit,
   or an enable is compared against the org's enabled subscriptions. The
   comparison is symbolic — "filter A implies filter B" over `eq`, `in`,
-  `prefix`, `contains`; `regex` proves nothing and can only warn. A write
+  `prefix`, `contains`, `not_in`, `not_prefix`; `regex` proves nothing and
+  can only warn. An exclusion also holds every event with no value for the
+  field, so two exclusions always overlap, and a positive filter never
+  covers an exclusion. A write
   that covers an existing rule on a shared event key (equal or superset)
   answers 409 with the colliding rules in the payload; `allowCollision: true`
   commits it anyway and logs the override. A partial overlap or subset
@@ -420,7 +446,9 @@ overlap shows the same list as a warning before the dialog closes.
 ## Testing
 
 - Unit: `verify()` with signed fixtures (pattern in `github-app.test.ts`),
-  `toEvent()` normalization, filter-matching engine as a pure function.
+  `toEvent()` normalization, filter-matching engine as a pure function,
+  including a truth table for `not_in` and `not_prefix` with the value
+  present, absent, and undeclared.
 - Route: ingest → event + delivery rows in one transaction; duplicate delivery
   id is a no-op; bad signature → drop log.
 - Dispatcher: retry/backoff, `SKIP LOCKED` claiming, each target kind against

@@ -6,9 +6,24 @@ import { eventKeyMatches } from "@valet/shared";
 export { eventKeyMatches } from "@valet/shared";
 import type { EventCatalogEntry } from "@valet/engine";
 
+/**
+ * The filter operators a subscription accepts. `not_in` and `not_prefix`
+ * exclude events: they match when the value is absent, because an absent
+ * value is not in the excluded set (see `filtersMatch`). The write validator
+ * (`subscription-write.ts`) re-exports this list, and the
+ * `event-subscriptions` skill names each one.
+ */
+export const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex", "not_in", "not_prefix"] as const;
+export type SubscriptionFilterOp = (typeof FILTER_OPS)[number];
+
+/** True for an op that excludes events: it matches when the value is absent. */
+export function isExclusionOp(op: SubscriptionFilterOp): op is "not_in" | "not_prefix" {
+  return op === "not_in" || op === "not_prefix";
+}
+
 export interface SubscriptionFilter {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains" | "regex";
+  op: SubscriptionFilterOp;
   value: string | string[];
 }
 
@@ -119,8 +134,8 @@ export function withSubjectFilter(entry: EventCatalogEntry): EventCatalogEntry {
  * (coarse to fine, spec Part A1). `eq` matches when any subject equals the
  * value; `prefix` matches when any subject starts with it. The binding spec
  * (Part G) defines only these two ops for `subject`; the write validator
- * (`subscription-write.ts`) refuses any other op at write time, so `in` /
- * `contains` / `regex` reaching here is defensive fail-closed, never a throw.
+ * (`subscription-write.ts`) refuses any other op at write time, so any other
+ * op reaching here is defensive fail-closed, never a throw.
  */
 function subjectFilterMatches(subjects: string[] | undefined, filter: SubscriptionFilter): boolean {
   if (!subjects || subjects.length === 0) return false;
@@ -189,6 +204,17 @@ export function subscriptionNamesKey(sub: { eventKeys: unknown }, eventKey: stri
   return eventKeyMatches(eventKey, sub.eventKeys as string[]);
 }
 
+/**
+ * Whether every filter passes for one event (AND).
+ *
+ * A value is absent when the event's catalog entry does not declare the
+ * field, or the payload holds no text or number at its path. An absent value
+ * fails every op that names what to match (`eq`, `in`, `prefix`, `contains`,
+ * `regex`). It passes the exclusion ops (`not_in`, `not_prefix`), because an
+ * absent value is not in the excluded set: `bot_id not_in [B1]` still matches
+ * a message a person wrote, and `channel_name not_prefix alerts-dev` still
+ * matches a direct message, which has no channel name.
+ */
 export function filtersMatch(
   payload: unknown,
   eventKey: string,
@@ -197,16 +223,14 @@ export function filtersMatch(
   subjects?: string[],
 ): boolean {
   if (filters.length === 0) return true;
-  // No catalog entry for this key → all field filters are undeclared → no match.
   const entry = catalog.find((e) => e.key === eventKey);
   return filters.every((filter) => {
     // `subject` reads the event's normalized subjects array, not a payload
     // path, so it is matched before (and independent of) catalog lookup.
     if (filter.field === SUBJECT_FILTER_FIELD) return subjectFilterMatches(subjects, filter);
     const declared = entry?.filters.find((f) => f.field === filter.field);
-    if (!declared) return false;
-    const actual = asString(resolvePath(payload, declared.path));
-    if (actual === undefined) return false;
+    const actual = declared ? asString(resolvePath(payload, declared.path)) : undefined;
+    if (actual === undefined) return isExclusionOp(filter.op);
     switch (filter.op) {
       case "eq":
         return actual === filter.value;
@@ -226,6 +250,10 @@ export function filtersMatch(
         if (re === null) return false;
         return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH));
       }
+      case "not_in":
+        return Array.isArray(filter.value) && !filter.value.includes(actual);
+      case "not_prefix":
+        return typeof filter.value === "string" && !actual.startsWith(filter.value);
     }
   });
 }

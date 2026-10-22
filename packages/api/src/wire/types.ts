@@ -5089,10 +5089,12 @@ export interface GetEventCatalogResponse {
   services: { service: string; entries: EventCatalogEntryWire[]; readiness?: EventIngressReadiness }[];
 }
 
-/** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
+/** Mirrors `events/match.ts`'s `SubscriptionFilter`. `not_in` and
+ * `not_prefix` skip matching events; an event with no value for the field
+ * still matches them. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains" | "regex";
+  op: "eq" | "in" | "prefix" | "contains" | "regex" | "not_in" | "not_prefix";
   value: string | string[];
   /**
    * Optional display label for the value — a resolved name for a raw id (a
@@ -5101,7 +5103,7 @@ export interface EventSubscriptionFilterWire {
    */
   label?: string;
   /**
-   * Optional display labels for an `in` list, aligned with `value` by index
+   * Optional display labels for an `in` or `not_in` list, aligned with `value` by index
    * (a channel id list shown as "#eng, #ops"). Matching ignores it.
    */
   labels?: string[];

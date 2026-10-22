@@ -502,7 +502,7 @@ const ANY_PLACE: Readonly<Record<SentenceService, string>> = {
 const SENDER_FIELDS: readonly string[] = ["user", "sender", "creator"];
 
 /** The ops whose value is a whole channel id, so a channel name can stand in for it. */
-const EXACT_OPS: readonly EventSubscriptionFilterWire["op"][] = ["eq", "in"];
+const EXACT_OPS: readonly EventSubscriptionFilterWire["op"][] = ["eq", "in", "not_in"];
 
 /**
  * The words for one Slack channel value: its saved label, else its name
@@ -523,9 +523,9 @@ export function channelWords(value: string, label: string | undefined, names: Se
 /**
  * Each value of a filter with the words a reader sees for it: the filter's
  * own label, then for a Slack channel its name (`channelWords`), then the
- * raw value. Only an exact match (`eq`, `in`) takes the name: a `prefix`,
- * `contains`, or `regex` value is a pattern over the id, and `starts with
- * #proj-valet` would describe a match that never runs.
+ * raw value. Only an exact value (`eq`, `in`, `not_in`) takes the name: a
+ * `prefix`, `contains`, or `regex` value is a pattern over the id, and
+ * `starts with #proj-valet` would describe a match that never runs.
  */
 function filterEntries(filter: EventSubscriptionFilterWire, names: SentenceNames = {}): { value: string; label: string }[] {
   const named = (value: string, label: string | undefined): string =>
@@ -1163,13 +1163,17 @@ export function activityPartsText(sentence: ActivitySentenceParts): string {
   return outcomes.length > 0 ? `${partsText(sentence.lead)} → ${outcomes}` : partsText(sentence.lead);
 }
 
-/** An op as a verb after its field: `starts with`, `contains`. */
-function opWords(op: EventSubscriptionFilterWire["op"]): string {
+/** An op as a verb after its field: `starts with`, `is not`. The editor's
+ * condition pills use the same words. */
+export function opWords(op: EventSubscriptionFilterWire["op"]): string {
   switch (op) {
+    case "eq":
+    case "in": return "is";
     case "prefix": return "starts with";
     case "contains": return "contains";
     case "regex": return "matches";
-    default: return "is";
+    case "not_in": return "is not";
+    case "not_prefix": return "doesn't start with";
   }
 }
 
