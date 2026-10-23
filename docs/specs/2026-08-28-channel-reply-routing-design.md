@@ -698,3 +698,11 @@ It preserves concurrent target edits, matching rules, ownership, and enabled sta
 Every subscription-created follow binding retains its subscription ID, including personal subscriptions. Followed replies read current presence from that rule.
 Empty presence objects behave as unset, including previously stored values. Overheard messages coalesce only when their display name and avatar overrides match.
 The digest retains those overrides. Different identities and sender authorities remain separate. Approval replay retains the blocked submission metadata across restart.
+
+## Slack processing status
+
+Processing status follows the submission lifecycle independently of reply streaming.
+Pending gates take priority over queued follow-ups. Completion, failure, cancellation, and shutdown clear the status when no work remains.
+Reply delivery restores the status if the submission still needs work.
+Startup subscribes before restoring unsettled Slack submissions and their pending gates from organization-scoped pages of 100.
+Shutdown prevents late admission or recovery callbacks from creating new status registrations.

@@ -6,6 +6,8 @@ import type { StreamMessage } from "~/stores/stream";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
 import { SignalCard, WatchEventsCard, groupWatchEvents, type TranscriptItem } from "./signal-card";
+import { endsWithToolResult } from "./transcript-cards";
+import { isContinuation, planTranscript } from "./transcript-plan";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
 import { BranchNoteDivider } from "./branch-note-divider";
@@ -46,7 +48,13 @@ export function MessageList({
   hiddenIds,
   ratings = true,
   newSince,
+  emptyState,
+  footer,
 }: {
+  /** Shown after the last message, such as the agents this thread is running. */
+  footer?: ReactNode;
+  /** Shown in place of the default line when the thread has no messages. */
+  emptyState?: ReactNode;
   messages: StreamMessage[];
   threadId?: string;
   /**
@@ -113,6 +121,12 @@ export function MessageList({
   }, [messages, pendingIds, threadId, hiddenIds]);
   const editable = useMemo(() => editableMessageIds(visible, viewerId), [visible, viewerId]);
   const dimFrom = editingId ? visible.findIndex((message) => message.id === editingId) : -1;
+
+  // Each turn's tool calls fold into as few work lines as its text allows.
+  const transcript = useMemo(() => {
+    const items = groupBranchNotes(groupWatchEvents(visible));
+    return { items, plans: planTranscript(items, agentBusy) };
+  }, [visible, agentBusy]);
 
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
@@ -211,12 +225,13 @@ export function MessageList({
           </div>
         )}
         {visible.length === 0 ? (
-          <div className="flex-1 grid place-items-center text-sm text-muted">
+          emptyState ?? <div className="flex-1 grid place-items-center text-sm text-muted">
             No messages yet — try sending a prompt below.
           </div>
         ) : (
           <div ref={contentRef} className="shrink-0 space-y-2 py-4">
-            {groupBranchNotes(groupWatchEvents(visible)).map((item, i, items) => {
+            {transcript.items.map((item, i, items) => {
+              const plan = transcript.plans[i]!;
               if (item.kind === "watch") {
                 return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
               }
@@ -224,6 +239,8 @@ export function MessageList({
                 return <BranchNoteDivider key={item.notes[0]!.id} notes={item.notes} onReturn={onReturnToBranch} onOpenThread={onOpenThread} />;
               }
               const m = item.message;
+              // Every part of this message shows in the work line above it.
+              if (plan.hidden) return newSince?.anchorId === m.id ? <NewSinceDivider key={m.id} label={newSince.label} /> : null;
               const row = m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
@@ -235,7 +252,11 @@ export function MessageList({
                   key={m.id}
                   message={m}
                   continuation={isContinuation(m, previousMessage(items[i - 1]))}
-                  suppressEmptyPlaceholder={agentBusy && i === items.length - 1}
+                  suppressEmptyPlaceholder={(agentBusy && i === items.length - 1) || (endsWithToolResult(previousMessage(items[i - 1])) && !m.errorMessage)}
+                  absorbedLeading={plan.absorbedLeading}
+                  extraWork={plan.extraWork.length ? plan.extraWork : undefined}
+                  extraWorkLive={plan.extraWorkLive}
+                  workedForMs={plan.workedForMs}
                   viewerId={viewerId}
                   onReply={onReply}
                   onEdit={onEdit && editable.has(m.id) ? onEdit : undefined}
@@ -248,6 +269,7 @@ export function MessageList({
                 ? <Fragment key={m.id}><NewSinceDivider label={newSince.label} />{row}</Fragment>
                 : row;
             })}
+            {footer}
           </div>
         )}
       </div>
@@ -325,11 +347,3 @@ function previousMessage(item: ListRow | undefined): StreamMessage | undefined {
   return item?.kind === "message" ? item.message : undefined;
 }
 
-/** Consecutive assistant messages from one turn share the first one's
- * header: the same model, within a few minutes, with nothing between. */
-export function isContinuation(message: StreamMessage, previous: StreamMessage | undefined): boolean {
-  if (!previous || message.role !== "assistant" || previous.role !== "assistant") return false;
-  if (previous.compaction || previous.signal || previous.command || message.settledOutcome) return false;
-  if ((message.model ?? "") !== (previous.model ?? "")) return false;
-  return message.createdAt - previous.createdAt < 5 * 60_000;
-}

@@ -22,6 +22,20 @@ class GatedStore extends InMemorySessionStore {
 }
 
 describe("thread metadata writes", () => {
+  it("persists a queue-mode change before another surface restores the thread", async () => {
+    const faux = registerFauxProvider({ provider: "durable-queue-mode" });
+    try {
+      const providers = { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+      const options = { userId: "alice", orgId: "org", workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [], queueMode: "steer" as const };
+      const session = await new Engine({ providers }).createSession(options);
+      const thread = await session.createThread("home");
+      await thread.setMode("followup");
+      expect((await providers.store.getThread(session.id, thread.id))?.queueMode).toBe("followup");
+      const restored = await new Engine({ providers }).restoreSession({ sessionId: session.id, options });
+      expect((await restored.threadByKey("home"))?.toThreadData().queueMode).toBe("followup");
+    } finally { faux.unregister(); }
+  });
+
   it("keeps a recorded Slack channel when a tool focus write interleaves", async () => {
     const faux = registerFauxProvider({ provider: "metadata-interleave" });
     try {
@@ -56,7 +70,9 @@ describe("thread metadata writes", () => {
       const session = await engine.createSession({ userId: "alice", orgId: "org", owner: { type: "user", id: "alice" }, workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [] });
       const thread = await session.createThread("sub:rule-1:delivery-1");
       await Promise.all([thread.addToMetadataList("slackChannels", "T1/C1"), thread.setMetadataFlag("conversational")]);
-      await thread.setMetadataFlag("conversational");
+      expect(await thread.setMetadataFlag("conversational")).toBe(false);
+      const claims = await Promise.all([thread.setMetadataFlag("offered"), thread.setMetadataFlag("offered")]);
+      expect(claims).toEqual([true, false]);
       expect((await store.getThread(session.id, thread.id))?.metadata).toMatchObject({ slackChannels: ["T1/C1"], conversational: true });
     } finally { faux.unregister(); }
   });

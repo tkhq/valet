@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxToolCall, registerApiProvider, registerFauxProvider, type Api, type Model } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,
@@ -21,6 +21,89 @@ function makeEngine() {
 }
 
 describe("engine: tool-call argument streaming", () => {
+  it("publishes a completed interval before message_end when the next block closes reasoning", async () => {
+    const faux = registerFauxProvider({ provider: "thinking-interrupted" });
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const stream = (_model: Model<Api>) => {
+      const events = createAssistantMessageEventStream();
+      const thinking = fauxAssistantMessage([{ type: "thinking", thinking: "PRIVATE REASONING" }]);
+      const message = fauxAssistantMessage([
+        { type: "thinking", thinking: "PRIVATE REASONING" }, { type: "text", text: "answer" },
+      ]);
+      void (async () => {
+        events.push({ type: "start", partial: thinking });
+        events.push({ type: "thinking_start", contentIndex: 0, partial: thinking });
+        events.push({ type: "text_start", contentIndex: 1, partial: message });
+        await pending;
+        events.push({ type: "done", reason: "stop", message });
+        events.end(message);
+      })();
+      return events;
+    };
+    registerApiProvider({ api: faux.api, stream, streamSimple: stream });
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    try {
+      const receipt = await session.prompt("reason");
+      await expect.poll(() => events.some(e => e.event.type === "thinking_update" && e.event.part.durationMs !== undefined)).toBe(true);
+      expect(events.some(e => e.event.type === "message_end")).toBe(false);
+      const finished = events.map(e => e.event).find(e => e.type === "thinking_update" && e.part.durationMs !== undefined);
+      expect(finished?.type === "thinking_update" && finished.part.text).toBe("");
+      expect(JSON.stringify(events)).not.toContain("PRIVATE REASONING");
+      release?.();
+      await waitForStatus(events, receipt.threadId, "idle");
+      const entries = await session.readEntries("web:default");
+      const entry = entries.find(e => e.type === "message" && e.role === "assistant");
+      expect(entry?.type === "message" && entry.parts?.[0]).toEqual(finished?.type === "thinking_update" && finished.part);
+    } finally {
+      release?.();
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
+  it("streams and persists each reasoning block in provider order", async () => {
+    const faux = registerFauxProvider({ provider: "thinking-timing", tokenSize: { min: 2, max: 3 } });
+    faux.setResponses([fauxAssistantMessage([
+      { type: "thinking", thinking: "first reasoning" },
+      { type: "text", text: "intermediate answer" },
+      { type: "thinking", thinking: "second reasoning" },
+      { type: "text", text: "final answer" },
+    ])]);
+    try {
+      const { engine, bus, events } = makeEngine();
+      const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const receipt = await session.prompt("reason twice");
+      await waitForStatus(events, receipt.threadId, "idle");
+      const updates = events.map(e => e.event).filter(e => e.type === "thinking_update");
+      expect(updates.length).toBeGreaterThan(4);
+      const finished = updates.filter(e => e.part.durationMs !== undefined);
+      expect(finished.map(e => e.index)).toEqual([0, 2]);
+      expect(updates.every(e => e.part.text === "")).toBe(true);
+      for (const update of finished) {
+        expect(update.part.startedAt).toBeTypeOf("number");
+        expect(update.part.durationMs).toBeGreaterThanOrEqual(0);
+      }
+      const entries = await session.readEntries("web:default");
+      const entry = entries.find(e => e.type === "message" && e.role === "assistant");
+      expect(entry?.type).toBe("message");
+      if (entry?.type !== "message") throw new Error("Missing assistant entry");
+      expect(entry.parts?.map(p => p.type)).toEqual(["thinking", "text", "thinking", "text"]);
+      expect(entry.parts?.filter(p => p.type === "thinking")).toEqual(finished.map(e => e.part));
+      const { events: log } = await bus.read(session.id);
+      expect(log.some(e => e.event.type === "thinking_update")).toBe(false);
+      const canonical = log.map(e => e.event).find(e => e.type === "message_update");
+      expect(canonical?.type === "message_update" && canonical.parts).toEqual(entry.parts);
+      for (const value of [events, log, entries]) {
+        expect(JSON.stringify(value)).not.toContain("first reasoning");
+        expect(JSON.stringify(value)).not.toContain("second reasoning");
+      }
+    } finally {
+      faux.unregister();
+    }
+  });
+
   it("emits ephemeral tool_call_update deltas while tool-call args stream", async () => {
     const args = {
       path: "/tmp/note.txt",
@@ -61,6 +144,10 @@ describe("engine: tool-call argument streaming", () => {
     // The deltas concatenate to the complete args JSON.
     const joined = updates.map((u) => u.argsDelta).join("");
     expect(JSON.parse(joined)).toEqual(args);
+
+    expect(events.some(e => e.event.type === "thinking_update")).toBe(false);
+    expect((await session.readEntries("web:default")).some(e =>
+      e.type === "message" && e.parts?.some(p => p.type === "thinking"))).toBe(false);
 
     // Every update precedes tool execution.
     const types = events.map((e) => e.event.type);

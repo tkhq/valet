@@ -3058,3 +3058,22 @@ export const childReplyDeliveries = pgTable("child_reply_deliveries", {
   childSessionId: text("child_session_id"),
   childQueueItemId: text("child_queue_item_id"),
 }, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);
+
+/** Work a person started from their home conversation: one thread in one of
+ * their workspaces. Home lists it under Tasks and reports back once when the
+ * starting submission settles. Done hides it from Tasks; the thread stays. */
+export const homeTasks = pgTable("home_tasks", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  title: text("title").notNull(),
+  /** The submission that started the task. Its settlement reports back home. */
+  queueItemId: text("queue_item_id"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  reportedAt: bigint("reported_at", { mode: "number" }),
+  doneAt: bigint("done_at", { mode: "number" }),
+}, (t) => [index("home_tasks_user").on(t.userId, t.createdAt), index("home_tasks_thread").on(t.sessionId, t.threadId)]);

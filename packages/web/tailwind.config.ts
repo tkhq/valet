@@ -48,10 +48,19 @@ export default {
           to: { transform: "scale(1.8)", opacity: "0" },
         },
         "browser-agent-type": { from: { opacity: "0.7" }, to: { opacity: "0" } },
+        "working-dot": { "0%, 80%, 100%": { opacity: "0.25" }, "40%": { opacity: "1" } },
+        "text-shimmer": { from: { backgroundPosition: "100% 0" }, to: { backgroundPosition: "-100% 0" } },
       },
       animation: {
         "browser-agent-click": "browser-agent-click 550ms ease-out",
         "browser-agent-type": "browser-agent-type 650ms ease-out",
+        // The three dots of a working thread row (`ThreadStateMark`), each
+        // delayed a little more than the one before it.
+        "working-dot": "working-dot 1.2s ease-in-out infinite both",
+        "working-dot-2": "working-dot 1.2s ease-in-out 0.2s infinite both",
+        "working-dot-3": "working-dot 1.2s ease-in-out 0.4s infinite both",
+        // A light band that crosses running text (`Trace` lines).
+        "text-shimmer": "text-shimmer 2s linear infinite",
       },
       colors: {
         // Neutral grayscale, OKLCH-tuned for even visual steps. Used for

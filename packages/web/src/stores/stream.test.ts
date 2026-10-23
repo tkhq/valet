@@ -70,6 +70,29 @@ function idleModelState(threadId: string): WireEvent {
 describe("stream store reducer", () => {
   beforeEach(reset);
 
+  it("keeps separate reasoning intervals through live updates and canonical history", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const update = (index: number, text: string, startedAt: number, durationMs?: number) => ingest(SESSION, {
+      type: "thinking_update", seq: 0, ts: 1000, threadId: THREAD, messageId: "m1", index,
+      part: { kind: "thinking", text, startedAt, durationMs },
+    });
+    update(0, "first", 1000);
+    update(0, "first done", 1000, 2400);
+    ingest(SESSION, { type: "text_delta", seq: 0, ts: 4000, threadId: THREAD, messageId: "m1", delta: "answer" });
+    update(2, "second", 9000, 500);
+    update(0, "stale", 1000);
+    const parts = useStreamStore.getState().bySession[SESSION].messages[0].parts;
+    expect(parts).toEqual([
+      { kind: "thinking", text: "first done", startedAt: 1000, durationMs: 2400 },
+      { kind: "text", text: "answer" },
+      { kind: "thinking", text: "second", startedAt: 9000, durationMs: 500 },
+    ]);
+    ingest(SESSION, { type: "message_update", seq: 2, offset: offset(2), ts: 10000, threadId: THREAD, messageId: "m1", parts });
+    ingest(SESSION, { type: "message_end", seq: 3, offset: offset(3), ts: 20000, threadId: THREAD, messageId: "m1", reason: "end_turn" });
+    expect(useStreamStore.getState().bySession[SESSION].messages[0].parts).toEqual(parts);
+  });
+
   it("drops the rows still streaming on a thread when its branch switches", () => {
     const { ingest, addUserMessage } = useStreamStore.getState();
     ingest(SESSION, messageStart("old-reply", 1));

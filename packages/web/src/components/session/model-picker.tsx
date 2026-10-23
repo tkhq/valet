@@ -1,7 +1,8 @@
-import { Check, ChevronDown, Search, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronRight, Search, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
+  Label,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
@@ -14,6 +15,8 @@ import {
   useModels,
   useOrgReasoning,
 } from "~/api/settings";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
+import { ModelSizeList } from "./model-size-list";
 import { curatedForCatalogId } from "~/lib/models";
 import {
   SIZE_TIERS,
@@ -78,6 +81,8 @@ import { matchesNeedle } from "~/lib/text-match";
  */
 export interface ModelPickerProps {
   currentId?: string;
+  /** A phone settings dialog embeds the controls without a second popup. */
+  presentation?: "menu" | "panel";
   /** Model shown in the closed trigger. Picker behavior remains based on
    * `currentId`. */
   displayId?: string;
@@ -154,6 +159,7 @@ type FlatEntry = { kind: "tier"; tier: SizeTier } | { kind: "model"; model: Mode
 
 export function ModelPicker({
   currentId,
+  presentation = "menu",
   displayId,
   ariaDescription,
   onSelect,
@@ -161,8 +167,13 @@ export function ModelPicker({
   onSelectReasoning,
   disabled,
 }: ModelPickerProps) {
+  const panel = presentation === "panel";
   const [open, setOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [moreModels, setMoreModels] = useState(false);
+  const previousMoreModels = useRef(false);
+  const moreModelsRef = useRef<HTMLButtonElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState("");
   const [highlightIndex, setHighlightIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -203,7 +214,7 @@ export function ModelPicker({
   // Collapse Anthropic aliases by default unless `showAll` or query is
   // active — a search should peek into the wider scope so a user typing
   // "haiku-3-5-2024" can still find that pinned alias without toggling.
-  const revealAll = restricted || showAll || query.trim().length > 0;
+  const revealAll = panel || restricted || showAll || query.trim().length > 0;
   const catalogForRole = revealAll ? roleScoped : approvedScoped;
   const filteredModels = useMemo(() => {
     const baseline = revealAll
@@ -223,9 +234,10 @@ export function ModelPicker({
   // The Size group hides when the query matches no tier label or token —
   // same substring matcher the model list search uses.
   const filteredTiers = useMemo(() => {
+    if (panel) return [];
     if (query.trim().length === 0) return [...SIZE_TIERS];
     return SIZE_TIERS.filter((t) => matchesNeedle(query, [TIER_LABELS[t], t]));
-  }, [query]);
+  }, [query, panel]);
 
   const grouped = useMemo(() => groupByProvider(filteredModels), [filteredModels]);
   const flat: FlatEntry[] = useMemo(
@@ -237,10 +249,17 @@ export function ModelPicker({
   );
   const hiddenCount = fullyRevealedModels.length - filteredModels.length;
 
+  useEffect(() => {
+    if (panel && previousMoreModels.current !== moreModels) {
+      (moreModels ? backRef : moreModelsRef).current?.focus();
+    }
+    previousMoreModels.current = moreModels;
+  }, [panel, moreModels]);
+
   // Reset highlight when the filtered set changes.
   useEffect(() => {
     setHighlightIndex(0);
-  }, [query, showAll, open]);
+  }, [query, showAll, open, moreModels]);
 
   // Auto-focus search when the menu opens; reset filter state on close.
   useEffect(() => {
@@ -255,12 +274,12 @@ export function ModelPicker({
 
   // Keep the highlighted row scrolled into view.
   useEffect(() => {
-    if (!open) return;
+    if (!open && (!panel || document.activeElement !== searchRef.current)) return;
     const el = listRef.current?.querySelector<HTMLElement>(
       `[data-model-index="${highlightIndex}"]`,
     );
-    el?.scrollIntoView({ block: "nearest" });
-  }, [highlightIndex, open]);
+    el?.scrollIntoView?.({ block: "nearest" });
+  }, [highlightIndex, open, panel]);
 
   const triggerId = displayId ?? currentId;
   const triggerLabel = triggerId
@@ -270,6 +289,8 @@ export function ModelPicker({
     ? ` · ${reasoningLabelFor(currentReasoning)}`
     : "";
   const descriptionId = useId();
+  const thinkingFieldId = useId();
+  const thinkingHelpId = useId();
   const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
   const activeThinkingLevels = thinkingLevelsFor(currentId, tierMapQ.data, models);
 
@@ -280,12 +301,13 @@ export function ModelPicker({
 
   function commitHighlighted() {
     const entry = flat[highlightIndex];
-    if (!entry) return;
+    if (!entry || disabled) return;
     onSelect(entry.kind === "tier" ? entry.tier : entry.model.id);
     setOpen(false);
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (panel && e.target !== searchRef.current) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlightIndex((i) => Math.min(i + 1, Math.max(flat.length - 1, 0)));
@@ -301,6 +323,290 @@ export function ModelPicker({
       searchRef.current?.focus();
     }
   }
+
+  const unavailableReasoning = currentReasoning && (!reasoningLevels.some(level => level === currentReasoning) || isLevelDisabled(currentReasoning));
+  const phoneThinkingControl = onSelectReasoning && (
+    <div className="rounded-2xl bg-ink-wash px-4 py-2">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <Label htmlFor={thinkingFieldId} className="shrink-0 text-base text-ink">Thinking</Label>
+        <div className="min-w-0 max-w-40 flex-1">
+          <ReasoningSelect id={thinkingFieldId} descriptionId={unavailableReasoning ? thinkingHelpId : undefined} ariaLabel="Thinking level"
+            value={currentReasoning ?? null} onChange={onSelectReasoning} emptyLabel="Default"
+            allowedLevels={activeThinkingLevels} disabled={disabled} chevron="inset" surface="plain" />
+        </div>
+      </div>
+      {unavailableReasoning && <p id={thinkingHelpId} className="mt-1.5 text-xs text-muted">Choose an available thinking level.</p>}
+    </div>
+  );
+
+  if (panel && !moreModels) return (
+    <div className="min-w-0 space-y-4" role="group" aria-label="Model and thinking settings">
+      {(modelsQ.isLoading || !approvalScopeResolved) && <p className="text-sm text-muted">Loading models…</p>}
+      {(modelsQ.error || approvedModelsQ.error) && <p role="alert" className="text-sm text-muted">Could not load models. Close settings and try again.</p>}
+      <ModelSizeList selectedId={currentId} onSelect={onSelect} choices={SIZE_TIERS.map(tier => ({
+        id: tier,
+        label: TIER_LABELS[tier],
+        description: tierSubtitle(tier, tierMapQ.data, models),
+        disabled: disabled || modelsQ.isLoading || !approvalScopeResolved || (restricted && resolveTierModel(tier, tierMapQ.data, models)?.approved !== true),
+      }))} />
+      {triggerId && !isSizeTier(currentId) && <p className="px-1 text-sm text-muted">Current: {triggerLabel}</p>}
+      {phoneThinkingControl}
+      <button ref={moreModelsRef} type="button" onClick={() => setMoreModels(true)}
+        className="flex min-h-11 w-full items-center justify-between gap-3 rounded-2xl bg-ink-wash px-4 py-3 text-left text-base text-ink hover:bg-moss-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
+        More models <ChevronRight aria-hidden="true" className="h-5 w-5 shrink-0 text-muted" />
+      </button>
+    </div>
+  );
+
+  const GroupLabel = panel ? "div" : DropdownMenuLabel;
+  const content = <>
+        <div className="sticky top-0 z-10 bg-paper border-b border-line px-2 py-1.5">
+          <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2">
+            <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search models…"
+              className="h-7 max-sm:min-h-11 max-sm:text-base w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
+              aria-label="Search models"
+            />
+          </div>
+        </div>
+        <div ref={listRef} className="min-h-0 max-h-[440px] overflow-y-auto overscroll-contain"
+          style={panel ? { maxHeight: "min(calc(var(--app-viewport-height, 100dvh) * 0.4), 20rem)" } : undefined}>
+          {modelsQ.isLoading && (
+            <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
+          )}
+          {!modelsQ.isLoading && !approvalScopeResolved && (
+            <div className="px-3 py-2 text-xs text-muted">Loading model policy…</div>
+          )}
+          {!modelsQ.isLoading && models.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted">No models available.</div>
+          )}
+          {!modelsQ.isLoading && models.length > 0 && flat.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted">No matching models.</div>
+          )}
+          {filteredTiers.length > 0 && (
+            <div>
+              <GroupLabel className={cn("sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted", panel && "px-3 py-2")}>
+                Size
+              </GroupLabel>
+              {filteredTiers.map((tier, idx) => {
+                const isHighlighted = idx === highlightIndex;
+                const isSelected = currentId === tier;
+                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    data-model-index={idx}
+                    data-row-kind="tier"
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                    disabled={disabled}
+                    onClick={panel ? () => onSelect(tier) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      // Prevent input blur from stealing focus before we
+                      // commit — otherwise the click can race the close.
+                      e.preventDefault();
+                      onSelect(tier);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      panel && "min-h-11",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isSelected ? (
+                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
+                      ) : (
+                        <span className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="text-sm font-medium">{TIER_LABELS[tier]}</span>
+                      {isSelected && (
+                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
+                          current
+                        </span>
+                      )}
+                    </div>
+                    {subtitle && (
+                      <div className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {grouped.map(({ provider, entries }) => (
+            <div key={provider}>
+              <GroupLabel className={cn("sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted", panel && "px-3 py-2")}>
+                {provider}
+              </GroupLabel>
+              {entries.map((m) => {
+                const idx = filteredTiers.length + filteredModels.indexOf(m);
+                const isHighlighted = idx === highlightIndex;
+                const isSelected = m.id === currentId;
+                const curated = curatedForCatalogId(m.id);
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    data-model-index={idx}
+                    data-row-kind="model"
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                    disabled={disabled}
+                    onClick={panel ? () => onSelect(m.id) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      // Prevent input blur from stealing focus before we
+                      // commit — otherwise the click can race the close.
+                      e.preventDefault();
+                      onSelect(m.id);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      panel && "min-h-11",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isSelected ? (
+                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
+                      ) : (
+                        <span className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="min-w-0 break-words text-sm font-medium">{curated?.label ?? m.name}</span>
+                      {isSelected && (
+                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
+                          current
+                        </span>
+                      )}
+                      <span className={cn("ml-auto font-mono text-[10px] text-muted/70 truncate max-w-[160px]", panel && "hidden")}>
+                        {m.id}
+                      </span>
+                    </div>
+                    {(curated?.description || m.providerName !== provider) && (
+                      <div className="pl-[22px] text-xs text-muted leading-snug">
+                        {curated?.description}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        <div className="sticky bottom-0 shrink-0 bg-paper border-t border-line">
+          {onSelectReasoning && (panel ? phoneThinkingControl : (
+            <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
+              <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={panel ? () => onSelectReasoning(null) : undefined}
+                aria-label="Default reasoning"
+                aria-pressed={currentReasoning === undefined}
+                onMouseDown={(e) => {
+                  if (panel) return;
+                  e.preventDefault();
+                  onSelectReasoning(null);
+                }}
+                className={cn(
+                  "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                  panel && "min-h-11 min-w-11 text-xs",
+                  currentReasoning === undefined
+                    ? "bg-moss-wash text-ink border-moss"
+                    : "text-muted hover:text-ink",
+                )}
+              >
+                Default
+              </button>
+              {reasoningLevels.map((level) => {
+                const levelDisabled = isLevelDisabled(level);
+                const active = currentReasoning === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    aria-label={`${REASONING_LABELS[level]} reasoning`}
+                    aria-pressed={active}
+                    disabled={disabled || levelDisabled}
+                    onClick={panel ? () => onSelectReasoning(level) : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      onSelectReasoning(level);
+                    }}
+                    className={cn(
+                      "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                      panel && "min-h-11 min-w-11 text-xs",
+                      levelDisabled
+                        ? "opacity-40 cursor-not-allowed"
+                        : active
+                          ? "bg-moss-wash text-ink border-moss"
+                          : "text-muted hover:text-ink",
+                    )}
+                  >
+                    {REASONING_LABELS[level]}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+          <div className="px-3 py-1.5 text-[10px] text-muted">
+            <span>
+              {filteredModels.length} of {roleScoped.length} models
+              {!restricted && hiddenCount > 0 && !showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
+                    onClick={panel ? () => { setShowAll(!showAll); searchRef.current?.focus(); } : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      setShowAll(true);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    show {hiddenCount} more
+                  </button>
+                </>
+              )}
+              {!restricted && showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
+                    onClick={panel ? () => { setShowAll(!showAll); searchRef.current?.focus(); } : undefined}
+                    onMouseDown={(e) => {
+                      if (panel) return;
+                      e.preventDefault();
+                      setShowAll(false);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    recommended only
+                  </button>
+                </>
+              )}
+            </span>
+          </div>
+        </div>
+  </>;
+  if (panel) return <div className="min-w-0" role="group" aria-label="Model and thinking settings">
+    <Button ref={backRef} variant="ghost" size="sm" aria-label="Back to sizes" onClick={() => { setQuery(""); setMoreModels(false); }}>
+      <ArrowLeft aria-hidden="true" className="h-4 w-4" /> Back
+    </Button>
+    <p className="mb-3 shrink-0 text-sm text-muted">{triggerLabel}{triggerReasoning}</p>
+    <div className="overflow-hidden rounded-2xl" onKeyDown={onKeyDown}>{content}</div>
+  </div>;
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -333,225 +639,7 @@ export function ModelPicker({
         // handling doesn't fight ours.
         onKeyDown={onKeyDown}
       >
-        <div className="sticky top-0 z-10 bg-paper border-b border-line px-2 py-1.5">
-          <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2">
-            <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search models…"
-              className="h-7 max-sm:min-h-11 max-sm:text-base w-full bg-transparent text-xs text-ink placeholder:text-muted focus:outline-none"
-              aria-label="Search models"
-            />
-          </div>
-        </div>
-        <div ref={listRef} className="min-h-0 max-h-[440px] overflow-y-auto overscroll-contain">
-          {modelsQ.isLoading && (
-            <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
-          )}
-          {!modelsQ.isLoading && !approvalScopeResolved && (
-            <div className="px-3 py-2 text-xs text-muted">Loading model policy…</div>
-          )}
-          {!modelsQ.isLoading && models.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted">No models available.</div>
-          )}
-          {!modelsQ.isLoading && models.length > 0 && flat.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted">No matching models.</div>
-          )}
-          {filteredTiers.length > 0 && (
-            <div>
-              <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
-                Size
-              </DropdownMenuLabel>
-              {filteredTiers.map((tier, idx) => {
-                const isHighlighted = idx === highlightIndex;
-                const isSelected = currentId === tier;
-                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
-                return (
-                  <button
-                    key={tier}
-                    type="button"
-                    data-model-index={idx}
-                    data-row-kind="tier"
-                    onMouseEnter={() => setHighlightIndex(idx)}
-                    onMouseDown={(e) => {
-                      // Prevent input blur from stealing focus before we
-                      // commit — otherwise the click can race the close.
-                      e.preventDefault();
-                      onSelect(tier);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
-                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isSelected ? (
-                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
-                      ) : (
-                        <span className="h-3.5 w-3.5 shrink-0" />
-                      )}
-                      <span className="text-sm font-medium">{TIER_LABELS[tier]}</span>
-                      {isSelected && (
-                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
-                          current
-                        </span>
-                      )}
-                    </div>
-                    {subtitle && (
-                      <div className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {grouped.map(({ provider, entries }) => (
-            <div key={provider}>
-              <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
-                {provider}
-              </DropdownMenuLabel>
-              {entries.map((m) => {
-                const idx = filteredTiers.length + filteredModels.indexOf(m);
-                const isHighlighted = idx === highlightIndex;
-                const isSelected = m.id === currentId;
-                const curated = curatedForCatalogId(m.id);
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    data-model-index={idx}
-                    data-row-kind="model"
-                    onMouseEnter={() => setHighlightIndex(idx)}
-                    onMouseDown={(e) => {
-                      // Prevent input blur from stealing focus before we
-                      // commit — otherwise the click can race the close.
-                      e.preventDefault();
-                      onSelect(m.id);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      "flex w-full max-sm:min-h-11 flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
-                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isSelected ? (
-                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
-                      ) : (
-                        <span className="h-3.5 w-3.5 shrink-0" />
-                      )}
-                      <span className="text-sm font-medium">{curated?.label ?? m.name}</span>
-                      {isSelected && (
-                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
-                          current
-                        </span>
-                      )}
-                      <span className="ml-auto font-mono text-[10px] text-muted/70 truncate max-w-[160px]">
-                        {m.id}
-                      </span>
-                    </div>
-                    {(curated?.description || m.providerName !== provider) && (
-                      <div className="pl-[22px] text-xs text-muted leading-snug">
-                        {curated?.description}
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-        <div className="sticky bottom-0 bg-paper border-t border-line">
-          {onSelectReasoning && (
-            <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
-              <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
-              <button
-                type="button"
-                aria-label="Default reasoning"
-                aria-pressed={currentReasoning === undefined}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  onSelectReasoning(null);
-                }}
-                className={cn(
-                  "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
-                  currentReasoning === undefined
-                    ? "bg-moss-wash text-ink border-moss"
-                    : "text-muted hover:text-ink",
-                )}
-              >
-                Default
-              </button>
-              {reasoningLevels.map((level) => {
-                const levelDisabled = isLevelDisabled(level);
-                const active = currentReasoning === level;
-                return (
-                  <button
-                    key={level}
-                    type="button"
-                    aria-label={`${REASONING_LABELS[level]} reasoning`}
-                    aria-pressed={active}
-                    disabled={levelDisabled}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      onSelectReasoning(level);
-                    }}
-                    className={cn(
-                      "max-sm:min-h-11 max-sm:min-w-11 max-sm:text-xs rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
-                      levelDisabled
-                        ? "opacity-40 cursor-not-allowed"
-                        : active
-                          ? "bg-moss-wash text-ink border-moss"
-                          : "text-muted hover:text-ink",
-                    )}
-                  >
-                    {REASONING_LABELS[level]}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="px-3 py-1.5 text-[10px] text-muted">
-            <span>
-              {filteredModels.length} of {roleScoped.length} models
-              {!restricted && hiddenCount > 0 && !showAll && !query && (
-                <>
-                  {" · "}
-                  <button
-                    type="button"
-                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setShowAll(true);
-                      searchRef.current?.focus();
-                    }}
-                  >
-                    show {hiddenCount} more
-                  </button>
-                </>
-              )}
-              {!restricted && showAll && !query && (
-                <>
-                  {" · "}
-                  <button
-                    type="button"
-                    className="inline-flex items-center max-sm:min-h-11 italic underline decoration-dotted hover:text-ink"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setShowAll(false);
-                      searchRef.current?.focus();
-                    }}
-                  >
-                    recommended only
-                  </button>
-                </>
-              )}
-            </span>
-          </div>
-        </div>
+        {content}
       </DropdownMenuContent>
     </DropdownMenu>
   );

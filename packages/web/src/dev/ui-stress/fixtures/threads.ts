@@ -1,9 +1,12 @@
 /** The thread sidebar: 200 threads with long titles, every origin, pull
  * requests, shares, questions, unread dots, and many children under a few
  * threads. */
-import type { ChildWorkResponse, DecisionGate, ListDecisionsResponse, ListSessionWakeupsResponse, ListThreadsResponse, ThreadSummary } from "@valet/api/wire";
+import type {
+  ArtifactListItem, ChildWorkResponse, DecisionGate, ListArtifactsResponse, ListDecisionsResponse, ListSessionWakeupsResponse,
+  ListThreadsResponse, ListWorkflowsResponse, ThreadSummary, WorkflowDefinitionSummary,
+} from "@valet/api/wire";
 import { threadOriginBucket, type ThreadOriginBucket } from "~/lib/thread-origin";
-import { EMOJI, HEX_300, HOUR, MINUTE, NOW, RTL_HEBREW, TITLE_400, unbroken } from "./common";
+import { EMOJI, HEX_300, HOUR, MINUTE, NOW, RTL_HEBREW, TITLE_400, stressMe, unbroken } from "./common";
 import { decisionGate, stressTitle } from "./approvals";
 
 /** The workspace session the rail lists, for every workspace key. */
@@ -109,6 +112,40 @@ export const stressChildWork: ChildWorkResponse = {
     status: i % 3 === 0 ? "settled" : "running",
     outcome: i % 3 === 0 ? (i % 2 === 0 ? `failed: ${HEX_300}` : "completed") : undefined,
     createdAt: NOW - i * MINUTE,
+  })),
+};
+
+/** The search dialog's Workflows group: long names, read while it is open. */
+export const stressSearchWorkflows: ListWorkflowsResponse = {
+  workflows: Array.from({ length: 12 }, (_, i): WorkflowDefinitionSummary => ({
+    id: `search-workflow-${i}`,
+    name: i % 4 === 0 ? TITLE_400 : stressTitle(i),
+    definition: {},
+    createdAt: NOW - i * HOUR,
+    updatedAt: NOW - i * MINUTE,
+    ownerType: "user",
+    ownerId: stressMe.id,
+  })),
+};
+
+/** The search dialog's Files group: long titles, unbroken paths, and one revoked file it leaves out. */
+export const stressSearchArtifacts: ListArtifactsResponse = {
+  artifacts: Array.from({ length: 12 }, (_, i): ArtifactListItem => ({
+    id: `search-artifact-${i}`,
+    ownerType: "user",
+    path: i % 3 === 0 ? `reports/${unbroken("quarterly-", 40)}.md` : `journal/2026-10-${String(i + 1).padStart(2, "0")}.md`,
+    title: i % 4 === 1 ? TITLE_400 : stressTitle(i),
+    format: i % 2 === 0 ? "markdown" : "html",
+    icon: "file",
+    version: i + 1,
+    sharedVersion: null,
+    token: `search-artifact-token-${i}`,
+    url: `https://valet.example/a/search-artifact-token-${i}`,
+    visibility: "org",
+    actorUserId: stressMe.id,
+    revoked: i === 11,
+    createdAt: NOW - i * HOUR,
+    updatedAt: NOW - i * MINUTE,
   })),
 };
 

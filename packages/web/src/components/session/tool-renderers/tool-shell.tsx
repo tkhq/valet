@@ -17,6 +17,7 @@ const TOOL_LABELS: Record<string, string> = {
   mem_patch: "memory patch",
   mem_read: "memory read",
   thread_read: "thread read",
+  update_plan: "plan",
 };
 
 export function prettyToolName(toolName: string): string {

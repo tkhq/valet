@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronRight, Workflow } from "lucide-react";
+import { Check, ChevronRight, Workflow } from "lucide-react";
 import type { Message, MessageSignal } from "@valet/api/wire";
-import { Badge } from "~/components/primitives";
+import { Badge, StatusDot } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { cn } from "~/lib/cn";
+import { stripMarkdown } from "~/lib/strip-markdown";
 
 const BODY_PREVIEW_LEN = 200;
 /** A signal body past either limit starts collapsed. */
@@ -74,7 +75,8 @@ function ChildSettledCard({
 }) {
   const title = childCardTitle(signal);
   const outcome = signal.attributes?.outcome;
-  const preview = truncateBody(message.content);
+  // A preview reads as prose: the report's markdown stays for the child's own page.
+  const preview = truncateBody(stripMarkdown(message.content));
   const childId = signal.senderSessionId;
 
   const body = (
@@ -575,6 +577,16 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
   if (isWakeupSignal(signal)) {
     return <WakeupCard message={message} signal={signal} />;
   }
+  // A task started from home reports back once. The body is the model's
+  // instruction, so the person sees one line that opens the task.
+  if (signal.signalType === "home.task_report") {
+    return <HomeTaskReportCard signal={signal} />;
+  }
+  // A routine's prompt (the morning brief, a daily check) is the model's
+  // instruction too: show its name, with the prompt behind a disclosure.
+  if (signal.signalType === "schedule") {
+    return <RoutinePromptCard message={message} signal={signal} />;
+  }
   return (
     <CardShell>
       <span className="inline-flex items-center rounded-sm bg-neutral-100 px-1.5 py-0.5 text-[11px] font-medium tracking-wide text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300">
@@ -583,6 +595,36 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
       {message.content && <SignalBody content={message.content} />}
     </CardShell>
   );
+}
+
+const REPORT_LABEL: Record<string, string> = { failed: "Task failed", aborted: "Task stopped", cancelled: "Task stopped" };
+
+function HomeTaskReportCard({ signal }: { signal: MessageSignal }) {
+  const attrs = signal.attributes ?? {};
+  const threadId = attrs.thread_id;
+  const label = REPORT_LABEL[attrs.outcome ?? ""] ?? "Task finished";
+  const line = <span className="flex min-w-0 items-center gap-2">
+    {attrs.outcome === "failed" ? <StatusDot tone="danger" size="sm" label="Failed" /> : <Check aria-hidden className="h-3.5 w-3.5 shrink-0" />}
+    <span className="shrink-0 font-medium text-ink">{label}</span>
+    {attrs.title && <span className="min-w-0 truncate">{attrs.title}</span>}
+  </span>;
+  return <div className="mx-auto my-1 w-full min-w-0 max-w-[52rem] px-5 text-xs text-muted sm:px-8">
+    {threadId ? <Link to="/threads/$threadId" params={{ threadId }} className="inline-flex max-w-full items-center gap-2 rounded px-1 py-1 hover:bg-ink-wash max-sm:min-h-11">
+      {line}<span className="shrink-0 underline-offset-2 hover:underline">Open</span>
+    </Link> : line}
+  </div>;
+}
+
+function RoutinePromptCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  return <div className="mx-auto my-1 w-full min-w-0 max-w-[52rem] px-5 sm:px-8">
+    <details className="group text-xs text-muted">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded px-1 py-1 hover:text-ink max-sm:min-h-11 [&::-webkit-details-marker]:hidden">
+        <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" />
+        <span className="min-w-0 truncate">{signal.attributes?.scheduleName ?? "Routine"}</span>
+      </summary>
+      {message.content && <div className="mt-1 rounded-md border border-line px-3 py-2 text-sm text-ink"><Markdown>{message.content}</Markdown></div>}
+    </details>
+  </div>;
 }
 
 /** A signal's text. A long one, such as a workflow's full prompt or a

@@ -1,5 +1,9 @@
 # Mobile styling
 
+The Home and navigation layout is updated by
+[Mobile Home and shared conversation components](2026-10-23-mobile-home-conversation-design.md).
+That design changes the shell below 768px and preserves the desktop shell.
+
 ## Scope
 
 Improve navigation and common controls in `packages/web` on phones and tablets. Preserve desktop behavior and workspace access rules.

@@ -11,6 +11,8 @@ import {
 import { X } from "lucide-react";
 import { Dialog, DialogClose, DialogContent, DialogTitle } from "~/components/primitives/dialog";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
+import { useMobileAppViewport } from "~/hooks/use-mobile-app-viewport";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
@@ -42,6 +44,9 @@ export interface SidebarControls {
   toggleCollapsed(): void;
   /** Mobile only: the sidebar is out of the flow and opens as a drawer. */
   openDrawer(): void;
+  /** Closes the mobile drawer, such as after a navigation that started in a
+   * menu the drawer does not contain. */
+  closeDrawer(): void;
 }
 
 const SidebarControlsContext = createContext<SidebarControls | null>(null);
@@ -94,6 +99,9 @@ export function AppShell({
   children: ReactNode;
   className?: string;
 }) {
+  const mobile = useMobileLayout();
+  const shellRef = useRef<HTMLDivElement>(null);
+  useMobileAppViewport(shellRef, mobile);
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
   const sidebarPane = useResizablePane({
     storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
@@ -120,6 +128,9 @@ export function AppShell({
     }
   }, []);
 
+  // Stable, so a consumer can close the drawer from an effect without
+  // re-running it on every shell render.
+  const closeDrawer = useCallback(() => setMobileOpen(false), [setMobileOpen]);
   const controls = useMemo<SidebarControls>(
     () => ({
       present: sidebar != null,
@@ -129,13 +140,14 @@ export function AppShell({
         drawerOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         setMobileOpen(true);
       },
+      closeDrawer,
     }),
-    [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen],
+    [sidebar, collapsed, setAndStoreCollapsed, setMobileOpen, closeDrawer],
   );
 
   return (
     <SidebarControlsContext.Provider value={controls}>
-      <div className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
+      <div ref={shellRef} data-mobile-app-shell={mobile ? "" : undefined} className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
         {topNav}
         <div className="flex-1 flex min-h-0 relative" style={sidebarPane.containerStyle}>
           {sidebar != null && (
@@ -175,9 +187,9 @@ export function AppShell({
                   }}
                 >
                   <div className="flex h-12 shrink-0 items-center justify-between border-b border-line pl-4 pr-1">
-                    <DialogTitle className="font-display text-base text-ink">Threads</DialogTitle>
+                    <DialogTitle className="font-display text-base text-ink">Valet</DialogTitle>
                     <DialogClose
-                      aria-label="Close threads"
+                      aria-label="Close menu"
                       className="inline-flex h-11 w-11 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/40"
                     >
                       <X className="h-4 w-4" aria-hidden />

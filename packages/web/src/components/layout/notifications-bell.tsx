@@ -7,8 +7,8 @@ import { Badge, Button, LoadingRow, Popover, PopoverContent, PopoverTrigger, Sta
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { cn } from "~/lib/cn";
-import { listedKeys } from "./bulk-answers";
-import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
+import { listedKeys } from "~/components/home/bulk-answers";
+import { NeedsActionHeader, useBulkAnswerRun } from "~/components/home/needs-action-header";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -79,7 +79,7 @@ export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boole
           <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => changeOpen(false)}><X className="h-4 w-4" /></Button>
         </div>
         <section aria-label="Needs action" className="space-y-3 p-4">
-          <NeedsActionHeader pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
+          <NeedsActionHeader compact pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
             decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor} run={bulkRun} />
           {loading && <LoadingRow label="Loading approvals…" className="py-0" />}
           {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button type="button" className={textLinkClass} onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}

@@ -11,8 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
-import type { AssistantThreadPolicy, Appearance } from "@valet/shared";
-export type { Appearance } from "@valet/shared";
+import type { AssistantThreadPolicy, Appearance, ThreadPlan } from "@valet/shared";
+export type { Appearance, ThreadPlan, ThreadPlanItem, ThreadPlanStatus } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -1054,6 +1054,12 @@ export interface ThreadRecapResponse {
   recap: { mode: "away" | "first"; points: ThreadRecapPoint[] } | null;
 }
 
+/** `GET /api/threads/:threadId/plan` — the checklist the model keeps with
+ * `update_plan`. `plan` is null when the thread has no plan. */
+export interface ThreadPlanResponse {
+  plan: ThreadPlan | null;
+}
+
 /** `GET /api/threads/:threadId/context` — how full the thread's model
  * context is. The engine measures it like the proactive compaction check
  * (`Thread.contextUsage`), so `tokens` at `limit` means the next turn
@@ -1372,7 +1378,7 @@ export type MessagePart =
       result?: unknown;
       error?: string;
     }
-  | { kind: "thinking"; text: string };
+  | { kind: "thinking"; text: string; startedAt?: number; durationMs?: number };
 
 /**
  * Trimmed projection of engine `MessageEntry.signal` (plan decision 2).
@@ -1747,6 +1753,11 @@ export interface DecisionGate {
   oneShot?: true;
   /** The gated tool action's risk level, on tool approval gates only. */
   riskLevel?: "low" | "medium" | "high" | "critical";
+  /** The gated tool call, so a card can preview what it does: the Slack
+   * message, the email, the merge. Present only when `body` already shows
+   * this call's `tool_id=` and `args=` lines. A string arg longer than
+   * 4000 characters is cut and ends with "…". */
+  tool?: { id: string; args?: Record<string, unknown> };
 }
 
 export interface DecisionResolution {
@@ -1796,6 +1807,7 @@ export type WireEvent =
   // that wiped non-default-thread state on every WS reconnect.
   | { seq: number; ts: number; offset?: string; type: "init"; session: SessionDetail }
   | { seq: number; ts: number; offset?: string; type: "message_start"; threadId: string; messageId: string; role: MessageRole }
+  | { seq: number; ts: number; offset?: string; type: "thinking_update"; threadId: string; messageId: string; index: number; part: Extract<MessagePart, { kind: "thinking" }> }
   | { seq: number; ts: number; offset?: string; type: "text_delta"; threadId: string; messageId: string; delta: string }
   | {
       /**
@@ -6441,6 +6453,61 @@ export interface WaitingThread {
 /** `GET /api/workspaces/:workspace/waiting` */
 export interface WaitingThreadsResponse {
   threads: WaitingThread[];
+}
+
+/** `POST /api/home`: the person's one conversation with Valet across every workspace. */
+export interface HomeConversationResponse {
+  sessionId: string;
+  threadId: string;
+}
+
+/** A workspace a person can work in: `key` is "user" (personal) or a team id. */
+export interface HomeWorkspaceRef {
+  key: string;
+  name: string;
+}
+
+/** One thread in the person's Tasks list. */
+export interface HomeTaskItem {
+  /** Stable list key. */
+  id: string;
+  sessionId: string;
+  threadId: string;
+  title: string;
+  workspace: HomeWorkspaceRef;
+  /** `waiting`: Valet replied and the person has not answered. `done`: a task
+   * started from home whose first run ended and that is not marked done. */
+  state: "needs_you" | "working" | "failed" | "waiting" | "done";
+  /** Valet's question, or the last sentence of its reply, as plain text. */
+  detail?: string;
+  question?: boolean;
+  unread?: boolean;
+  updatedAt: number;
+  /** Set for work the person started from home. Only they can mark it done. */
+  homeTaskId?: string;
+  /** Progress of the thread's plan, when it has one. */
+  plan?: { done: number; total: number; current?: string };
+  /** What the thread produced, newest first, at most three. */
+  outputs?: HomeTaskOutput[];
+}
+
+/** A file or pull request a task produced. */
+export interface HomeTaskOutput {
+  kind: "file" | "pull_request";
+  title: string;
+  /** A file's share token (`/a/:token`) or a pull request's URL. */
+  href: string;
+  /** For a pull request: open, merged, or closed. */
+  state?: string;
+  updatedAt: number;
+}
+
+/** `GET /api/home/tasks`: what is in flight across all of the person's workspaces. */
+export interface HomeTasksResponse {
+  needsYou: HomeTaskItem[];
+  working: HomeTaskItem[];
+  updates: HomeTaskItem[];
+  finished: HomeTaskItem[];
 }
 
 /** A release notice with a stable identity and an internal destination. */

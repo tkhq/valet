@@ -1,26 +1,45 @@
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { MemoryCard } from "~/components/assistant/memory-card";
 import { WorkspaceCatchUp } from "~/components/dashboard/workspace-catch-up";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamDashboard } from "~/components/dashboard/team-dashboard";
+import { HomeScreen, type HomeView } from "~/components/home/home-screen";
 import { Button, ErrorRow, LoadingRow, PageHeader, pageClass } from "~/components/primitives";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { usePageTitle } from "~/lib/page-title";
 import { cn } from "~/lib/cn";
 
-/** Home follows the workspace switcher and shows the personal or team activity dashboard. */
+/** On a phone, Home is the person's one conversation with Valet across every
+ * workspace, with Tasks and Make: `?view=tasks` or `?view=make` opens that
+ * tab. A wider screen follows the workspace switcher and shows the personal
+ * or team activity dashboard. */
 export const Route = createFileRoute("/")({
+  validateSearch: (raw: Record<string, unknown>): { view?: "tasks" | "make" } =>
+    (raw.view === "tasks" || raw.view === "make" ? { view: raw.view } : {}),
   component: Home,
 });
 
 export function Home() {
+  return useMobileLayout() ? <PhoneHome /> : <WebHome />;
+}
+
+function PhoneHome() {
+  const { view } = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
+  usePageTitle("Valet");
+  return <HomeScreen view={view ?? "chat"}
+    onViewChange={(next: HomeView) => void navigate({ search: next === "chat" ? {} : { view: next }, replace: true })} />;
+}
+
+function WebHome() {
   const scope = useWorkspaceScope();
   if (scope.teamId !== undefined) {
     return <TeamDashboard teamId={scope.teamId} />;
   }
   return <Dashboard />;
 }
-
 export function Dashboard() {
   const info = useWorkspaceRuntimeInfo("user");
 

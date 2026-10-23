@@ -1,4 +1,5 @@
 import { mergeAppearance, readAppearance } from "@valet/shared";
+import { HOME_THREAD_KEY } from "../home/context.js";
 import { slackEditSignal } from "./slack-edit.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
@@ -66,7 +67,7 @@ import { ingestChannelFile, type IngestedChannelFile } from "../services/channel
 import { resolveOrgChannelCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { isOrgAdmin } from "../services/org.js";
-import { answersGate, canResolveSessionGate, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
+import { answersGate, canResolveSessionGate, gateApprover, isSharedAccountGate, type SessionOwnerLike } from "../services/session-access.js";
 import { recordThreadUserActivity } from "../services/thread-activity.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
@@ -75,6 +76,8 @@ import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { ChannelProcessingStatus } from "./processing-status.js";
+import { restoreProcessingStatus, trackProcessingItem } from "./processing-status-recovery.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
 
 export interface ChannelHostDeps {
@@ -428,6 +431,7 @@ export class ChannelHost {
   /** Engine deltas → provider streams. Only transports that implement the
    * whole start/append/stop triple ever reach it. */
   private readonly streamBridge: ChannelStreamBridge;
+  private readonly processingStatus: ChannelProcessingStatus;
   private readonly childReplies: ChildReplyDispatcher;
 
   constructor(private readonly deps: ChannelHostDeps) {
@@ -443,13 +447,16 @@ export class ChannelHost {
         });
       },
     });
+    this.processingStatus = new ChannelProcessingStatus(deps.eventStream, channelType => this.transportFor(channelType));
     this.streamBridge = new ChannelStreamBridge({
       eventStream: deps.eventStream,
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
       transportFor: (channelType) => this.transportFor(channelType),
       markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
-      onMessageClosed: (turn, providerMessageId, engineMessageId) =>
-        this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, { entryId: engineMessageId }),
+      onMessageClosed: async (turn, providerMessageId, engineMessageId) => {
+        await this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, { entryId: engineMessageId });
+        this.processingStatus.refresh(turn.sessionId, turn.threadId);
+      },
       abortTurn: async (sessionId, threadId) => {
         // Streams only ever run on a channel thread, and channel threads only
         // exist on an assistant's session (`handleMessage` always threads
@@ -609,6 +616,7 @@ export class ChannelHost {
           }
           throw err;
         }
+        if (!this.started) return;
         if (!credential) {
           this.unconfiguredTransports.add(factory.channelType);
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
@@ -629,6 +637,11 @@ export class ChannelHost {
           continue;
         }
         this.transports.set(factory.channelType, transport);
+        if (factory.channelType === "slack") {
+          // Observe new admissions before the durable scan; item IDs deduplicate overlap.
+          this.startOutbound();
+          await restoreProcessingStatus(this.deps.db, this.deps.engineStore, this.processingStatus, orgId, transport);
+        }
         if (hasGetMe(transport)) {
           try {
             const me = await transport.getMe();
@@ -741,6 +754,7 @@ export class ChannelHost {
     this.pollLoops = [];
     // Before the transports go away: a stream closed here is one the next
     // boot does not have to apologise for.
+    await this.processingStatus.stop();
     await this.streamBridge.stop();
     this.stopOutbound();
     await this.childReplies.drain();
@@ -782,10 +796,12 @@ export class ChannelHost {
    */
   startOutbound(): void {
     if (this.outboundUnsub) return;
+    this.processingStatus.start();
     this.childReplies.start();
     this.outboundUnsub = this.deps.eventStream.subscribe(
       {
         eventTypes: [
+          "queue_state",
           "message_end",
           "submission_settled",
           "tool_end",
@@ -825,6 +841,7 @@ export class ChannelHost {
   }
 
   stopOutbound(): void {
+    void this.processingStatus.stop();
     this.childReplies.stop();
     this.outboundUnsub?.();
     this.outboundUnsub = null;
@@ -840,7 +857,18 @@ export class ChannelHost {
   private async handleOutboundEvent(event: DeliveredBusEvent): Promise<void> {
     try {
       const e = event.event;
-      if (e.type === "message_end") {
+      if (e.type === "queue_state") {
+        const transport = this.transportFor("slack");
+        if (!transport) return;
+        const session = await this.deps.engineStore.getSession(event.sessionId);
+        if (session?.orgId !== this.orgId) return;
+        const ids = new Set([...e.state.pending, ...(e.state.collectBuffer ?? [])].map(item => item.id));
+        if (e.state.activeItemId) ids.add(e.state.activeItemId);
+        for (const id of ids) {
+          const item = await this.deps.engineStore.getQueueItem(event.sessionId, id);
+          if (item) await trackProcessingItem(this.deps.engineStore, this.processingStatus, event.sessionId, item, transport);
+        }
+      } else if (e.type === "message_end") {
         await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
           messageId: e.messageId,
           queueItemId: event.queueItemId,
@@ -863,6 +891,10 @@ export class ChannelHost {
       }
     } catch (err) {
       console.error("[channels] outbound delivery failed", err);
+    } finally {
+      if ("threadId" in event.event && event.event.threadId !== undefined) {
+        this.processingStatus.refresh(event.sessionId, event.event.threadId);
+      }
     }
   }
 
@@ -1125,6 +1157,18 @@ export class ChannelHost {
    * call for such a transport is handed a key it did not mint.
    */
   /** The channel conversation that spawned an unsettled child session. */
+  /**
+   * The channel conversation a home-thread submission came from. Home holds
+   * the person's Slack DM and web messages in one thread, so the thread key
+   * cannot say where a turn started; the submission's origin can.
+   */
+  private async homeOriginConversation(sessionId: string, queueItemId: string): Promise<{ channelType: string; conversationKey: string } | null> {
+    const item = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
+    const content = item?.content;
+    const origin = content && typeof content === "object" && "kind" in content && content.kind === "signal" ? content.origin : undefined;
+    return origin ? this.channelThreadFor(origin.threadKey) : null;
+  }
+
   private async childOriginConversation(sessionId: string): Promise<{ channelType: string; conversationKey: string } | null> {
     const watch = await activeChildWatch(this.deps.db, sessionId);
     return watch?.origin ? this.channelThreadFor(watch.origin.threadKey) : null;
@@ -1217,7 +1261,10 @@ export class ChannelHost {
     if (entry.channel === undefined) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
-    const mapped = this.channelThreadFor(thread.key);
+    // A command typed in a Slack DM runs in home, whose key names no
+    // conversation; the entry's channel mark does.
+    const mapped = this.channelThreadFor(thread.key)
+      ?? (thread.key === HOME_THREAD_KEY && entry.channel?.channelId ? { channelType: entry.channel.channelType, conversationKey: entry.channel.channelId } : null);
     if (!mapped) return;
 
     const dedupeKey = `${sessionId}:${entry.id}`;
@@ -1242,7 +1289,8 @@ export class ChannelHost {
     // A child's own thread is never a channel thread. Its card goes to the
     // conversation that spawned the work, so the person who asked there can
     // answer it (TKAI-564). The callback still resolves the child's gate.
-    const direct = this.channelThreadFor(thread.key);
+    const direct = this.channelThreadFor(thread.key)
+      ?? (thread.key === HOME_THREAD_KEY ? await this.homeOriginConversation(sessionId, gate.queueItemId) : null);
     const mapped = direct ?? await this.childOriginConversation(sessionId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
@@ -1268,7 +1316,7 @@ export class ChannelHost {
     // who gets it directly (`attention-wiring.ts`). The conversation learns
     // that the request went to them, with no buttons to press.
     const approver = gateApprover(gate);
-    if (approver) {
+    if (approver && isSharedAccountGate(gate)) {
       const sender = await this.workspaceSenderForSession(sessionId, gate.queueItemId);
       await transport.send(mapped.conversationKey, {
         markdown: `This needs ${approver.name ?? "a teammate"}'s shared account. Valet asked them for permission and continues once they allow it.`,
@@ -1645,7 +1693,8 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await session.threadByKey(threadKey);
+    const thread = await session.threadByKey(threadKey) ??
+      (channelType === "slack" ? await session.threadByKey(HOME_THREAD_KEY) : null);
     if (!thread) {
       await this.dropLog(orgId, "edit_without_thread", event.conversationKey, `thread ${threadKey} does not exist`);
       return;
@@ -1692,11 +1741,18 @@ export class ChannelHost {
     const threadKey =
       transport?.threadKeyFromConversationKey?.(event.conversationKey) ??
       `${channelType}:${chatIdFromKey(event.conversationKey)}`;
-    const thread = await this.deps.engineHost.ensureFreshThread(session, threadKey, {
+    // A Slack DM with Valet is the person's home conversation, the same one
+    // the web app opens first. The reply still goes back to the DM thread:
+    // the origin below keeps the Slack thread key. A reply in a DM thread
+    // that already has its own Valet thread (one started before home
+    // existed) stays in that thread.
+    const ownThread = channelType === "slack" ? await session.threadByKey(threadKey) : null;
+    const thread = await this.deps.engineHost.ensureFreshThread(session, channelType === "slack" && !ownThread ? HOME_THREAD_KEY : threadKey, {
       userId,
       orgId,
       workspace: session.options.workspace,
     });
+    if (thread.key === HOME_THREAD_KEY) await thread.setMode("followup");
     // A text reply in this conversation answers the open question its thread
     // waits on, instead of queueing behind the turn that asked it.
     if (!event.media?.length && await answerOpenQuestion(this.deps.db, {
@@ -1704,58 +1760,70 @@ export class ChannelHost {
       channelId: event.conversationKey, dispatchId: event.dispatchId, now: this.now(),
     })) return;
 
-    let text = event.text ?? "";
-    const attachments: PromptAttachment[] = [];
-    for (const media of event.media ?? []) {
-      const fetched = transport?.fetchMedia ? await transport.fetchMedia(media) : null;
-      if (!fetched) {
-        text += "\n\n[attachment skipped: too large or unavailable]";
-        continue;
+    const processing = event.threadTs ? this.processingStatus.begin({
+      channelType, conversationKey: event.conversationKey, threadTs: event.threadTs,
+      sessionId: session.id, threadId: thread.id,
+    }) : undefined;
+    let admitted = false;
+    try {
+      let text = event.text ?? "";
+      const attachments: PromptAttachment[] = [];
+      for (const media of event.media ?? []) {
+        const fetched = transport?.fetchMedia ? await transport.fetchMedia(media) : null;
+        if (!fetched) {
+          text += "\n\n[attachment skipped: too large or unavailable]";
+          continue;
+        }
+        if (fetched.mimeType.startsWith("image/")) {
+          // Signal content is persisted before the turn runs. Keep image data
+          // JSON-safe across that queue boundary.
+          attachments.push({
+            type: "image",
+            url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
+            mimeType: fetched.mimeType,
+            name: fetched.name,
+          });
+          continue;
+        }
+        // A PDF, spreadsheet or archive cannot ride an image content block, so
+        // it goes to the sandbox instead and the agent reads it from there.
+        const file = await this.storeChannelFile(session, fetched);
+        if (!file) {
+          text += `\n\n[attachment skipped: could not store ${fetched.mimeType}]`;
+          continue;
+        }
+        attachments.push({ type: "file", ...file });
       }
-      if (fetched.mimeType.startsWith("image/")) {
-        // Signal content is persisted before the turn runs. Keep image data
-        // JSON-safe across that queue boundary.
-        attachments.push({
-          type: "image",
-          url: `data:${fetched.mimeType};base64,${Buffer.from(fetched.data).toString("base64")}`,
-          mimeType: fetched.mimeType,
-          name: fetched.name,
-        });
-        continue;
-      }
-      // A PDF, spreadsheet or archive cannot ride an image content block, so
-      // it goes to the sandbox instead and the agent reads it from there.
-      const file = await this.storeChannelFile(session, fetched);
-      if (!file) {
-        text += `\n\n[attachment skipped: could not store ${fetched.mimeType}]`;
-        continue;
-      }
-      attachments.push({ type: "file", ...file });
-    }
 
-    const content: SignalContent = {
-      kind: "signal",
-      signalType: `${channelType}.message`,
-      body: text === "" ? "(media message)" : text,
-      origin: { channelType, threadKey },
-      ...(attachments.length > 0 ? { attachments } : {}),
-      ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
-    };
-    try { await thread.submitPrompt(
-      content,
-      {
-        dispatchId: event.dispatchId,
-        author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId },
-        // Stamp the surface this prompt came from. A channel thread keeps its
-        // binding for its whole life, so the thread key alone cannot say
-        // whether a given turn started on the channel or in the web UI. The
-        // Gate and command-result delivery use this mark to distinguish a
-        // channel turn from a web turn on the same bound thread (TKAI-323).
-        channel: { channelType, channelId: event.conversationKey },
-      },
-    ); } catch (err) {
+      const content: SignalContent = {
+        kind: "signal",
+        signalType: `${channelType}.message`,
+        body: text === "" ? "(media message)" : text,
+        origin: { channelType, threadKey },
+        ...(attachments.length > 0 ? { attachments } : {}),
+        ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
+      };
+      const receipt = await thread.submitPrompt(
+        content,
+        {
+          dispatchId: event.dispatchId,
+          queueMode: thread.key === HOME_THREAD_KEY ? "followup" : undefined,
+          author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId, interactive: true, directChannel: true },
+          // Stamp the surface this prompt came from. A channel thread keeps its
+          // binding for its whole life, so the thread key alone cannot say
+          // whether a given turn started on the channel or in the web UI. The
+          // Gate and command-result delivery use this mark to distinguish a
+          // channel turn from a web turn on the same bound thread (TKAI-323).
+          channel: { channelType, channelId: event.conversationKey },
+        },
+      );
+      this.processingStatus.bind(processing, receipt.queueItemId);
+      admitted = true;
+    } catch (err) {
       // A concurrent consumer may have admitted the same authenticated delivery.
       if (!(err instanceof ConflictError) || !await alreadyAdmitted()) throw err;
+    } finally {
+      if (!admitted) this.processingStatus.cancel(processing);
     }
 
     // Bump lastActivityAt so a long-lived channel-bound session rises in
@@ -1971,8 +2039,10 @@ export class ChannelHost {
       }
     }
     if (stored && !answersGate(stored, userPrincipal(userId))) {
-      await transport?.answerCallback?.(gateCallback.callbackId, `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`);
-      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the account's owner may answer this gate");
+      await transport?.answerCallback?.(gateCallback.callbackId, isSharedAccountGate(stored)
+        ? `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`
+        : `Only ${gateApprover(stored)?.name ?? "the person who asked"} can answer this request. Ask them in the thread.`);
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the named approver may answer this gate");
       return;
     }
 

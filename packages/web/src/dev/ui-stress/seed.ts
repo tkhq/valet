@@ -10,6 +10,9 @@ import type {
   ChildWorkResponse,
   EventLogResponse,
   GetChangelogResponse,
+  HomeConversationResponse,
+  HomeTasksResponse,
+  ListArtifactsResponse,
   ListCredentialsResponse,
   ListDecisionsResponse,
   ListEventSubscriptionsResponse,
@@ -28,6 +31,7 @@ import type {
   OrgResponse,
   ProductAnnouncementsResponse,
   TeamOnePasswordStatusResponse,
+  ThreadPlanResponse,
   UsageBreakdownResponse,
   UsageDrillResponse,
   UsageOutcomesResponse,
@@ -35,14 +39,17 @@ import type {
   WorkflowRunDetail,
   WorkspaceIntegrationLimitResponse,
 } from "@valet/api/wire";
+import { qkArtifacts } from "~/api/artifacts";
 import { qkChangelog } from "~/api/changelog";
 import { childWorkKey } from "~/api/child-work";
 import { qkEvents } from "~/api/events";
+import { qkHome } from "~/api/home";
 import { qkIntegrations } from "~/api/integrations";
 import { onePasswordKeys } from "~/api/onepassword";
 import { qkPolicies } from "~/api/policies";
 import { qk } from "~/api/queries";
 import { qkSettings } from "~/api/settings";
+import { qkThreadPlan } from "~/api/thread-plan";
 import { qkUsage } from "~/api/usage";
 import { qkWorkflows } from "~/api/workflows";
 import {
@@ -50,6 +57,7 @@ import {
 } from "./fixtures/approvals";
 import { NOW, stressMe, stressOrg, stressTeams } from "./fixtures/common";
 import { eventLogPage, stressEventSubscriptions } from "./fixtures/events";
+import { stressHomeConversation, stressHomeTasks } from "./fixtures/home";
 import {
   INTEGRATIONS_TEAM_ID, stressIntegrationLimit, stressOrgDirectory, stressPlugins, stressTeamCredentials,
   stressToolPermissions, stressUserCredentials,
@@ -60,8 +68,9 @@ import {
 } from "./fixtures/usage";
 import {
   SIDEBAR_SESSION_ID, stressSidebarWakeups, fixedSidebarThreads, searchSidebarThreads, sidebarThreadPage, stressArchivedThreads,
-  stressChildWork, stressSidebarDecisions,
+  stressChildWork, stressSearchArtifacts, stressSearchWorkflows, stressSidebarDecisions,
 } from "./fixtures/threads";
+import { THREAD_ID, stressThreadPlan } from "./fixtures/thread";
 import { STRESS_AGENT_SESSION_ID, STRESS_RUN_ID, stressAgentDecisions, stressRunDetail } from "./fixtures/workflow-run";
 
 const stressChangelog: GetChangelogResponse = {
@@ -75,6 +84,9 @@ function seedShell(client: QueryClient): void {
   client.setQueryData<OrgResponse>(qkSettings.org(), stressOrg);
   client.setQueryData<ListTeamsResponse>(qkSettings.teams(), { teams: stressTeams });
   client.setQueryData<GetChangelogResponse>(qkChangelog.manifest(), stressChangelog);
+  // The drawer's Home row counts what needs the person.
+  client.setQueryData<HomeConversationResponse>(qkHome.conversation, stressHomeConversation);
+  client.setQueryData<HomeTasksResponse>(qkHome.tasks, stressHomeTasks);
   // Inline key in `components/product-announcement.tsx`. Empty: the notice
   // is fixed over the page, and its dismissal cannot save here.
   client.setQueryData<ProductAnnouncementsResponse>(["product-announcements", stressMe.id], { announcements: [] });
@@ -87,6 +99,11 @@ function seedApprovals(client: QueryClient): void {
   // Inline key in `useNotificationDecisions` (`api/queries.ts`).
   client.setQueryData<ListNotificationDecisionsResponse>(["notification-decisions", undefined], stressDecisionsFirstPage);
   client.setQueryData<ListNotificationDecisionsResponse>(["notification-decisions", DECISION_NEXT_CURSOR], stressDecisionsSecondPage);
+}
+
+/** The thread view's pinned plan. */
+function seedThreadView(client: QueryClient): void {
+  client.setQueryData<ThreadPlanResponse>(qkThreadPlan(THREAD_ID), { plan: stressThreadPlan });
 }
 
 function seedWorkflowRun(client: QueryClient): void {
@@ -152,11 +169,16 @@ function seedThreads(client: QueryClient): void {
     pages: [stressChildWork],
     pageParams: [undefined],
   });
+  // The search dialog's Workflows and Files groups, read while it is open.
+  const owner = { ownerType: "user" as const, ownerId: stressMe.id };
+  client.setQueryData<ListWorkflowsResponse>(qkWorkflows.list(owner), stressSearchWorkflows);
+  client.setQueryData<ListArtifactsResponse>(qkArtifacts.list(owner), stressSearchArtifacts);
 }
 
 export function seedUiStressCache(client: QueryClient): void {
   seedShell(client);
   seedApprovals(client);
+  seedThreadView(client);
   seedWorkflowRun(client);
   seedUsage(client);
   seedIntegrations(client);

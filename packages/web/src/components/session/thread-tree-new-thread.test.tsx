@@ -29,6 +29,8 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useSearch: () => ({}),
   useNavigate: () => navigate,
+  // The thread list renders on /chat here, where a row can be the open thread.
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: "/chat" } }),
 }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).

@@ -32,6 +32,34 @@
     overflow-wrap: break-word;
   }
 
+  /* Only the signed-in phone shell owns the document viewport. Public
+     pages keep normal document scrolling, as does the desktop layout. */
+  @media (max-width: 767px) {
+    html:has([data-mobile-app-shell]), body:has([data-mobile-app-shell]) {
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+    body:has([data-mobile-app-shell]) {
+      position: fixed;
+      inset: 0;
+    }
+    #root [data-mobile-app-shell] {
+      position: fixed;
+      left: 0;
+      right: 0;
+      top: var(--app-viewport-top, 0px);
+      height: var(--app-viewport-height, 100dvh);
+      overscroll-behavior: none;
+    }
+  }
+
+  @media (max-width: 767px) {
+    body [data-mobile-model-settings] {
+      top: calc(var(--app-viewport-top, 0px) + var(--app-viewport-height, 100dvh) / 2);
+      max-height: calc(var(--app-viewport-height, 100dvh) - 2rem);
+    }
+  }
+
   /* Phone gestures pan app content without scaling the fixed app shell.
      Inheritance covers nested scrollers and portaled menus. Components
      with their own gestures (for example React Flow) keep their overrides. */

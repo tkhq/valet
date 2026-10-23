@@ -146,6 +146,14 @@ export function gateApprover(gate: { context?: Record<string, unknown> }): { use
   return typeof userId === "string" && userId ? { userId, ...(typeof name === "string" ? { name } : {}) } : undefined;
 }
 
+/** The gate asks a member to lend their account (a shared-account borrow),
+ * not the person who asked to confirm their own request. Both name an
+ * approver; only a borrow hides the requester's thread from the approver. */
+export function isSharedAccountGate(gate: { context?: Record<string, unknown> }): boolean {
+  const provenance = gate.context?.provenance;
+  return !!provenance && typeof provenance === "object" && (provenance as Record<string, unknown>).source === "shared_account";
+}
+
 /** Whether `caller` may answer `gate` once they may resolve the session's
  * gates (`canResolveSessionGate`). A gate that names an approver answers to
  * that person alone. */

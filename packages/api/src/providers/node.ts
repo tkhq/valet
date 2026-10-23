@@ -1,4 +1,6 @@
 import { drainAttentionDeliveries } from "../events/attention-delivery.js";
+import { buildHomeTools } from "../home/tools.js";
+import type { HomeDeps } from "../home/service.js";
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
@@ -493,6 +495,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
   let statusRef: ChildStatusReader | undefined;
+  let homeDepsRef: HomeDeps | undefined;
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -540,7 +543,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
       return statusRef(req, ctx);
     },
+    homeTools: () => buildHomeTools(() => {
+      if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
+      return homeDepsRef;
+    }),
   });
+  homeDepsRef = { db, engineHost, engineStore, engineCredentials, onePassword };
   // Arm the capacity gate now that the host exists — creates admitted
   // before this line (none happen during construction) pass ungated.
   gateHostRef.current = engineHost;

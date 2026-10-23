@@ -13,8 +13,11 @@ import { ErrorRow, LoadingRow } from "~/components/primitives/query-state";
 import { ProductAnnouncement } from "~/components/product-announcement";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
+import { MobileTopNav } from "~/components/layout/mobile-top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { AppDrawer } from "~/components/layout/app-drawer";
 import { AssistantRail } from "~/components/session/assistant-rail";
+import { useMobileLayout } from "~/hooks/use-mobile-layout";
 import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
@@ -37,16 +40,17 @@ export const Route = createRootRouteWithContext<RouterContext>()({
  * (via `RootLayout`'s `<Outlet/>` boundary), so it isn't a bare white page.
  */
 function NotFound() {
+  const mobile = useMobileLayout();
   return (
     <div className="flex-1 grid place-items-center p-8 text-center">
       <div className="max-w-sm space-y-3">
         <h1 className="font-display text-2xl text-ink">This page doesn’t exist.</h1>
-        <p className="text-sm text-muted">The dashboard does.</p>
+        <p className="text-sm text-muted">{mobile ? "Valet is on Home." : "The dashboard does."}</p>
         <Link
           to="/"
           className="inline-flex rounded px-3 py-1.5 text-sm text-moss hover:underline"
         >
-          Back to the dashboard
+          {mobile ? "Back to Home" : "Back to the dashboard"}
         </Link>
       </div>
     </div>
@@ -54,7 +58,7 @@ function NotFound() {
 }
 
 /**
- * Which sidebar (if any) the current route gets, per assistant-centered
+ * Which sidebar (if any) a route gets on a wider screen, per assistant-centered
  * web UI decisions 12/14. This is a root-layout concern rather than
  * something each route/`SessionView` renders itself, because the sidebar
  * lives in the app shell's `<aside>`, outside the routed `<main>` content.
@@ -65,8 +69,9 @@ function NotFound() {
  *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
  *   have no thread UI (decision 14); the memory explorer renders its own
  *   tree pane inside the route (Task 6); the dashboard and session list
- *   have no thread concept at all. The old flat `ThreadList` sidebar that
- *   used to cover this "everything else" bucket is dead — deleted.
+ *   have no thread concept at all.
+ *
+ * A phone gets the drawer (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
   if (pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
@@ -104,6 +109,7 @@ function RootLayout() {
     return () => window.removeEventListener("storage", changed);
   }, []);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const mobile = useMobileLayout();
   const isPublic = isPublicPath(pathname);
 
   if (isPublic) {
@@ -117,16 +123,25 @@ function RootLayout() {
   // Inside the signed-in branch only: the provider reads assistants and
   // teams, which a signed-out visitor cannot fetch.
   const gallery = UiStressShell !== null && isUiStressPath(pathname);
+  // A phone gets the phone UI: its own top bar, and the drawer (Home and the
+  // threads) on every page. A wider screen keeps the web UI: the top bar with
+  // every page, the thread sidebar on /chat, and the Ask Valet panel.
+  const shell = mobile
+    ? <AppShell topNav={<MobileTopNav />} sidebar={<AppDrawer />}>
+      {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
+      <ChatKeybindingsHost />
+      <Outlet />
+    </AppShell>
+    : <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
+      <ChatKeybindingsHost />
+      <Outlet />
+    </AppShell>;
   const app = (
     <WorkspaceScopeProvider persist={!gallery}>
       <WorkspaceAssistantProvider>
         <SignedInEffects />
         <ProductAnnouncement />
-        <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
-          {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
-          <ChatKeybindingsHost />
-          <Outlet />
-        </AppShell>
+        {shell}
       </WorkspaceAssistantProvider>
     </WorkspaceScopeProvider>
   );

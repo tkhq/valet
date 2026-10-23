@@ -25,6 +25,8 @@ let threadModelVariables: { threadId: string; model: string | null } | undefined
 let threadModelError: Error | null = null;
 const setReasoningMutate = vi.fn();
 const setThreadReasoningMutate = vi.fn();
+let mobileLayout = false;
+vi.mock("~/hooks/use-mobile-layout", () => ({ useMobileLayout: () => mobileLayout }));
 /** Threads for the header's thread-scoped model picker. Empty by default:
  * the picker then falls back to the session default (legacy behavior). */
 let headerThreads: Array<{
@@ -34,6 +36,7 @@ let headerThreads: Array<{
   model?: string;
   reasoning?: string | null;
   key?: string;
+  share?: "view" | "reply";
 }> = [];
 /** The workspace channel list `useWorkspaceChannels` reads, for resolving a
  * Slack subject thread's channel id to its name (spec Part G). Undefined by
@@ -197,6 +200,7 @@ function idleModel(threadId: string) {
 }
 
 beforeEach(() => {
+  mobileLayout = false;
   useStreamStore.setState({ bySession: {} });
   deleteMutateAsync.mockClear();
   sessionRating = null;
@@ -933,6 +937,45 @@ describe("SessionHeader — rename", () => {
 });
 
 describe("SessionHeader — team assistant", () => {
+  it("labels an explicitly shared helper conversation as shared on a phone", () => {
+    mobileLayout = true;
+    headerThreads = [{ id: "helper", sessionId: "sess-1", createdAt: 1, key: "app-assistant:u1", share: "view" }];
+    renderHeader(undefined, "helper");
+    expect(screen.getByText("Shared by link")).toBeTruthy();
+    expect(screen.queryByText("Only you")).toBeNull();
+  });
+
+  it("shows model errors inside the phone dialog and returns focus to the menu when closed", async () => {
+    mobileLayout = true;
+    withTeam("admin");
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, key: "web:shared" }];
+    threadModelVariables = { threadId: "team-thread", model: "test-model" };
+    threadModelError = new Error("Model unavailable. Choose another model.");
+    renderHeader(undefined, "team-thread", teamSession());
+    const menu = screen.getByRole("button", { name: "Thread menu" });
+    await userEvent.click(menu);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));
+    const dialog = await screen.findByRole("dialog", { name: "Model and thinking" });
+    expect(within(dialog).getByRole("alert").textContent).toContain("Model unavailable");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+  });
+
+  it("keeps the team and viewers visible in the compact phone header and moves models into the menu", async () => {
+    mobileLayout = true;
+    withTeam("admin");
+    headerThreads = [{ id: "team-thread", sessionId: "assistant:asst_team", createdAt: 1, model: "test-model", key: "web:shared" }];
+    render(<TooltipProvider><SessionHeader session={teamSession()} threadId="team-thread" agentStatus="idle" conn="open"
+      viewers={[{ userId: "teammate", name: "Team Member", typing: false }]} /></TooltipProvider>);
+    expect(screen.getByTestId("owning-team").textContent).toBe("Platform");
+    expect(screen.getByTestId("thread-viewers")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /model:/i })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Thread menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Model and thinking" }));
+    const modelDialog = await screen.findByRole("dialog", { name: "Model and thinking" });
+    expect(document.activeElement).toBe(modelDialog);
+  });
+
   function teamSession(): SessionDetail {
     return { ...baseSession(), id: "assistant:asst_team", title: "Assistant", isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } };
   }

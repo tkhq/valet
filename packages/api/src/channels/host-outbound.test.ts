@@ -2153,6 +2153,23 @@ describe("ChannelHost outbound delivery", () => {
     settledElsewhere.mockRestore();
   });
 
+  it.each([false, true])("names the right authority when another person answers a gate (shared account: %s)", async sharedAccount => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const thread = await session.createThread("callback-approver");
+    await engineStore.saveDecisionGate(session.id, thread.id, {
+      id: "other-person-gate", sessionId: session.id, threadId: thread.id, queueItemId: "q-other", resumeKey: "other", ordinal: 0,
+      type: "approval", title: "Approve?", actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: 0, updatedAt: 0,
+      context: { approver: { userId: "other-person", name: "Requester" }, ...(sharedAccount ? { provenance: { source: "shared_account", baseMode: "ask" } } : {}) },
+    });
+    const ref = { conversationKey: "fake:dm:99", messageId: "other-person-card" };
+    host.recordGatePrompt("other-person-gate", ref, session.id);
+    await callback(ref, "wrong-person");
+    expect(fakeTransport.answered.find(answer => answer.callbackId === "wrong-person")?.text).toContain(sharedAccount
+      ? "Only Requester can allow use of their account."
+      : "Only Requester can answer this request.");
+    expect((await engineStore.getDecisionGate(session.id, "other-person-gate"))?.status).toBe("pending");
+  });
+
   it("gate_callback round trip resolves the real gate", async () => {
 
     faux.setResponses([

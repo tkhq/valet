@@ -76,6 +76,15 @@ describe("orchestratorPersona", () => {
     }
   });
 
+  // A plan in thread metadata survives compaction; the persona says when to keep one.
+  it("tells the assistant to keep a plan for work with three or more steps", () => {
+    for (const owner of OWNERS) {
+      expect(orchestratorPersona(owner)).toContain(
+        "For work with three or more steps, call `update_plan` before you start, and update it when each step finishes. Keep exactly one item `in_progress`, and mark an item `done` only when it is done.",
+      );
+    }
+  });
+
   it("names the team when a display name is given, never the raw id", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "team_c7268244" }, "Platform"));
     expect(persona).toContain("Platform");

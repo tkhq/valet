@@ -26,9 +26,9 @@ export interface BulkAnswerRun {
   dismiss: () => void;
 }
 
-/** Run state for bulk answers. `NotificationsBell` owns it, not the popover
- * content: closing the bell unmounts the content, and a run must keep its
- * progress and summary, and block a second run, until it settles.
+/** Run state for bulk answers. `ApprovalsInbox` owns it, not the header:
+ * a run must keep its progress and summary, and block a second run, until
+ * it settles, even after its last item leaves the list.
  * `refresh` refetches the lists and returns the keys still listed, or
  * undefined when the refetch failed. A target still listed is not answered. */
 export function useBulkAnswerRun(refresh: () => Promise<ReadonlySet<string> | undefined>): BulkAnswerRun {
@@ -64,29 +64,32 @@ export function useBulkAnswerRun(refresh: () => Promise<ReadonlySet<string> | un
 
 /** What the confirm does, in the dialog's description. A tool action runs
  * once; a workflow approval node lets its run go on to its next steps. */
-function describe(decision: BulkDecision, targets: readonly BulkTarget[], partial: boolean): string {
+function describe(decision: BulkDecision, targets: readonly BulkTarget[], partial: boolean, where: string): string {
   const parts = [decision === "approve" ? "Valet approves each request below." : "Valet denies each request below."];
   if (decision === "approve") {
     if (targets.some(t => t.kind === "decision" || t.policy)) parts.push("Each tool action runs once. Valet saves no rule and allows no later calls.");
     if (targets.some(t => t.kind === "workflow" && !t.policy)) parts.push("Each workflow approval lets its run continue to the next steps.");
   }
-  if (partial) parts.push("This covers only the requests listed in the bell. Other pages are not included.");
+  if (partial) parts.push(`This covers only the requests listed ${where}. Other pages are not included.`);
   return parts.join(" ");
 }
 
-/** The bell's "Needs action" heading with "Approve all" and "Deny all". A
- * bulk answer covers only the items listed now (`partial` when the bell
- * shows one page of several), and the dialog names each one before it runs. */
-export function NeedsActionHeader({ pendingCount, partialCount, workflows, decisions, partial, run }: {
+/** The approvals heading with "Approve all" and "Deny all", in Tasks and in
+ * the web bell (`compact`). A bulk answer covers only the items listed now
+ * (`partial` when one page of several shows), and the dialog names each one
+ * before it runs. */
+export function NeedsActionHeader({ pendingCount, partialCount, workflows, decisions, partial, run, compact = false }: {
   pendingCount: number;
   /** The first decision page is not the whole inbox: the badge shows "+". */
   partialCount: boolean;
   workflows: readonly WorkflowActionRequiredItem[];
   decisions: ListNotificationDecisionsResponse["items"];
-  /** The bell lists one decision page of several, so a bulk answer covers
+  /** Tasks lists one decision page of several, so a bulk answer covers
    * only the listed items. */
   partial: boolean;
   run: BulkAnswerRun;
+  /** The bell's small "Needs action" label instead of the Tasks heading. */
+  compact?: boolean;
 }) {
   const me = useMe();
   const [pending, setPending] = useState<{ decision: BulkDecision; targets: BulkTarget[]; skipped: SkippedItem[] } | null>(null);
@@ -111,12 +114,14 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
     ? `${VERB[progress.decision].ing} ${Math.min(progress.settled + 1, progress.total)} of ${progress.total}…`
     : summary;
   const verb = pending ? VERB[pending.decision] : VERB.approve;
-  const description = pending ? describe(pending.decision, pending.targets, partial) : "";
+  const description = pending ? describe(pending.decision, pending.targets, partial, compact ? "in the bell" : "here") : "";
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3>
+        {compact
+          ? <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3>
+          : <h2 className="font-display text-lg">Approvals</h2>}
         <Badge variant={pendingCount ? "warning" : "neutral"}>{pendingCount}{partialCount ? "+" : ""}</Badge>
         {(n > 0 || running) && <div className="ml-auto flex gap-2">
           {(["approve", "deny"] as const).map(decision => {
@@ -144,7 +149,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
           // After a confirmed run, focus the progress line: the buttons are
           // disabled, and they leave the page when no item is left. After
           // Cancel, focus the button that opened the dialog. Radix's own
-          // restore lands on the body inside the bell's popover.
+          // restore lands on the page body.
           event.preventDefault();
           const back = openedBy.current;
           if (!started.current && back?.isConnected) back.focus();

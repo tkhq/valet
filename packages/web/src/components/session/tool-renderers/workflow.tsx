@@ -503,4 +503,6 @@ export const workflowRenderer: ToolRenderer = {
   },
   Body: WorkflowToolBody,
   Preview: WorkflowToolPreview,
+  // Only a started run shows a preview; reads and edits fold into the work line.
+  keepsInView: (args, toolName) => workflowToolSuffix(args, toolName) === "start_run",
 };

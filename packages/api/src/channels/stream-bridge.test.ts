@@ -130,6 +130,7 @@ interface Harness {
 function makeHarness(
   overrides: {
     transport?: ChannelTransport;
+    onMessageClosed?: () => Promise<void>;
     /** Lets a test take the transport away mid-turn, as a restart does. */
     transportFor?: (channelType: string, fallback: ChannelTransport) => ChannelTransport | null;
   } = {},
@@ -150,6 +151,7 @@ function makeHarness(
           ? transport
           : null,
     markDelivered: (key) => delivered.push(key),
+    onMessageClosed: overrides.onMessageClosed,
     abortTurn: async (sessionId, threadId) => {
       aborted.push({ sessionId, threadId });
     },
@@ -597,7 +599,7 @@ describe("the turn parks on an approval gate", () => {
     expect(h.transport.stopped).toHaveLength(1);
     expect(h.streams.size()).toBe(0);
     expect(h.bridge.isStreaming(SESSION_ID, THREAD_ID)).toBe(false);
-    expect(h.transport.statuses.at(-1)?.status).toContain("approval");
+    expect(h.transport.statuses).toEqual([]);
   });
 
   it("opens a fresh stream for the resumed turn", async () => {
@@ -777,4 +779,20 @@ describe("splitForFlush", () => {
     expect(send).toBe(buffer);
     expect(keep).toBe("");
   });
+});
+
+
+it("notifies the status owner only after stopping the provider stream", async () => {
+  const closed = vi.fn(async () => {
+    expect(h.transport.stopped).toHaveLength(1);
+  });
+  const h = makeHarness({ onMessageClosed: closed });
+  h.bridge.noteInboundTurn(h.turn);
+  await h.emit(messageStart("m-status-order"));
+  h.delta("Working\n");
+  await h.emit(messageEnd("m-status-order", "end_turn"));
+  await advance(FLUSH_INTERVAL_MS * 2);
+  expect(closed).toHaveBeenCalledOnce();
+  expect(h.transport.statuses).toEqual([]);
+  await h.bridge.stop();
 });

@@ -43,6 +43,7 @@ import { securityRouter } from "./routes/security.js";
 import { workspaceChannelsRouter } from "./routes/workspace-channels.js";
 import { presenceRouter } from "./routes/presence.js";
 import { workspaceActiveWorkRouter } from "./routes/workspace-active-work.js";
+import { homeRouter } from "./routes/home.js";
 import { workspaceOutcomesRouter } from "./routes/workspace-outcomes.js";
 import { legacyOrchestratorRouter, workspaceRuntimeRouter } from "./routes/workspace-runtime.js";
 import { childWorkRouter } from "./routes/child-work.js";
@@ -363,6 +364,7 @@ export function createApp(
   app.route("/api/workspaces", workspaceRuntimeRouter);
   app.route("/api/workspaces", workspaceOutcomesRouter);
   app.route("/api/workspaces", workspaceActiveWorkRouter);
+  app.route("/api/home", homeRouter);
   app.route("/api/workspaces", workspaceChannelsRouter);
   app.route("/api/presence", presenceRouter);
 

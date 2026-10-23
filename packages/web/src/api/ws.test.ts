@@ -224,6 +224,22 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
+  it("refreshes a thread's plan after a successful update_plan call in that thread", () => {
+    const { queryClient, unmount } = renderSocketHook("s1");
+    const socket = FakeWebSocket.instances[0];
+    const invalidated = (threadId: string) => queryClient.getQueryState(["thread-plan", threadId])?.isInvalidated;
+    const reset = () => { for (const id of ["t1", "t2"]) queryClient.setQueryData(["thread-plan", id], { plan: null }); };
+    const end = (toolName: string, isError: boolean) => act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, type: "tool_end", threadId: "t1", toolName, callId: "c1", result: "", isError }) }));
+
+    reset();
+    end("bash", false);
+    end("update_plan", true);
+    expect([invalidated("t1"), invalidated("t2")]).toEqual([false, false]);
+    end("update_plan", false);
+    expect([invalidated("t1"), invalidated("t2")]).toEqual([true, false]);
+    unmount();
+  });
+
   it("refreshes a thread's context reading after its turn, its settlement, its compaction, or a model switch", () => {
     const { queryClient, unmount } = renderSocketHook("s1");
     const reading = { context: { tokens: 1, limit: 10, contextWindow: 12, model: "m", autoCompact: true } };

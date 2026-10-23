@@ -7,7 +7,7 @@
  * fallen out of the catalog still labels instead of crashing.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { GetModelTiersResponse, GetOrgReasoningResponse, MeResponse, ModelInfo } from "@valet/api/wire";
@@ -537,4 +537,90 @@ describe("ModelPicker — reasoning row", () => {
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("· High");
   });
+});
+
+
+describe("ModelPicker — phone settings panel", () => {
+  it("shows model and thinking controls directly, and stays open after a selection", async () => {
+    const onSelect = vi.fn();
+    const onSelectReasoning = vi.fn();
+    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", onSelect, onSelectReasoning });
+    expect(screen.queryByRole("button", { name: /^Choose model:/ })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Search models" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Small" }));
+    expect(onSelect).toHaveBeenCalledWith("s");
+    expect(screen.queryByRole("button", { name: "High reasoning" })).toBeNull();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Thinking level" }), "high");
+    expect(onSelectReasoning).toHaveBeenCalledWith("high");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("uses native keyboard activation for thinking without selecting a highlighted model", () => {
+    const onSelect = vi.fn();
+    renderPicker({ presentation: "panel", onSelect, onSelectReasoning: vi.fn() });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Thinking level" }), { key: "Enter" });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the catalog behind More models and restores focus when returning", async () => {
+    const onSelect = vi.fn();
+    renderPicker({ presentation: "panel", currentId: "l", onSelect });
+    expect(document.querySelectorAll('[data-row-kind="tier"]')).toHaveLength(5);
+    expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Large" }).getAttribute("aria-pressed")).toBe("true");
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to sizes" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+    await userEvent.click(screen.getByRole("button", { name: "Back to sizes" }));
+    expect(screen.queryByRole("textbox", { name: "Search models" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More models" }));
+    expect(screen.getByRole("button", { name: "Large" })).toBeTruthy();
+  });
+
+  it("labels a custom current model without selecting an unrelated size", () => {
+    renderPicker({ presentation: "panel", currentId: "custom_1/llama-3" });
+    expect(screen.getByText("Current: Llama 3")).toBeTruthy();
+    expect(screen.queryAllByRole("button", { pressed: true })).toHaveLength(0);
+  });
+
+  it("resets keyboard selection when reopening the catalog without a search", async () => {
+    const onSelect = vi.fn();
+    renderPicker({ presentation: "panel", onSelect });
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.click(screen.getByRole("textbox", { name: "Search models" }));
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.click(screen.getByRole("button", { name: "Back to sizes" }));
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.click(screen.getByRole("textbox", { name: "Search models" }));
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenCalledWith("custom_1/llama-3");
+  });
+
+  it("keeps restricted tiers and catalog choices within the approved models", async () => {
+    meData = makeMe({ orgRole: "admin" });
+    if (!modelsData) throw new Error("Missing models fixture");
+    modelsData.models[0].approved = false;
+    approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
+    tierMapData = { xs: [], s: ["custom_1/llama-3"], m: [], l: ["anthropic/claude-sonnet-4-5"], xl: [] };
+    renderPicker({ presentation: "panel" });
+    expect(screen.getByRole("button", { name: /Small Llama/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: /Large Claude Sonnet/ })).toHaveProperty("disabled", false);
+    await userEvent.click(screen.getByRole("button", { name: "More models" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search models" }), "Llama");
+    expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(0);
+  });
+});
+
+
+it("only offers supported thinking levels on a phone, within the organization limit", () => {
+  orgReasoningData = { max: "high" };
+  if (!modelsData) throw new Error("Missing models fixture");
+  modelsData.models[0].thinkingLevels = ["low", "medium", "high", "xhigh"];
+  renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", currentReasoning: "medium", onSelectReasoning: vi.fn() });
+  const select = screen.getByRole("combobox", { name: "Thinking level" });
+  expect(select).toHaveProperty("value", "medium");
+  expect(Array.from(select.querySelectorAll("option"), o => o.value)).toEqual(["", "low", "medium", "high"]);
 });

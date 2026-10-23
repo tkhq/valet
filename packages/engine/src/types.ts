@@ -1,7 +1,7 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
-import type { ToolScope } from "@valet/shared";
+import type { ThreadPlan, ThreadPlanItem, ToolScope } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -33,8 +33,11 @@ export interface PromptAuthor {
    * the turn runs as; `name` is the sender. Tools the sender may not use on
    * their own refuse such a turn (`ToolContext.externalSender`). */
   externalSender?: boolean;
-  /** The host verified a direct human submission, rather than a token or channel sender. */
+  /** The host verified direct human input, not a token caller or unattended event. */
   interactive?: boolean;
+  /** The host verified a linked person's direct channel message. Never set
+   * from an event payload or inherited by a background signal. */
+  directChannel?: boolean;
 }
 
 export interface ChannelTarget {
@@ -447,7 +450,7 @@ export interface BaseEntry {
 
 export type MessagePart =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | { type: "thinking"; text: string; startedAt?: number; durationMs?: number }
   | {
       type: "tool_call";
       callId: string;
@@ -783,6 +786,8 @@ export interface ToolContext {
   readonly toolScope?: ToolScope;
   readonly toolScopeCeiling?: ToolScope;
   setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
+  /** Replace this thread's plan in thread metadata (`update_plan`). Absent on a context built by hand. */
+  setThreadPlan?: (items: ThreadPlanItem[]) => Promise<ThreadPlan>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -794,8 +799,8 @@ export interface ToolContext {
   threadId: string;
   sessionPurpose?: SessionPurpose;
   actor?: { id: string; name?: string; email?: string };
-  /** Authenticated author of a direct interactive prompt, never a signal creator
-   * or delegated workflow/child actor. Does not confer any resource role. */
+  /** Authenticated author of a direct prompt or host-verified direct channel
+   * message, never a background signal or delegated actor. Confers no role. */
   interactiveActor?: { id: string };
   /** This turn came from a channel sender with no Valet account, running as
    * `userId` (`PromptAuthor.externalSender`). */
@@ -1145,6 +1150,9 @@ export interface DecisionGateRequest {
 }
 
 export interface DecisionResolution {
+  /** Transient engine-supplied context from the actual gate, not a caller's
+   * answer. Empty means a legacy gate had no context. Not persisted here. */
+  gateContext?: Record<string, unknown>;
   /** Inline images supplied with a question answer; persisted for restart replay. */
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
   actionId?: string;
@@ -1855,6 +1863,7 @@ export type ModelStateEvent =
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
+  | { type: "thinking_update"; threadId: string; messageId: string; index: number; part: Extract<MessagePart, { type: "thinking" }> }
   | {
       /**
        * Live-only tool-call argument streaming (same ephemeral plane as

@@ -26,3 +26,4 @@ export * from "./filter-chips.js";
 export * from "./page.js";
 export * from "./link-tabs.js";
 export * from "./radio-card.js";
+export * from "./trace.js";
