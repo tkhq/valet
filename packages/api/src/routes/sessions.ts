@@ -1255,6 +1255,11 @@ sessionsRouter.patch("/:id", async (c) => {
   if (nextOwner !== undefined || nextProfile !== undefined) {
     engineHost.evictCache(id);
   }
+  // The browser profile moves with the session. Keep the old owner's sign-ins
+  // out of reach of the new owner until someone turns the browser back on.
+  if (nextOwner !== undefined) {
+    await engineHost.browserPolicy()?.disableForOwnerChange(id);
+  }
 
   // Sends the forced stop's signals into the session as it now is.
   const sendStopped = async () => {

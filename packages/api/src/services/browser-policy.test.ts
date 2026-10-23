@@ -130,7 +130,7 @@ describe("durable browser policy", () => {
     });
     await expect(
       service.decide({ ...request, policyVersion: settings.policyVersion }),
-    ).rejects.toThrow("disabled");
+    ).rejects.toThrow("turned off");
   });
   it("lets current team members use a team session's browser and refuses nonmembers", async () => {
     team = true;
@@ -141,6 +141,23 @@ describe("durable browser policy", () => {
     await expect(
       service.decide({ ...request, actorId: "member" }),
     ).rejects.toThrow("Only members");
+  });
+  it("names a person as the fix when a team turn has no author", async () => {
+    team = true;
+    member = false;
+    await expect(
+      service.authorize({ ...identity, actorId: "team:u" }),
+    ).rejects.toThrow("no person behind it");
+  });
+  it("turns the browser off and revokes decisions when the owner changes", async () => {
+    team = true;
+    await service.disableForOwnerChange("s");
+    const settings = await service.settings("s");
+    expect(settings.enabled).toBe(false);
+    expect(settings.policyVersion).not.toBe("default");
+    await expect(
+      service.authorize({ ...identity, actorId: "member" }),
+    ).rejects.toThrow("Ask a team admin to turn it on");
   });
   it("refuses a session owned by neither a person nor a team", async () => {
     org = true;

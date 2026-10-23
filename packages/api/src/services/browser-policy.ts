@@ -44,7 +44,9 @@ export class BrowserPolicy implements BrowserPolicyService {
     const settings = await this.settings(identity.sessionId);
     if (!settings.enabled)
       throw new Error(
-        "The browser is disabled. Ask the session owner to enable it.",
+        owner.type === "team"
+          ? "The browser is turned off for this thread. Ask a team admin to turn it on in the Browser panel."
+          : "The browser is turned off for this thread. Turn it on in the Browser panel.",
       );
     if (owner.type === "user") {
       if (identity.actorId !== owner.id)
@@ -57,6 +59,10 @@ export class BrowserPolicy implements BrowserPolicyService {
       // mention) cannot reach what members signed in to. A turn with no person
       // behind it runs as `team:<id>`, which is not a member, so it is refused
       // too, although its shell commands still run.
+      if (identity.actorId === `team:${owner.id}`)
+        throw new Error(
+          "This turn has no person behind it, so it cannot use the team browser. Ask the assistant from a message in the thread.",
+        );
       if (!(await this.options.isMember(owner, identity.actorId)))
         throw new Error(
           "Browser access denied. Only members of the owning team can use this browser. Ask a team admin to add you.",
@@ -67,6 +73,23 @@ export class BrowserPolicy implements BrowserPolicyService {
       );
     }
     return { policyVersion: settings.policyVersion };
+  }
+
+  /**
+   * A moved session keeps its browser profile, including the sign-ins of its
+   * old owner. Turn the browser off so the new owner's members cannot reach
+   * them until an owner or team admin turns it back on. The new policy
+   * version also revokes pending browser decisions.
+   */
+  async disableForOwnerChange(sessionId: string): Promise<void> {
+    const current = await this.settings(sessionId);
+    await this.options.store
+      .session(sessionId)
+      .put("settings", "browser", {
+        ...current,
+        enabled: false,
+        policyVersion: randomUUID(),
+      });
   }
 
   async updateSettings(

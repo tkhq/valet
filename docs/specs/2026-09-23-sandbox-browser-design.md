@@ -625,7 +625,9 @@ follows the same rule as its threads: every current member of the owning team,
 and the assistant acting for a member, can use the browser. A
 nonmember actor, such as an organization-audience Slack mention, cannot. A turn
 with no person behind it runs as the team itself (`team:<id>`), so the browser
-refuses it, although its shell commands still run. Browser
+refuses it, although its shell commands still run. Moving a session to another
+owner turns its browser off, because the profile keeps the old owner's sign-ins.
+The new owner or a team admin turns it back on in the Browser panel. Browser
 outputs enter the team-readable transcript, the same as shell and tool output in
 that session. A team or session admin can disable the browser for one session.
 This first design does not support a private browser inside a team-readable chat:

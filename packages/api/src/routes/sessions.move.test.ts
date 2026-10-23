@@ -86,6 +86,17 @@ describe("PATCH /api/sessions/:id — teamId (move between workspaces)", () => {
     expect(await storedOwner(api, "mv-to-team")).toEqual({ type: "team", id: "team_mv" });
   });
 
+  it("turns the browser off when a session moves, so the old owner's sign-ins stay private", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_br", ["local-user"]);
+    await seedSession(api, { id: "mv-browser", owner: { type: "user", id: "local-user" } });
+    const policy = api.providers.engineHost.browserPolicy();
+    expect((await policy?.settings("mv-browser"))?.enabled).toBe(true);
+    const res = await patch(api, "mv-browser", { teamId: "team_br" });
+    expect(res.status).toBe(200);
+    expect((await policy?.settings("mv-browser"))?.enabled).toBe(false);
+  });
+
   it("teamId null moves a team session to the caller's own workspace", async () => {
     api = await bootTestApi();
     await seedTeam(api, "team_mv2", ["local-user"]);
