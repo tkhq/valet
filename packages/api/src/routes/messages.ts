@@ -1,3 +1,4 @@
+import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
 import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
@@ -588,7 +589,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
     .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => {
       const meta = metaById.get(t.id);
-      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, meta?.title,
+      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, t.key === HOME_THREAD_KEY ? HOME_THREAD_TITLE : meta?.title,
         t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
       return { ...summary, ...(meta?.share ? { share: meta.share } : {}), ...(meta?.approvalBypass ? { approvalBypass: true as const } : {}) };
     });
