@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import {
@@ -14,6 +15,7 @@ import {
   type PluginActionResult,
 } from "@valet/engine";
 import { Octokit } from "octokit";
+import { imageCommentBody, imageUploadError, storeCommentImages, withImageDeadline } from "./comment-images.js";
 import { parseJobLog } from "./parse-job-log.js";
 import {
   collectDirectoryEntries,
@@ -25,7 +27,7 @@ import { resolveGithubApiUrl } from "./api.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
+async function getOctokit(ctx: PluginActionContext, images = false): Promise<Octokit> {
   const cred = await ctx.credentials.get();
   const token = cred?.accessToken;
   if (!token) {
@@ -33,7 +35,11 @@ async function getOctokit(ctx: PluginActionContext): Promise<Octokit> {
       "Missing GitHub access token. Connect the GitHub integration in Settings.",
     );
   }
-  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl() });
+  return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl(), ...(images ? {
+    // Supported throttle id isolates assets from unrelated writes. Do not sleep through rate limits.
+    throttle: { id: `valet-comment-images-${createHash("sha256").update(token).digest("hex")}`, onRateLimit: () => false, onSecondaryRateLimit: () => false },
+    retry: { enabled: false },
+  } : {}) });
 }
 
 /**
@@ -363,21 +369,52 @@ const createComment = action(Type.Object({
     owner: Type.String(),
     repo: Type.String(),
     issueNumber: Type.Integer(),
-    body: Type.String(),
+    body: Type.Optional(Type.String({ description: "Comment body. Optional when images are supplied." })),
+    images: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({ minLength: 1, description: "Sandbox image file path (PNG, JPEG, GIF, or WebP)." }),
+      alt: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text image description." })),
+      caption: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text caption below the image." })),
+    }), { minItems: 1, maxItems: 10, description: "PR images, placed before the body. Maximum 10 MiB each and 20 MiB total. Stored on an isolated assets ref, not in the PR diff. The encoded comment plus reserved URL space must fit within 60,000 characters." })),
   }))({
   id: "github.create_comment",
   name: "Create Comment",
-  description: "Create a comment on an issue or pull request",
+  description: "Create a comment on an issue or pull request. Optionally attach sandbox images to a PR without browser uploads.",
   riskLevel: "medium",
-  execute: async ({ owner, repo, issueNumber, body }, ctx) => {
-    const octokit = await getOctokit(ctx);
-    try {
+  execute: async ({ owner, repo, issueNumber, body, images }, ctx) => {
+    const ordinaryOctokit = images === undefined ? await getOctokit(ctx) : undefined;
+    const originalBody = body;
+    let stored: Awaited<ReturnType<typeof storeCommentImages>> | undefined;
+    const post = async (ctx: PluginActionContext): Promise<PluginActionResult> => {
+      let octokit: Octokit;
+      try { octokit = ordinaryOctokit ?? await getOctokit(ctx, true); }
+      catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : "Cannot resolve GitHub credentials. Reconnect GitHub in Settings." };
+      }
+      if (images !== undefined) ctx.signal.throwIfAborted();
+      if (body === undefined && images === undefined) {
+        return { success: false, error: "The comment is empty. Supply a body or sandbox images and retry." };
+      }
+      if (images !== undefined) {
+        if (imageCommentBody(body, images, images.map(() => "x".repeat(500))).length > 60_000) {
+          return { success: false, error: "The image comment is too long. Shorten the body, alt text, or captions. The encoded comment plus reserved URL space must fit within 60,000 characters." };
+        }
+        stored = await storeCommentImages(octokit, ctx, owner, repo, issueNumber, images);
+        body = imageCommentBody(body, images, stored.imageUrls);
+      }
       const { data } = await octokit.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
-        { owner, repo, issue_number: issueNumber, body },
+        { owner, repo, issue_number: issueNumber, body: body ?? "", request: { signal: ctx.signal } },
       );
-      return { success: true, data };
-    } catch (err) {
+      return { success: true, data: stored ? { ...data, ...stored, activityText: [originalBody, `Attached ${images?.length} image(s).`].filter(Boolean).join("\n\n") } : data };
+    };
+    try { return images === undefined ? await post(ctx) : await withImageDeadline(ctx, post); }
+    catch (err) {
+      if (images !== undefined) {
+        return {
+          success: false, data: stored, error: imageUploadError(err, stored ? "comment" : "storage") + (stored
+            ? ` Images are stored. Retry create_comment with the following Markdown in body and omit images to avoid another upload:\n\n${imageCommentBody(originalBody, images, stored.imageUrls)}` : ""),
+        };
+      }
       return handleOctokitError(err, "github.create_comment", "Create comment");
     }
   },

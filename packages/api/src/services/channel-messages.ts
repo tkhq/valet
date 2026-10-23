@@ -264,12 +264,13 @@ export function actionChannelMessage(record: ActionRecord, threadKey: string | n
     // An issue comment is not a pull request conversation.
     if (!url || !/\/pull\/\d+#/.test(url) || !owner || !repo || typeof number !== "number" || id === undefined) return null;
     const channelKey = githubPullRequestKey(owner, repo, number);
+    const messageText = text(field(data, "activityText")) ?? text(field(data, "body"));
     return {
       ...base,
       channelKey,
       conversationKey: channelKey,
       providerMessageId: String(id),
-      ...(text(field(data, "body")) ? { text: text(field(data, "body")) } : {}),
+      ...(messageText ? { text: messageText } : {}),
       url,
     };
   }
