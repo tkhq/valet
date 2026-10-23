@@ -1,6 +1,6 @@
 import { useOrgReasoning } from "~/api/settings";
 import { Select } from "~/components/primitives";
-import { levelsUpTo, REASONING_LABELS } from "~/lib/reasoning";
+import { levelsUpTo, REASONING_LABELS, reasoningLabelFor } from "~/lib/reasoning";
 
 /**
  * Small labeled `<select>` for a reasoning/thinking-level override: an
@@ -21,25 +21,39 @@ export function ReasoningSelect({
   emptyLabel = "Inherit",
   ariaLabel = "Reasoning",
   disabled = false,
+  allowedLevels,
+  id,
+  descriptionId,
 }: {
   value: string | null;
   onChange: (level: string | null) => void;
   emptyLabel?: string;
   ariaLabel?: string;
   disabled?: boolean;
+  /** Model-specific support, intersected with the organization limit. */
+  allowedLevels?: readonly string[];
+  id?: string;
+  descriptionId?: string;
 }) {
   const orgReasoningQ = useOrgReasoning();
-  const levels = levelsUpTo(orgReasoningQ.data?.max);
+  const levels = levelsUpTo(orgReasoningQ.data?.max).filter(level => allowedLevels === undefined || allowedLevels.includes(level));
+  const unavailableValue = value && !levels.some(level => level === value) ? value : null;
 
   return (
     <Select
+      id={id}
       aria-label={ariaLabel}
+      aria-describedby={descriptionId}
       value={value ?? ""}
-      onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+      onChange={(e) => {
+        const next = e.target.value;
+        if (next === "" || levels.some(level => level === next)) onChange(next === "" ? null : next);
+      }}
       className="w-full"
-      disabled={disabled}
+      disabled={disabled || (levels.length === 0 && unavailableValue === null)}
     >
       <option value="">{emptyLabel}</option>
+      {unavailableValue && <option value={unavailableValue} disabled>{reasoningLabelFor(unavailableValue)} (unavailable)</option>}
       {levels.map((level) => (
         <option key={level} value={level}>
           {REASONING_LABELS[level]}

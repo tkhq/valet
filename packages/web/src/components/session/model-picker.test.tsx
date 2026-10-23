@@ -549,8 +549,8 @@ describe("ModelPicker — phone settings panel", () => {
     expect(screen.getByRole("textbox", { name: "Search models" })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Small" }));
     expect(onSelect).toHaveBeenCalledWith("s");
-    expect(screen.getByRole("button", { name: "High reasoning" })).toBeTruthy();
-    await userEvent.click(screen.getByRole("button", { name: "High reasoning" }));
+    expect(screen.queryByRole("button", { name: "High reasoning" })).toBeNull();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Thinking level" }), "high");
     expect(onSelectReasoning).toHaveBeenCalledWith("high");
     expect(onSelect).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu")).toBeNull();
@@ -559,7 +559,18 @@ describe("ModelPicker — phone settings panel", () => {
   it("uses native keyboard activation for thinking without selecting a highlighted model", () => {
     const onSelect = vi.fn();
     renderPicker({ presentation: "panel", onSelect, onSelectReasoning: vi.fn() });
-    fireEvent.keyDown(screen.getByRole("button", { name: "High reasoning" }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Thinking level" }), { key: "Enter" });
     expect(onSelect).not.toHaveBeenCalled();
   });
+});
+
+
+it("only offers supported thinking levels on a phone, within the organization limit", () => {
+  orgReasoningData = { max: "high" };
+  if (!modelsData) throw new Error("Missing models fixture");
+  modelsData.models[0].thinkingLevels = ["low", "medium", "high", "xhigh"];
+  renderPicker({ presentation: "panel", currentId: "custom_1/llama-3", currentReasoning: "medium", onSelectReasoning: vi.fn() });
+  const select = screen.getByRole("combobox", { name: "Thinking level" });
+  expect(select).toHaveProperty("value", "medium");
+  expect(Array.from(select.querySelectorAll("option"), o => o.value)).toEqual(["", "low", "medium", "high"]);
 });

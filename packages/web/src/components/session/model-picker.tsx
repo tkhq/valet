@@ -2,6 +2,7 @@ import { Check, ChevronDown, Search, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
+  Label,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
@@ -14,6 +15,7 @@ import {
   useModels,
   useOrgReasoning,
 } from "~/api/settings";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { curatedForCatalogId } from "~/lib/models";
 import {
   SIZE_TIERS,
@@ -274,6 +276,8 @@ export function ModelPicker({
     ? ` · ${reasoningLabelFor(currentReasoning)}`
     : "";
   const descriptionId = useId();
+  const thinkingFieldId = useId();
+  const thinkingHelpId = useId();
   const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
   const activeThinkingLevels = thinkingLevelsFor(currentId, tierMapQ.data, models);
 
@@ -450,7 +454,23 @@ export function ModelPicker({
           ))}
         </div>
         <div className="sticky bottom-0 shrink-0 bg-paper border-t border-line">
-          {onSelectReasoning && (
+          {onSelectReasoning && (panel ? (
+            <div className="space-y-1.5 border-b border-line px-3 py-3">
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <Label htmlFor={thinkingFieldId} className="shrink-0 text-sm text-ink">Thinking</Label>
+                <div className="min-w-0 max-w-40 flex-1">
+                  <ReasoningSelect id={thinkingFieldId} descriptionId={thinkingHelpId} ariaLabel="Thinking level"
+                    value={currentReasoning ?? null} onChange={onSelectReasoning} emptyLabel="Default"
+                    allowedLevels={activeThinkingLevels} disabled={disabled} />
+                </div>
+              </div>
+              <p id={thinkingHelpId} className="text-xs text-muted">
+                {currentReasoning && (!reasoningLevels.some(level => level === currentReasoning) || isLevelDisabled(currentReasoning))
+                  ? "Choose an available thinking level."
+                  : currentReasoning ? "More thinking can take longer." : "Uses the default thinking level."}
+              </p>
+            </div>
+          ) : (
             <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
               <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
               <button
@@ -505,7 +525,7 @@ export function ModelPicker({
                 );
               })}
             </div>
-          )}
+          ))}
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
               {filteredModels.length} of {roleScoped.length} models

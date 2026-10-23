@@ -149,3 +149,10 @@ retain normal document behavior. Viewport listeners and variables clear on deskt
 The model dialog initially focuses its container, so opening settings does not
 open the phone keyboard. The model list has a bounded scroll region. On short
 viewports, the dialog also scrolls so the list and thinking controls stay reachable.
+
+
+The phone panel shows one Thinking field with the current level. It reuses
+ReasoningSelect and the native platform picker. Model-supported levels intersect
+with the organization limit; unavailable saved values remain labeled until changed.
+Default still clears the override. The desktop button group stays unchanged.
+This follows the single effort entry and list patterns in Claude and Codex.
