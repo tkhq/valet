@@ -50,14 +50,39 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderSocketHook(sessionId: string) {
+function renderSocketHook(sessionId: string, sharedThreadId?: string) {
   const queryClient = new QueryClient();
   const wrapper = ({ children }: PropsWithChildren) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
-  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId), { wrapper }) };
+  return { queryClient, ...renderHook(() => useSessionWebSocket(sessionId, sharedThreadId), { wrapper }) };
 }
 
 describe("useSessionWebSocket", () => {
+  it("keeps REST history when a second scoped view opens before any durable event", () => {
+    const main = renderSocketHook("s1");
+    act(() => useStreamStore.getState().setThreadMessages("s1", "parent", [{
+      id: "saved-parent", sessionId: "s1", threadId: "parent", role: "assistant",
+      content: "Saved answer", parts: [], createdAt: 1,
+    }]));
+    expect(useStreamStore.getState().bySession.s1.lastOffset).toBe("");
+    const scoped = renderSocketHook("s1", "child");
+    expect(useStreamStore.getState().bySession.s1.messages.map(message => message.id)).toEqual(["saved-parent"]);
+    scoped.unmount();
+    main.unmount();
+  });
+
+  it("keeps REST history when revisiting an idle session without an event cursor", () => {
+    const initial = renderSocketHook("s1");
+    act(() => useStreamStore.getState().setThreadMessages("s1", "parent", [{
+      id: "saved-parent", sessionId: "s1", threadId: "parent", role: "assistant",
+      content: "Saved answer", parts: [], createdAt: 1,
+    }]));
+    initial.unmount();
+    const revisit = renderSocketHook("s1");
+    expect(useStreamStore.getState().bySession.s1.messages.map(message => message.id)).toEqual(["saved-parent"]);
+    revisit.unmount();
+  });
+
   it("refreshes settings after a successful settings action, while unrelated and failed tools leave them alone", () => {
     const { queryClient } = renderSocketHook("s1");
     const key = ["settings", "me"];
